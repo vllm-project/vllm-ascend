@@ -132,7 +132,7 @@ except ImportError:  # pragma: no cover - exercised on v0.28.0
     raise_if_nan_logits = None
 
 # yapf: enable
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -194,6 +194,7 @@ from vllm_ascend.spec_decode.utils import (
 from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
+    embedding_tp_enable,
     enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
@@ -205,6 +206,7 @@ from vllm_ascend.utils import (
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
@@ -759,6 +761,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        allow_dp_padding: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
         # our case, we still need to sync the other two flags as well. So we need to
@@ -784,18 +787,7 @@ class NPUModelRunner(GPUModelRunner):
         synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
 
         # Create a tensor for num_tokens_after_padding
-        comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config)
-        is_finegrained_tp = self.ascend_config.finegrained_tp_config.max_finegrained_tp_size > 1
-        use_mega_moe = comm_method == MoECommType.FUSED_MC2 and is_mega_moe_supported()
-        # There are three cases where padding between DPs is required:
-        # 1. comm_method == ALLGATHER, ensure the input tensor shape of allgather is consistent;
-        # 2. comm_method == MC2, reduce communication and computation through active_mask to enhance performance;
-        # 3. when finegrained_tp is open, we need to ensure num_tokens remains consistent within finegrained_tp_group.
-        #    TODO(zzzzwwjj): We can do dp padding in finegrained_tp_group, instead of world_group.
-        # 4. when use mega_moe, op cannot support dynamic bs now,
-        #    we need to do allreduce and pad token across dp every step.
-        #    TODO(zzzzwwjj): remove it when op can support dynamic bs.
-        if comm_method in {MoECommType.ALLGATHER, MoECommType.MC2} or is_finegrained_tp or use_mega_moe:
+        if allow_dp_padding or is_draft_model:
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )
@@ -3185,6 +3177,10 @@ class NPUModelRunner(GPUModelRunner):
             _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                 num_tokens=num_tokens_padded,
                 cudagraph_mode=cudagraph_mode,
+                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
+                                  or enable_sp(self.vllm_config)
+                                  or oproj_tp_enable()
+                                  or embedding_tp_enable()),
             )
 
             # Extract DP padding if there is any
@@ -3725,7 +3721,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
-            num_tokens_across_dp[self.dp_rank] = num_tokens_padded
+            num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
 
         if self.dynamic_eplb:
