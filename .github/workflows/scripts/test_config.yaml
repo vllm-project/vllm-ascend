@@ -194,6 +194,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
+  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 730
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
@@ -257,13 +258,13 @@ partition:
     runner_label: linux-aarch64-a2b3-1
     count: 5
   a3-2:
-    runner_label: linux-aarch64-a3-2-
-    count: 2
+    runner_label: linux-aarch64-a3-2
+    count: 4
   a3-4:
-    runner_label: linux-aarch64-a3-4-
-    count: 2
+    runner_label: linux-aarch64-a3-4
+    count: 4
   a3-8:
-    runner_label: linux-aarch64-a3-8-
+    runner_label: linux-aarch64-a3-8
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk

@@ -226,6 +226,7 @@ nav:
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
         - tutorials/models/DeepSeek-V4-Flash-Vision.md
+        - tutorials/models/DeepSeek-V4.1-Flash.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
         - tutorials/models/DeepSeekOCR2.md
@@ -289,6 +290,7 @@ nav:
         - user_guide/feature_guide/rfork.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
         - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
