@@ -8,7 +8,7 @@ import torch
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
-from vllm_ascend.distributed.kv_transfer.kv_pool.broadcast_transport import BroadcastKVPPTransport
+from vllm_ascend.distributed.kvpp import BroadcastKVPPTransport
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 

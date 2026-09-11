@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.ut.kvpp_utils import ManualExecutor
-from vllm_ascend.distributed.kv_transfer.kv_pool import broadcast_transport
+from vllm_ascend.distributed import kvpp
 
 
 @pytest.mark.parametrize("local_rank", [0, 1], ids=["receiver", "owner"])
@@ -46,10 +46,10 @@ def test_full_layer_broadcast_completes_before_future(monkeypatch, local_rank):
         assert stream is transfer
         return nullcontext(stream)
 
-    monkeypatch.setattr(broadcast_transport.torch.npu, "stream", use_stream)
-    monkeypatch.setattr(broadcast_transport.torch.npu, "Event", lambda: done)
-    monkeypatch.setattr(broadcast_transport.dist, "broadcast", broadcast)
-    transport = broadcast_transport.BroadcastKVPPTransport(group, {"layer": 1}, {"layer": payload})
+    monkeypatch.setattr(kvpp.torch.npu, "stream", use_stream)
+    monkeypatch.setattr(kvpp.torch.npu, "Event", lambda: done)
+    monkeypatch.setattr(kvpp.dist, "broadcast", broadcast)
+    transport = kvpp.BroadcastKVPPTransport(group, {"layer": 1}, {"layer": payload})
     future = executor.submit(transport.prefetch, "layer", ready, transfer)
     executor.run_next()
     assert future.done()
