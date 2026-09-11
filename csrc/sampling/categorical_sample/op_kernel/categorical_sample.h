@@ -1,0 +1,906 @@
+/*
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+ */
+
+#ifndef CATEGORICAL_SAMPLE_H
+#define CATEGORICAL_SAMPLE_H
+
+#include "kernel_operator.h"
+
+namespace CategoricalSample {
+using namespace AscendC;
+
+constexpr float POS_INFINITY = __builtin_inff();
+constexpr float NEG_INFINITY = -__builtin_inff();
+// Standard Philox4x32-10 multipliers and Weyl key increments.
+constexpr uint32_t PHILOX_M0 = 0xD2511F53U;
+constexpr uint32_t PHILOX_M1 = 0xCD9E8D57U;
+constexpr uint32_t PHILOX_W0 = 0x9E3779B9U;
+constexpr uint32_t PHILOX_W1 = 0xBB67AE85U;
+constexpr float UINT24_TO_UNIT = 1.0f / 16777216.0f;
+constexpr uint32_t VECTOR_ALIGNMENT_ELEMENTS = 256;
+constexpr int32_t FP64_WEIGHT_FRACTION_BITS = 42;
+constexpr int32_t FP32_ABS_MASK = 0x7FFFFFFF;
+constexpr int32_t FP32_EXP_MASK = 0x7F800000;
+// One DMA-aligned record per original tile; max and sum phases use separate GM regions.
+constexpr uint32_t TILE_STAT_WORDS = 8;
+
+#define CATEGORICAL_SAMPLE_CHECK(condition, message) \
+    do {                                             \
+        if (!(condition)) {                         \
+            AscendC::AssertPrint(message);           \
+            AscendC::Trap();                         \
+        }                                            \
+    } while (0)
+
+struct CategoricalSampleTilingData {
+    uint32_t numRows;
+    uint32_t vocabSize;
+    uint32_t numRequests;
+    uint32_t rowStride;
+    uint32_t logitsCacheStride;
+    uint32_t logitsCacheColStride;
+    uint32_t logitsCacheDtype;
+    uint32_t logitsCacheNumCols;
+    uint32_t tileElements;
+    uint32_t tileCount;
+    uint32_t hasLogitsCache;
+    uint32_t hasLogitsCacheCol;
+    uint32_t logitsCacheColPerToken;
+    uint32_t applyTemperature;
+    uint32_t returnLse;
+    uint32_t useFp64;
+    uint32_t coresPerRow;
+};
+
+__aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
+{
+    return lhs < rhs ? lhs : rhs;
+}
+
+__aicore__ inline uint32_t AlignUpU32(uint32_t value, uint32_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+__aicore__ inline void PipeVToS()
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+    SetFlag<HardEvent::V_S>(eventId);
+    WaitFlag<HardEvent::V_S>(eventId);
+}
+
+__aicore__ inline void PipeSToV()
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(eventId);
+    WaitFlag<HardEvent::S_V>(eventId);
+}
+
+__aicore__ inline uint32_t MulHi(uint32_t lhs, uint32_t rhs)
+{
+    return static_cast<uint32_t>((static_cast<uint64_t>(lhs) * static_cast<uint64_t>(rhs)) >> 32U);
+}
+
+__aicore__ inline uint32_t MulLo(uint32_t lhs, uint32_t rhs)
+{
+    return static_cast<uint32_t>(static_cast<uint64_t>(lhs) * static_cast<uint64_t>(rhs));
+}
+
+__aicore__ inline void PhiloxRandom(int64_t seed, int64_t position, uint32_t& random0, uint32_t& random1)
+{
+    uint32_t counter0 = static_cast<uint32_t>(position);
+    uint32_t counter1 = static_cast<uint32_t>(static_cast<uint64_t>(position) >> 32U);
+    uint32_t counter2 = 0;
+    uint32_t counter3 = 0;
+    uint32_t key0 = static_cast<uint32_t>(seed);
+    uint32_t key1 = static_cast<uint32_t>(static_cast<uint64_t>(seed) >> 32U);
+
+    for (uint32_t round = 0; round < 10; ++round) {
+        const uint32_t hi0 = MulHi(PHILOX_M0, counter0);
+        const uint32_t lo0 = MulLo(PHILOX_M0, counter0);
+        const uint32_t hi1 = MulHi(PHILOX_M1, counter2);
+        const uint32_t lo1 = MulLo(PHILOX_M1, counter2);
+        const uint32_t next0 = hi1 ^ counter1 ^ key0;
+        const uint32_t next1 = lo1;
+        const uint32_t next2 = hi0 ^ counter3 ^ key1;
+        const uint32_t next3 = lo0;
+        counter0 = next0;
+        counter1 = next1;
+        counter2 = next2;
+        counter3 = next3;
+        key0 += PHILOX_W0;
+        key1 += PHILOX_W1;
+    }
+
+    random0 = counter0;
+    random1 = counter1;
+}
+
+__aicore__ inline int32_t PhiloxRandom24(int64_t seed, int64_t position)
+{
+    uint32_t random0 = 0;
+    uint32_t random1 = 0;
+    PhiloxRandom(seed, position, random0, random1);
+    return static_cast<int32_t>(random0 >> 8U);
+}
+
+__aicore__ inline uint64_t PhiloxRandom64(int64_t seed, int64_t position)
+{
+    uint32_t random0 = 0;
+    uint32_t random1 = 0;
+    PhiloxRandom(seed, position, random0, random1);
+    return (static_cast<uint64_t>(random1) << 32U) | static_cast<uint64_t>(random0);
+}
+
+__aicore__ inline uint64_t MulHigh64(uint64_t lhs, uint64_t rhs)
+{
+    const uint64_t lhsLow = static_cast<uint32_t>(lhs);
+    const uint64_t lhsHigh = lhs >> 32U;
+    const uint64_t rhsLow = static_cast<uint32_t>(rhs);
+    const uint64_t rhsHigh = rhs >> 32U;
+    const uint64_t lowProduct = lhsLow * rhsLow;
+    const uint64_t middle = lhsHigh * rhsLow + (lowProduct >> 32U);
+    const uint64_t middleLow = middle & 0xFFFFFFFFULL;
+    const uint64_t middleHigh = middle >> 32U;
+    const uint64_t upperMiddle = middleLow + lhsLow * rhsHigh;
+    return lhsHigh * rhsHigh + middleHigh + (upperMiddle >> 32U);
+}
+
+template <typename T, typename MappingType>
+class CategoricalSampleKernel {
+public:
+    __aicore__ inline CategoricalSampleKernel() {}
+
+    __aicore__ inline void Init(
+        GM_ADDR processedLogits,
+        GM_ADDR expandedIdxMapping,
+        GM_ADDR temperature,
+        GM_ADDR seed,
+        GM_ADDR pos,
+        GM_ADDR logitsCache,
+        GM_ADDR logitsCacheCol,
+        GM_ADDR sampledTokenIds,
+        GM_ADDR lse,
+        GM_ADDR workspace,
+        CategoricalSampleTilingData* tilingData,
+        TPipe* pipe)
+    {
+        numRows_ = tilingData->numRows;
+        vocabSize_ = tilingData->vocabSize;
+        numRequests_ = tilingData->numRequests;
+        rowStride_ = tilingData->rowStride;
+        logitsCacheStride_ = tilingData->logitsCacheStride;
+        logitsCacheColStride_ = tilingData->logitsCacheColStride;
+        logitsCacheDtype_ = tilingData->logitsCacheDtype;
+        logitsCacheNumCols_ = tilingData->logitsCacheNumCols;
+        tileElements_ = tilingData->tileElements;
+        tileCount_ = tilingData->tileCount;
+        hasLogitsCache_ = tilingData->hasLogitsCache != 0;
+        hasLogitsCacheCol_ = tilingData->hasLogitsCacheCol != 0;
+        logitsCacheColPerToken_ = tilingData->logitsCacheColPerToken != 0;
+        applyTemperature_ = tilingData->applyTemperature != 0;
+        returnLse_ = tilingData->returnLse != 0;
+        useFp64_ = tilingData->useFp64 != 0;
+        coresPerRow_ = tilingData->coresPerRow;
+        pipe_ = pipe;
+
+        processedLogitsGm_.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(processedLogits), (numRows_ - 1) * rowStride_ + vocabSize_);
+        expandedIdxMappingGm_.SetGlobalBuffer(reinterpret_cast<__gm__ MappingType*>(expandedIdxMapping), numRows_);
+        temperatureGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(temperature), numRequests_);
+        seedGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(seed), numRequests_);
+        posGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(pos), numRows_);
+        logitsCacheGm_ = logitsCache;
+        if (hasLogitsCacheCol_) {
+            logitsCacheColGm_.SetGlobalBuffer(
+                reinterpret_cast<__gm__ int32_t*>(logitsCacheCol),
+                logitsCacheColPerToken_ ? numRows_ : 1);
+        }
+        sampledTokenIdsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(sampledTokenIds), numRows_);
+        if (returnLse_) {
+            lseGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(lse), numRows_);
+        }
+
+        pipe_->InitBuffer(inputQueue_, 1, tileElements_ * sizeof(T));
+        pipe_->InitBuffer(logitsFloatBuf_, tileElements_ * sizeof(float));
+        pipe_->InitBuffer(workBuf_, tileElements_ * sizeof(float));
+        pipe_->InitBuffer(nanValuesBuf_, tileElements_ * sizeof(float));
+        pipe_->InitBuffer(nanMaskBuf_, tileElements_ * sizeof(uint8_t));
+        pipe_->InitBuffer(scalarBuf_, 64);
+        pipe_->InitBuffer(scalarIntBuf_, 32);
+        pipe_->InitBuffer(tileSumsBuf_, AlignUpU32(tileCount_ * sizeof(float), 32));
+        pipe_->InitBuffer(tileMassesBuf_, AlignUpU32(tileCount_ * sizeof(uint64_t), 32));
+        pipe_->InitBuffer(sampledOutputBuf_, 32);
+        pipe_->InitBuffer(lseOutputBuf_, 32);
+        if (coresPerRow_ > 1) {
+            tileStatsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(GetUserWorkspace(workspace)));
+            pipe_->InitBuffer(tileStatsBuf_, tileCount_ * TILE_STAT_WORDS * sizeof(float));
+        }
+    }
+
+    __aicore__ inline void Process()
+    {
+        if (coresPerRow_ > 1) {
+            ProcessCooperativeRow();
+            return;
+        }
+        const uint32_t coreIndex = GetBlockIdx();
+        const uint32_t coreCount = GetBlockNum();
+        for (uint32_t row = coreIndex; row < numRows_; row += coreCount) {
+            ProcessRow(row);
+        }
+    }
+
+private:
+    __aicore__ inline void StoreTileStatistics(uint32_t row, uint32_t phase, uint32_t begin, uint32_t end)
+    {
+        const uint32_t offset = ((row * 2 + phase) * tileCount_ + begin) * TILE_STAT_WORDS;
+        PipeBarrier<PIPE_ALL>();
+        DataCopy(tileStatsGm_[offset], tileStatsBuf_.Get<float>()[begin * TILE_STAT_WORDS],
+                 (end - begin) * TILE_STAT_WORDS);
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void LoadTileStatistics(uint32_t row, uint32_t phase)
+    {
+        DataCopy(tileStatsBuf_.Get<float>(), tileStatsGm_[(row * 2 + phase) * tileCount_ * TILE_STAT_WORDS],
+                 tileCount_ * TILE_STAT_WORDS);
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void ProcessCooperativeRow()
+    {
+        const uint32_t row = GetBlockIdx() / coresPerRow_;
+        const uint32_t lane = GetBlockIdx() % coresPerRow_;
+        const uint32_t begin = tileCount_ * lane / coresPerRow_;
+        const uint32_t end = tileCount_ * (lane + 1) / coresPerRow_;
+        bool valid = row < numRows_;
+        if (valid) {
+            const int64_t request = expandedIdxMappingGm_.GetValue(row);
+            valid = request >= 0 && request < static_cast<int64_t>(numRequests_);
+            if (valid) {
+                activeRequestIndex_ = static_cast<uint32_t>(request);
+                activeTemperature_ = temperatureGm_.GetValue(request);
+                activeLogitsCacheCol_ = hasLogitsCacheCol_ ?
+                    logitsCacheColGm_.GetValue(logitsCacheColPerToken_ ? row : 0) : 0;
+                valid = !hasLogitsCache_ || (activeLogitsCacheCol_ >= 0 &&
+                    static_cast<uint32_t>(activeLogitsCacheCol_) < logitsCacheNumCols_);
+            }
+        }
+        LocalTensor<float> stats = tileStatsBuf_.Get<float>();
+        if (valid) {
+            for (uint32_t tile = begin; tile < end; ++tile) {
+                uint32_t first = 0;
+                const float maximum = TileMax(row, tile, activeTemperature_ == 0.0f, first);
+                stats.SetValue(tile * TILE_STAT_WORDS, maximum);
+                stats.ReinterpretCast<uint32_t>().SetValue(tile * TILE_STAT_WORDS + 1, first);
+                stats.SetValue(tile * TILE_STAT_WORDS + 2, cooperativeNan_ ? 1.0f : 0.0f);
+            }
+            StoreTileStatistics(row, 0, begin, end);
+        }
+        // Padding, invalid metadata and the optional alignment lane also reach both barriers.
+        SyncAll();
+        if (valid) {
+            LoadTileStatistics(row, 0);
+            for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+                cooperativeNan_ |= stats.GetValue(tile * TILE_STAT_WORDS + 2) != 0.0f;
+                const float maximum = stats.GetValue(tile * TILE_STAT_WORDS);
+                if (maximum > cooperativeMax_) {
+                    cooperativeMax_ = maximum;
+                    cooperativeFirstMax_ = static_cast<int64_t>(tile) * tileElements_ +
+                        stats.ReinterpretCast<uint32_t>().GetValue(tile * TILE_STAT_WORDS + 1);
+                }
+            }
+            if (!cooperativeNan_ && cooperativeMax_ != NEG_INFINITY && cooperativeMax_ != POS_INFINITY) {
+                const bool isGreedy = activeTemperature_ == 0.0f;
+                for (uint32_t tile = begin; tile < end; ++tile) {
+                    float sum = 0.0f;
+                    uint64_t mass = 0;
+                    if (returnLse_ || (!isGreedy && !useFp64_)) {
+                        sum = ComputeTileExpSum(row, tile, cooperativeMax_, hasLogitsCache_);
+                    } else if (isGreedy && hasLogitsCache_) {
+                        LoadTile(row, tile, true);
+                    }
+                    if (!isGreedy && useFp64_) {
+                        mass = ComputeTileFixedMass(row, tile, cooperativeMax_, hasLogitsCache_ && !returnLse_);
+                    }
+                    stats.SetValue(tile * TILE_STAT_WORDS, sum);
+                    stats.ReinterpretCast<uint64_t>().SetValue(tile * TILE_STAT_WORDS / 2 + 1, mass);
+                }
+                StoreTileStatistics(row, 1, begin, end);
+            }
+        }
+        SyncAll();
+        if (row < numRows_ && lane == 0) {
+            // Device assertions and special-value exits occur only after the last collective.
+            CATEGORICAL_SAMPLE_CHECK(!cooperativeNan_, "CategoricalSample processed logits must not contain NaN\n");
+            if (valid && cooperativeMax_ != NEG_INFINITY && cooperativeMax_ != POS_INFINITY) {
+                LoadTileStatistics(row, 1);
+            }
+            ProcessRow(row);
+        }
+    }
+
+    __aicore__ inline uint32_t TileLength(uint32_t tileIndex) const
+    {
+        const uint32_t tileOffset = tileIndex * tileElements_;
+        return MinU32(tileElements_, vocabSize_ - tileOffset);
+    }
+
+    __aicore__ inline uint32_t TileVectorLength(uint32_t tileIndex) const
+    {
+        return AlignUpU32(TileLength(tileIndex), VECTOR_ALIGNMENT_ELEMENTS);
+    }
+
+    template <typename CacheT>
+    __aicore__ inline void WriteLogitsCacheTileTyped(
+        LocalTensor<float> logitsFloat, uint32_t row, uint32_t tileIndex, uint32_t validElements)
+    {
+        if (!hasLogitsCache_) {
+            return;
+        }
+        const uint64_t cacheOffset = static_cast<uint64_t>(activeRequestIndex_) * logitsCacheStride_ +
+            static_cast<uint64_t>(activeLogitsCacheCol_) * logitsCacheColStride_ +
+            static_cast<uint64_t>(tileIndex) * tileElements_;
+        GlobalTensor<CacheT> cache;
+        cache.SetGlobalBuffer(reinterpret_cast<__gm__ CacheT*>(logitsCacheGm_));
+        LocalTensor<CacheT> values;
+        if constexpr (IsSameType<CacheT, float>::value) {
+            values = logitsFloat;
+        } else {
+            values = workBuf_.Get<CacheT>();
+            Cast(values, logitsFloat, RoundMode::CAST_RINT, AlignUpU32(validElements, VECTOR_ALIGNMENT_ELEMENTS));
+        }
+        PipeBarrier<PIPE_ALL>();
+        DataCopyPad(
+            cache[cacheOffset],
+            values,
+            DataCopyExtParams(1, validElements * static_cast<uint32_t>(sizeof(CacheT)), 0, 0, 0));
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline LocalTensor<float> LoadTile(uint32_t row, uint32_t tileIndex, bool writeCache = false)
+    {
+        const uint32_t validElements = TileLength(tileIndex);
+        const uint32_t vectorElements = TileVectorLength(tileIndex);
+        const uint64_t gmOffset = static_cast<uint64_t>(row) * rowStride_ +
+            static_cast<uint64_t>(tileIndex) * tileElements_;
+        LocalTensor<T> inputLocal = inputQueue_.AllocTensor<T>();
+        DataCopyExtParams copyParams{1, validElements * static_cast<uint32_t>(sizeof(T)), 0, 0, 0};
+        DataCopyPadExtParams<T> padParams{false, 0, 0, static_cast<T>(0)};
+        DataCopyPad(inputLocal, processedLogitsGm_[gmOffset], copyParams, padParams);
+        inputQueue_.EnQue(inputLocal);
+        inputLocal = inputQueue_.DeQue<T>();
+
+        LocalTensor<float> logitsFloat = logitsFloatBuf_.Get<float>();
+        if constexpr (IsSameType<T, float>::value) {
+            Adds(logitsFloat, inputLocal, 0.0f, vectorElements);
+        } else {
+            Cast(logitsFloat, inputLocal, RoundMode::CAST_NONE, vectorElements);
+        }
+        inputQueue_.FreeTensor(inputLocal);
+        PipeBarrier<PIPE_V>();
+        if (writeCache) {
+            // Store raw logits before scaling; the rejection sampler applies temperature on load.
+            if (logitsCacheDtype_ == 0) {
+                WriteLogitsCacheTileTyped<float>(logitsFloat, row, tileIndex, validElements);
+            } else if (logitsCacheDtype_ == 1) {
+                WriteLogitsCacheTileTyped<half>(logitsFloat, row, tileIndex, validElements);
+            } else {
+                WriteLogitsCacheTileTyped<bfloat16_t>(logitsFloat, row, tileIndex, validElements);
+            }
+        }
+        if (applyTemperature_ && activeTemperature_ != 0.0f) {
+            LocalTensor<float> divisor = workBuf_.Get<float>();
+            Duplicate(divisor, activeTemperature_, vectorElements);
+            PipeBarrier<PIPE_V>();
+            Div(logitsFloat, logitsFloat, divisor, vectorElements);
+            PipeBarrier<PIPE_V>();
+        }
+        return logitsFloat;
+    }
+
+    __aicore__ inline LocalTensor<float> BuildNanIndicator(LocalTensor<float> logitsFloat, uint32_t vectorElements)
+    {
+        LocalTensor<float> nanValues = nanValuesBuf_.Get<float>();
+        LocalTensor<uint8_t> nanMask = nanMaskBuf_.Get<uint8_t>();
+        LocalTensor<int32_t> logitsBits = logitsFloat.ReinterpretCast<int32_t>();
+        LocalTensor<int32_t> workBits = workBuf_.Get<int32_t>();
+
+        Duplicate(workBits, FP32_EXP_MASK, vectorElements);
+        PipeBarrier<PIPE_V>();
+        // C220 implements Level-2 And with 16-bit lanes for compatibility.
+        And(workBits, logitsBits, workBits, static_cast<int32_t>(2 * vectorElements));
+        PipeBarrier<PIPE_V>();
+        Compares(nanMask, workBits, FP32_EXP_MASK, CMPMODE::EQ, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Duplicate(nanValues, 1.0f, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Select(nanValues, nanMask, nanValues, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, vectorElements);
+
+        Duplicate(workBits, FP32_ABS_MASK, vectorElements);
+        PipeBarrier<PIPE_V>();
+        And(workBits, logitsBits, workBits, static_cast<int32_t>(2 * vectorElements));
+        PipeBarrier<PIPE_V>();
+        Compares(nanMask, workBits, FP32_EXP_MASK, CMPMODE::EQ, vectorElements);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> infinityValues = workBuf_.Get<float>();
+        Duplicate(infinityValues, 1.0f, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Select(infinityValues, nanMask, infinityValues, 0.0f, SELMODE::VSEL_TENSOR_SCALAR_MODE, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Sub(nanValues, nanValues, infinityValues, vectorElements);
+        PipeBarrier<PIPE_V>();
+        return nanValues;
+    }
+
+    __aicore__ inline float TileMax(
+        uint32_t row, uint32_t tileIndex, bool needFirstMaxIndex, uint32_t& firstMaxIndex)
+    {
+        const uint32_t validElements = TileLength(tileIndex);
+        const uint32_t vectorElements = TileVectorLength(tileIndex);
+        LocalTensor<float> logitsFloat = LoadTile(row, tileIndex);
+        LocalTensor<float> work = workBuf_.Get<float>();
+        LocalTensor<float> nanValues = BuildNanIndicator(logitsFloat, vectorElements);
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+
+        ReduceMax(scalar[8], nanValues, work, validElements);
+        PipeVToS();
+        if (coresPerRow_ > 1) {
+            cooperativeNan_ |= scalar.GetValue(8) != 0.0f;
+        } else {
+            CATEGORICAL_SAMPLE_CHECK(
+                scalar.GetValue(8) == 0.0f, "CategoricalSample processed logits must not contain NaN\n");
+        }
+        // ReduceMax returns the first maximum's index, including partial tiles.
+        ReduceMax(scalar, logitsFloat, work, validElements, needFirstMaxIndex);
+        PipeVToS();
+        const float tileMax = scalar.GetValue(0);
+        if (needFirstMaxIndex) {
+            firstMaxIndex = scalar.ReinterpretCast<uint32_t>().GetValue(1);
+        }
+        return tileMax;
+    }
+
+    __aicore__ inline float ComputeTileExpSum(
+        uint32_t row, uint32_t tileIndex, float rowMax, bool writeCache)
+    {
+        const uint32_t validElements = TileLength(tileIndex);
+        const uint32_t vectorElements = TileVectorLength(tileIndex);
+        LocalTensor<float> logitsFloat = LoadTile(row, tileIndex, writeCache);
+        LocalTensor<float> work = workBuf_.Get<float>();
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+        Adds(logitsFloat, logitsFloat, -rowMax, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Exp(logitsFloat, logitsFloat, vectorElements);
+        PipeBarrier<PIPE_V>();
+        if (validElements != vectorElements) {
+            PipeVToS();
+            float tileSum = 0.0f;
+            for (uint32_t index = 0; index < validElements; ++index) {
+                tileSum += logitsFloat.GetValue(index);
+            }
+            return tileSum;
+        }
+
+        ReduceSum(scalar, logitsFloat, work, vectorElements);
+        PipeVToS();
+        return scalar.GetValue(0);
+    }
+
+    __aicore__ inline float ComputeAllExpSums(uint32_t row, float rowMax, bool writeCache)
+    {
+        LocalTensor<float> tileSums = tileSumsBuf_.Get<float>();
+        float total = 0.0f;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            // Keep the original tile order and FP32 additions, independent of lane count.
+            const float tileSum = coresPerRow_ > 1 ?
+                tileStatsBuf_.Get<float>().GetValue(tile * TILE_STAT_WORDS) :
+                ComputeTileExpSum(row, tile, rowMax, writeCache);
+            tileSums.SetValue(tile, tileSum);
+            total += tileSum;
+        }
+        return total;
+    }
+
+    __aicore__ inline uint64_t FloatToFixedMass(uint32_t bits)
+    {
+        if (bits == 0 || (bits >> 31U) != 0) {
+            return 0;
+        }
+        const uint32_t exponent = (bits >> 23U) & 0xFFU;
+        const uint64_t mantissa = exponent == 0 ? (bits & 0x7FFFFFU) : ((bits & 0x7FFFFFU) | 0x800000U);
+        const int32_t binaryExponent = exponent == 0 ? -149 : static_cast<int32_t>(exponent) - 150;
+        const int32_t shift = binaryExponent + FP64_WEIGHT_FRACTION_BITS;
+        if (shift >= 0) {
+            return mantissa << static_cast<uint32_t>(shift);
+        }
+        const uint32_t rightShift = static_cast<uint32_t>(-shift);
+        if (rightShift >= 64U) {
+            return 0;
+        }
+        return (mantissa + (1ULL << (rightShift - 1U))) >> rightShift;
+    }
+
+    __aicore__ inline uint64_t ComputeTileFixedMass(
+        uint32_t row, uint32_t tileIndex, float rowMax, bool writeCache)
+    {
+        const uint32_t validElements = TileLength(tileIndex);
+        const uint32_t vectorElements = TileVectorLength(tileIndex);
+        LocalTensor<float> logitsFloat = LoadTile(row, tileIndex, writeCache);
+        Adds(logitsFloat, logitsFloat, -rowMax, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Exp(logitsFloat, logitsFloat, vectorElements);
+        PipeVToS();
+
+        // Read the existing FP32 bits without a scalar UB round trip.
+        LocalTensor<uint32_t> weightBits = logitsFloat.ReinterpretCast<uint32_t>();
+        uint64_t tileMass = 0;
+        for (uint32_t index = 0; index < validElements; ++index) {
+            tileMass += FloatToFixedMass(weightBits.GetValue(index));
+        }
+        return tileMass;
+    }
+
+    __aicore__ inline uint64_t ComputeAllFixedMasses(uint32_t row, float rowMax, bool writeCache)
+    {
+        LocalTensor<uint64_t> tileMasses = tileMassesBuf_.Get<uint64_t>();
+        uint64_t totalMass = 0;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const uint64_t tileMass = coresPerRow_ > 1 ?
+                tileStatsBuf_.Get<uint64_t>().GetValue(tile * TILE_STAT_WORDS / 2 + 1) :
+                ComputeTileFixedMass(row, tile, rowMax, writeCache);
+            tileMasses.SetValue(tile, tileMass);
+            totalMass += tileMass;
+        }
+        return totalMass;
+    }
+
+    __aicore__ inline float ComputeLse(float rowMax, float expSum)
+    {
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+        scalar.SetValue(0, expSum);
+        PipeSToV();
+        Ln(scalar, scalar, 1);
+        PipeVToS();
+        return rowMax + scalar.GetValue(0);
+    }
+
+    __aicore__ inline float IntToFloat(int32_t value)
+    {
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+        LocalTensor<int32_t> scalarInt = scalarIntBuf_.Get<int32_t>();
+        scalarInt.SetValue(0, value);
+        PipeSToV();
+        Cast(scalar, scalarInt, RoundMode::CAST_NONE, 1);
+        PipeVToS();
+        return scalar.GetValue(0);
+    }
+
+    __aicore__ inline float Uniform(int64_t seed, int64_t position)
+    {
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+        LocalTensor<int32_t> scalarInt = scalarIntBuf_.Get<int32_t>();
+        scalarInt.SetValue(0, PhiloxRandom24(seed, position));
+        PipeSToV();
+        Cast(scalar, scalarInt, RoundMode::CAST_NONE, 1);
+        PipeBarrier<PIPE_V>();
+        Adds(scalar, scalar, 0.5f, 1);
+        PipeBarrier<PIPE_V>();
+        Muls(scalar, scalar, UINT24_TO_UNIT, 1);
+        PipeVToS();
+        return scalar.GetValue(0);
+    }
+
+    __aicore__ inline int64_t SelectCategorical(uint32_t row, float rowMax, float uniform, float total)
+    {
+        LocalTensor<float> tileSums = tileSumsBuf_.Get<float>();
+        const float target = uniform * total;
+        float prefix = 0.0f;
+        uint32_t selectedTile = tileCount_ - 1;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const float nextPrefix = prefix + tileSums.GetValue(tile);
+            if (target <= nextPrefix || tile + 1 == tileCount_) {
+                selectedTile = tile;
+                break;
+            }
+            prefix = nextPrefix;
+        }
+
+        const uint32_t validElements = TileLength(selectedTile);
+        const uint32_t vectorElements = TileVectorLength(selectedTile);
+        LocalTensor<float> logitsFloat = LoadTile(row, selectedTile);
+        Adds(logitsFloat, logitsFloat, -rowMax, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Exp(logitsFloat, logitsFloat, vectorElements);
+        PipeVToS();
+
+        float cumulative = prefix;
+        int64_t fallback = static_cast<int64_t>(selectedTile) * tileElements_;
+        for (uint32_t index = 0; index < validElements; ++index) {
+            const float weight = logitsFloat.GetValue(index);
+            if (weight > 0.0f) {
+                fallback = static_cast<int64_t>(selectedTile) * tileElements_ + index;
+            }
+            cumulative += weight;
+            if (cumulative >= target) {
+                return static_cast<int64_t>(selectedTile) * tileElements_ + index;
+            }
+        }
+        return fallback;
+    }
+
+    __aicore__ inline int64_t SelectCategoricalFp64(
+        uint32_t row, float rowMax, uint64_t random, uint64_t totalMass)
+    {
+        LocalTensor<uint64_t> tileMasses = tileMassesBuf_.Get<uint64_t>();
+        const uint64_t target = MulHigh64(random, totalMass);
+        uint64_t prefix = 0;
+        uint32_t selectedTile = tileCount_ - 1;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const uint64_t nextPrefix = prefix + tileMasses.GetValue(tile);
+            if (target < nextPrefix || tile + 1 == tileCount_) {
+                selectedTile = tile;
+                break;
+            }
+            prefix = nextPrefix;
+        }
+
+        const uint32_t validElements = TileLength(selectedTile);
+        const uint32_t vectorElements = TileVectorLength(selectedTile);
+        LocalTensor<float> logitsFloat = LoadTile(row, selectedTile);
+        Adds(logitsFloat, logitsFloat, -rowMax, vectorElements);
+        PipeBarrier<PIPE_V>();
+        Exp(logitsFloat, logitsFloat, vectorElements);
+        PipeVToS();
+
+        LocalTensor<uint32_t> weightBits = logitsFloat.ReinterpretCast<uint32_t>();
+        uint64_t cumulative = prefix;
+        int64_t fallback = static_cast<int64_t>(selectedTile) * tileElements_;
+        for (uint32_t index = 0; index < validElements; ++index) {
+            const uint64_t mass = FloatToFixedMass(weightBits.GetValue(index));
+            if (mass > 0) {
+                fallback = static_cast<int64_t>(selectedTile) * tileElements_ + index;
+            }
+            cumulative += mass;
+            if (cumulative > target) {
+                return static_cast<int64_t>(selectedTile) * tileElements_ + index;
+            }
+        }
+        return fallback;
+    }
+
+    __aicore__ inline int32_t CountPositiveInfinity(uint32_t row, int64_t& firstIndex, bool writeCache)
+    {
+        int32_t count = 0;
+        firstIndex = 0;
+        bool foundFirst = false;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const uint32_t validElements = TileLength(tile);
+            const uint32_t vectorElements = TileVectorLength(tile);
+            LocalTensor<float> logitsFloat = LoadTile(row, tile, writeCache);
+            PipeVToS();
+            for (uint32_t index = 0; index < validElements; ++index) {
+                if (logitsFloat.GetValue(index) == POS_INFINITY) {
+                    if (!foundFirst) {
+                        firstIndex = static_cast<int64_t>(tile) * tileElements_ + index;
+                        foundFirst = true;
+                    }
+                    ++count;
+                }
+            }
+        }
+        return count;
+    }
+
+    __aicore__ inline int64_t SelectPositiveInfinity(uint32_t row, float rank)
+    {
+        int64_t lastIndex = 0;
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const uint32_t validElements = TileLength(tile);
+            const uint32_t vectorElements = TileVectorLength(tile);
+            LocalTensor<float> logitsFloat = LoadTile(row, tile);
+            PipeVToS();
+            for (uint32_t index = 0; index < validElements; ++index) {
+                if (logitsFloat.GetValue(index) == POS_INFINITY) {
+                    lastIndex = static_cast<int64_t>(tile) * tileElements_ + index;
+                    if (rank < 1.0f) {
+                        return lastIndex;
+                    }
+                    rank -= 1.0f;
+                }
+            }
+        }
+        // The FP32 midpoint draw can round up to 1.0. Keep its endpoint
+        // on the positive-infinity support instead of returning token zero.
+        return lastIndex;
+    }
+
+    __aicore__ inline int64_t SelectPositiveInfinityFp64(uint32_t row, uint64_t rank)
+    {
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            const uint32_t validElements = TileLength(tile);
+            const uint32_t vectorElements = TileVectorLength(tile);
+            LocalTensor<float> logitsFloat = LoadTile(row, tile);
+            PipeVToS();
+            for (uint32_t index = 0; index < validElements; ++index) {
+                if (logitsFloat.GetValue(index) == POS_INFINITY) {
+                    if (rank == 0) {
+                        return static_cast<int64_t>(tile) * tileElements_ + index;
+                    }
+                    --rank;
+                }
+            }
+        }
+        return 0;
+    }
+
+    __aicore__ inline void WriteProcessedLogitsRow(uint32_t row)
+    {
+        if (!hasLogitsCache_ || coresPerRow_ > 1) {
+            return;
+        }
+        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+            LoadTile(row, tile, true);
+        }
+    }
+
+    __aicore__ inline void WriteRow(uint32_t row, int64_t sampledIndex, float lseValue)
+    {
+        LocalTensor<int64_t> sampledOutput = sampledOutputBuf_.Get<int64_t>();
+        LocalTensor<float> lseOutput = lseOutputBuf_.Get<float>();
+        sampledOutput.SetValue(0, sampledIndex);
+        if (returnLse_) {
+            lseOutput.SetValue(0, lseValue);
+        }
+
+        PipeBarrier<PIPE_ALL>();
+        DataCopyPad(sampledTokenIdsGm_[row], sampledOutput, DataCopyExtParams(1, sizeof(int64_t), 0, 0, 0));
+        if (returnLse_) {
+            DataCopyPad(lseGm_[row], lseOutput, DataCopyExtParams(1, sizeof(float), 0, 0, 0));
+        }
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void WritePaddingRow(uint32_t row)
+    {
+        WriteRow(row, 0, 0.0f);
+    }
+
+    __aicore__ inline void ProcessRow(uint32_t row)
+    {
+        const int64_t requestIndex = expandedIdxMappingGm_.GetValue(row);
+        if (requestIndex == -1) {
+            WritePaddingRow(row);
+            return;
+        }
+        CATEGORICAL_SAMPLE_CHECK(
+            requestIndex >= 0 && requestIndex < static_cast<int64_t>(numRequests_),
+            "CategoricalSample expanded index mapping is outside request state\n");
+
+        activeRequestIndex_ = static_cast<uint32_t>(requestIndex);
+        activeLogitsCacheCol_ = 0;
+        if (hasLogitsCacheCol_) {
+            activeLogitsCacheCol_ =
+                logitsCacheColGm_.GetValue(logitsCacheColPerToken_ ? row : 0);
+        }
+        CATEGORICAL_SAMPLE_CHECK(
+            !hasLogitsCache_ ||
+                (activeLogitsCacheCol_ >= 0 &&
+                 static_cast<uint32_t>(activeLogitsCacheCol_) < logitsCacheNumCols_),
+            "CategoricalSample output processed logits column is outside cache bounds\n");
+        activeTemperature_ = temperatureGm_.GetValue(requestIndex);
+        const bool isGreedy = activeTemperature_ == 0.0f;
+        float rowMax = cooperativeMax_;
+        int64_t firstMaxIndex = cooperativeFirstMax_;
+        for (uint32_t tile = 0; coresPerRow_ == 1 && tile < tileCount_; ++tile) {
+            uint32_t tileFirstMaxIndex = 0;
+            const float tileMax = TileMax(row, tile, isGreedy, tileFirstMaxIndex);
+            if (tileMax > rowMax) {
+                rowMax = tileMax;
+                firstMaxIndex = static_cast<int64_t>(tile) * tileElements_ + tileFirstMaxIndex;
+            }
+        }
+        CATEGORICAL_SAMPLE_CHECK(
+            rowMax != NEG_INFINITY, "CategoricalSample processed logits row must not be all -inf\n");
+
+        if (rowMax == POS_INFINITY) {
+            int64_t firstIndex = 0;
+            const int32_t infCount = CountPositiveInfinity(row, firstIndex, hasLogitsCache_);
+            int64_t sampledIndex = firstIndex;
+            if (!isGreedy) {
+                if (useFp64_) {
+                    const uint64_t random = PhiloxRandom64(seedGm_.GetValue(requestIndex), posGm_.GetValue(row));
+                    const uint64_t rank = MulHigh64(random, static_cast<uint64_t>(infCount));
+                    sampledIndex = SelectPositiveInfinityFp64(row, rank);
+                } else {
+                    const float uniform = Uniform(seedGm_.GetValue(requestIndex), posGm_.GetValue(row));
+                    const float rank = uniform * IntToFloat(infCount);
+                    sampledIndex = SelectPositiveInfinity(row, rank);
+                }
+            }
+            WriteRow(row, sampledIndex, POS_INFINITY);
+            return;
+        }
+
+        int64_t sampledIndex = 0;
+        float expSum = 0.0f;
+        if (isGreedy) {
+            sampledIndex = firstMaxIndex;
+            if (returnLse_) {
+                expSum = ComputeAllExpSums(row, rowMax, hasLogitsCache_);
+            } else {
+                WriteProcessedLogitsRow(row);
+            }
+        } else if (useFp64_) {
+            if (returnLse_) {
+                expSum = ComputeAllExpSums(row, rowMax, hasLogitsCache_);
+            }
+            const uint64_t totalMass =
+                ComputeAllFixedMasses(row, rowMax, hasLogitsCache_ && !returnLse_);
+            const uint64_t random = PhiloxRandom64(seedGm_.GetValue(requestIndex), posGm_.GetValue(row));
+            sampledIndex = SelectCategoricalFp64(row, rowMax, random, totalMass);
+        } else {
+            expSum = ComputeAllExpSums(row, rowMax, hasLogitsCache_);
+            const float uniform = Uniform(seedGm_.GetValue(requestIndex), posGm_.GetValue(row));
+            sampledIndex = SelectCategorical(row, rowMax, uniform, expSum);
+        }
+
+        const float lseValue = returnLse_ ? ComputeLse(rowMax, expSum) : 0.0f;
+        WriteRow(row, sampledIndex, lseValue);
+    }
+
+private:
+    TPipe* pipe_ = nullptr;
+    TQue<QuePosition::VECIN, 1> inputQueue_;
+    TBuf<QuePosition::VECCALC> logitsFloatBuf_;
+    TBuf<QuePosition::VECCALC> workBuf_;
+    TBuf<QuePosition::VECCALC> nanValuesBuf_;
+    TBuf<QuePosition::VECCALC> nanMaskBuf_;
+    TBuf<QuePosition::VECCALC> scalarBuf_;
+    TBuf<QuePosition::VECCALC> scalarIntBuf_;
+    TBuf<QuePosition::VECCALC> tileSumsBuf_;
+    TBuf<QuePosition::VECCALC> tileMassesBuf_;
+    TBuf<QuePosition::VECCALC> sampledOutputBuf_;
+    TBuf<QuePosition::VECCALC> lseOutputBuf_;
+    TBuf<QuePosition::VECCALC> tileStatsBuf_;
+    GlobalTensor<float> tileStatsGm_;
+
+    GlobalTensor<T> processedLogitsGm_;
+    GlobalTensor<MappingType> expandedIdxMappingGm_;
+    GlobalTensor<float> temperatureGm_;
+    GlobalTensor<int64_t> seedGm_;
+    GlobalTensor<int64_t> posGm_;
+    GM_ADDR logitsCacheGm_ = nullptr;
+    GlobalTensor<int32_t> logitsCacheColGm_;
+    GlobalTensor<int64_t> sampledTokenIdsGm_;
+    GlobalTensor<float> lseGm_;
+
+    uint32_t numRows_ = 0;
+    uint32_t vocabSize_ = 0;
+    uint32_t numRequests_ = 0;
+    uint32_t rowStride_ = 0;
+    uint32_t logitsCacheStride_ = 0;
+    uint32_t logitsCacheColStride_ = 0;
+    uint32_t logitsCacheDtype_ = 0;
+    uint32_t logitsCacheNumCols_ = 0;
+    uint32_t tileElements_ = 0;
+    uint32_t tileCount_ = 0;
+    uint32_t coresPerRow_ = 1;
+    float cooperativeMax_ = NEG_INFINITY;
+    int64_t cooperativeFirstMax_ = 0;
+    bool cooperativeNan_ = false;
+    uint32_t activeRequestIndex_ = 0;
+    int32_t activeLogitsCacheCol_ = 0;
+    float activeTemperature_ = 1.0f;
+    bool hasLogitsCache_ = false;
+    bool hasLogitsCacheCol_ = false;
+    bool logitsCacheColPerToken_ = false;
+    bool applyTemperature_ = false;
+    bool returnLse_ = false;
+    bool useFp64_ = false;
+};
+}  // namespace CategoricalSample
+
+#endif
