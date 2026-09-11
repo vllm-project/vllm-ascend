@@ -4200,6 +4200,11 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
+            assert self.sparse_kv_offload_manager is not None
+            self.sparse_kv_offload_manager.prepare_host_kv_allocation(
+                device_id=torch.npu.current_device(),
+                dp_rank=int(self.dp_rank),
+            )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
         # TODO: refactor the logic of attention
         if (
@@ -4241,6 +4246,16 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def shutdown(self) -> None:
+        parent_shutdown = getattr(super(), "shutdown", None)
+        try:
+            if callable(parent_shutdown):
+                parent_shutdown()
+        finally:
+            manager = getattr(self, "sparse_kv_offload_manager", None)
+            if manager is not None:
+                manager.close()
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
@@ -4806,6 +4821,7 @@ class NPUModelRunner(GPUModelRunner):
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
+                        assert self.sparse_kv_offload_manager is not None
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None
@@ -4819,6 +4835,7 @@ class NPUModelRunner(GPUModelRunner):
                                     self.tp_rank,
                                     self.sparse_kv_offload_config.keep_device_kv_cache,
                                     self._allocate_int8_cache_tensor,
+                                    self.sparse_kv_offload_manager.allocate_host_kv_tensors,
                                 )
                             )
                         else:
@@ -4832,6 +4849,7 @@ class NPUModelRunner(GPUModelRunner):
                                             self.tp_rank,
                                             self.sparse_kv_offload_config.keep_device_kv_cache,
                                             self._allocate_int8_cache_tensor,
+                                            self.sparse_kv_offload_manager.allocate_host_kv_tensors,
                                         )
                                     )
                         continue

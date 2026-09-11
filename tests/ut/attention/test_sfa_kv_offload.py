@@ -231,6 +231,7 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         _get_offload_layer_id=lambda _: 0,
         get_fused_overlap_cpu_kv_inputs=lambda _: (full_kv_cpu, full_rope_cpu),
         allocate_fused_overlap_membership_map=allocate_membership,
+        is_fused_membership_storage=lambda tensor: tensor.dtype == torch.int16,
         prepare_fused_overlap_external_plan=prepare_plan,
         inject_current_kv_into_selection=inject_current,
         wait_for_current_kv_writeback=wait_for_writeback,
