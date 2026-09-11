@@ -79,13 +79,11 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
-# vLLM main added KVConnectorBlockState for connector block snapshots; v0.28.0
-# does not ship it. Import optionally so CI rebase onto main does not break the
-# release lane at module import time.
-try:
+if not vllm_version_is("0.28.0"):
     from vllm.v1.core.sched.output import KVConnectorBlockState
-except ImportError:  # pragma: no cover - exercised on v0.28.0
+else:
     KVConnectorBlockState = None  # type: ignore[misc, assignment]
 
 
@@ -786,19 +784,13 @@ class BalanceScheduler(Scheduler):
         if KVConnectorBlockState is not None:
             boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
             if self.connector is not None:
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                # A scheduled request can finish a cache chunk without allocating
+                # new blocks. Resolve its current table only when the connector reads it.
+                block_state_req_ids = set(num_scheduled_tokens)
+                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
                 kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    req_ids=block_state_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
                     boundary_state_offloads=boundary_state_offloads,
                 )
 
