@@ -136,15 +136,16 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
         The full-window path still reuses the same logical window for every MTP
         layer, but graph-param update/replay expects draft metadata to be
-        indexed by speculative step.  Each Step3.5 MTP attention group maps to
-        one draft step/KV-cache group, so return:
+        indexed by speculative step. A logical MTP layer maps to one draft
+        step, while its main attention and split indexer can belong to
+        different backend/cache groups. Group the results by layer prefix, so
+        return:
 
         ``[{layer0: meta0}, {layer1: meta1}, {layer2: meta2}]``
 
         instead of one dict containing all MTP layers.
         """
-        per_group_attn_metadata: list[Any] = []
-        multi_steps_attn_metadata: list[dict[str, Any]] = []
+        per_step_layer_metadata: dict[str, dict[str, Any]] = {}
         extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
@@ -168,12 +169,36 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 )
                 if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                     attn_metadata.attn_mask = None
-            per_group_attn_metadata.append(attn_metadata)
-            per_step_attn_metadata: dict[str, Any] = {}
             for layer_name in attn_group.layer_names:
+                step_key = layer_name.split(".self_attn.", maxsplit=1)[0]
+                per_step_attn_metadata = per_step_layer_metadata.setdefault(step_key, {})
                 per_step_attn_metadata[layer_name] = attn_metadata
-            multi_steps_attn_metadata.append(per_step_attn_metadata)
-        return per_group_attn_metadata, multi_steps_attn_metadata
+
+        def step_number(step_key: str) -> int:
+            marker = ".layers."
+            if marker not in step_key:
+                return 0
+            return int(step_key.split(marker, maxsplit=1)[1].split(".", maxsplit=1)[0])
+
+        multi_steps_attn_metadata = [
+            metadata
+            for _, metadata in sorted(
+                per_step_layer_metadata.items(),
+                key=lambda item: step_number(item[0]),
+            )
+        ]
+        primary_attn_metadata = [
+            self._primary_step_attn_metadata(metadata)
+            for metadata in multi_steps_attn_metadata
+        ]
+        return primary_attn_metadata, multi_steps_attn_metadata
+
+    @staticmethod
+    def _primary_step_attn_metadata(per_layer_metadata: dict[str, Any]) -> Any:
+        for layer_name, metadata in per_layer_metadata.items():
+            if not layer_name.endswith(".indexer.k_cache"):
+                return metadata
+        raise RuntimeError("Step3.5 MTP step is missing its main attention metadata.")
 
     def _sample_draft_tokens_for_step(
         self,
@@ -461,7 +486,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         common_attn_metadata.query_start_loc = self.query_start_loc_group[0][: num_reqs_padded + 1]
         common_attn_metadata.num_input_tokens = num_input_tokens
         _, multi_steps_attn_metadata = self._build_step_attn_metadatas(common_attn_metadata)
-        attn_metadata_i = next(iter(multi_steps_attn_metadata[0].values()))
+        attn_metadata_i = self._primary_step_attn_metadata(multi_steps_attn_metadata[0])
 
         if not self.use_cuda_graph:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()

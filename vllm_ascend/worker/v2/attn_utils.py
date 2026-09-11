@@ -286,6 +286,7 @@ def build_attn_metadata(
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -300,8 +301,9 @@ def build_attn_metadata(
                     num_actual_reqs=num_actual_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 )
-            # Only SFA and DSA metadata builders consume PCP context.
-            if pcp_context is not None and (is_sfa_builder or is_dsa_builder):
+            # Parallel attention and cache-only backends opt in to the PCP
+            # context needed to construct their own metadata.
+            if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
                 attn_metadata_extra_kwargs.update(
                     pcp_context=pcp_context,
                     pcp_cache_group_idx=i,

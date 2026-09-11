@@ -82,7 +82,9 @@ def test_step3p5_draft_window_and_config_contracts() -> None:
     create_config = _src(_method(STEP3P5, "AscendStep3p5MTPProposer", "_create_draft_vllm_config"))
 
     assert [arg.arg for arg in step_run.args.args] == [arg.arg for arg in base_run.args.args]
-    assert "multi_steps_attn_metadata.append(per_step_attn_metadata)" in build_metadata
+    assert ".self_attn." in build_metadata
+    assert "per_step_layer_metadata.setdefault(step_key, {})" in build_metadata
+    assert "self._primary_step_attn_metadata(metadata)" in build_metadata
     assert "multi_steps_attn_metadata[spec_step_idx]" in run_window
     assert "self.input_ids[token_indices_to_sample]" in roll_inputs
     assert "_ensure_draft_layer_types_cover_mtp_layers()" in create_config

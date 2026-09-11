@@ -27,7 +27,11 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    MoECommType,
+    moe_output_is_reduced,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -175,11 +179,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
-            MoECommType.ALLTOALL,
-            MoECommType.MC2,
-            MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
+        if torch.compiler.is_compiling():
+            # Profile runs still compile at max_num_batched_tokens, where the
+            # runtime method can be ALLGATHER.  FULL decode capture uses the
+            # capacity-sized MC2 contract, so bake that contract into the
+            # outer graph.  The profile output is discarded; real calls with
+            # a different contract bypass this graph in the forward context.
+            compiled_moe_comm_type = _EXTRA_CTX.compiled_moe_comm_type
+            if compiled_moe_comm_type is not None:
+                moe_comm_type = compiled_moe_comm_type
+        return moe_output_is_reduced(
+            moe_comm_type,
+            self.moe_config.is_sequence_parallel,
+        )
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)
@@ -317,13 +329,29 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            # The runner input transform provides a padded gathered tensor in
-            # SP multistream mode. Trim the shared-MLP view before use.
+            # A routed input transform can overlap the shared-input gather and
+            # passes the gathered tensor into this custom op explicitly. For
+            # models without such a transform, start the same gather here and
+            # join it before routed MoE so TP and EP AIV collectives cannot be
+            # interleaved in a rank-dependent order.
+            uses_sp_multistream = (
+                self.ascend_shared_experts.multistream_overlap
+                and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            )
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
-            shared_expert_input = (
-                shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
-            )
+            shared_expert_input = shared_hidden_states
+            all_gather_done = None
+            if uses_sp_multistream and not shared_input_is_gathered:
+                shared_expert_input, all_gather_done = self.ascend_shared_experts.start_input_all_gather(
+                    shared_hidden_states
+                )
+                assert all_gather_done is not None
+                shared_input_is_gathered = True
+            if shared_input_is_gathered:
+                # start_input_all_gather keeps TP padding for the custom-op
+                # boundary; the shared MLP consumes only real tokens.
+                shared_expert_input = shared_expert_input[: _EXTRA_CTX.num_tokens]
             if self.is_internal_router:
                 gate = self.gate
                 assert gate is not None
@@ -344,6 +372,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None
 
+            if all_gather_done is not None:
+                torch.npu.current_stream().wait_event(all_gather_done)
             routed_out, fused_moe_events = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
@@ -351,7 +381,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
             fused_moe_events.before_routed_experts = before_routed_experts
             fused_moe_events.after_routed_experts = after_routed_experts
-            if shared_input_is_gathered:
+            if uses_sp_multistream:
                 fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
             shared_out = self.ascend_shared_experts.forward(

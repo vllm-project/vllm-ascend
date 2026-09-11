@@ -121,6 +121,8 @@ class TestAscendSFAIndexerBackend(TestBase):
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
+            cos=MagicMock(name="cos"),
+            sin=MagicMock(name="sin"),
         )
 
     def test_forward_runs_full_pipeline(self):
@@ -147,8 +149,6 @@ class TestAscendSFAIndexerBackend(TestBase):
         hidden_states = torch.zeros(2, 32)
         q_c = torch.zeros(2, 16)
         k_hidden_states = torch.zeros(2, 32)
-        cos, sin = MagicMock(name="cos"), MagicMock(name="sin")
-
         with (
             patch("vllm_ascend.attention.indexer.HAS_TRITON", True),
             patch(
@@ -160,12 +160,16 @@ class TestAscendSFAIndexerBackend(TestBase):
                 side_effect=_select,
             ),
         ):
-            result = indexer.forward(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata)
+            result = indexer.forward(hidden_states, q_c, k_hidden_states, indexer_metadata)
 
         self.assertIs(result, expected_topk)
         # The write completes before the selection kernel reads the cache.
         self.assertEqual(calls, ["forward_k", "write_cache", "select"])
-        indexer.forward_k.assert_called_once_with(k_hidden_states, cos, sin)
+        indexer.forward_k.assert_called_once_with(
+            k_hidden_states,
+            indexer_metadata.cos,
+            indexer_metadata.sin,
+        )
         indexer.write_cache.assert_called_once_with(
             k_li,
             None,
@@ -185,8 +189,6 @@ class TestAscendSFAIndexerBackend(TestBase):
             result = indexer.forward(
                 torch.zeros(2, 32),
                 None,
-                MagicMock(name="cos"),
-                MagicMock(name="sin"),
                 torch.zeros(2, 32),
                 indexer_metadata,
                 compute_topk=False,
@@ -327,8 +329,8 @@ class TestIndexerWrapper(TestBase):
         self.assertIs(wrapper.impl, mock_backend_cls.return_value)
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
-        wrapper("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
-        wrapper.impl.assert_called_once_with("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
+        wrapper("hidden", "q_c", "k_hidden", "meta", False)
+        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False)
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()

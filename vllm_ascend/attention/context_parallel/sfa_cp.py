@@ -8,7 +8,6 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
@@ -17,6 +16,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
+)
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_local_block_table,
+    get_sfa_dcp_max_local_block_table_cols,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -602,10 +607,11 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 # - SFA KV cache remains DCP-local to preserve the KV memory saving. The sparse
 #   topk indices produced from the replicated indexer view are remapped to local
 #   KV indices before calling sparse flash attention.
-# - BlockTable only owns the DCP-local physical layout. This builder derives the
-#   replicated block table and slot mapping on demand, temporarily builds the
-#   indexer-facing metadata with that replicated view, and then stores the
-#   original DCP-local view in metadata.dcp_context for KV writes and SFA reads.
+# - BlockTable only owns the DCP-local physical layout. This builder derives its
+#   replicated block table and slot mapping on demand, then stores the original
+#   DCP-local view in metadata.dcp_context for KV writes and SFA reads. The
+#   independent indexer builder derives its own replicated view from common
+#   metadata using the same stateless address helpers.
 # - The replicated view uses the same logical/kernel block size as BlockTable,
 #   including hybrid block splitting.
 class AscendSFADCPMetadataBuilder(
@@ -661,8 +667,11 @@ class AscendSFADCPMetadataBuilder(
         total_cp_size = self.dcp_size
         # The generic vLLM BlockTable may expose global-width storage, while
         # the DCP physical KV layout only populates rank-local block columns.
-        self.max_local_block_table_cols = (
-            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
+        self.max_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+            max_model_len,
+            kv_cache_spec.block_size,
+            total_cp_size,
+            self.blocks_per_phys_block,
         )
         max_replicated_block_table_cols = self.max_local_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
@@ -705,8 +714,11 @@ class AscendSFADCPMetadataBuilder(
         )[:, self.dcp_rank]
 
     def _get_dcp_local_block_table(self, block_table: torch.Tensor, num_reqs: int) -> torch.Tensor:
-        local_cols = min(block_table.shape[1], self.max_local_block_table_cols)
-        return block_table[:num_reqs, :local_cols]
+        return get_sfa_dcp_local_block_table(
+            block_table,
+            num_reqs,
+            self.max_local_block_table_cols,
+        )
 
     def _ensure_replicated_view_buffers(
         self,
@@ -749,28 +761,14 @@ class AscendSFADCPMetadataBuilder(
             local_block_table_cols,
         )
 
-        total_cp_size = self.dcp_size
-        blocks_per_phys_block = self.blocks_per_phys_block
-        local_col_idx = (
-            replicated_col_idx // (total_cp_size * blocks_per_phys_block) * blocks_per_phys_block
-            + replicated_col_idx % blocks_per_phys_block
+        return build_sfa_dcp_replicated_block_table(
+            dcp_block_table,
+            seq_lens,
+            block_table_replicated_view,
+            replicated_col_idx,
+            self.dcp_size,
+            self.blocks_per_phys_block,
         )
-        rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
-
-        local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
-        if blocks_per_phys_block == 1:
-            replicated_blocks = local_logical_blocks * total_cp_size + rank_in_replicated_view
-        else:
-            local_sub_blocks = local_logical_blocks % blocks_per_phys_block
-            local_phys_blocks = local_logical_blocks // blocks_per_phys_block
-            replicated_blocks = (
-                local_phys_blocks * total_cp_size + rank_in_replicated_view
-            ) * blocks_per_phys_block + local_sub_blocks
-
-        valid_req_mask = (seq_lens[:num_reqs].to(device=self.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
-        replicated_blocks = replicated_blocks * valid_req_mask
-        block_table_replicated_view.copy_(replicated_blocks)
-        return block_table_replicated_view
 
     def _build_slot_mapping_replicated_view(
         self,
@@ -779,42 +777,19 @@ class AscendSFADCPMetadataBuilder(
     ) -> torch.Tensor:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
         local_block_table_cols = block_table_replicated_view.shape[1] // self.dcp_size
         _, _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
             num_reqs,
             num_input_tokens,
             local_block_table_cols,
         )
-        slot_mapping_replicated_view.fill_(-1)
-        if num_actual_tokens == 0:
-            return slot_mapping_replicated_view
-
-        query_lens = (
-            common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
+        return build_sfa_dcp_replicated_slot_mapping(
+            common_attn_metadata,
+            block_table_replicated_view,
+            slot_mapping_replicated_view,
+            self.replicated_view_block_size,
+            self.device,
         )
-        req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
-            query_lens.to(device=self.device),
-            output_size=num_input_tokens,
-        )[:num_actual_tokens]
-        if req_indices.numel() == 0:
-            return slot_mapping_replicated_view
-
-        num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
-        req_indices = req_indices[:num_actual_tokens]
-        positions = common_attn_metadata.positions[:num_actual_tokens].to(
-            device=self.device,
-            dtype=torch.int32,
-        )
-        logical_block_idx = positions // self.replicated_view_block_size
-        block_offsets = positions % self.replicated_view_block_size
-        block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
-        block_numbers = block_table_replicated_view.flatten()[block_table_indices]
-        slot_mapping_replicated_view[:num_actual_tokens] = (
-            block_numbers * self.replicated_view_block_size + block_offsets
-        )
-        return slot_mapping_replicated_view
 
     def _build_compact_kv_gather_metadata(
         self,

@@ -375,6 +375,22 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
+def test_runner_compiles_with_capture_moe_reduction_contract(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            moe_comm_type=MoECommType.ALLGATHER,
+            compiled_moe_comm_type=MoECommType.MC2,
+        ),
+    )
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+
+    assert runner._fused_output_is_reduced is True
+
+
 @pytest.mark.parametrize(
     ("is_sequence_parallel", "output_is_reduced", "should_reduce"),
     [
@@ -1733,6 +1749,96 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
         )
         assert result is routed_out
         ascend_shared_experts.forward.assert_not_called()
+
+
+def test_nonlatent_sp_multistream_serializes_shared_input_gather_before_routed_moe(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+
+    hidden_states = torch.randn(2, 4)
+    gathered_states = torch.randn(8, 4)
+    router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    all_gather_done = MagicMock(name="all_gather_done")
+    before_routed = MagicMock(name="before_routed")
+    after_routed_finalize = MagicMock(name="after_routed_finalize")
+    operation_order = []
+
+    def start_input_all_gather(states):
+        operation_order.append("start_input_all_gather")
+        assert states is hidden_states
+        return gathered_states, all_gather_done
+
+    def routed_forward(**kwargs):
+        operation_order.append("routed_moe")
+        assert kwargs["hidden_states"] is hidden_states
+        return routed_out, FusedMoEEvents(
+            before_routed_experts=None,
+            after_routed_experts=None,
+            before_dispatch=None,
+            before_gmm2=None,
+            before_combine=None,
+        )
+
+    def shared_forward(*args, **kwargs):
+        operation_order.append("shared_moe")
+        return shared_out
+
+    shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        start_input_all_gather=MagicMock(side_effect=start_input_all_gather),
+        forward=MagicMock(side_effect=shared_forward),
+    )
+    runner.ascend_shared_experts = shared_experts
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(side_effect=routed_forward))
+    current_stream = MagicMock()
+
+    def wait_event(event):
+        assert event is all_gather_done
+        operation_order.append("wait_input_all_gather")
+
+    def record_event():
+        if "routed_moe" in operation_order:
+            operation_order.append("record_routed_finalize")
+            return after_routed_finalize
+        operation_order.append("record_before_routed")
+        return before_routed
+
+    current_stream.wait_event.side_effect = wait_event
+    current_stream.record_event.side_effect = record_event
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(num_tokens=7))
+
+    result = runner._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input=None,
+    )
+
+    assert operation_order == [
+        "start_input_all_gather",
+        "record_before_routed",
+        "wait_input_all_gather",
+        "routed_moe",
+        "record_routed_finalize",
+        "shared_moe",
+    ]
+    shared_call = shared_experts.forward.call_args
+    torch.testing.assert_close(shared_call.args[0], gathered_states[:7])
+    assert shared_call.args[1].before_routed_experts is before_routed
+    assert shared_call.args[1].after_routed_finalize is after_routed_finalize
+    assert shared_call.kwargs == {
+        "input_is_gathered": True,
+        "defer_output_wait": False,
+    }
+    assert result[0] is shared_out
+    assert result[1] is routed_out
 
 
 def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
