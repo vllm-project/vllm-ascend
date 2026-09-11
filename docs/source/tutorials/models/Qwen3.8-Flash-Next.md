@@ -8,7 +8,9 @@ This tutorial describes the W8A8 deployment on Atlas 800 A3 and Ascend 950DT. Te
 
 !!! warning
 
-    Automatic Prefix Caching is currently unavailable for Qwen3.8-Flash-Next. Keep `--no-enable-prefix-caching` in the startup command. Do not enable Prefix Caching for this model.
+    Automatic Prefix Caching is experimental for Qwen3.8-Flash-Next. Enable it
+    with `--enable-prefix-caching --mamba-cache-mode align` and revalidate NPU
+    memory capacity for the target context length and concurrency.
 
 ## 2 Supported Features
 
@@ -24,7 +26,7 @@ The following table summarizes the features covered by this tutorial.
 | Full Decode ACLGraph | Supported | Uses `FULL_DECODE_ONLY`; the MTP proposer remains eager |
 | Function calling | Supported | Uses `qwen3_xml` |
 | Reasoning parsing | Supported | Uses `qwen3` |
-| Automatic Prefix Caching | **Unsupported** | `--no-enable-prefix-caching` is required |
+| Automatic Prefix Caching | Experimental | Uses aligned GDN and PLE state checkpoints and requires additional NPU memory |
 | Multimodal input | Supported | Image-and-text input has been validated on A3 and 950DT |
 
 Refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the general model support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
@@ -186,8 +188,9 @@ vllm serve "$MODEL_PATH" \
     --max-model-len 135168 \
     --max-num-seqs 8 \
     --max-num-batched-tokens 4096 \
-    --gpu-memory-utilization 0.95 \
-    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.93 \
+    --enable-prefix-caching \
+    --mamba-cache-mode align \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
     --reasoning-parser qwen3 \
@@ -203,7 +206,7 @@ Key parameter descriptions:
 - `--quantization ascend` loads the Ascend-compatible W8A8 checkpoint.
 - `--tensor-parallel-size 8` and `--data-parallel-size 1` configure the A3 single-DP TP8 topology.
 - `--enable-expert-parallel` enables expert parallelism for the MoE layers.
-- `--no-enable-prefix-caching` is mandatory because Prefix Caching is currently unavailable for this model.
+- `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching with aligned GDN and PLE state checkpoints.
 - The validated command does not set `--language-model-only`, so the vision encoder remains enabled and the service accepts both text and multimodal requests. For a text-only deployment, you may add `--language-model-only` to skip loading the vision encoder.
 - `--enable-auto-tool-choice --tool-call-parser qwen3_xml` enables automatic Function Calling with the Qwen3 XML parser.
 - `--reasoning-parser qwen3` separates reasoning from the final answer in the OpenAI-compatible response.
@@ -245,7 +248,8 @@ vllm serve "$MODEL_PATH" \
     --max-num-seqs 8 \
     --max-num-batched-tokens 4096 \
     --gpu-memory-utilization 0.95 \
-    --no-enable-prefix-caching \
+    --enable-prefix-caching \
+    --mamba-cache-mode align \
     --compilation-config '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
@@ -254,7 +258,19 @@ vllm serve "$MODEL_PATH" \
 - `VLLM_SERVER_DEV_MODE=1` enables the server development mode required by this 950DT setup, including cache-clearing support.
 - `SOC_VERSION=ascend950dt_9582` selects the 950DT SoC target used by the image.
 - `--language-model-only` is optional. Add it only when a text-only service is desired and the vision encoder should not be loaded.
-- Prefix Caching remains unavailable on 950DT, so `--no-enable-prefix-caching` is required.
+- `--enable-prefix-caching --mamba-cache-mode align` enables Prefix Caching.
+  Revalidate memory headroom on the target 950DT deployment rather than reusing
+  the A3 memory-utilization observation as a fixed value.
+
+Prefix Caching stores aligned GDN and PLE state checkpoints in addition to the
+reusable attention cache, so it consumes additional NPU memory. The exact
+overhead depends on the maximum context length, concurrency, and cache layout.
+If memory is tight, reduce `--gpu-memory-utilization`, `--max-model-len`, or
+`--max-num-seqs`, and then repeat the real-weight capacity validation. In one A3
+DP1 × TP8 correctness validation, `--gpu-memory-utilization 0.95` left
+insufficient QSA workspace headroom and caused an out-of-memory error, while
+`0.93` passed. This is a workload-specific A3 observation, not a universal
+recommended value or a 950DT validation result.
 
 The minimal 950DT command above does not enable automatic Function Calling or reasoning parsing. To use the verification requests in Sections 6.3 and 6.4, add:
 
@@ -437,6 +453,8 @@ The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond wi
 ## 8 Limitations
 
 - Atlas 800 A3 and Ascend 950DT are currently supported.
-- Automatic Prefix Caching is currently unavailable. Always use `--no-enable-prefix-caching`.
+- Automatic Prefix Caching is experimental and consumes additional NPU memory.
+  Use `--enable-prefix-caching --mamba-cache-mode align` and validate memory
+  capacity for the target workload.
 - Text and multimodal input have been validated on A3 and 950DT. Add `--language-model-only` only for an optional text-only deployment.
 - The GPQA Diamond score in this tutorial was measured on A3 and must not be treated as a 950DT accuracy result.
