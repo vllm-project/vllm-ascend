@@ -1,72 +1,106 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Ascend causal conv1d entry points for the GLM-5.3-Flash KDA layers.
-
-The upstream CUDA kernels reference ``tl.extra.cuda.gdc_wait``, which Ascend
-Triton does not provide -- the AST visitor raises even when ``launch_pdl`` is
-False. Both entry points are therefore routed to Ascend implementations, and the
-kwargs the upstream signatures grew for CUDA-side cache management are dropped
-here rather than at every call site.
-
-``causal_conv1d_update`` prefers the NPU Triton kernel, which has no host sync
-and accepts the spec-decode arguments directly. The PyTorch fallback calls
-``.item()`` per request, so ACL graph capture stalls at decode-FULL when the
-kernel is unavailable; ``has_npu_triton_conv1d_update()`` lets the caller report
-that up front instead of hanging during capture.
-"""
+"""AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.causal_conv1d import (
-    causal_conv1d_fn as _torch_causal_conv1d_fn,
-)
-from vllm_ascend.ops.causal_conv1d import (
-    causal_conv1d_update as _torch_causal_conv1d_update,
-)
+CONV_STATE_COPY_BLOCK_SIZE = 256
 
-try:
-    from vllm_ascend.ops.triton.mamba.causal_conv1d import (  # type: ignore[attr-defined]
-        causal_conv1d_update_npu as _npu_triton_conv1d_update,
+
+@triton.jit
+def _copy_conv_state(
+    cache,
+    packed,
+    cache_indices,
+    starts,
+    packed_indices,
+    cache_stride,
+    index_stride,
+    num_slots,
+    STATE_LEN: tl.constexpr,
+    DIM: tl.constexpr,
+    STATE_STRIDE: tl.constexpr,
+    DIM_STRIDE: tl.constexpr,
+    WRITE_BACK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    request = tl.program_id(0)
+    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
+    active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
+    in_range = offsets < STATE_LEN * DIM
+    safe_slot = tl.where(active, slot, 0)
+    cache_offsets = safe_slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
+    packed_offsets = request * STATE_LEN * DIM + offsets
+    if WRITE_BACK:
+        values = tl.load(packed + packed_offsets, mask=in_range, other=0)
+        tl.store(cache + cache_offsets, values, mask=active & in_range)
+    else:
+        values = tl.load(cache + cache_offsets, mask=active & in_range, other=0)
+        tl.store(packed + packed_offsets, values, mask=in_range)
+        if tl.program_id(1) == 0:
+            tl.store(packed_indices + request, tl.where(active, request, -1))
+
+
+def causal_conv1d(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    *,
+    run_mode: int,
+    initial_state_mode: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
+    # Padded requests can be skipped by the kernel; their output must stay zero.
+    output = torch.zeros_like(x)
+    if cache_indices.shape[0] == 0:
+        return output
+    kernel_state = conv_state
+    kernel_indices = cache_indices
+    # aclnnCausalConv1d materializes a non-contiguous state without writing its
+    # mutations back to the view. Stage only this batch's rows, retaining both
+    # page strides and DS layouts; never copy the entire persistent cache.
+    if not conv_state.is_contiguous():
+        requests = cache_indices.shape[0]
+        state_len, dim = conv_state.shape[1:]
+        kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
+        kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
+        copy_grid = (requests, triton.cdiv(state_len * dim, CONV_STATE_COPY_BLOCK_SIZE))
+        copy_args = (
+            conv_state,
+            kernel_state,
+            cache_indices,
+            query_start_loc,
+            kernel_indices,
+            conv_state.stride(0),
+            cache_indices.stride(0),
+            conv_state.shape[0],
+            state_len,
+            dim,
+            conv_state.stride(1),
+            conv_state.stride(2),
+        )
+        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+    # Return the declared result so graph functionalization retains the call.
+    result = torch.ops._C_ascend.npu_causal_conv1d_custom(
+        output,
+        x,
+        weight,
+        conv_state=kernel_state,
+        bias_opt=None,
+        query_start_loc_opt=query_start_loc,
+        cache_indices_opt=kernel_indices,
+        initial_state_mode_opt=initial_state_mode,
+        num_accepted_tokens_opt=num_accepted_tokens,
+        activation_mode=1,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=run_mode,
     )
-
-    _HAS_NPU_TRITON_CONV1D_UPDATE = True
-except ImportError:
-    _npu_triton_conv1d_update = None
-    _HAS_NPU_TRITON_CONV1D_UPDATE = False
-
-# Cache-management and validation kwargs the upstream CUDA signatures accept but
-# the Ascend implementations neither need nor understand.
-_UNSUPPORTED_KWARGS = (
-    "null_block_id",
-    "block_idx_first_scheduled_token",
-    "block_idx_last_scheduled_token",
-    "initial_state_idx",
-    "num_computed_tokens",
-    "block_size_to_align",
-    "validate_data",
-    "metadata",
-)
-
-_UPDATE_FALLBACK_UNSUPPORTED_KWARGS = (*_UNSUPPORTED_KWARGS, "max_query_len", "out")
-
-
-def has_npu_triton_conv1d_update() -> bool:
-    """Whether the host-sync-free NPU Triton update kernel is available."""
-    return _HAS_NPU_TRITON_CONV1D_UPDATE
-
-
-def causal_conv1d_fn(*args, **kwargs) -> torch.Tensor:
-    for key in _UNSUPPORTED_KWARGS:
-        kwargs.pop(key, None)
-    return _torch_causal_conv1d_fn(*args, **kwargs)
-
-
-def causal_conv1d_update(*args, **kwargs) -> torch.Tensor:
-    if _npu_triton_conv1d_update is not None:
-        for key in _UNSUPPORTED_KWARGS:
-            kwargs.pop(key, None)
-        return _npu_triton_conv1d_update(*args, **kwargs)
-
-    for key in _UPDATE_FALLBACK_UNSUPPORTED_KWARGS:
-        kwargs.pop(key, None)
-    return _torch_causal_conv1d_update(*args, **kwargs)
+    if not conv_state.is_contiguous():
+        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+    return result
