@@ -1164,8 +1164,6 @@ Here is one accuracy evaluation method for Kimi K3.
 
 ## 8 Performance Evaluation
 
-The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](#5-online-service-deployment).
-
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for the environment setup and evaluation procedure.
@@ -1203,6 +1201,12 @@ vllm bench serve \
 ```
 
 ## 9 Performance Tuning
+
+### 9.1 Recommended Configurations
+
+The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](https://vllm--16008.org.readthedocs.build/projects/ascend/en/16008/tutorials/models/Kimi-K3.html#5-online-service-deployment).
+
+### 9.2 Tuning Guide
 
 Use the validated deployment values above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
 
