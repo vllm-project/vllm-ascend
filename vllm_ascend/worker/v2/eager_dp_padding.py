@@ -17,9 +17,9 @@
 #
 """DP padding for fine-grained TP eager steps.
 
-Cross-DP collectives (o_proj TP, mlp TP) need every rank to forward the same
-token count per step. Cudagraph dispatch pads natively, eager dispatch would
-hang, so `NPUModelRunner` aligns eager steps to the group max.
+Cross-DP collectives (o_proj TP) need every rank to forward the same token
+count per step. Cudagraph dispatch pads natively, eager dispatch would hang,
+so `NPUModelRunner` aligns eager steps to the group max.
 """
 
 from __future__ import annotations
@@ -52,12 +52,13 @@ def make_dp_padded_dummy_output(
     is synthetic, so rewriting it is safe.
     """
     # decode_query_len-sized requests keep the dummy uniform-decode shaped, so it
-    # still matches the captured decode graphs; one group_max-token request would
-    # drag the step off them via the cg_mode min (to eager under FULL_DECODE_ONLY,
-    # to the mixed/piecewise graphs under the other modes). A trailing remainder
-    # keeps the total exact — the batch is non-uniform then, so no decode graph
-    # matches regardless of the dummy's shape. Past max_num_reqs the decode graphs
-    # cannot match either, so reuse _dummy_run's bounded even split there.
+    # can still match the captured decode graphs when a capture size covers
+    # group_max; one group_max-token request would drag the step off them via the
+    # cg_mode min (to eager under FULL_DECODE_ONLY, to the mixed/piecewise graphs
+    # under the other modes). A trailing remainder keeps the total exact — the
+    # batch is non-uniform then, so no decode graph matches regardless of the
+    # dummy's shape. Past max_num_reqs the decode graphs cannot match either, so
+    # reuse _dummy_run's bounded even split there.
     num_full, remainder = divmod(group_max, decode_query_len)
     per_request = [decode_query_len] * num_full
     if remainder:
