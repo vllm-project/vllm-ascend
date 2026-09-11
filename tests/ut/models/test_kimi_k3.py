@@ -29,6 +29,111 @@ from vllm_ascend.transformers_utils.configs.kimi_k3 import (
 )
 
 
+@pytest.mark.parametrize(
+    "device_type",
+    [
+        kimi_k3.AscendDeviceType.A3,
+        kimi_k3.AscendDeviceType.A5,
+    ],
+)
+def test_kimi_k3_attention_residual_uses_fused_op(
+    monkeypatch: pytest.MonkeyPatch,
+    device_type: kimi_k3.AscendDeviceType,
+):
+    prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
+    block_residual = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+    projection_weight = torch.randn(1, 4, dtype=torch.bfloat16)
+    norm_weight = torch.randn(4, dtype=torch.bfloat16)
+    calls: list[tuple[torch.Tensor, ...]] = []
+
+    def fake_attn_res_fwd(
+        actual_prefix_sum: torch.Tensor,
+        actual_block_residual: torch.Tensor,
+        actual_projection_weight: torch.Tensor,
+        actual_norm_weight: torch.Tensor,
+        norm_eps: float,
+    ) -> torch.Tensor:
+        calls.append(
+            (
+                actual_prefix_sum,
+                actual_block_residual,
+                actual_projection_weight,
+                actual_norm_weight,
+            )
+        )
+        assert norm_eps == pytest.approx(1e-5)
+        return actual_prefix_sum + 1
+
+    monkeypatch.setattr(
+        kimi_k3.torch.ops._C_ascend,
+        "attn_res_fwd",
+        fake_attn_res_fwd,
+        raising=False,
+    )
+    monkeypatch.setattr(kimi_k3, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(kimi_k3, "enable_attn_res_fwd_op", lambda: True)
+    monkeypatch.setattr(
+        kimi_k3,
+        "apply_attn_res",
+        lambda *args: pytest.fail("A3/A5 BF16 inputs must prefer AttnResFwd over Triton"),
+    )
+    projection = SimpleNamespace(weight=projection_weight)
+    norm = SimpleNamespace(weight=norm_weight, variance_epsilon=1e-5)
+
+    output = kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
+
+    assert torch.equal(output, prefix_sum + 1)
+    assert len(calls) == 1
+    expected_args = (
+        prefix_sum,
+        block_residual,
+        projection_weight,
+        norm_weight,
+    )
+    assert all(actual is expected for actual, expected in zip(calls[0], expected_args))
+
+
+def test_kimi_k3_attention_residual_keeps_empty_blocks_on_eager_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
+    block_residual = torch.empty(2, 0, 4, dtype=torch.bfloat16)
+    projection = SimpleNamespace(weight=torch.randn(1, 4, dtype=torch.bfloat16))
+    norm = SimpleNamespace(weight=torch.randn(4, dtype=torch.bfloat16), variance_epsilon=1e-5)
+
+    monkeypatch.setattr(kimi_k3, "get_ascend_device_type", lambda: kimi_k3.AscendDeviceType.A5)
+    monkeypatch.setattr(
+        kimi_k3.torch.ops._C_ascend,
+        "attn_res_fwd",
+        lambda *args: pytest.fail("empty block_residual must not invoke AttnResFwd"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        kimi_k3.torch_npu,
+        "npu_rms_norm",
+        lambda values, weight, eps: (values, None),
+    )
+
+    output = kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
+
+    torch.testing.assert_close(output, prefix_sum)
+
+
+def test_kimi_k3_attention_residual_requires_registered_fused_op(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
+    block_residual = torch.randn(2, 1, 4, dtype=torch.bfloat16)
+    projection = SimpleNamespace(weight=torch.randn(1, 4, dtype=torch.bfloat16))
+    norm = SimpleNamespace(weight=torch.randn(4, dtype=torch.bfloat16), variance_epsilon=1e-5)
+
+    monkeypatch.setattr(kimi_k3, "get_ascend_device_type", lambda: kimi_k3.AscendDeviceType.A3)
+    monkeypatch.setattr(kimi_k3, "enable_attn_res_fwd_op", lambda: False)
+
+    with pytest.raises(RuntimeError, match="AttnResFwd requires"):
+        kimi_k3._apply_attention_residual(prefix_sum, block_residual, projection, norm)
+
+
 def test_kimi_k3_model_declares_checkpoint_packing_contract():
     assert AscendKimiK3ForCausalLM.packed_modules_mapping["fused_qkv"] == [
         "q_proj",
