@@ -47,7 +47,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     _select_seq_lens,
-    enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -78,18 +77,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        if enable_dcp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-
-            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        if enable_dcp():
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-
-            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @classmethod
@@ -150,6 +141,20 @@ class AscendAttentionState(Enum):
     DecodeOnly = 2
     ChunkedPrefill = 3
     SpecDecoding = 4
+
+
+class AscendAttentionDCPBackend(AscendAttentionBackend):
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
+
+        return AscendAttentionDCPImpl
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
+
+        return AscendAttentionDCPMetadataBuilder
 
 
 @dataclass

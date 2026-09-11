@@ -2,15 +2,18 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
-from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from tests.ut.attention.utils import patch_distributed_groups
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.attention import sfa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.platform import NPUPlatform
 
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
@@ -23,6 +26,7 @@ from vllm_ascend.attention.sfa_kv_offload import (
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFABackend,
+    AscendSFADCPBackend,
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
@@ -39,77 +43,100 @@ from vllm_ascend.quantization.methods import (
 )
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected_backend"),
+    [
+        ((False, False, False, False), "AscendSFABackend"),
+        ((False, False, True, False), "AscendSFABackend"),
+        ((False, True, False, False), "AscendSFADCPBackend"),
+        ((False, True, True, False), "AscendSFADCPBackend"),
+        ((True, False, False, False), "AscendSFAPCPBackend"),
+        ((True, False, True, False), "AscendSFAPCPBackend"),
+        ((True, True, False, False), "AscendSFAPCPDCPBackend"),
+        ((True, True, True, False), "AscendSFAPCPDCPBackend"),
+        ((True, True, True, True), "AscendSFAPCPDCPBackend"),
+    ],
+)
+def test_sfa_backend_survives_target_draft_context_switch(flags, expected_backend):
+    use_pcp, use_dcp, use_dsa_cp, offload = flags
+    expected_pairs = {
+        "AscendSFABackend": ("AscendSFAMetadataBuilder", "AscendSFAImpl"),
+        "AscendSFAPCPBackend": ("AscendSFAMetadataBuilder", "AscendSFAPCPImpl"),
+        "AscendSFADCPBackend": ("AscendSFADCPMetadataBuilder", "AscendSFADCPImpl"),
+        "AscendSFAPCPDCPBackend": ("AscendSFAPCPDCPMetadataBuilder", "AscendSFAPCPDCPImpl"),
+    }
+    expected_pair = expected_pairs[expected_backend]
+    if offload:
+        expected_pair = ("AscendSFAKVOffloadMetadataBuilder", "AscendSFAKVOffloadImpl")
+    elif use_dsa_cp:
+        expected_pair = (
+            ("AscendSFADSADCPMetadataBuilder", "AscendSFADSADCPImpl")
+            if use_dcp
+            else ("AscendSFADSACPMetadataBuilder", "AscendSFADSACPImpl")
+        )
+    path = f"vllm_ascend.attention.sfa_v1.{expected_backend}"
+    selector = SimpleNamespace(use_mla=True, use_sparse=True, use_pcp=use_pcp, use_dcp=use_dcp)
+    config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=offload))
+    with (
+        patch("vllm_ascend.platform._validate_fa3_backend", return_value=False),
+        patch("vllm_ascend.utils.enable_dsa_cp", return_value=use_dsa_cp),
+        patch.object(sfa_v1, "get_ascend_config", return_value=config),
+    ):
+        assert NPUPlatform.get_attn_backend_cls(None, selector) == path
+        backend = resolve_obj_by_qualname(path)
+        # Backend queries must work after the layer's loading config scope ends.
+        builder, impl = backend.get_builder_cls(), backend.get_impl_cls()
+        assert (builder.__name__, impl.__name__) == expected_pair
+        with (
+            patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("no config")),
+            patch.object(sfa_v1, "get_current_vllm_config", side_effect=AssertionError("wrong draft config")),
+        ):
+            assert backend.get_builder_cls() is builder
+            assert backend.get_impl_cls() is impl
+
+
 class TestAscendSFABackend(TestBase):
     def setUp(self):
-        self.mock_config = MagicMock()
-        mock_parallel_config = MagicMock()
-        mock_parallel_config.prefill_context_parallel_size = 1
-        mock_parallel_config.decode_context_parallel_size = 1
-        self.mock_config.parallel_config = mock_parallel_config
-        self.mock_config.model_config = MagicMock(spec=[])
-        self.config_context = set_current_vllm_config(self.mock_config)
-        self.config_context.__enter__()
-
-        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
-        self.utils_patcher.start()
-        self.dsa_patcher = patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False)
-        self.dsa_patcher.start()
-
-        self.ascend_config_patcher = patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-        mock_ascend_config = self.ascend_config_patcher.start()
-        mock_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        self.ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        self.ascend_config_patcher = patch.object(sfa_v1, "get_ascend_config", return_value=self.ascend_config)
+        self.dsa_cp_patcher = patch("vllm_ascend.utils.enable_dsa_cp", return_value=False)
+        self.ascend_config_patcher.start()
+        self.dsa_cp_patcher.start()
 
     def tearDown(self):
+        self.dsa_cp_patcher.stop()
         self.ascend_config_patcher.stop()
-        self.utils_patcher.stop()
-        self.dsa_patcher.stop()
-        self.config_context.__exit__(None, None, None)
 
     def test_get_name(self):
         self.assertEqual(AscendSFABackend.get_name(), "ASCEND_SFA")
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_builder_cls(self, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+    def test_get_builder_cls(self):
         self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendSFABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_impl_cls(self, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        result = AscendSFABackend.get_impl_cls()
-        self.assertEqual(result, AscendSFAImpl)
+    def test_get_impl_cls(self):
+        self.assertEqual(AscendSFABackend.get_impl_cls(), AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        builder_cls = AscendSFABackend.get_builder_cls()
-        self.assertIsNotNone(builder_cls)
+    def test_get_builder_cls_with_dcp(self):
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        impl_cls = AscendSFABackend.get_impl_cls()
-        self.assertIsNotNone(impl_cls)
+        self.assertIs(AscendSFADCPBackend.get_builder_cls(), AscendSFADCPMetadataBuilder)
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_builder_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
-        result = AscendSFABackend.get_builder_cls()
-        self.assertEqual(result, AscendSFAKVOffloadMetadataBuilder)
+    def test_get_impl_cls_with_dcp(self):
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_impl_cls_with_sparse_kv_offload(self, mock_get_ascend_config):
-        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = True
-        result = AscendSFABackend.get_impl_cls()
-        self.assertEqual(result, AscendSFAKVOffloadImpl)
+        self.assertIs(AscendSFADCPBackend.get_impl_cls(), AscendSFADCPImpl)
+
+    def test_get_builder_cls_with_sparse_kv_offload(self):
+        self.ascend_config.sparse_kv_offload_config.enabled = True
+        self.assertIs(AscendSFABackend.get_builder_cls(), AscendSFAKVOffloadMetadataBuilder)
+
+    def test_get_impl_cls_with_sparse_kv_offload(self):
+        self.ascend_config.sparse_kv_offload_config.enabled = True
+        self.assertIs(AscendSFABackend.get_impl_cls(), AscendSFAKVOffloadImpl)
 
 
 class TestAscendSFADeviceOperator(TestBase):
