@@ -2108,7 +2108,7 @@ class TestKVPPExecute(unittest.TestCase):
                 events.clear()
                 runner = NPUModelRunner.__new__(NPUModelRunner)
                 runner.ascend_config = SimpleNamespace(
-                    scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False))
+                    scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
                 )
                 runner.execute_model_state = None
                 runner.speculative_config = None
