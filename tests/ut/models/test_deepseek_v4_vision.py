@@ -7,13 +7,30 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm import ir
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.models.deepseek_v4 import vision_dp
 from vllm_ascend.models.deepseek_v4.vision import DeepseekV4Aligner, DeepseekV4ViT
 from vllm_ascend.models.deepseek_v4.vl_model import (
     AscendDeepseekV4ForConditionalGeneration,
 )
+
+
+@pytest.fixture
+def cpu_vision_config(monkeypatch):
+    # Keep numeric DP tests on native PyTorch even when other UTs register
+    # Ascend custom ops. All patches and configuration are scoped to one test.
+    monkeypatch.setattr(CustomOp, "dispatch_forward", lambda self, compile_native=False: self.forward_native)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.attention.mm_encoder_attention.get_vit_attn_backend",
+        lambda **kwargs: AttentionBackendEnum.TORCH_SDPA,
+    )
+    with set_current_vllm_config(VllmConfig()), ir.ops.rms_norm.set_priority(["native"]):
+        yield
 
 
 def test_vision_wrapper_exposes_dspark_aux_hidden_state_interface():
@@ -109,7 +126,7 @@ def assignments(inputs, tp_size):
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 @pytest.mark.parametrize("grids", [[(1, 1)], [(4, 4), (3, 5)], [(3, 3), (8, 7), (1, 1), (4, 5), (6, 6)]])
 @torch.inference_mode()
-def test_encoder_dp_matches_replicated_path(monkeypatch, dtype, tp_size, grids):
+def test_encoder_dp_matches_replicated_path(monkeypatch, cpu_vision_config, dtype, tp_size, grids):
     vision, aligner = make_models(dtype)
     # The processor's dtype need not match the model's dtype.
     inputs = make_inputs(grids, torch.float32)
@@ -157,7 +174,7 @@ def test_encoder_dp_matches_replicated_path(monkeypatch, dtype, tp_size, grids):
 
 
 @torch.inference_mode()
-def test_empty_batch_has_no_encoder_or_collective_calls(monkeypatch):
+def test_empty_batch_has_no_encoder_or_collective_calls(monkeypatch, cpu_vision_config):
     vision, aligner = make_models()
     monkeypatch.setattr(vision, "forward", MagicMock(side_effect=AssertionError("Unexpected encoder call")))
     gather = MagicMock(side_effect=AssertionError("Unexpected collective"))
@@ -168,7 +185,7 @@ def test_empty_batch_has_no_encoder_or_collective_calls(monkeypatch):
 @pytest.mark.parametrize(
     "case", ["grid_shape", "grid_dtype", "nonpositive", "merge", "patch_count", "perm_count", "perm_dtype"]
 )
-def test_invalid_metadata_rejected_before_collective(monkeypatch, case):
+def test_invalid_metadata_rejected_before_collective(monkeypatch, cpu_vision_config, case):
     vision, aligner = make_models()
     inputs = list(make_inputs([(4, 5)]))
     if case == "grid_shape":
