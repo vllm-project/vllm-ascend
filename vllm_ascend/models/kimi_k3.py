@@ -537,6 +537,14 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
     dspark_aux_capture_materialized = False
 
+    def _capture_raw_dspark_aux_hidden_state(self, aux_hidden_states, layer_idx, hidden_states):
+        # Ascend already folds the pending MLP output into the running prefix.
+        # The residual is a 3-D AttnRes block bank, not a 2-D additive residual.
+        # Eagle's generic hidden_states + residual would corrupt the MLA stream.
+        if layer_idx in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
+        return aux_hidden_states
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
@@ -664,11 +672,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         if self.dspark_aux_capture_materialized:
             aux_hidden_states: list[torch.Tensor] = []
         else:
-            aux_hidden_states = self._maybe_add_hidden_state(
+            aux_hidden_states = self._capture_raw_dspark_aux_hidden_state(
                 [],
                 self.start_layer,
                 hidden_states,
-                residual,
             )
         attn_res_block_num = cdiv(
             self.end_layer,
@@ -703,11 +710,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 residual=residual,
             )
             if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
-                self._maybe_add_hidden_state(
+                self._capture_raw_dspark_aux_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
                     hidden_states,
-                    residual,
                 )
 
         if not get_pp_group().is_last_rank:

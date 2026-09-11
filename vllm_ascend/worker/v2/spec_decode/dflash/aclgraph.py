@@ -1,4 +1,5 @@
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -66,7 +67,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        # MLA needs rotary positions and speculative metadata during capture;
+        # other parallel drafters retain their existing capture path.
+        capture_context = getattr(self.speculator, "draft_capture_context", nullcontext)
+        with communicator_switch(), model_capture_wrapper(self.speculator, False), capture_context():
             super().capture(
                 forward_fn,
                 input_buffers,
