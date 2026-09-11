@@ -28,7 +28,8 @@ from vllm.config import CompilationConfig
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -57,6 +58,13 @@ DFLASH2_MODELS = {
     "dflash2": {
         "main": "Qwen/Qwen3.8-27B",
         "spec": "z-lab/Qwen3.8-27B-DFlash2",
+    },
+}
+
+DSPARK_MODELS = {
+    "qwen36_35b_dspark": {
+        "main": "Qwen/Qwen3.6-35B-A3B",
+        "spec": "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
     },
 }
 
@@ -632,3 +640,62 @@ def test_dflash2_acceptance(
 
     match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+
+
+@pytest.mark.parametrize("model", DSPARK_MODELS["qwen36_35b_dspark"]["main"])
+@pytest.mark.parametrize("draft_model", DSPARK_MODELS["qwen36_35b_dspark"]["spec"])
+@pytest.mark.parametrize("max_tokens", [1024])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            id="full_decode_only",
+        )
+    ],
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_qwen36_35b_dspark_spec_decoding(
+    model: str,
+    draft_model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+    compilation_config: dict,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    num_speculative_tokens = 7
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=4096,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "method": "dspark",
+            "model": draft_model,
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        compilation_config=compilation_config,
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.73, 0.64, 0.55, 0.49, 0.40, 0.31, 0.27]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"

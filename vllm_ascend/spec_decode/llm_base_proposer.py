@@ -1387,11 +1387,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
                 # compute logits in draft-vocab space so that the Markov bias
                 # (draft_vocab_size) can be added; sampled draft ids are then
-                # remapped to target ids. Mirrors the GPU reference.
-                if hasattr(self.model, "compute_draft_logits"):
-                    raw_logits = self.model.compute_draft_logits(sample_hidden_states)
-                else:
-                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                # remapped to target ids.
+                raw_logits = self.model.compute_draft_logits(sample_hidden_states)
+
 
                 if lmhead_tp_enable():
                     # Remove B_max - B communication padding.
