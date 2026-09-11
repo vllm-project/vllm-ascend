@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_protocol,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend as mooncake_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -70,6 +71,30 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+class TestBackendDeviceBinding(unittest.TestCase):
+    def test_scheduler_device(self):
+        for assigned_ids, expected in (([5], 2), (None, 3)):
+            with self.subTest(assigned_ids=assigned_ids):
+                npu = MagicMock()
+                npu.current_device.return_value = 3
+                parallel_config = SimpleNamespace(assigned_physical_gpu_ids=assigned_ids)
+                with (
+                    patch.object(backend_base.torch, "npu", npu),
+                    patch.object(backend_base, "set_assigned_physical_gpu_ids") as set_ids,
+                    patch.object(
+                        backend_base.current_platform,
+                        "logical_device_id_to_visible_device_id",
+                        return_value=2,
+                    ),
+                ):
+                    backend_base.set_scheduler_device(parallel_config)  # type: ignore[arg-type]
+
+                npu.set_device.assert_called_once_with(expected)
+                if assigned_ids is not None:
+                    set_ids.assert_called_once_with(assigned_ids)
+                    npu.current_device.assert_not_called()
 
 
 # =========================================================================
@@ -300,6 +325,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         contribute_memory: bool = True,
     ) -> MooncakeBackend:
         backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.device_id = 0
         backend.parallel_config = MagicMock()
         backend.config = config
         backend.local_seg = None
@@ -337,13 +363,16 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                     config=_make_mooncake_store_config(),
                     use_fabric_mem=use_fabric_mem,
                 )
+                backend.device_id = 3
                 store = MagicMock()
                 store.setup.return_value = 0
 
-                result = self._setup_store(backend, store)
+                with patch(f"{self._MODULE_PATH}.torch.npu.set_device") as set_device:
+                    result = self._setup_store(backend, store)
 
                 self.assertIs(result, store)
                 self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
+                set_device.assert_called_once_with(3)
 
     def test_setup_forwards_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
@@ -423,6 +452,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             patch.object(MooncakeBackend, "__init__", lambda self, pc: None),
         ):
             backend = MooncakeBackend.__new__(MooncakeBackend)
+            backend.device_id = 0
             backend.store = MagicMock()
             backend.config = MagicMock()
             backend.local_seg = "127.0.0.1:1234"
@@ -804,8 +834,9 @@ class TestMemcacheQosInjection(unittest.TestCase):
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
+            patch.object(memcache_module.torch.npu, "current_device", return_value=0),
         ):
-            MemcacheBackend(MagicMock(), local_rank=0, extra_config={"qos_priority": 2})
+            MemcacheBackend(MagicMock(), extra_config={"qos_priority": 2})
             self.assertEqual(os.environ.get(self._ENV), "2")
 
 
@@ -1106,7 +1137,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch.object(MemcacheBackend, "__init__", lambda self, pc: None):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
-            backend.local_rank = 0
+            backend.device_id = 0
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
@@ -1117,6 +1148,29 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
+
+    def test_setup_uses_captured_device(self):
+        b = self._make_backend()
+        b.device_id = 3
+        b._init_bm = True
+        store = MagicMock()
+        store.init.return_value = 0
+        module_path = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend"
+
+        with (
+            patch.object(
+                sys.modules["memcache_hybrid"],
+                "DistributedObjectStore",
+                return_value=store,
+                create=True,
+            ),
+            patch(f"{module_path}.torch.npu.set_device") as set_device,
+            patch(f"{module_path}.time.sleep"),
+        ):
+            self.assertIs(b._setup_store(), store)
+
+        set_device.assert_called_once_with(3)
+        store.init.assert_called_once_with(3, init_bm=True)
 
     def test_register_buffer(self):
         b = self._make_backend()
