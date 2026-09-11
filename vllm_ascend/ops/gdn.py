@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -39,6 +40,58 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+
+def _chunk_gated_delta_rule_fla_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    scale: float,
+    prebuilt_meta,
+    fused_fwd,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    g = g.to(torch.float32).contiguous()
+    beta = beta.to(v.dtype).contiguous()
+    initial_state = initial_state.contiguous()
+
+    cu_seqlens = prebuilt_meta.cu_seqlens_host
+    chunk_indices = prebuilt_meta.chunk_indices_chunk64_host
+    keep_meta = prebuilt_meta.keep_meta
+    initial_state_kern = initial_state
+    if keep_meta is not None:
+        cu_seqlens = prebuilt_meta.cu_seqlens_kern
+        initial_state_kern = initial_state[keep_meta]
+
+    output, final_state = fused_fwd(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        initial_state=initial_state_kern,
+        output_final_state=True,
+        chunk_size=64,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        layout="BSND",
+        use_exp2=True,
+        use_qk_l2norm_in_kernel=True,
+        allow_neg_eigval=False,
+        disable_recompute=True,
+        state_v_first=True,
+    )
+    if keep_meta is not None:
+        full_final_state = initial_state.clone()
+        full_final_state[keep_meta] = final_state
+        final_state = full_final_state
+    return output, final_state
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -521,11 +574,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
+            ascend_config = get_ascend_config()
+            if ascend_config.gdn_prefill_backend == "fla_npu":
+                if get_pcp_group().world_size != 1:
+                    raise RuntimeError("FLA fused GDN prefill currently requires PCP world size 1.")
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                (core_attn_out_non_spec, last_recurrent_state) = _chunk_gated_delta_rule_fla_npu(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    scale=key_non_spec.shape[-1] ** -0.5,
+                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
+                    fused_fwd=ascend_config.gdn_prefill_op,
+                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
-            use_fused_chunk = AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1
-            if use_fused_chunk:
+            elif (
+                ascend_config.gdn_prefill_backend == "auto"
+                and AscendGatedDeltaNetAttention._probe_fused_chunk()
+                and get_pcp_group().world_size == 1
+            ):
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
                 # returns a copy, safe to clear in place.
