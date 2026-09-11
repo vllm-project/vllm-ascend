@@ -499,12 +499,16 @@ def test_stateful_handoff_preserves_decode_graph(
     assert mode == expected_mode
     assert descriptor.uniform == (expected_mode == CUDAGraphMode.FULL)
     if dp_size > 1:
-        padded_num_tokens = num_tokens
-        for capture_size in cudagraph_capture_sizes:
-            if num_tokens <= capture_size:
-                padded_num_tokens = capture_size
-                break
-        assert descriptor.num_tokens == padded_num_tokens
         expected_tokens_across_dp = torch.full((dp_size,), 32, dtype=torch.int32)
-        expected_tokens_across_dp[0] = padded_num_tokens
-        torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
+        if mode != CUDAGraphMode.NONE:
+            assert descriptor.num_tokens == 32
+            torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
+        else:
+            padded_num_tokens = num_tokens
+            for capture_size in cudagraph_capture_sizes:
+                if num_tokens <= capture_size:
+                    padded_num_tokens = capture_size
+                    break
+            assert descriptor.num_tokens == padded_num_tokens
+            expected_tokens_across_dp[0] = padded_num_tokens
+            torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
