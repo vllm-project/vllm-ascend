@@ -116,16 +116,10 @@ def _measure_median_ttft(
             start = time.perf_counter()
             runner.generate([prompt_ids], sampling_params, use_tqdm=False)
             ttfts.append(time.perf_counter() - start)
-            print(
-                f"[sfa dcp perf] {name} sample={sample_idx} "
-                f"prompt_tokens={len(prompt_ids)} ttft={ttfts[-1]:.3f}s"
-            )
+            print(f"[sfa dcp perf] {name} sample={sample_idx} prompt_tokens={len(prompt_ids)} ttft={ttfts[-1]:.3f}s")
 
     median_ttft = statistics.median(ttfts)
-    print(
-        f"[sfa dcp perf] {name} TTFTs="
-        f"{[round(ttft, 3) for ttft in ttfts]} median={median_ttft:.3f}s"
-    )
+    print(f"[sfa dcp perf] {name} TTFTs={[round(ttft, 3) for ttft in ttfts]} median={median_ttft:.3f}s")
     return median_ttft
 
 
