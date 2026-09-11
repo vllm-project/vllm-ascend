@@ -64,8 +64,6 @@ skip_tests:
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   # Temporarily skipped: capture/replay metrics unstable
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
-  # Temporarily skip this DeepSeek V4 test
-  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   # Temporarily skip the Qwen3.6 MTP e2e test
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   # Temporarily skipped: this test is currently broken
