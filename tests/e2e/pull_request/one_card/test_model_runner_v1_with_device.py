@@ -418,7 +418,14 @@ def test_determine_batch_execution_and_padding(
         pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, id="stateful_one_token_handoff"),
         pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, id="first_token_without_state"),
         pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, id="steady_spec_decode"),
-        pytest.param(7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, id="handoff_padded_to_spec_width"),
+        pytest.param(
+            7,
+            [16, 7],
+            [8, 8],
+            [8, 8],
+            CUDAGraphMode.NONE,
+            id="spec_handoff_falls_back_from_decode_graph",
+        ),
         pytest.param(7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, id="spec_width_prefill_without_state"),
         pytest.param(7, [16, 7], [8, 8], [8, 1], CUDAGraphMode.NONE, id="nonuniform_handoff"),
     ],
@@ -465,6 +472,7 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),
