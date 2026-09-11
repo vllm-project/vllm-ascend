@@ -10,6 +10,11 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 _RESAMPLE_BLOCK_SIZE = 1024
+# Offset salt keeping the resample threshold's noise stream disjoint from the
+# verification kernel's acceptance draws (keyed by the raw position) and from
+# the draft sampling salt (upstream #54282 uses 1 << 30). Positions never
+# approach either constant in practice.
+_RESAMPLE_NOISE_SALT = tl.constexpr(1 << 29)
 
 
 def _get_vectorcore_num() -> int:
@@ -227,8 +232,14 @@ def _categorical_finalize_kernel(
     )
 
     # One random value defines one point on the whole vocabulary-mass interval.
+    # NPU: salt the position so this draw is independent of the acceptance
+    # threshold u, which the verification kernel derives from the same
+    # (seed, pos) pair at the rejected row. Reusing that value conditions the
+    # residual sample on the rejection -- there u only spans (h, 1) of the
+    # unit interval, so the threshold u * Z can never land in the first h * Z
+    # of the residual CDF and the output marginal drifts off the target.
     seed = tl.load(seed_ptr + req_state_idx)
-    position = tl.load(pos_ptr + resample_token_idx).to(tl.int32)
+    position = tl.load(pos_ptr + resample_token_idx).to(tl.int32) + _RESAMPLE_NOISE_SALT
     uniform = tl.max(tl.rand(tl.randint(seed, position), tl.arange(0, 1)).to(tl.float32), axis=0)
 
     stored_block_mass = tl.load(
