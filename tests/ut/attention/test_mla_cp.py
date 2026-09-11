@@ -2,7 +2,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -77,6 +77,8 @@ def test_mla_dcp_decode_uses_mrv2_native_metadata(mock_build_decode) -> None:
     builder.dcp_rank = 1
     builder.cp_local_block_size = 4
     builder.seq_lens = torch.tensor([9, 14], dtype=torch.int32)
+    builder.query_lens = torch.tensor([1, 1], dtype=torch.int32)
+    builder.speculative_config = None
     common_attn_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         dcp_local_seq_lens=torch.tensor([4, 6], dtype=torch.int32),
@@ -94,6 +96,45 @@ def test_mla_dcp_decode_uses_mrv2_native_metadata(mock_build_decode) -> None:
         result.actual_seq_lengths_q,
         torch.tensor([1, 2]),
     )
+
+
+@patch.object(AscendMLAMetadataBuilder, "build_decode_metadata")
+def test_mla_dcp_decode_builds_mrv2_mtp_mask(mock_build_decode) -> None:
+    decode_metadata = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
+    mock_build_decode.return_value = decode_metadata
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 1
+    builder.dcp_size = 2
+    builder.dcp_rank = 1
+    builder.cp_local_block_size = 4
+    builder.seq_lens = torch.tensor([9], dtype=torch.int32)
+    builder.query_lens = torch.tensor([4], dtype=torch.int32)
+    builder.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    builder.dcp_mtp_attn_mask = MagicMock()
+    builder.dcp_mtp_attn_mask.cpu = torch.zeros((1, 4, 16), dtype=torch.bool)
+    builder.dcp_mtp_attn_mask.gpu = builder.dcp_mtp_attn_mask.cpu
+    common_attn_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        dcp_local_seq_lens=torch.tensor([4], dtype=torch.int32),
+    )
+
+    result = builder.build_decode_metadata(
+        common_prefix_len=0,
+        common_attn_metadata=common_attn_metadata,
+    )
+
+    assert result is decode_metadata
+    assert result.cp_seq_len == [4]
+    expected = torch.tensor(
+        [
+            [False, False, True, True],
+            [False, False, False, True],
+            [False, False, False, False],
+            [False, False, False, False],
+        ]
+    )
+    torch.testing.assert_close(result.dcp_mtp_attn_mask[0, :4, :4], expected)
+    builder.dcp_mtp_attn_mask.copy_to_gpu.assert_called_once_with(1)
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:

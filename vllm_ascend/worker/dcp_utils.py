@@ -25,6 +25,7 @@ from vllm.config import VllmConfig
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.attention.context_parallel.common_cp import (
+    build_dcp_mtp_attention_mask,
     get_dcp_local_seq_lens,
 )
 from vllm_ascend.spec_decode.utils import correct_optimistic_seq_lens_cpu
@@ -660,37 +661,11 @@ class DCPManager:
             dtype=torch.int32,
         )
         histories = torch.tensor(decode_num_computed_tokens, dtype=torch.int32)
-        total_lens = histories + q_lens
-        k_lens = get_dcp_local_seq_lens(
-            total_lens,
+        return build_dcp_mtp_attention_mask(
+            self.dcp_mtp_attn_mask.cpu,
+            histories,
+            q_lens,
             self.dcp_world_size,
+            self.dcp_world_rank,
             interleave_size,
-        )[:, self.dcp_world_rank]
-        valid = k_lens > 0
-        output = self.dcp_mtp_attn_mask.cpu[:num_decode_reqs]
-        output.zero_()
-        if not valid.any():
-            return output
-
-        max_q = int(q_lens[valid].max().item())
-        max_k = int(k_lens[valid].max().item())
-        q_indices = torch.arange(max_q, dtype=torch.int32)
-        k_indices = torch.arange(max_k, dtype=torch.int32)
-        valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
-        valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
-        positions = histories[:, None] + q_indices[None, :]
-        inclusive_positions = positions + 1
-        local_q = get_dcp_local_seq_lens(
-            inclusive_positions,
-            self.dcp_world_size,
-            interleave_size,
-        )[..., self.dcp_world_rank]
-        upper = local_q - 1
-        full_mask = (
-            (k_indices[None, None, :] > upper[:, :, None])
-            & (upper[:, :, None] >= 0)
-            & valid_q[:, :, None]
-            & valid_k[:, None, :]
         )
-        output[:num_decode_reqs, :max_q, :max_k] = full_mask
-        return output

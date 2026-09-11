@@ -5,6 +5,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -23,6 +24,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    build_dcp_mtp_attention_mask,
     get_dcp_local_seq_lens,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -79,6 +81,36 @@ class AscendMlaDCPMetadataBuilder(
             self.block_size,
             self.cp_virtual_block_size,
         )
+        self.dcp_mtp_attn_mask: CpuGpuBuffer | None = None
+        if self.speculative_config is not None and vllm_config.use_v2_model_runner:
+            self.dcp_mtp_attn_mask = CpuGpuBuffer(
+                (
+                    vllm_config.scheduler_config.max_num_seqs,
+                    self.decode_threshold,
+                    vllm_config.model_config.max_model_len,
+                ),
+                dtype=torch.bool,
+                device=device,
+                pin_memory=True,
+            )
+
+    def _build_mrv2_dcp_mtp_attn_mask(self) -> torch.Tensor | None:
+        query_lens = self.query_lens[: self.num_decodes]
+        if self.speculative_config is None or not torch.any(query_lens > 1):
+            return None
+
+        assert self.dcp_mtp_attn_mask is not None
+        history_lens = self.seq_lens[: self.num_decodes] - query_lens
+        build_dcp_mtp_attention_mask(
+            self.dcp_mtp_attn_mask.cpu,
+            history_lens,
+            query_lens,
+            self.dcp_size,
+            self.dcp_rank,
+            self.cp_local_block_size,
+        )
+        self.dcp_mtp_attn_mask.copy_to_gpu(self.num_decodes)
+        return self.dcp_mtp_attn_mask.gpu[: self.num_decodes]
 
     def build_chunked_metadata(
         self,
@@ -178,7 +210,7 @@ class AscendMlaDCPMetadataBuilder(
                 self.cp_local_block_size,
             )
             decode_metadata.cp_seq_len = local_seq_lens_allranks[:, self.dcp_rank].tolist()
-            decode_metadata.dcp_mtp_attn_mask = None
+            decode_metadata.dcp_mtp_attn_mask = self._build_mrv2_dcp_mtp_attn_mask()
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         return decode_metadata
 

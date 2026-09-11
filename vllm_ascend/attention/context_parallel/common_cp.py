@@ -29,6 +29,60 @@ def get_dcp_local_seq_lens(
     )
 
 
+def build_dcp_mtp_attention_mask(
+    output: torch.Tensor,
+    history_lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    dcp_size: int,
+    dcp_rank: int,
+    interleave_size: int,
+) -> torch.Tensor:
+    """Fill an interleave-aware causal mask for DCP speculative decode."""
+    num_reqs = query_lens.shape[0]
+    output = output[:num_reqs]
+    output.zero_()
+    if num_reqs == 0:
+        return output
+
+    total_lens = history_lens + query_lens
+    local_k_lens = get_dcp_local_seq_lens(
+        total_lens,
+        dcp_size,
+        interleave_size,
+    )[:, dcp_rank]
+    valid = local_k_lens > 0
+    if not valid.any():
+        return output
+
+    max_q = int(query_lens[valid].max().item())
+    max_k = int(local_k_lens[valid].max().item())
+    if max_q > output.shape[1] or max_k > output.shape[2]:
+        raise ValueError(
+            "DCP MTP attention mask buffer is too small: "
+            f"required=({num_reqs}, {max_q}, {max_k}), "
+            f"available={tuple(output.shape)}"
+        )
+
+    q_indices = torch.arange(max_q, dtype=torch.int32)
+    k_indices = torch.arange(max_k, dtype=torch.int32)
+    valid_q = valid[:, None] & (q_indices[None, :] < query_lens[:, None])
+    valid_k = valid[:, None] & (k_indices[None, :] < local_k_lens[:, None])
+    query_positions = history_lens[:, None] + q_indices[None, :]
+    local_visible_k_lens = get_dcp_local_seq_lens(
+        query_positions + 1,
+        dcp_size,
+        interleave_size,
+    )[..., dcp_rank]
+    local_visible_k_end = local_visible_k_lens - 1
+    output[:num_reqs, :max_q, :max_k] = (
+        (k_indices[None, None, :] > local_visible_k_end[:, :, None])
+        & (local_visible_k_end[:, :, None] >= 0)
+        & valid_q[:, :, None]
+        & valid_k[:, None, :]
+    )
+    return output
+
+
 class DCPMetadataBuilderMixin:
     """Shared DCP metadata access for backend-specific metadata builders."""
 
