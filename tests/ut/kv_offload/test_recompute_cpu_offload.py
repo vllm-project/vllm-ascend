@@ -78,6 +78,7 @@ def test_recompute_cpu_offload_connector_scheduler_methods_forward():
     blocks = MagicMock()
     block_ids = ([1, 2],)
 
+    assert connector.supports_divergent_local_hybrid_hits is True
     assert connector.get_num_new_matched_tokens(request, 4) == (8, True)
     connector.update_state_after_alloc(request, blocks, 8)
     assert connector.update_state_before_preempt(request, block_ids, 16) is True
@@ -132,6 +133,24 @@ def test_recompute_cpu_offload_connector_defaults_without_scheduler_manager():
     assert connector.has_preempted_request("req-1") is False
     assert connector.take_events() == []
     assert connector.reset_cache() is None
+
+
+def test_recompute_cpu_offload_capacity_priority():
+    resolve = RecomputeCPUOffloadConnectorV1._resolve_offload_capacity
+
+    assert resolve({}, 8) == (None, 1.0)
+    assert resolve({"offload_host_memory_ratio": 1.5}, 8) == (None, 1.5)
+    assert resolve(
+        {"cpu_bytes_to_use": 800, "offload_host_memory_ratio": 2}, 8
+    ) == (100, 2.0)
+    assert resolve(
+        {
+            "cpu_bytes_to_use_per_rank": 200,
+            "cpu_bytes_to_use": 800,
+            "offload_host_memory_ratio": 2,
+        },
+        8,
+    ) == (200, 2.0)
 
 
 def test_recompute_cpu_offload_scheduler_get_num_new_matched_tokens_states():
@@ -192,6 +211,147 @@ def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
     ]
     assert scheduler._align_group_block_ids(1, [7, 8], 4) == [7, 8]
     assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
+
+
+def test_recompute_cpu_offload_cpu_config_uses_v028_tensor_layout():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        shared_by=["layer.0"],
+        offset=32,
+        block_stride=64,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.vllm_version_is",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = RecomputeCPUOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=512,
+        )
+
+    assert cpu_config.num_blocks == 4
+    assert cpu_config.kv_cache_groups == ["group"]
+    assert vars(cpu_config.kv_cache_tensors[0]) == {
+        "size": 512,
+        "shared_by": ["layer.0"],
+        "offset": 32,
+        "block_stride": 64,
+    }
+
+
+def test_recompute_cpu_offload_cpu_config_uses_v029_tensor_layout():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        layers=["layer.0"],
+        layer_stride=512,
+        block_stride=64,
+        offset=32,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = RecomputeCPUOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=512,
+        )
+
+    assert cpu_config.num_blocks == 4
+    assert vars(cpu_config.kv_cache_tensors[0]) == {
+        "size": 512,
+        "layers": ["layer.0"],
+        "layer_stride": 512,
+        "block_stride": 64,
+        "offset": 32,
+    }
+
+
+def test_recompute_cpu_offload_cpu_config_uses_host_memory_ratio():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        layers=["layer.0"],
+        layer_stride=512,
+        block_stride=64,
+        offset=0,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool."
+            "recompute_cpu_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = RecomputeCPUOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=None,
+            offload_host_memory_ratio=1.5,
+        )
+
+    assert cpu_config.num_blocks == 12
+    assert cpu_config.kv_cache_tensors[0].size == 1536
 
 
 def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():

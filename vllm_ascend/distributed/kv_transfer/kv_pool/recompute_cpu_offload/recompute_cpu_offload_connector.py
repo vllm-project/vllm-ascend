@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """RecomputeCPUOffloadConnector: minimal CPU KV cache offloading."""
 
+import math
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -36,12 +37,42 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-# Default CPU capacity: 8 GB
-DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
-
-
 class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache preservation for recompute-preempted requests."""
+
+    @staticmethod
+    def _resolve_offload_capacity(
+        extra_config: dict[str, Any], world_size: int
+    ) -> tuple[int | None, float]:
+        offload_host_memory_ratio = float(
+            extra_config.get("offload_host_memory_ratio", 1)
+        )
+        if (
+            not math.isfinite(offload_host_memory_ratio)
+            or offload_host_memory_ratio <= 0
+        ):
+            raise ValueError(
+                "offload_host_memory_ratio must be a positive finite number, "
+                f"got {offload_host_memory_ratio!r}"
+            )
+
+        if "cpu_bytes_to_use_per_rank" in extra_config:
+            cpu_capacity_per_rank = int(extra_config["cpu_bytes_to_use_per_rank"])
+        elif "cpu_bytes_to_use" in extra_config:
+            cpu_capacity_per_rank = int(extra_config["cpu_bytes_to_use"]) // world_size
+        else:
+            cpu_capacity_per_rank = None
+
+        if cpu_capacity_per_rank is not None and cpu_capacity_per_rank <= 0:
+            raise ValueError(
+                "The effective per-rank CPU offload memory must be positive, "
+                f"got {cpu_capacity_per_rank} bytes"
+            )
+        return cpu_capacity_per_rank, offload_host_memory_ratio
+
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -52,30 +83,23 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
-        cpu_capacity_bytes = int(extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES))
         enable_offload_prefix_caching = extra_config.get("enable_offload_prefix_caching", False)
         if not isinstance(enable_offload_prefix_caching, bool):
             raise ValueError(f"enable_offload_prefix_caching must be a boolean, got {enable_offload_prefix_caching!r}")
         world_size = vllm_config.parallel_config.world_size
-        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
-        if "cpu_bytes_to_use_per_rank" in extra_config:
-            explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
-            if explicit != cpu_capacity_per_rank:
-                logger.warning(
-                    "cpu_bytes_to_use_per_rank (%.2f GB) != "
-                    "cpu_bytes_to_use/world_size (%.2f GB). Using per-rank value.",
-                    explicit / (1024**3),
-                    cpu_capacity_per_rank / (1024**3),
-                )
-            cpu_capacity_per_rank = explicit
+        cpu_capacity_per_rank, offload_host_memory_ratio = self._resolve_offload_capacity(
+            extra_config, world_size
+        )
 
         self.scheduler_manager: RecomputeCPUOffloadScheduler | None = None
         self.worker_handler: RecomputeCPUOffloadWorker | None = None
 
         logger.info(
-            "RecomputeCPUOffloadConnector: role=%s, per_rank=%.2f GB, world_size=%d, offload_prefix_caching=%s",
+            "RecomputeCPUOffloadConnector: role=%s, per_rank_bytes=%s, "
+            "host_memory_ratio=%s, world_size=%d, offload_prefix_caching=%s",
             role.name,
-            cpu_capacity_per_rank / (1024**3),
+            cpu_capacity_per_rank,
+            offload_host_memory_ratio,
             world_size,
             enable_offload_prefix_caching,
         )
@@ -86,12 +110,14 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
                 cpu_capacity_per_rank,
                 enable_offload_prefix_caching,
+                offload_host_memory_ratio,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = RecomputeCPUOffloadWorker(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
+                offload_host_memory_ratio,
             )
 
     # --- Worker-side methods ---

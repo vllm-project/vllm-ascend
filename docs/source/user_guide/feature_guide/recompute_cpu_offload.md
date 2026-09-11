@@ -45,8 +45,9 @@ full prompt recompute path when their KV state can be preserved locally.
 | :--- | :--- |
 | `kv_connector` | Must be set to `RecomputeCPUOffloadConnector`. |
 | `kv_role` | Set to `kv_consumer` on Decode nodes. |
-| `cpu_bytes_to_use_per_rank` | Optional and recommended. CPU memory budget in bytes used by each rank/card for recompute offload. If set, it overrides `cpu_bytes_to_use / world_size`. |
-| `cpu_bytes_to_use` | Optional. Total CPU memory budget in bytes for this vLLM instance. The connector divides it by `world_size` to get the per-rank budget. This is less direct than `cpu_bytes_to_use_per_rank` and is easier to misconfigure in DP deployments. The default is 8 GiB total. |
+| `cpu_bytes_to_use_per_rank` | Optional. CPU memory budget in bytes used by each rank/card. This has the highest priority. |
+| `cpu_bytes_to_use` | Optional. Total CPU memory budget in bytes for this vLLM instance. The connector divides it by `world_size`. This is used when `cpu_bytes_to_use_per_rank` is absent. |
+| `offload_host_memory_ratio` | Optional. Ratio between CPU and GPU KV block counts. The CPU cache contains `int(ratio * gpu_num_blocks)` blocks. This is used only when neither byte-based option is set and defaults to `1`. |
 | `enable_offload_prefix_caching` | Optional. Enables CPU block sharing for full hashed blocks with the same prefix-cache hash. The default is `false`; keep it disabled unless explicitly testing prefix sharing. |
 
 Prefer `cpu_bytes_to_use_per_rank` when you want every rank/card to use the
@@ -59,6 +60,11 @@ Decode DP size. For example, when starting a DP2TP8 Decode service, setting
 `cpu_bytes_to_use` to 16 GiB gives each DP rank's cards about 8 GiB of recompute
 offload space. To avoid ambiguity, use `cpu_bytes_to_use_per_rank` for new
 deployments.
+
+If neither byte-based option is set, the default
+`offload_host_memory_ratio=1` allocates one CPU KV block for every GPU KV
+block. Set a different ratio to scale this capacity without calculating the
+physical byte size.
 
 `scheduler_config.recompute_scheduler_enable` must also be enabled in `additional-config` on
 P/D-disaggregated Decode nodes:
@@ -286,6 +292,10 @@ offload budget for each rank/card. For example,
 setting `cpu_bytes_to_use=17179869184` gives each DP rank's cards about 8 GiB
 of offload space. Increase the budget if logs show that CPU cache free blocks
 are insufficient.
+
+Alternatively, omit both byte-based options and set
+`offload_host_memory_ratio`. Its default value of `1` creates the same number
+of CPU and GPU KV blocks.
 
 ### How do I know the offload path is active?
 

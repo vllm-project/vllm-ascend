@@ -25,11 +25,13 @@ class RecomputeCPUOffloadWorker:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
-        cpu_capacity_bytes: int,
+        cpu_capacity_bytes: int | None,
+        offload_host_memory_ratio: float = 1,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self.offload_host_memory_ratio = offload_host_memory_ratio
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -71,7 +73,17 @@ class RecomputeCPUOffloadWorker:
             if get_kv_cache_tensor_layers(t):
                 scheduler_gpu_kv_cache_tensors.append(t)
         scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
-        scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)
+        if self.cpu_capacity_bytes is None:
+            scheduler_num_cpu_blocks = max(
+                1, int(self.offload_host_memory_ratio * self.num_gpu_blocks)
+            )
+        else:
+            scheduler_num_cpu_blocks = max(
+                1,
+                self.num_gpu_blocks
+                * self.cpu_capacity_bytes
+                // scheduler_gpu_total_bytes,
+            )
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         register_cache_ptrs = []
@@ -90,7 +102,12 @@ class RecomputeCPUOffloadWorker:
 
         per_tensor_bytes_per_block = [tensor.shape[-1] * tensor.element_size() for tensor in unique_gpu_caches.values()]
         total_bytes_per_block = sum(per_tensor_bytes_per_block)
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        if self.cpu_capacity_bytes is None:
+            self.num_cpu_blocks = scheduler_num_cpu_blocks
+        else:
+            self.num_cpu_blocks = max(
+                1, self.cpu_capacity_bytes // total_bytes_per_block
+            )
         if self.num_cpu_blocks != scheduler_num_cpu_blocks:
             self.num_cpu_blocks = scheduler_num_cpu_blocks
             logger.warning(

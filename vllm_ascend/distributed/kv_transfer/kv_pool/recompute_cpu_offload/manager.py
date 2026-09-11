@@ -65,8 +65,9 @@ class RecomputeCPUOffloadScheduler:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
-        cpu_capacity_bytes: int,
+        cpu_capacity_bytes: int | None,
         enable_offload_prefix_caching: bool = True,
+        offload_host_memory_ratio: float = 1,
     ):
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
@@ -74,7 +75,11 @@ class RecomputeCPUOffloadScheduler:
         self.num_spec_tokens = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
-        self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
+        self.cpu_kv_cache_config = self._derive_cpu_config(
+            kv_cache_config,
+            cpu_capacity_bytes,
+            offload_host_memory_ratio,
+        )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
         self._group_is_mamba = self._get_group_is_mamba(kv_cache_config)
@@ -85,7 +90,7 @@ class RecomputeCPUOffloadScheduler:
         logger.info(
             "RecomputeCPUOffloadScheduler: allocating %d CPU blocks (%.2f GB) for recompute offload, prefix caching=%s",
             self.num_cpu_blocks,
-            cpu_capacity_bytes / (1024**3),
+            sum(t.size for t in self.cpu_kv_cache_config.kv_cache_tensors) / (1024**3),
             self.enable_offload_prefix_caching,
         )
 
@@ -96,7 +101,7 @@ class RecomputeCPUOffloadScheduler:
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
-            max_num_batched_tokens=(vllm_config.scheduler_config.max_num_batched_tokens),
+            max_in_flight_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             use_eagle=False,
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -147,7 +152,11 @@ class RecomputeCPUOffloadScheduler:
         return group_is_mamba
 
     @staticmethod
-    def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
+    def _derive_cpu_config(
+        gpu_config: "KVCacheConfig",
+        cpu_capacity_bytes: int | None,
+        offload_host_memory_ratio: float = 1,
+    ) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -158,12 +167,17 @@ class RecomputeCPUOffloadScheduler:
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        if cpu_capacity_bytes is None:
+            num_cpu_blocks = max(1, int(offload_host_memory_ratio * num_gpu_blocks))
+        else:
+            num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         if vllm_version_is("0.28.0"):
             cpu_tensors = [
                 KVCacheTensor(
                     size=t.size // num_gpu_blocks * num_cpu_blocks,
                     shared_by=list(t.shared_by),
+                    offset=t.offset,
+                    block_stride=t.block_stride,
                 )
                 for t in gpu_kv_cache_tensors
             ]
