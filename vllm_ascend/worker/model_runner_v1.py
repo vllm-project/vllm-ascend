@@ -187,6 +187,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.uno import AscendUnoProposer
 from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
@@ -676,6 +677,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
+            | AscendUnoProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -703,6 +705,41 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_drafter(self):
         return get_spec_decode_method(self.speculative_config.method, self.vllm_config, self.device, self)
+
+    def _use_uno(self) -> bool:
+        """Keep the current release usable until upstream Uno is available."""
+        if self.speculative_config is None:
+            return False
+        use_uno = getattr(self.speculative_config, "use_uno", None)
+        return bool(use_uno is not None and use_uno())
+
+    def _install_uno_lora(self, drafter: AscendUnoProposer) -> None:
+        """Keep Uno's internal adapter loaded and restore base mappings."""
+        self._ensure_lora_enabled()
+        active_mapping: tuple[int, ...] = ()
+
+        def ensure_adapter() -> None:
+            # Profiling may evict adapters while exercising available slots.
+            if drafter.uno_lora_id not in self.lora_manager.list_adapters():
+                self.lora_manager.add_adapter(drafter.lora_request)
+
+        def set_draft_mapping(mapping: tuple[int, ...] | None) -> None:
+            nonlocal active_mapping
+            if mapping is None:
+                base_mapping = (0,) * len(active_mapping)
+                self._set_active_loras(base_mapping, base_mapping, set())
+                active_mapping = ()
+                return
+            active_mapping = mapping
+            ensure_adapter()
+            self._set_active_loras(
+                mapping,
+                mapping,
+                {drafter.lora_request},
+            )
+
+        ensure_adapter()
+        drafter.set_lora_hook(set_draft_mapping)
 
     def _eagle3_uses_aux_hidden_state(self) -> bool:
         if self.speculative_config is None or self.speculative_config.method != "eagle3":
@@ -879,6 +916,16 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        if (
+            self.speculative_config
+            and self._use_uno()
+            and any(
+                req.lora_request for req in scheduler_output.scheduled_new_reqs
+            )
+        ):
+            raise ValueError(
+                "Uno does not support request-specific LoRA adapters"
+            )
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -1907,6 +1954,81 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
             self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+        elif self._use_uno():
+            assert isinstance(self.drafter, AscendUnoProposer)
+            common_attn_metadata = spec_decode_common_attn_metadata
+            sampled_token_ids = valid_sampled_token_ids
+            valid_sampled_tokens_count = None
+            if isinstance(sampled_token_ids, list):
+                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    scheduler_output.num_scheduled_tokens,
+                )
+            else:
+                next_token_ids, valid_sampled_tokens_count = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                )
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
+                )
+
+            num_rejected_tokens_gpu = None
+            if spec_decode_metadata is None:
+                token_indices_to_sample = None
+                target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
+                target_positions = self._get_positions(num_scheduled_tokens)
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+            elif isinstance(sampled_token_ids, list):
+                common_attn_metadata, token_indices = self.drafter.prepare_inputs(
+                    common_attn_metadata,
+                    sampled_token_ids,
+                    spec_decode_metadata.num_draft_tokens,
+                )
+                token_indices_to_sample = None
+                target_token_ids = self.input_ids.gpu[token_indices]
+                target_positions = self._get_positions(token_indices)
+                target_hidden_states = hidden_states[token_indices]
+            else:
+                assert valid_sampled_tokens_count is not None
+                (
+                    common_attn_metadata,
+                    token_indices,
+                    token_indices_to_sample,
+                    num_rejected_tokens_gpu,
+                ) = self.drafter.prepare_inputs_padded(
+                    common_attn_metadata,
+                    spec_decode_metadata,
+                    valid_sampled_tokens_count,
+                )
+                target_token_ids = self.input_ids.gpu[token_indices]
+                target_positions = self._get_positions(token_indices)
+                target_hidden_states = hidden_states[token_indices]
+
+            draft_token_ids = self.drafter.propose(
+                num_speculative_tokens=(
+                    scheduler_output.num_spec_tokens_to_schedule
+                ),
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                token_indices_to_sample=token_indices_to_sample,
+                common_attn_metadata=common_attn_metadata,
+                sampling_metadata=sampling_metadata,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+            )
+            draft_probs = self.drafter.take_last_draft_probs()
+            if draft_probs is not None:
+                self._draft_probs = draft_probs
+                self._draft_prob_req_ids = self.input_batch.req_ids.copy()
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
@@ -3567,7 +3689,7 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
-                    | AscendDSparkProposer):
+                    | AscendDSparkProposer | AscendUnoProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 elif isinstance(self.drafter, AscendExtractHiddenStatesProposer):
@@ -4036,7 +4158,7 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
-            if self.drafter:
+            if self.drafter and not isinstance(self.drafter, AscendUnoProposer):
                 logger.info("Loading drafter model...")
                 with get_tp_context(self.drafter):
                     self.drafter.load_model(self.model)
@@ -4098,6 +4220,10 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+            if isinstance(self.drafter, AscendUnoProposer):
+                logger.info("Loading Uno shared-model drafter...")
+                self.drafter.load_model(self.model)
+                self._install_uno_lora(self.drafter)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
@@ -4132,7 +4258,11 @@ class NPUModelRunner(GPUModelRunner):
                     enable_enpu=self.enable_enpu,
                 )
                 drafter = getattr(self, "drafter", None)
-                if drafter is not None and hasattr(drafter, "model"):
+                if (
+                    drafter is not None
+                    and not isinstance(drafter, AscendUnoProposer)
+                    and hasattr(drafter, "model")
+                ):
                     drafter.model = BreakableACLGraphWrapper(
                         drafter.model,
                         self.vllm_config,
@@ -4207,15 +4337,17 @@ class NPUModelRunner(GPUModelRunner):
             and self.drafter is not None
             and (
                 self.speculative_config.use_eagle()
+                or self._use_uno()
                 or self.speculative_config.uses_draft_model()
             )
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
+                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer
+                | AscendUnoProposer,
             )
             kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
+            if isinstance(self.drafter, AscendDSparkProposer | AscendUnoProposer):
                 sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
                 draft_kernel_block_sizes = [
                     int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes

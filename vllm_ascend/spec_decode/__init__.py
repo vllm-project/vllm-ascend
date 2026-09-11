@@ -31,6 +31,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.uno import AscendUnoProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -57,5 +58,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendDraftModelProposer(vllm_config, device, runner)
     elif method == "extract_hidden_states":
         return AscendExtractHiddenStatesProposer(vllm_config, device, runner)
+    elif method == "uno":
+        return AscendUnoProposer(vllm_config, device, runner)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")

@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.lora.layers import LoRAMapping
 
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -79,12 +80,46 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             ),
         )
     refresh.assert_called_once()
+    # Token-level LoRA mappings can alternate adapters for every token. Keep
+    # the SGMV segment metadata at token capacity rather than request capacity.
+    assert wrapper._seq_start_locs.numel() == 8
+    assert wrapper._seq_lengths.numel() == 8
+    assert wrapper._lora_indices_per_batch.numel() == 8
     if expect_torch_ops:
         from vllm.lora.ops.torch_ops import bgmv_shrink
 
         assert wrapper.bgmv_shrink is bgmv_shrink
     else:
         assert wrapper.bgmv_shrink is lora_ops.bgmv_shrink
+
+
+def test_uno_mapping_keeps_all_lora_segments() -> None:
+    with (
+        patch(
+            "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
+        patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes"),
+    ):
+        wrapper = PunicaWrapperNPU(
+            8,
+            2,
+            torch.device("cpu"),
+            lora_config=SimpleNamespace(max_lora_rank=128),
+        )
+
+    mapping = (0, 7, 7, 7, 0, 7, 7, 7)
+    wrapper.update_metadata(
+        LoRAMapping(mapping, mapping, is_prefill=True),
+        [7, None],
+        2,
+        100,
+    )
+
+    assert wrapper.batch_size == 4
+    assert wrapper.prefill_metadata[0].tolist() == [0, 1, 4, 5]
+    assert wrapper.prefill_metadata[1].tolist() == [1, 3, 1, 3]
+    assert wrapper.prefill_metadata[2].tolist() == [-1, 0, -1, 0]
 
 
 def test_prefill_calls_sgmv_when_lora_active() -> None:
