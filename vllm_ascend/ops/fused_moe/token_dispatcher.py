@@ -237,6 +237,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
+        combine_topk_weights = kwargs_mc2.get("expert_scales", token_dispatch_input.topk_weights)
         output = (
             torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
             if self.enable_dispatch_v2
@@ -261,7 +262,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             group_list_type=group_list_type,
             combine_metadata=MoEMC2CombineMetadata(
                 topk_ids=token_dispatch_input.topk_ids,
-                topk_weights=token_dispatch_input.topk_weights,
+                topk_weights=combine_topk_weights,
                 expert_map=token_dispatch_input.routing.expert_map,
                 ep_recv_counts=ep_recv_counts,
                 tp_recv_counts=tp_recv_counts,
