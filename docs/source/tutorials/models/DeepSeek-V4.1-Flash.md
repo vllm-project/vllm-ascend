@@ -17,8 +17,8 @@ one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
 vLLM Ascend supports W8A8 colocated deployment on either two Atlas 800 A3
-servers or four Atlas 800 A2 servers. Prefill-Decode disaggregation is not
-covered by this guide.
+servers or four Atlas 800 A2 servers. Prefill-Decode disaggregation and Engram
+host offloading are not covered by this guide.
 
 ## 2 Supported Features
 
