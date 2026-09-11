@@ -38,6 +38,7 @@ def test_a3_official_inplace_partial_rotary_mul_matches_legacy_custom(tmp_path: 
     legacy_root_value = os.environ.get(LEGACY_ROOT_ENV)
     if not legacy_root_value:
         pytest.skip(f"set {LEGACY_ROOT_ENV} to an A3-built checkout to run operator parity")
+    assert legacy_root_value is not None
 
     legacy_root = Path(legacy_root_value).resolve()
     legacy_opp = legacy_root / "vllm_ascend" / "_cann_ops_custom" / "vendors" / "custom_transformer"
@@ -56,7 +57,7 @@ def test_a3_official_inplace_partial_rotary_mul_matches_legacy_custom(tmp_path: 
 
 def _run_inplace_partial_rotary_mul(output_path: Path, dtype: str) -> None:
     import torch_npu  # noqa: F401  # Registers the NPU dispatch key.
-    from cann_ops_transformer.ops import inplace_partial_rotary_mul
+    from cann_ops_transformer.ops import inplace_partial_rotary_mul  # type: ignore[import-not-found]
 
     torch.manual_seed(20260910)
     tensor_dtype = getattr(torch, dtype)
@@ -65,7 +66,7 @@ def _run_inplace_partial_rotary_mul(output_path: Path, dtype: str) -> None:
     sin = torch.randn((2, 1, 1, 64), dtype=tensor_dtype, device="npu")
 
     if os.environ.get("ASCEND_CUSTOM_OPP_PATH"):
-        import vllm_ascend.vllm_ascend_C  # noqa: F401  # Registers _C_ascend bindings.
+        import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(x, cos, sin, rotary_mode="interleave", partial_slice=[64, 128])
     else:
