@@ -8,9 +8,11 @@ import pytest
 import torch
 from torch import nn
 
+import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolMetadata,
     AscendIndexerKPoolStateMetadata,
+    Glm5NextKPoolIndexerBackend,
 )
 
 # The operator PR owns these kernels. Each orchestration test below replaces
@@ -22,9 +24,7 @@ with patch.dict(
         "vllm_ascend.ops.triton.glm5_next_lightning_indexer": MagicMock(),
     },
 ):
-    import vllm_ascend.attention.indexer_kpool_backend as backend_module
     import vllm_ascend.models.glm5next.sparse_attn_indexer_kpool as kpool_module
-    from vllm_ascend.attention.indexer_kpool_backend import Glm5NextKPoolIndexerBackend
     from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
 
 

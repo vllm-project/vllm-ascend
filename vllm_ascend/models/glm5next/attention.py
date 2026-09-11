@@ -119,7 +119,7 @@ class Indexer(nn.Module):
     def get_ascend_indexer_backend_cls(self):
         # Lazy import keeps the model module independent from the shared ops
         # registry during process startup.
-        from vllm_ascend.attention.indexer_kpool_backend import (
+        from vllm_ascend.attention.indexer_kpool import (
             Glm5NextKPoolIndexerBackend,
         )
 

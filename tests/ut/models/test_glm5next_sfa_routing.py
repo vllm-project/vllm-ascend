@@ -2,25 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import vllm.config as vllm_config_module
 
+import vllm_ascend.attention.indexer_kpool as backend_module
 import vllm_ascend.platform as platform
+from vllm_ascend.attention.indexer_kpool import Glm5NextKPoolIndexerBackend
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, DeviceAdaptorFamily
-
-# Routing and visible-length checks do not execute the external kernels.
-with patch.dict(
-    "sys.modules",
-    {
-        "vllm_ascend.ops.triton.glm5_next_kpool_state_compress": MagicMock(),
-        "vllm_ascend.ops.triton.glm5_next_lightning_indexer": MagicMock(),
-    },
-):
-    import vllm_ascend.attention.indexer_kpool_backend as backend_module
-    from vllm_ascend.attention.indexer_kpool_backend import Glm5NextKPoolIndexerBackend
 
 
 @pytest.mark.parametrize("kpool", [False, True])
