@@ -175,19 +175,19 @@ private:
         if constexpr (IS_QUANT_V) {
             const uint32_t slot = st % MSA_K_SCRATCH_STAGES_A2;
             if (slot == 0U) {
-                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK0);
+                Catlass::Arch::CrossCoreWaitFlag(flagK0);
             } else if (slot == 1U) {
-                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK1);
+                Catlass::Arch::CrossCoreWaitFlag(flagK1);
             } else if (slot == 2U) {
-                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK2);
+                Catlass::Arch::CrossCoreWaitFlag(flagK2);
             } else {
-                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK3);
+                Catlass::Arch::CrossCoreWaitFlag(flagK3);
             }
         } else {
             (void)flagK1;
             (void)flagK2;
             (void)flagK3;
-            Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE2>(flagK0);
+            Catlass::Arch::CrossCoreWaitFlag(flagK0);
         }
     }
 
