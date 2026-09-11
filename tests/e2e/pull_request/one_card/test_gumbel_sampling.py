@@ -12,6 +12,9 @@ import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
+from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+    _selector_walk_kernel_ascend,
+)
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
@@ -608,6 +611,68 @@ class TestGumbelSampling:
         assert ((sampled >= 0) & (sampled < logits.shape[-1])).all()
         torch.testing.assert_close(speculator.draft_logits[idx_mapping.long(), 1], logits, rtol=0, atol=0)
         assert (speculator.draft_logits[:, 0] == 0).all()
+
+    def test_dflash2_selector_matches_target_gumbel(self):
+        """DFlash2 and target sampling must use the same keyed random draw."""
+        torch.manual_seed(211)
+        num_reqs, num_steps, top_k, vocab_size = 16, 1, 8, 97
+        candidate_ids = torch.stack([torch.randperm(vocab_size)[:top_k] for _ in range(num_reqs)]).to(
+            device=DEVICE, dtype=torch.int64
+        )[:, None, :]
+        edge_scores = torch.randn(
+            num_reqs,
+            num_steps,
+            top_k,
+            top_k,
+            device=DEVICE,
+            dtype=torch.float32,
+        )
+        sample_pos = torch.arange(41, 41 + num_reqs, device=DEVICE, dtype=torch.int64)
+        req_mapping = torch.arange(num_reqs, device=DEVICE, dtype=torch.int32)
+        temperature = torch.linspace(0.3, 1.7, num_reqs, device=DEVICE)
+        seeds = torch.arange(num_reqs, device=DEVICE, dtype=torch.int64) * 104729 + 17
+        selected = torch.empty(num_reqs, num_steps, device=DEVICE, dtype=torch.int64)
+        realized_scores = torch.empty(num_reqs, num_steps, top_k, device=DEVICE, dtype=torch.float32)
+
+        _selector_walk_kernel_ascend[(num_reqs,)](
+            edge_scores,
+            candidate_ids,
+            sample_pos,
+            req_mapping,
+            temperature,
+            seeds,
+            selected,
+            realized_scores,
+            num_steps=num_steps,
+            top_k=top_k,
+            BLOCK_K=top_k,
+            SAMPLE_PROBABILISTIC=True,
+            USE_FP64=False,
+            num_warps=1,
+        )
+
+        # At step zero the selector starts from predecessor row zero. Build the
+        # equivalent sparse vocabulary logits and sample them through the
+        # target path. Both paths key noise by token id and Q - 1.
+        target_logits = torch.full(
+            (num_reqs, vocab_size),
+            -float("inf"),
+            device=DEVICE,
+            dtype=torch.float32,
+        )
+        target_logits.scatter_(1, candidate_ids[:, 0], edge_scores[:, 0, 0])
+        expected = gumbel_sample(
+            target_logits,
+            req_mapping,
+            temperature,
+            seeds,
+            sample_pos - 1,
+            apply_temperature=True,
+        )
+        torch.npu.synchronize()
+
+        assert torch.equal(selected[:, 0], expected)
+        torch.testing.assert_close(realized_scores[:, 0], edge_scores[:, 0, 0], rtol=0, atol=0)
 
     @pytest.mark.parametrize("temp", [0.5, 2.0])
     @pytest.mark.parametrize("vocab_size", [31, 1031])
