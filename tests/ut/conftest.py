@@ -27,6 +27,7 @@ run on CPU via mocks.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 import types
@@ -39,12 +40,22 @@ try:
 except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
+# Documented CPU UT command sets TORCH_DEVICE_BACKEND_AUTOLOAD=0. Importing real
+# torch_npu after `import torch` double-registers TORCH_LIBRARY `_inductor_test`.
+if os.getenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "1") == "0":
+    _npu_available = False
+
 if _npu_available:
     # Fully initialize torch_npu before importing vllm_ascend. Otherwise
     # `from vllm_ascend.utils import ...` runs package __init__ -> logger ->
     # vllm -> current_platform -> vllm_ascend.utils, which re-enters torch_npu
     # mid-import and double-registers TORCH_LIBRARY `_inductor_test`.
-    import torch_npu  # noqa: F401
+    try:
+        import torch_npu  # noqa: F401
+    except RuntimeError as exc:
+        if "TORCH_LIBRARY" not in str(exc):
+            raise
+        _npu_available = False
 
 if not _npu_available:
     triton_runtime = MagicMock()
