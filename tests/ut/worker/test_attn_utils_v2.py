@@ -848,6 +848,10 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
         return common_attn_metadata.is_prefilling
 
 
+class _PCPContextOptInBuilder(_PrefillStateBuilder):
+    consumes_pcp_context = True
+
+
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
 def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture):
     monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", _PrefillStateBuilder)
@@ -882,6 +886,41 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     )
 
     assert metadata["layer.0"] is is_prefilling
+    assert builder.extra_kwargs == {
+        "pcp_context": pcp_context,
+        "pcp_cache_group_idx": 0,
+    }
+
+
+def test_build_attn_metadata_passes_pcp_context_to_opted_in_cache_backend(monkeypatch):
+    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", type("UnrelatedSFABuilder", (), {}))
+    builder = _PCPContextOptInBuilder()
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0.indexer.k_cache"],
+        get_metadata_builder=lambda _: builder,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    pcp_context = object()
+
+    attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        pcp_context=pcp_context,
+        seq_lens_np=np.array([1], dtype=np.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+    )
+
     assert builder.extra_kwargs == {
         "pcp_context": pcp_context,
         "pcp_cache_group_idx": 0,
