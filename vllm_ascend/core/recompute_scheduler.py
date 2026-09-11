@@ -50,8 +50,10 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.metrics.perf import PerfStats
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -1470,3 +1472,59 @@ class DyntraLBRecomputeScheduler(DyntraLBPolicyMixin, RecomputeScheduler):
 # delta for dyntra_lb: combine async recompute scheduling with the same DyntraLB policy.
 class AsyncDyntraLBRecomputeScheduler(DyntraLBPolicyMixin, AsyncRecomputeScheduler):
     pass
+
+
+_ORIG_EXECUTE_DUMMY_BATCH = EngineCore.execute_dummy_batch
+
+
+def _any_request_awaiting_remote_kv(scheduler) -> bool:
+    # An async KV load pops the request out of ``waiting`` and parks it in
+    # ``skipped_waiting`` (scheduler.py: pop_request -> step_skipped_waiting ->
+    # skipped_waiting), so ``waiting`` alone never sees these requests. Scan
+    # both; ``skipped_waiting`` is the one that actually matters here.
+    for queue_name in ("skipped_waiting", "waiting"):
+        queue = getattr(scheduler, queue_name, None)
+        if not queue:
+            continue
+        if any(req.status == RequestStatus.WAITING_FOR_REMOTE_KVS for req in queue):
+            return True
+    return False
+
+
+def _execute_dummy_batch_with_kv_poll(self) -> None:
+    _ORIG_EXECUTE_DUMMY_BATCH(self)
+
+    # Gate the extra RPC: without it, every dummy on an idle DP rank would pay
+    # a zmq round-trip that delays its arrival at the next cross-DP all-reduce,
+    # showing up as TPOT jitter on a busy peer.
+    if self.vllm_config.kv_transfer_config is None:
+        return
+    if not _any_request_awaiting_remote_kv(self.scheduler):
+        return
+
+    try:
+        results = self.model_executor.collective_rpc("get_kv_transfer_finished")
+    except Exception:
+        # Connector or worker without this hook: fall back to the normal
+        # execute_model poll as the only path.
+        logger.warning("[dummy_kv_poll] worker hook unavailable", exc_info=True)
+        return
+    if not results or results[0] is None:
+        return
+
+    finished_sending, finished_recving = results[0]
+    if not finished_sending and not finished_recving:
+        return
+
+    # Only promotes WAITING_FOR_REMOTE_KVS and frees finished-send blocks.
+    # Requests inside an async-scheduling in-flight batch are RUNNING, so the
+    # two state sets are disjoint and this is safe between steps.
+    self.scheduler._update_from_kv_xfer_finished(
+        KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+    )
+
+
+EngineCore.execute_dummy_batch = _execute_dummy_batch_with_kv_poll
