@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.worker.v2.eager_dp_padding import sync_dp_group_max_tokens
+from vllm_ascend.worker.v2.eager_dp_padding import make_dp_padded_dummy_output, sync_dp_group_max_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -225,6 +225,7 @@ def _make_dp_padding_runner(enabled=True, aligned_tokens=0):
     runner._dp_padding_original_tokens = 0
     runner.dp_size = 8
     runner.dp_rank = 3
+    runner.decode_query_len = 2
     # need_timing=False keeps both profiling helpers pure no-ops (no NPU sync).
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
@@ -305,8 +306,21 @@ def test_dp_padding_dummy_step_forwards_group_max():
 
     forwarded = super_execute.call_args.args[0]
     assert forwarded.total_num_scheduled_tokens == 4
-    assert forwarded.num_scheduled_tokens == {"_dummy_dp_padding": 4}
+    # decode_query_len-sized requests keep the dummy graph-matchable
+    assert list(forwarded.num_scheduled_tokens.values()) == [2, 2]
     assert forwarded.finished_req_ids == {"done-r0"}
+
+
+def test_dp_padded_dummy_output_keeps_decode_shape():
+    """The rewrite must stay uniform-decode shaped (graph match) with an exact total."""
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=4, decode_query_len=2)
+    assert list(out.num_scheduled_tokens.values()) == [2, 2]
+    assert out.total_num_scheduled_tokens == 4
+
+    # A remainder keeps the eager row count exact; the step is non-uniform anyway.
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=5, decode_query_len=2)
+    assert list(out.num_scheduled_tokens.values()) == [2, 2, 1]
+    assert out.total_num_scheduled_tokens == 5
 
 
 @pytest.mark.parametrize(
