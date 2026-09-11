@@ -159,11 +159,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         gate = self.gate
         assert gate is not None
         weight_fp32 = getattr(gate, "weight_fp32", None)
-        if weight_fp32 is not None:
-            return weight_fp32
-        # Unexpected load path: cache once so later forwards do not keep casting.
-        weight_fp32 = gate.weight.data.to(torch.float32)
-        gate.weight_fp32 = weight_fp32
+        if weight_fp32 is None:
+            # Do not fall back to gate.weight.to(fp32): that emits an
+            # uncapturable aclop Cast during ACLGraph capture. Precast must
+            # happen in process_weights_after_loading via precast_fp32_weight.
+            raise RuntimeError(
+                "Internal-router MoE gate is missing weight_fp32 after weight "
+                "loading. Ensure gate.precast_fp32_weight=True before "
+                "process_weights_after_loading so ACLGraph capture does not "
+                "emit an uncapturable aclop Cast."
+            )
         return weight_fp32
 
     @property
