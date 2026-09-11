@@ -43,7 +43,6 @@ from vllm_ascend.ascend_config import (
     clear_ascend_config,
     get_ascend_config,
     init_ascend_config,
-    is_mega_moe_supported,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -1099,24 +1098,29 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
 
     @_clean_up
-    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
-        # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
-        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
-        # of whether the model config supports megamoe. So even when
-        # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
-        # up False and the fused path routes to dispatch_ffn_combine instead of
-        # mega_moe.
-        vc = VllmConfig()
-        vc.additional_config = {"enable_fused_mc2": 1}
+    def test_fused_mc2_preserves_operator_selection(self, mock_fix, mock_megamoe_supported):
+        for mode in (0, 1, True, "1", 2, "2"):
+            for supported in (False, True):
+                with self.subTest(mode=mode, supported=supported):
+                    clear_ascend_config()
+                    mock_megamoe_supported.reset_mock()
+                    mock_megamoe_supported.return_value = supported
+                    vc = VllmConfig()
+                    vc.additional_config = {"enable_fused_mc2": mode}
+                    # Package availability must not control the selected operator.
+                    with patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=None) as mock_find:
+                        config = init_ascend_config(vc)
 
-        config = init_ascend_config(vc)
-        self.assertEqual(config.enable_fused_mc2, 1)
-        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
-        # routes to dispatch_ffn_combine instead of mega_moe.
-        self.assertFalse(is_mega_moe_supported())
+                    use_mega_moe = int(mode) == 2
+                    self.assertEqual(config._use_mega_moe, use_mega_moe)
+                    self.assertEqual(config.enable_fused_mc2, int(supported) if use_mega_moe else int(mode))
+                    if use_mega_moe:
+                        mock_megamoe_supported.assert_called_once_with(vc)
+                    else:
+                        mock_megamoe_supported.assert_not_called()
+                    self.assertFalse(any(call.args == ("cann_ops_transformer",) for call in mock_find.call_args_list))
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

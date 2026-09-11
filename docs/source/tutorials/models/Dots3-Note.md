@@ -23,7 +23,7 @@ Dots3 Note supports the following features on vLLM-Ascend:
 | Model architecture | Dots3 Note MoE + MLA | MoE mixture of experts + multi-head latent attention |
 | Multimodal | audio + vision | Audio / vision encoders, enabled per form (see §5.1) |
 | MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (Model Runner V1 limitation) |
-| FusedMC2 | ✅ | Fused `dispatch_ffn_combine` / `mega_moe` operators for MoE (`--additional-config`) |
+| FusedMC2 | ✅ | `enable_fused_mc2=1` uses `dispatch_ffn_combine`; `enable_fused_mc2=2` opts into CANN `mega_moe` for testing, subject to supported configurations |
 | Prefix caching | ✅ | `--enable-prefix-caching`, reuses KV for similar prompts |
 
 > This chapter describes the validation scope and does not mean that all hardware and software version combinations are covered. When reproducing the results in this document, prefer the validation environment and component versions listed in Chapters 3–4.
@@ -415,7 +415,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | ACL graph captures only the decode stage, reducing capture peak memory |
 | `--compilation-config.cudagraph_capture_sizes` | text-only `[16]`; image `[16]`; audio `[4,8,16]` | Graph capture batch sizes; TP16 + sequence parallelism requires multiples of 16, and audio `[4,8]` are automatically removed at startup |
 | `--compilation-config.max_cudagraph_capture_size` | 16 (text-only / audio) | Maximum graph capture batch size, `= max_num_seqs × (1 + num_speculative_tokens) = 4 × 4` |
-| `--additional-config.enable_fused_mc2` | `1` | Enables FusedMC2 (fused `dispatch_ffn_combine` / `mega_moe` operators for MoE) |
+| `--additional-config.enable_fused_mc2` | `1` | Uses `dispatch_ffn_combine`; set to `2` to test CANN `mega_moe` with a supported configuration |
 
 ### 5.6 Service Verification
 

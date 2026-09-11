@@ -31,22 +31,6 @@ from vllm_ascend.config_utils import config
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_MEGA_MOE_SUPPORTED = None
-
-
-def is_mega_moe_supported() -> bool:
-    """Whether the megamoe op is available at runtime.
-
-    Always read _MEGA_MOE_SUPPORTED through this accessor instead of
-    ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
-    """
-    global _MEGA_MOE_SUPPORTED
-    if _MEGA_MOE_SUPPORTED is None:
-        _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-    return _MEGA_MOE_SUPPORTED
-
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
@@ -479,6 +463,8 @@ class AscendConfig:
     num_head_replica: int = 1
 
     # ---- private derived state (init=False) ----
+    # Preserve the user's MegaMoE opt-in after normalizing enable_fused_mc2=2 to 1.
+    _use_mega_moe: bool = dataclasses.field(default=False, init=False, repr=False)
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
@@ -495,12 +481,8 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
-        if self.enable_fused_mc2 in (0, 1):
-            # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+        self._use_mega_moe = self.enable_fused_mc2 == 2
+        if self._use_mega_moe:
             self.enable_fused_mc2 = 1
         return self
 
@@ -655,7 +637,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and self._use_mega_moe and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -1490,6 +1472,7 @@ def init_ascend_config(vllm_config):
         "pd_head_ratio",
         "num_head_replica",
         # private derived state (init=False, but listed for safety)
+        "_use_mega_moe",
         "_sparse_li_c8_layer_ids",
         "_sparse_li_c8_layer_names",
         "_sparse_li_c8_layer_filter_enabled",
