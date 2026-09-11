@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -271,7 +272,10 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         weak_ref_workspaces()
 
-    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
+    def _capture_budget_graph(self, token_budget: int, path: str = "default", axis_keys: tuple[Hashable, ...] = ()):
+        if axis_keys:
+            raise NotImplementedError("Encoder ACL graphs with capture axes are not supported.")
+
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
@@ -318,7 +322,11 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         mm_kwargs: dict[str, Any],
         token_budget: int,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] = (),
     ) -> torch.Tensor | None:
+        if axis_keys:
+            raise NotImplementedError("Encoder ACL graphs with capture axes are not supported.")
+
         num_items = len(self._get_item_specs(mm_kwargs))
         graph_set = self._get_graph_set(path)
         if token_budget not in graph_set:
