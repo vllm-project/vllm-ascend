@@ -1351,6 +1351,7 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    host_backend: Literal["memfabric", "mooncake"] = "memfabric"
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1358,6 +1359,15 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if self.enabled and self.host_backend == "mooncake":
+            if not self.use_fused_overlap:
+                raise ValueError("sparse_kv_offload_config.host_backend='mooncake' requires use_fused_overlap=true")
+            if self.keep_device_kv_cache:
+                raise ValueError(
+                    "sparse_kv_offload_config.host_backend='mooncake' is "
+                    "only supported for PD-disaggregated decode; "
+                    "keep_device_kv_cache must be false"
+                )
         return self
 
     @classmethod
