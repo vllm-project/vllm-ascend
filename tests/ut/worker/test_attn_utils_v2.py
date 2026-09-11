@@ -881,3 +881,113 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
         "pcp_context": pcp_context,
         "pcp_cache_group_idx": 0,
     }
+
+
+class _RecordingStateBuilder(_PrefillStateBuilder):
+    """Keeps the metadata object so a test can inspect what was published."""
+
+    def __init__(self):
+        super().__init__()
+        self.common_attn_metadata = None
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        self.common_attn_metadata = common_attn_metadata
+        return super().build(common_prefix_len, common_attn_metadata, **kwargs)
+
+
+def _build_draft_metadata(monkeypatch, *, approx_enabled):
+    """Run ``build_attn_metadata`` for a *draft* build (no ``seq_lens_np``)."""
+    monkeypatch.setattr(
+        attn_utils.envs_ascend,
+        "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV",
+        approx_enabled,
+        raising=False,
+    )
+    builder = _RecordingStateBuilder()
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0"],
+        get_metadata_builder=lambda _: builder,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    # The draft's true KV length is 5; the optimistic bound overstates it as 7
+    # because it assumes the previous step's draft was accepted in full.
+    attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+        max_seq_len=64,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        is_prefilling=torch.tensor([False]),
+        seq_lens_np=None,
+        seq_lens_cpu_upper_bound=torch.tensor([7], dtype=torch.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+    )
+    return builder.common_attn_metadata
+
+
+def test_draft_build_keeps_placeholder_mirror_when_approximation_is_off(monkeypatch):
+    """Default: a draft build must not claim any usable host mirror.
+
+    ``seq_lens_np`` is None, so the mirror is the ``max_seq_len`` placeholder --
+    not a sequence length at all. Both flags stay False so the attention builder
+    keeps paying the D2H copy. See issue #16271.
+    """
+    cad = _build_draft_metadata(monkeypatch, approx_enabled=False)
+
+    assert cad.seq_lens_cpu_is_exact is False
+    assert cad.seq_lens_cpu_is_approximate is False
+    assert cad.seq_lens_cpu.tolist() == [64]  # the placeholder, deliberately not 5 or 7
+
+
+def test_draft_build_publishes_the_optimistic_bound_when_opted_in(monkeypatch):
+    """VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1 swaps in the optimistic bound.
+
+    It is still not exact -- 7 rather than the true 5 -- so ``is_exact`` must
+    stay False; only the separate approximation flag is raised.
+    """
+    cad = _build_draft_metadata(monkeypatch, approx_enabled=True)
+
+    assert cad.seq_lens_cpu_is_exact is False
+    assert cad.seq_lens_cpu_is_approximate is True
+    assert cad.seq_lens_cpu.tolist() == [7]
+
+
+def test_target_build_is_unaffected_by_the_approximation_flag(monkeypatch):
+    """A target build has ``seq_lens_np`` and must stay exact either way."""
+    for approx_enabled in (False, True):
+        monkeypatch.setattr(
+            attn_utils.envs_ascend,
+            "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV",
+            approx_enabled,
+            raising=False,
+        )
+        builder = _RecordingStateBuilder()
+        attn_utils.build_attn_metadata(
+            attn_groups=[[SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)]],
+            num_reqs=1,
+            num_tokens=1,
+            query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+            max_query_len=1,
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            max_seq_len=64,
+            block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+            slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+            is_prefilling=torch.tensor([False]),
+            seq_lens_np=np.array([5], dtype=np.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([7], dtype=torch.int32),
+            positions=torch.tensor([0], dtype=torch.int64),
+        )
+        cad = builder.common_attn_metadata
+        assert cad.seq_lens_cpu_is_exact is True
+        assert cad.seq_lens_cpu_is_approximate is False
+        assert cad.seq_lens_cpu.tolist() == [5]

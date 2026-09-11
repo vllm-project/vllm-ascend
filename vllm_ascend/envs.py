@@ -87,6 +87,27 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Let a parallel-drafting (DFlash / DSpark) draft build take its KV lengths
+    # from the host-side optimistic bound instead of the device tensor.
+    # Default: 0 (disabled). Valid values: 0 or 1.
+    #
+    # This is an approximation and it is deliberately opt-in. The bound assumes
+    # every draft token of the previous step was accepted, so the draft attends
+    # over up to ``num_speculative_tokens`` stale KV positions. What that costs
+    # is draft *quality*, not correctness: the target model verifies every
+    # proposed token, and rejection sampling uses the same draft distribution
+    # in both the acceptance test and the recovery distribution, so the output
+    # distribution is unchanged for any draft.
+    #
+    # Measured on A2 / 8x910B4 (Qwen3.6-35B-A3B + DSpark, 8 speculative tokens,
+    # TP4+EP, model runner v2): 72 greedy completions were byte-for-byte
+    # identical to the unpatched baseline, mean acceptance length fell 6.4 %
+    # (1.5732 -> 1.4725, pooled over ~38k drafts per arm), and median
+    # inter-token latency at concurrency 8 went from 75.4 ms to 50.0 ms with
+    # output throughput 136.0 -> 179.8 tok/s. The throughput figure is already
+    # net of the extra decode steps the lower acceptance costs.
+    # See https://github.com/vllm-project/vllm-ascend/issues/16271
+    "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV": lambda: _strict_binary_env("VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV"),
 }
 
 # end-env-vars-definition

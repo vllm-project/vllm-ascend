@@ -266,6 +266,21 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # the previous behaviour. See issue #16271.
     seq_lens_cpu_is_exact: bool = False
 
+    # Set when a producer has deliberately published an *approximate* host
+    # mirror for a speculative draft build, under
+    # ``VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1``. The mirror is then the
+    # optimistic bound: it assumes every draft token of the previous step was
+    # accepted, so it can overstate the draft's KV extent by up to
+    # ``num_speculative_tokens``. The attention builder is allowed to use it
+    # instead of paying a blocking D2H copy.
+    #
+    # This is separate from ``seq_lens_cpu_is_exact`` on purpose -- that flag
+    # must keep meaning "equals the device tensor", so that anything needing a
+    # genuinely exact value can still tell the two apart. Reading a few stale
+    # KV positions costs draft quality (acceptance rate), not output
+    # correctness: the target verifies every token it emits. See issue #16271.
+    seq_lens_cpu_is_approximate: bool = False
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
@@ -315,6 +330,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
             seq_lens_cpu_is_exact=self.seq_lens_cpu_is_exact,
+            seq_lens_cpu_is_approximate=self.seq_lens_cpu_is_approximate,
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,

@@ -351,7 +351,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             # exact host mirror; only a *draft* build has to fall back to a D2H,
             # because its rejections are resolved on the device.
             seq_lens = common_attn_metadata.seq_lens
-            seq_lens_mirrored_on_host = common_attn_metadata.seq_lens_cpu_is_exact
+            # An approximate mirror is accepted here only because the producer
+            # opted in explicitly (VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV): the
+            # draft may then attend over a few stale KV positions, which costs
+            # acceptance rate but not output correctness.
+            seq_lens_mirrored_on_host = (
+                common_attn_metadata.seq_lens_cpu_is_exact
+                or common_attn_metadata.seq_lens_cpu_is_approximate
+            )
 
         attn_state = common_attn_metadata.attn_state
 

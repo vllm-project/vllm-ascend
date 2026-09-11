@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -225,9 +226,21 @@ def build_attn_metadata(
     # the placeholder below is not a sequence length and consumers must be told
     # not to trust it. See issue #16271.
     seq_lens_cpu_is_exact = seq_lens_np is not None
-    if seq_lens_np is None:
+    seq_lens_cpu_is_approximate = False
+    if seq_lens_np is not None:
+        seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+    elif envs_ascend.VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV and seq_lens_cpu_upper_bound is not None:
+        # Opt-in approximation for the draft build: publish the optimistic
+        # bound as the host mirror so the attention builder can skip the
+        # blocking D2H copy. The bound assumes the previous step's draft was
+        # accepted in full, so it can be up to ``num_speculative_tokens`` too
+        # long. That costs acceptance rate, not output correctness -- see the
+        # note on ``VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV`` in ``envs.py``.
+        seq_lens_cpu = seq_lens_cpu_upper_bound[:num_reqs]
+        seq_lens_cpu_is_approximate = True
+    else:
         seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
-    seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+        seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
@@ -270,6 +283,7 @@ def build_attn_metadata(
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
+            seq_lens_cpu_is_approximate=seq_lens_cpu_is_approximate,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,

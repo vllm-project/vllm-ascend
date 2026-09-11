@@ -177,7 +177,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
-    def _build_parallel_drafting_metadata(self, *, seq_lens_cpu_is_exact):
+    def _build_parallel_drafting_metadata(self, *, seq_lens_cpu_is_exact, seq_lens_cpu_is_approximate=False):
         """Run ``build`` for a parallel-drafting batch, recording every tolist.
 
         Returns ``(metadata, tolist_sources)``.
@@ -190,6 +190,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             seq_lens=seq_lens_device,
             seq_lens_cpu=seq_lens_cpu,
             seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
+            seq_lens_cpu_is_approximate=seq_lens_cpu_is_approximate,
             num_computed_tokens_cpu=None,
             num_reqs=3,
             num_actual_tokens=3,
@@ -251,6 +252,27 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     def test_seq_lens_cpu_is_exact_defaults_to_false(self):
         """Unaudited producers must keep the previous (device) behaviour."""
         self.assertFalse(AscendCommonAttentionMetadata.seq_lens_cpu_is_exact)
+
+    def test_parallel_drafting_accepts_an_approximate_mirror_when_opted_in(self):
+        """Draft build under VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1.
+
+        The mirror is only an optimistic bound, so it is *not* exact -- but the
+        producer has opted into the approximation, and the point of opting in is
+        to stop issuing the blocking ``.tolist()`` against the device tensor.
+        """
+        metadata, tolist_sources, seq_lens_device, seq_lens_cpu = self._build_parallel_drafting_metadata(
+            seq_lens_cpu_is_exact=False,
+            seq_lens_cpu_is_approximate=True,
+        )
+
+        self.assertIs(metadata.seq_lens, seq_lens_device)
+        self.assertEqual(metadata.seq_lens_list, [4, 5, 6])
+        self.assertFalse(any(src is seq_lens_device for src in tolist_sources))
+        self.assertTrue(any(src.data_ptr() == seq_lens_cpu.data_ptr() for src in tolist_sources))
+
+    def test_seq_lens_cpu_is_approximate_defaults_to_false(self):
+        """The approximation must never be on unless a producer asked for it."""
+        self.assertFalse(AscendCommonAttentionMetadata.seq_lens_cpu_is_approximate)
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
