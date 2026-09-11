@@ -84,7 +84,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
-| `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
+| `mega_moe_max_tokens`               | int  | `6144` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable FlashComm1 optimization. Can also be configured via the `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable during the migration period. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. Can also be configured via the `MSMONITOR_USE_DAEMON` environment variable during the migration period. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
@@ -96,6 +96,60 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. |
+
+### Fused MC2 / MegaMoe prefill capacity
+
+`enable_fused_mc2` and `enable_prefill_mc2` control different behaviors:
+
+- `enable_fused_mc2=1` selects the fused MC2 path (`dispatch_ffn_combine` or MegaMoe).
+- `enable_prefill_mc2=true` sizes the MC2/MegaMoe token capacity from
+  `max_num_batched_tokens` instead of the decode-only ACL graph capacity. It
+  does not enable MegaMoe by itself.
+
+Enable `enable_prefill_mc2` when the fused path can process prefill or startup
+profiling batches larger than the decode-only capacity. Otherwise, the
+MegaMoe symmetric buffer can be initialized too small and CANN may fail during
+tiling with an error similar to:
+
+```text
+num_max_tokens_per_rank is invalid, should be >= bs(512), but got 16
+```
+
+For example, with `max_num_batched_tokens=8192`, TP=16, and a maximum decode
+graph size of 256:
+
+- decode-only sizing reserves `256 / 16 = 16` tokens per rank;
+- prefill sizing reserves `8192 / 16 = 512` tokens per rank.
+
+The second value is required if the startup profile or prefill forward passes
+512 tokens per rank. Keep `max_num_batched_tokens` no larger than
+`tp_size * 512`, as recommended for prefill MC2.
+
+```bash
+vllm serve <model> \
+  --tensor-parallel-size 16 \
+  --max-num-batched-tokens 8192 \
+  --enable-expert-parallel \
+  --additional-config \
+  '{"enable_fused_mc2":1,"enable_prefill_mc2":true,"multistream_overlap_shared_expert":false}'
+```
+
+When fused MC2 is disabled and the prefill batch exceeds the decode-only MC2
+capacity, the normal communication selector can fall back to AlltoAll instead
+of producing this MegaMoe buffer error. Therefore, `enable_prefill_mc2=false`
+does not necessarily fail when `enable_fused_mc2=0`; it means prefill MC2 is
+not reserved.
+
+Fused MC2 and `multistream_overlap_shared_expert` are mutually exclusive. The
+fused operator owns the dispatch, expert FFN, and combine schedule and does not
+expose the intermediate events required by shared-expert multi-stream overlap.
+When both are requested, vLLM Ascend keeps fused MC2 enabled and forces
+`multistream_overlap_shared_expert` to `false`.
+
+For PD disaggregation, enable prefill MC2 on P nodes that use fused MC2. It is
+normally unnecessary on D-only nodes, unless their startup/profile path also
+executes prefill-sized MegaMoe batches. Use identical capacity-related settings
+on every rank in the same distributed P or D group.
 
 The details of each configuration option are as follows:
 
