@@ -37,13 +37,7 @@ FILL_THRESHOLD = -1.0e30
 def _load_golden_module():
     repo_root = Path(__file__).resolve().parents[6]
     golden_path = (
-        repo_root
-        / "csrc"
-        / "attention"
-        / "msa_index_score"
-        / "tests"
-        / "golden"
-        / "msa_index_score_golden.py"
+        repo_root / "csrc" / "attention" / "msa_index_score" / "tests" / "golden" / "msa_index_score_golden.py"
     )
     spec = spec_from_file_location("msa_index_score_golden", golden_path)
     assert spec is not None and spec.loader is not None
@@ -70,14 +64,9 @@ def _is_ascend_950() -> bool:
         return False
 
 
-def _discrete_random(
-    shape: tuple[int, ...], generator: torch.Generator
-) -> torch.Tensor:
+def _discrete_random(shape: tuple[int, ...], generator: torch.Generator) -> torch.Tensor:
     # Binary fractions keep independent CPU and NPU reductions deterministic.
-    return (
-        torch.randint(-8, 9, shape, generator=generator, dtype=torch.int32).float()
-        / 8.0
-    )
+    return torch.randint(-8, 9, shape, generator=generator, dtype=torch.int32).float() / 8.0
 
 
 def _run_case(
@@ -99,17 +88,13 @@ def _run_case(
     num_pages = max(required_blocks + 3, 4)
 
     query_values = _discrete_random((total_q, num_heads, head_dim), generator)
-    logical_key_values = _discrete_random(
-        (num_pages, BLOCK_SIZE, 1, head_dim), generator
-    )
+    logical_key_values = _discrete_random((num_pages, BLOCK_SIZE, 1, head_dim), generator)
 
     block_table = torch.zeros((len(q_lens), table_width), dtype=torch.int32)
     for batch_id, kv_len in enumerate(kv_lens):
         num_blocks = math.ceil(kv_len / BLOCK_SIZE)
         if num_blocks:
-            block_table[batch_id, :num_blocks] = torch.randperm(
-                num_pages, generator=generator
-            )[:num_blocks].int()
+            block_table[batch_id, :num_blocks] = torch.randperm(num_pages, generator=generator)[:num_blocks].int()
 
     base_dtype = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
     query = query_values.to(base_dtype).npu()
@@ -191,19 +176,11 @@ def _run_case(
     [
         pytest.param(torch.float16, (32, 17), (300, 130), 8, 1, id="fp16-prefill"),
         pytest.param(torch.bfloat16, (32, 17), (300, 130), 8, 1, id="bf16-prefill"),
-        pytest.param(
-            torch.bfloat16, (32, 17), (300, 130), 8, 2, id="bf16-strided-page-axis"
-        ),
+        pytest.param(torch.bfloat16, (32, 17), (300, 130), 8, 2, id="bf16-strided-page-axis"),
         pytest.param(torch.float8_e4m3fn, (32, 17), (300, 130), 8, 1, id="fp8-prefill"),
-        pytest.param(
-            torch.float8_e4m3fn, (32, 17), (300, 130), 8, 2, id="fp8-strided-page-axis"
-        ),
-        pytest.param(
-            torch.float8_e4m3fn, (1, 1, 1, 1), (900, 512, 129, 1), 8, 1, id="fp8-decode"
-        ),
-        pytest.param(
-            torch.float8_e4m3fn, (2,), (5,), 257, 1, id="fp8-wide-block-table"
-        ),
+        pytest.param(torch.float8_e4m3fn, (32, 17), (300, 130), 8, 2, id="fp8-strided-page-axis"),
+        pytest.param(torch.float8_e4m3fn, (1, 1, 1, 1), (900, 512, 129, 1), 8, 1, id="fp8-decode"),
+        pytest.param(torch.float8_e4m3fn, (2,), (5,), 257, 1, id="fp8-wide-block-table"),
     ],
 )
 @torch.inference_mode()
