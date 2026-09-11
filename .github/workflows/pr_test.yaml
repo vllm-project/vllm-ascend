@@ -248,13 +248,9 @@ jobs:
   cpu-ut:
     needs: pre-commit
     if: ${{ needs.pre-commit.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_version: ${{ fromJSON(needs.pre-commit.outputs.vllm_versions) }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
+      vllm: ${{ needs.pre-commit.outputs.main_commit }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-

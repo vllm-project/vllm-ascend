@@ -111,10 +111,20 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
                 + virtual_offsets % cp_interleave
             )
             ref_compute_slot_mappings_kernel[(1, idx_mapping.shape[0] + 1)](
-                max_num_tokens, idx_mapping, query_start_loc, local_positions,
-                block_table_ptrs[group_id:], block_table_strides[group_id:], kernel_block_sizes[group_id:],
-                ref_slot_mappings[group_id:], ref_slot_mappings.stride(0), 0,
-                CP_SIZE=1, CP_INTERLEAVE=1, PAD_ID=-1, TRITON_BLOCK_SIZE=1024,
+                max_num_tokens,
+                idx_mapping,
+                query_start_loc,
+                local_positions,
+                block_table_ptrs[group_id:],
+                block_table_strides[group_id:],
+                kernel_block_sizes[group_id:],
+                ref_slot_mappings[group_id:],
+                ref_slot_mappings.stride(0),
+                0,
+                CP_SIZE=1,
+                CP_INTERLEAVE=1,
+                PAD_ID=-1,
+                TRITON_BLOCK_SIZE=1024,
             )
             ref_slot_mappings[group_id, : positions.numel()].masked_fill_(~is_local, -1)
     else:
