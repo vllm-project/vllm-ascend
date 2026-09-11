@@ -489,7 +489,17 @@ class DeepseekV4MoE(nn.Module):
             fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_input)
         else:
             # router_logits: (num_tokens, n_experts)
-            router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
+            router_input = (
+                hidden_states_fp32
+                if hidden_states_fp32 is not None
+                else (
+                    torch.ops._C_ascend.npu_static_cast(
+                        hidden_states, "bfloat16", "float32"
+                    )
+                    if hidden_states.dtype == torch.bfloat16
+                    else hidden_states.float()
+                )
+            )
             router_logits = F.linear(router_input, self.gate.weight)
             fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 

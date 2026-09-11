@@ -59,6 +59,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -1583,6 +1584,91 @@ at::Tensor npu_hc_pre_inv_rms_npu(const at::Tensor& x, double epsilon=1e-20)
     return yOut;
 }
 
+int64_t check_bf16_to_fp32_static_cast_input(const at::Tensor& x)
+{
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1,
+                "bf16_to_fp32_static_cast expects an NPU tensor.");
+    TORCH_CHECK(x.dtype() == at::kBFloat16,
+                "bf16_to_fp32_static_cast expects a BF16 input.");
+    TORCH_CHECK(x.is_contiguous(),
+                "bf16_to_fp32_static_cast expects a contiguous input.");
+
+    int64_t elementNum = 1;
+    for (const int64_t dim : x.sizes()) {
+        TORCH_CHECK(dim >= 1,
+                    "bf16_to_fp32_static_cast requires positive dimensions.");
+        TORCH_CHECK(elementNum <= std::numeric_limits<int64_t>::max() / dim,
+                    "bf16_to_fp32_static_cast input numel overflows int64.");
+        elementNum *= dim;
+    }
+    return elementNum;
+}
+
+at::Tensor npu_bf16_to_fp32_static_cast_npu(const at::Tensor& x)
+{
+    (void)check_bf16_to_fp32_static_cast_input(x);
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options().dtype(at::kFloat));
+    EXEC_NPU_CMD(aclnnBf16ToFp32StaticCast, x, y);
+    return y;
+}
+
+at::Tensor npu_fp32_to_fp16_static_cast_npu(const at::Tensor& x)
+{
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1 && x.dtype() == at::kFloat &&
+                    x.is_contiguous(),
+                "fp32_to_fp16_static_cast expects a contiguous FP32 NPU tensor.");
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options().dtype(at::kHalf));
+    EXEC_NPU_CMD(aclnnFp32ToFp16StaticCast, x, y);
+    return y;
+}
+
+at::Tensor npu_bf16_to_fp16_static_cast_npu(const at::Tensor& x)
+{
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1 && x.dtype() == at::kBFloat16 &&
+                    x.is_contiguous(),
+                "bf16_to_fp16_static_cast expects a contiguous BF16 NPU tensor.");
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options().dtype(at::kHalf));
+    EXEC_NPU_CMD(aclnnBf16ToFp16StaticCast, x, y);
+    return y;
+}
+
+at::Tensor npu_static_cast_npu(
+    const at::Tensor& x,
+    c10::string_view input_dtype,
+    c10::string_view output_dtype)
+{
+    TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1 && x.is_contiguous(),
+                "npu_static_cast expects a contiguous NPU tensor.");
+
+    if (input_dtype == "bfloat16" && output_dtype == "float32") {
+        TORCH_CHECK(x.dtype() == at::kBFloat16,
+                    "npu_static_cast input_dtype=bfloat16 does not match tensor dtype.");
+        return npu_bf16_to_fp32_static_cast_npu(x);
+    }
+    if (input_dtype == "float32" && output_dtype == "bfloat16") {
+        TORCH_CHECK(x.dtype() == at::kFloat,
+                    "npu_static_cast input_dtype=float32 does not match tensor dtype.");
+        at::Tensor y = at::empty_symint(x.sym_sizes(), x.options().dtype(at::kBFloat16));
+        EXEC_NPU_CMD(aclnnFp32ToBf16StaticCast, x, y);
+        return y;
+    }
+    if (input_dtype == "float32" && output_dtype == "float16") {
+        TORCH_CHECK(x.dtype() == at::kFloat,
+                    "npu_static_cast input_dtype=float32 does not match tensor dtype.");
+        return npu_fp32_to_fp16_static_cast_npu(x);
+    }
+    if (input_dtype == "bfloat16" && output_dtype == "float16") {
+        TORCH_CHECK(x.dtype() == at::kBFloat16,
+                    "npu_static_cast input_dtype=bfloat16 does not match tensor dtype.");
+        return npu_bf16_to_fp16_static_cast_npu(x);
+    }
+    TORCH_CHECK(
+        false,
+        "npu_static_cast supports only bfloat16->float32, float32->bfloat16, "
+        "float32->float16, and bfloat16->float16.");
+    return at::Tensor();
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
 {
     auto xDims = x.dim();
@@ -3076,6 +3162,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor out)"
         );
     ops.impl("npu_hc_pre_inv_rms", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_inv_rms_npu);
+
+    ops.def("npu_static_cast(Tensor x, str input_dtype, str output_dtype) -> Tensor");
+    ops.impl("npu_static_cast", torch::kPrivateUse1, &vllm_ascend::npu_static_cast_npu);
 
     ops.def(
         "npu_hc_pre_sinkhorn("

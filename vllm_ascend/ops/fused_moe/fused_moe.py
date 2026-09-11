@@ -978,7 +978,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # increase with extra hidden states. We also assume that all gate
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
-            hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
+            if router_logits.dtype == torch.float32:
+                hidden_states_fp32 = router_logits
+            elif shared_hidden_states.dtype == torch.bfloat16:
+                hidden_states_fp32 = torch.ops._C_ascend.npu_static_cast(
+                    shared_hidden_states, "bfloat16", "float32"
+                )
+            else:
+                hidden_states_fp32 = shared_hidden_states.float()
             before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
