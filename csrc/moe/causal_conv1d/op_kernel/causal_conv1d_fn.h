@@ -21,7 +21,8 @@
  public:
      __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates, GM_ADDR queryStartLoc,
                                  GM_ADDR cacheIndices, GM_ADDR initialStateMode, GM_ADDR numAcceptedTokens, GM_ADDR y,
-                                 GM_ADDR workspace, const CausalConv1dTilingData *tilingData)
+                                 GM_ADDR y_q, GM_ADDR y_k, GM_ADDR y_v, GM_ADDR workspace,
+                                 const CausalConv1dTilingData *tilingData)
      {
          (void)numAcceptedTokens;
          this->ResetRuntimeState(tilingData);
@@ -53,6 +54,11 @@
              }
          }
          this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
+         if (tilingData->split_qkv != 0) {
+             this->yQGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_q));
+             this->yKGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_k));
+             this->yVGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_v));
+         }
          if (tilingData->hasInitStateWorkspace != 0) {
              const uint64_t syncElems =
                  static_cast<uint64_t>(GetBlockNum()) * INIT_STATE_SYNCALL_NEED_SIZE;
@@ -79,12 +85,12 @@
  template <typename T, uint32_t widthKey, uint32_t fnPlanKey>
  __aicore__ inline void RunCausalConv1dFn(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                           GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
-                                          GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                          const CausalConv1dTilingData *tilingData)
+                                          GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR y_q, GM_ADDR y_k, GM_ADDR y_v,
+                                          GM_ADDR workspace, const CausalConv1dTilingData *tilingData)
  {
      CausalConv1dFn<T, widthKey, fnPlanKey> op;
-     op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
-             tilingData);
+     op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, y_q, y_k,
+             y_v, workspace, tilingData);
      op.Process();
  }
  

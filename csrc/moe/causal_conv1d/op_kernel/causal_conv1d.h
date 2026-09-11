@@ -166,6 +166,7 @@
      __aicore__ inline const CausalConv1dTilingData *GetTilingData() const;
      __aicore__ inline bool HasActivation() const;
      __aicore__ inline bool HasBias() const;
+     __aicore__ inline bool IsSplitQkv() const;
      __aicore__ inline bool IsUpdateMode() const;
      __aicore__ inline bool IsFnRollingFastPathEnabled() const;
      __aicore__ inline bool HasExplicitFnTokenSeqRanges() const;
@@ -209,6 +210,10 @@
      GlobalTensor<int32_t> numAcceptedTokensGmInt32;
      GlobalTensor<int64_t> numAcceptedTokensGmInt64;
      GlobalTensor<T> yGm;
+     // P2: split-write output buffers (bound only when tilingData_->split_qkv != 0).
+     GlobalTensor<T> yQGm;
+     GlobalTensor<T> yKGm;
+     GlobalTensor<T> yVGm;
      GlobalTensor<int32_t> initStateSyncGm_;
      GlobalTensor<T> initStateWorkspaceGm_;
  
@@ -475,7 +480,34 @@
  
          const int64_t outOffset = static_cast<int64_t>(start + t) * dim + channelStart;
          WaitFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
-         DataCopy(yGm[outOffset], outSlotT, baseDim);
+         if (IsSplitQkv()) {
+             // P2: demux the channel tile [channelStart, channelStart+baseDim) of the
+             // merged [N, dim] output into the q/k/v thirds (each [N, dim/3]) written
+             // to yQGm/yKGm/yVGm. dim is 3*C with C 16-aligned (host guard), so every
+             // sub-range here is 16-aligned.
+             const int32_t thirdBase = dim / 3;
+             for (int32_t third = 0; third < 3; ++third) {
+                 const int32_t thirdLo = third * thirdBase;
+                 const int32_t thirdHi = thirdLo + thirdBase;
+                 const int32_t ovLo = (channelStart > thirdLo) ? channelStart : thirdLo;
+                 const int32_t ovHi = ((channelStart + baseDim) < thirdHi) ? (channelStart + baseDim) : thirdHi;
+                 if (ovLo >= ovHi) {
+                     continue;
+                 }
+                 const int32_t srcOff = ovLo - channelStart;
+                 const int32_t subLen = ovHi - ovLo;
+                 const int64_t dstOff = static_cast<int64_t>(start + t) * thirdBase + (ovLo - thirdLo);
+                 if (third == 0) {
+                     DataCopy(yQGm[dstOff], outSlotT[srcOff], subLen);
+                 } else if (third == 1) {
+                     DataCopy(yKGm[dstOff], outSlotT[srcOff], subLen);
+                 } else {
+                     DataCopy(yVGm[dstOff], outSlotT[srcOff], subLen);
+                 }
+             }
+         } else {
+             DataCopy(yGm[outOffset], outSlotT, baseDim);
+         }
          if (t + 2 < len) {
              SetFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
          }
@@ -693,7 +725,34 @@
  
          const int64_t outOffset = static_cast<int64_t>(start + t) * dim + channelStart;
          WaitFlag<HardEvent::V_MTE3>(outVToMte3Event_[outSlot]);
-         DataCopy(yGm[outOffset], outSlotT, baseDim);
+         if (IsSplitQkv()) {
+             // P2: demux the channel tile [channelStart, channelStart+baseDim) of the
+             // merged [N, dim] output into the q/k/v thirds (each [N, dim/3]) written
+             // to yQGm/yKGm/yVGm. dim is 3*C with C 16-aligned (host guard), so every
+             // sub-range here is 16-aligned.
+             const int32_t thirdBase = dim / 3;
+             for (int32_t third = 0; third < 3; ++third) {
+                 const int32_t thirdLo = third * thirdBase;
+                 const int32_t thirdHi = thirdLo + thirdBase;
+                 const int32_t ovLo = (channelStart > thirdLo) ? channelStart : thirdLo;
+                 const int32_t ovHi = ((channelStart + baseDim) < thirdHi) ? (channelStart + baseDim) : thirdHi;
+                 if (ovLo >= ovHi) {
+                     continue;
+                 }
+                 const int32_t srcOff = ovLo - channelStart;
+                 const int32_t subLen = ovHi - ovLo;
+                 const int64_t dstOff = static_cast<int64_t>(start + t) * thirdBase + (ovLo - thirdLo);
+                 if (third == 0) {
+                     DataCopy(yQGm[dstOff], outSlotT[srcOff], subLen);
+                 } else if (third == 1) {
+                     DataCopy(yKGm[dstOff], outSlotT[srcOff], subLen);
+                 } else {
+                     DataCopy(yVGm[dstOff], outSlotT[srcOff], subLen);
+                 }
+             }
+         } else {
+             DataCopy(yGm[outOffset], outSlotT, baseDim);
+         }
          if (t + 2 < len) {
              SetFlag<HardEvent::MTE3_V>(outMte3ToVEvent_[outSlot]);
          }
@@ -1050,6 +1109,14 @@
  __aicore__ inline bool CAUSAL_CONV1D_CLASS::HasBias() const
  {
      return (tilingData_ != nullptr) && (tilingData_->hasBias != 0);
+ }
+
+ // P2: when true, the output write demuxes each channel tile into y_q/y_k/y_v
+ // (each [N, dim/3]) instead of a merged [N, dim] y.
+ template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool CAUSAL_CONV1D_CLASS::IsSplitQkv() const
+ {
+     return (tilingData_ != nullptr) && (tilingData_->split_qkv != 0);
  }
  
  template <CAUSAL_CONV1D_TEMPLATE_ARGS>

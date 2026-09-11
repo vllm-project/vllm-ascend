@@ -60,6 +60,11 @@
      attrInfo.runMode = (runModePtr == nullptr) ? 0 : *runModePtr;
      OP_CHECK_IF(attrInfo.runMode != 0 && attrInfo.runMode != 1, OP_LOGE(context, "runMode only supports 0/1"),
                  return ge::GRAPH_FAILED);
+
+     // P2: split_qkv attr (Bool, optional, default false). When true the kernel writes
+     // q/k/v into y_q/y_k/y_v instead of a merged y.
+     const bool *splitQkvPtr = attrs->GetAttrPointer<bool>(IDX_ATTR_SPLIT_QKV);
+     attrInfo.split_qkv = (splitQkvPtr == nullptr) ? false : *splitQkvPtr;
      return ge::GRAPH_SUCCESS;
  }
  
@@ -81,6 +86,7 @@
      const bool isDecodeMode = (attrInfo.runMode == 1);
      tiling.activationMode = attrInfo.activationMode;
      tiling.padSlotId = attrInfo.padSlotId;
+     tiling.split_qkv = attrInfo.split_qkv ? 1 : 0;
  
      auto xShapePtr = context->GetInputShape(X_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, xShapePtr);
@@ -124,6 +130,18 @@
      OP_CHECK_IF(ValidateAlignedDim(context, dim) != ge::GRAPH_SUCCESS,
                  OP_LOGE(context, "dim alignment validation failed"),
                  return ge::GRAPH_FAILED);
+
+     // P2: when split_qkv is enabled, dim must be 3*C with C itself 16-aligned so the
+     // per-third sub-range DataCopys stay 16-aligned (Ascend MTE3 requirement).
+     if (attrInfo.split_qkv) {
+         OP_CHECK_IF(dim % 3 != 0,
+                     OP_LOGE(context, "split_qkv requires dim %% 3 == 0 (dim=%ld)", dim),
+                     return ge::GRAPH_FAILED);
+         OP_CHECK_IF((dim / 3) % DIM_ALIGN_ELEMS != 0,
+                     OP_LOGE(context, "split_qkv requires (dim/3) %% %ld == 0 (dim=%ld)",
+                             DIM_ALIGN_ELEMS, dim),
+                     return ge::GRAPH_FAILED);
+     }
  
      auto wShapePtr = context->GetInputShape(WEIGHT_INDEX);
      OP_CHECK_NULL_WITH_CONTEXT(context, wShapePtr);

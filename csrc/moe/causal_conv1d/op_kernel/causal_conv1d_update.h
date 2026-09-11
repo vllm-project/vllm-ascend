@@ -22,7 +22,8 @@ class CausalConv1dUpdate
                           CAUSAL_CONV1D_TPL_FN_PLAN_INVALID> {
 public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates, GM_ADDR queryStartLoc,
-                                GM_ADDR cacheIndices, GM_ADDR, GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
+                                GM_ADDR cacheIndices, GM_ADDR, GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR y_q,
+                                GM_ADDR y_k, GM_ADDR y_v, GM_ADDR workspace,
                                 const CausalConv1dTilingData *tilingData)
     {
         (void)workspace;
@@ -53,6 +54,11 @@ public:
             }
         }
         this->yGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y));
+        if (tilingData->split_qkv != 0) {
+            this->yQGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_q));
+            this->yKGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_k));
+            this->yVGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(y_v));
+        }
         this->InitSharedBuffersAndEvents();
     }
 
@@ -77,12 +83,12 @@ public:
 template <typename T>
 __aicore__ inline void RunCausalConv1dUpdate(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                              GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
-                                             GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                             const CausalConv1dTilingData *tilingData)
+                                             GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR y_q, GM_ADDR y_k, GM_ADDR y_v,
+                                             GM_ADDR workspace, const CausalConv1dTilingData *tilingData)
 {
     CausalConv1dUpdate<T> op;
-    op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
-            tilingData);
+    op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, y_q, y_k,
+            y_v, workspace, tilingData);
     op.Process();
 }
 
