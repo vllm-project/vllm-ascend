@@ -151,6 +151,32 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             return self.attn_groups
         return self.target_attn_groups
 
+    def _refresh_replicated_prefill_mappings(
+        self,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+    ) -> torch.Tensor | None:
+        """Refresh the persistent cache mappings used by replicated drafts."""
+        input_batch = self.input_batch
+        if not self.replicated_pcp or input_batch is None:
+            return None
+
+        assert isinstance(input_batch, AscendInputBatch)
+        if input_batch.is_dummy:
+            return None
+
+        # Omitting out updates the default buffers bound by draft graph capture.
+        self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=num_reqs_padded,
+        )
+        return self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            num_tokens_padded=num_tokens_padded,
+        )
+
     def _prepare_replicated_prefill_attn(
         self,
         attn_metadata: dict[str, Any] | None,
@@ -162,24 +188,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         dict[str, torch.Tensor] | None,
     ]:
         """Rebuild global draft prefill state for replicated PCP."""
+        if attn_metadata is None:
+            return attn_metadata, slot_mappings
+
+        slot_mappings_tensor = self._refresh_replicated_prefill_mappings(num_reqs_padded, num_tokens_padded)
+        if slot_mappings_tensor is None:
+            return attn_metadata, slot_mappings
+
         input_batch = self.input_batch
-        if not self.replicated_pcp or attn_metadata is None or input_batch is None:
-            return attn_metadata, slot_mappings
-
-        assert isinstance(input_batch, AscendInputBatch)
-        if input_batch.is_dummy:
-            return attn_metadata, slot_mappings
-
-        self.block_tables.gather_block_tables(
-            input_batch.idx_mapping,
-            num_reqs_padded=num_reqs_padded,
-        )
-        slot_mappings_tensor = self.block_tables.compute_slot_mappings(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            num_tokens_padded=num_tokens_padded,
-        )
+        assert input_batch is not None
         slot_mappings = build_slot_mappings_by_layer(
             slot_mappings_tensor,
             self.kv_cache_config,
@@ -505,6 +522,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 )
                 assert prepared_attn_metadata is not None
                 attn_metadata = prepared_attn_metadata
+            else:
+                self._refresh_replicated_prefill_mappings(num_reqs_padded, num_tokens_padded)
             return [attn_metadata]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
