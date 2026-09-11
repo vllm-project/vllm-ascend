@@ -93,6 +93,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         c8_k_cache_dtype = torch.int8
         c8_k_scale_cache_dtype = torch.float16
 
+    ascend_config = get_ascend_config()
+    if ascend_config.enable_sparse_li_c4:
+        c4_k_cache_dtype = torch.uint8
+        c4_k_scale_cache_dtype = torch.float8_e8m0fnu
+
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
@@ -133,21 +138,25 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
-            cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
+            cache_sparse_li_c8 = ascend_config.is_sparse_li_c8_layer(layer_name)
+            cache_sparse_li_c4 = ascend_config.is_sparse_li_c4_layer(layer_name)
+            head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
-                head_size=vllm_config.model_config.hf_text_config.index_head_dim,
-                dtype=c8_k_cache_dtype
-                if cache_sparse_li_c8
+                head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
+                dtype=c4_k_cache_dtype if cache_sparse_li_c4
+                else c8_k_cache_dtype if cache_sparse_li_c8
                 else get_kv_cache_torch_dtype(
                     vllm_config.cache_config.cache_dtype,
                     vllm_config.model_config.dtype,
                 ),
                 cache_dtype_str=vllm_config.cache_config.cache_dtype,
-                scale_dim=1 if cache_sparse_li_c8 else 0,
-                scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
-                cache_sparse_li_c8=cache_sparse_li_c8,
+                scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                scale_dtype=c4_k_scale_cache_dtype if cache_sparse_li_c4
+                else c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                li_quant_mode="cache_sparse_li_c4" if cache_sparse_li_c4
+                else "cache_sparse_li_c8" if cache_sparse_li_c8 else "",
                 sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
             )
             continue
@@ -1019,6 +1028,9 @@ def _reshape_kv_cache_v2(
                         group_spec.num_kv_heads,
                         group_spec.scale_dim,
                     )
+                    if group_spec.li_quant_mode == "cache_sparse_li_c4":
+                        indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1],
+                            group_spec.head_size * 2 // 64, 2)
                     indexer_scale_cache = raw_scale_tensor.view(group_spec.scale_dtype).view(indexer_scale_cache_shape)
                     kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
 

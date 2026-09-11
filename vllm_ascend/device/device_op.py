@@ -327,6 +327,7 @@ class BaseDeviceAdaptor:
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
@@ -335,7 +336,9 @@ class BaseDeviceAdaptor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
 
-        if enable_sparse_li_c8:
+        if enable_sparse_li_c4:
+            raise RuntimeError("C4 lightning indexer is only supported on A5 devices.")
+        elif enable_sparse_li_c8:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
             assert q_li_scale is not None
@@ -1282,52 +1285,77 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
+        enable_sparse_li_c4: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
 
-        if enable_sparse_li_c8:
+        if enable_sparse_li_c4:
+            assert len(kv_cache) == 2
+            assert q_li_shape_ori is not None
+            assert q_li_scale is not None
+
+            key_dequant_scale = kv_cache[indexer_scale_cache_idx]
+            weights_c4 = weights.to(torch.float32)
+            cu_seqlens_q = torch.cat([
+                torch.zeros(1, dtype=actual_seq_lengths_query.dtype,
+                            device=actual_seq_lengths_query.device),
+                actual_seq_lengths_query,
+            ])
+            seqused_k = actual_seq_lengths_key
+            num_heads_q = q_li_shape_ori[1]
+            head_dim = q_li_shape_ori[-1]
+            batch_size = seqused_k.shape[0]
+
+            import vllm_ascend.vllm_ascend_C  # noqa: F401, PLC0415
+
+            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                num_heads_q=num_heads_q, num_heads_k=1, head_dim=head_dim,
+                topk=2048, quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
+                batch_size=batch_size, max_seqlen_q=-1, max_seqlen_k=-1,
+                layout_q="TND", layout_k="PA_BBND",
+                mask_mode=3, cmp_ratio=1, device=str(q_li.device),
+            )
+            q_li_packed_shape = (*q_li_shape_ori[:-1], q_li_shape_ori[-1] // 2)
+            sparse_indices, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+                q_li.view(q_li_packed_shape), kv_cache[indexer_cache_idx], weights_c4,
+                q_li_scale, key_dequant_scale,
+                topk=2048, quant_mode=5,
+                cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
+                block_table=attn_metadata.block_table, metadata=metadata,
+                max_seqlen_q=-1, layout_q="TND", layout_k="PA_BBND",
+                mask_mode=3, cmp_ratio=1, return_value=0,
+            )
+            topk_indices = sparse_indices
+        elif enable_sparse_li_c8:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
             assert q_li_shape_ori is not None
 
-            if q_li_scale is not None:
-                q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
-                key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
+            q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
+            key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
 
-                topk_indices = torch_npu.npu_quant_lightning_indexer(
-                    query=q_li.view(q_li_shape_ori),
-                    key=kv_cache[indexer_cache_idx],
-                    weights=weights,
-                    query_dequant_scale=q_li_scale,
-                    key_dequant_scale=key_dequant_scale,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table,
-                    query_quant_mode=0,
-                    key_quant_mode=0,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=2048,
-                    sparse_mode=3,
-                )
-            else:
-                topk_indices, _ = torch_npu.npu_lightning_indexer(
-                    query=q_li.view(q_li_shape_ori),
-                    key=kv_cache[indexer_cache_idx],
-                    weights=weights,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                    actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table,
-                    layout_query="TND",
-                    layout_key="PA_BSND",
-                    sparse_count=2048,
-                    sparse_mode=3,
-                )
+            topk_indices = torch_npu.npu_quant_lightning_indexer(
+                query=q_li.view(q_li_shape_ori),
+                key=kv_cache[indexer_cache_idx],
+                weights=weights,
+                query_dequant_scale=q_li_scale,
+                key_dequant_scale=key_dequant_scale,
+                actual_seq_lengths_query=actual_seq_lengths_query,
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=attn_metadata.block_table,
+                query_quant_mode=0,
+                key_quant_mode=0,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=2048,
+                sparse_mode=3,
+            )
         else:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
-                query=q_li,
+                query=q_li.view(q_li_shape_ori) if q_li_shape_ori is not None else q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query,
