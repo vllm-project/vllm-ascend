@@ -1103,6 +1103,8 @@ def _mock_kv_connector(*, matched=(0, False), offload=False):
     connector.get_num_new_matched_tokens.return_value = matched
     connector.get_num_new_matched_tokens.side_effect = None
     connector.update_state_before_preempt.return_value = offload
+    connector.request_finished.return_value = (False, None)
+    connector.request_finished_all_groups.return_value = (False, None)
     connector.ensure_cache_available.return_value = True
     connector.build_connector_meta.return_value = "meta"
     connector.get_kv_connector_stats.return_value = None
