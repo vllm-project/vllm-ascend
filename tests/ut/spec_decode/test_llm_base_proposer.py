@@ -46,6 +46,30 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
+def test_query_start_loc_arange_expands_to_required_capacity():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 2
+    proposer.max_num_tokens = 4
+    proposer.arange = torch.arange(4, dtype=torch.int64)
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange.dtype == torch.int64
+    assert torch.equal(proposer.arange, torch.arange(5, dtype=torch.int64))
+
+
+def test_query_start_loc_arange_keeps_sufficient_buffer():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 4
+    proposer.max_num_tokens = 2
+    arange = torch.arange(5, dtype=torch.int32)
+    proposer.arange = arange
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange is arange
+
+
 class TestMultimodalImageTokenIndex:
     @pytest.mark.parametrize(
         "model_name",
