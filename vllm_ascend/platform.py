@@ -532,25 +532,35 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        # A configured dump path keeps direct Dynamo modes enabled for FX graph
-        # collection.  VLLM_DEBUG_DUMP_PATH overrides the config field later in
-        # VllmConfig.compile_debug_dump_path(), so account for it here before
-        # the Ascend compatibility pass has a chance to erase the compile mode.
+        # Keep direct Dynamo modes for FX graph capture when an external
+        # prefill backend is selected:
+        #   - VLLM_ASCEND_ENABLE_FXRT_BACKEND=1: vLLM wraps the configured
+        #     backend and delegates the captured graph to fxrt; the "inductor"
+        #     name is only retained for config validation.
+        #   - VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC=1: stock torch._inductor
+        #     stays in control but the "npu" device codegen is overridden to
+        #     inductor_npu_ext's AscendC fusion kernels (instead of Triton).
+        #   - VLLM_ASCEND_ENABLE_INDUCTOR_FXRT=1: like the AscendC path, but
+        #     inductor's fx_wrapper codegen re-emits the lowered program as
+        #     a host FX graph that is executed by the fxrt runtime.
         direct_fx_backend_modes = (
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
         )
-        has_debug_dump_path = (
-            compilation_config.debug_dump_path is not None
-            or bool(os.getenv("VLLM_DEBUG_DUMP_PATH"))
+        from vllm_ascend import envs as ascend_envs
+
+        external_backend_enabled = (
+            ascend_envs.VLLM_ASCEND_ENABLE_FXRT_BACKEND
+            or ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC
+            or ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_FXRT
         )
-        dump_external_fx = (
+        external_fx_backend = (
             compilation_config.mode in direct_fx_backend_modes
             and compilation_config.backend == "inductor"
             and compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            and has_debug_dump_path
+            and external_backend_enabled
         )
-        if not dump_external_fx and compilation_config.mode not in [
+        if not external_fx_backend and compilation_config.mode not in [
             CompilationMode.NONE,
             CompilationMode.VLLM_COMPILE,
         ]:
@@ -612,12 +622,13 @@ class NPUPlatform(Platform):
 
         compilation_config.use_inductor = False
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            if not dump_external_fx:
+            if not external_fx_backend:
                 compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-            ascend_config.ascend_compilation_config.enable_static_kernel = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
-            vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+            if external_fx_backend:
+                ascend_config.ascend_compilation_config.enable_static_kernel = False
+                vllm_config.additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
             # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
             assert compilation_config.mode == CompilationMode.VLLM_COMPILE, (

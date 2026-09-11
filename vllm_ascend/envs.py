@@ -110,6 +110,33 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Route Dynamo-captured prefill FX graphs (STOCK_TORCH_COMPILE) to the
+    # external fxrt backend instead of Triton Inductor. The "inductor" name in
+    # the compilation config is only retained for vLLM config validation.
+    # Decode is not affected and stays eager. Requires fxrt to be installed.
+    "VLLM_ASCEND_ENABLE_FXRT_BACKEND": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_FXRT_BACKEND", "0"))
+    ),
+    # Use the inductor_npu_ext AscendC fusion codegen for the prefill
+    # STOCK_TORCH_COMPILE graph instead of the default Triton-on-NPU backend.
+    # Stock torch._inductor still drives the pipeline; only the "npu" device
+    # codegen is overridden to generate fused AscendC kernels. Decode stays
+    # eager. Requires inductor_npu_ext to be importable. Mutually exclusive
+    # with VLLM_ASCEND_ENABLE_FXRT_BACKEND (fxrt takes precedence if both set).
+    "VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC", "0"))
+    ),
+    # Let stock torch._inductor drive lowering/fusion for the prefill
+    # STOCK_TORCH_COMPILE graph with the inductor_npu_ext AscendC scheduling
+    # backend, then use fxrt's inductor fx_wrapper codegen to re-emit the
+    # lowered program as a host torch.fx graph (fused AscendC regions survive
+    # as compiled-kernel HOP nodes) and route that graph to the fxrt runtime.
+    # Decode stays eager. Requires fxrt and inductor_npu_ext. Takes precedence
+    # over VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC; VLLM_ASCEND_ENABLE_FXRT_BACKEND
+    # (which bypasses inductor entirely) takes precedence over both.
+    "VLLM_ASCEND_ENABLE_INDUCTOR_FXRT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_INDUCTOR_FXRT", "0"))
+    ),
 }
 
 # end-env-vars-definition

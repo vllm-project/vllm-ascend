@@ -3816,19 +3816,51 @@ class NPUModelRunner(GPUModelRunner):
             and mm_config.is_multimodal_pruning_enabled()
         ) # type: bool
 
+        self._stock_compiled_call = None
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             from vllm.env_override import _apply_constrain_to_fx_strides_patch
 
             _apply_constrain_to_fx_strides_patch()
             backend = self.compilation_config.init_backend(self.vllm_config)
+            from vllm_ascend import envs as ascend_envs
+
             debug_dump_path = self.vllm_config.compile_debug_dump_path()
-            if debug_dump_path is not None:
+            dump_dir = (
+                debug_dump_path / "fx_graphs"
+                if debug_dump_path is not None
+                else None
+            )
+            if ascend_envs.VLLM_ASCEND_ENABLE_FXRT_BACKEND:
                 from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
 
-                logger.info("Using external FX backend for STOCK_TORCH_COMPILE")
-                backend = wrap_backend_with_fx_dump(
-                    backend, debug_dump_path / "fx_graphs", "model"
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill to the external "
+                    "fxrt backend (Triton Inductor is bypassed)"
                 )
+                backend = wrap_backend_with_fx_dump(backend, dump_dir, "model")
+            elif ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC:
+                from vllm_ascend.compilation.ascendc_inductor import (
+                    enable_ascendc_inductor_backend,
+                )
+
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill through stock "
+                    "torch._inductor with the inductor_npu_ext AscendC fusion "
+                    "codegen (Triton-on-NPU backend is overridden)"
+                )
+                enable_ascendc_inductor_backend()
+            elif ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_FXRT:
+                from vllm_ascend.compilation.ascendc_inductor import (
+                    enable_inductor_fxrt_fx_wrapper,
+                )
+
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill through stock "
+                    "torch._inductor (inductor_npu_ext AscendC fusion); the "
+                    "fxrt fx_wrapper re-emits the lowered graph to host FX "
+                    "and executes it via the fxrt runtime"
+                )
+                enable_inductor_fxrt_fx_wrapper()
             compilation_counter.stock_torch_compile_count += 1
             # Keep an explicit compiled prefill entry point instead of
             # replacing Module.__call__ globally. Decode-only/spec-decode
