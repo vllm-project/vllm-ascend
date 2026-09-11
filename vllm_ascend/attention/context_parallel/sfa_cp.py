@@ -27,6 +27,7 @@ from vllm_ascend.distributed.utils import (
     all_gather_async,
 )
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.utils import enable_sfa_dcp_force_tmajor_restore
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -1053,12 +1054,15 @@ class AscendSFADCPImpl(AscendSFAImpl):
     @staticmethod
     def _finish_dcp_gather(
         context: DCPGatherContext,
+        keep_view: bool = False,
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
         gathered = context.gathered
         if context.restore_perm is not None:
-            gathered = gathered.permute(context.restore_perm).contiguous()
+            gathered = gathered.permute(context.restore_perm)
+            if not keep_view:
+                gathered = gathered.contiguous()
         return torch.split(gathered, context.split_sizes, dim=-1)
 
     def _all_gather_dim_async(
@@ -1209,6 +1213,24 @@ class AscendSFADCPImpl(AscendSFAImpl):
         # fragments. On Ascend the separate gathers can leave SFA with an
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
+        if query_gather_dim == 1 and getattr(ql_nope, "is_npu", False):
+            try:
+                from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
+
+                head_major = prep_query_head_major(ql_nope, q_pe)
+            except Exception:
+                # Hard kernel failure: route to the torch assembly below.
+                head_major = None
+            if head_major is not None:
+                gathered, handle = all_gather_async(head_major, self.dcp_group)
+                return DCPGatherContext(
+                    gathered=gathered,
+                    handle=handle,
+                    restore_perm=(1, 0, 2),
+                    split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+                )
+            # prep_query_head_major returned None (shape not provably legal
+            # for the fast kernel): fall back to the torch assembly below.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
         return self._start_dcp_gather(
             fused_q,
@@ -1289,7 +1311,14 @@ class AscendSFADCPImpl(AscendSFAImpl):
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
-        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        # Keep the query as a strided view of the head-major gather output.
+        # The SFA query fragments are already strided views after torch.split.
+        # Set sfa_dcp_force_tmajor_restore=true in additional-config to
+        # materialize token-major storage for comparison runs.
+        ql_nope, q_pe = self._finish_dcp_gather(
+            gather_context,
+            keep_view=not enable_sfa_dcp_force_tmajor_restore(),
+        )
         sfa_output, softmax_lse = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,

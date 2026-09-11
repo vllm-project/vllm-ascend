@@ -1511,6 +1511,13 @@ def singleton(cls):
     return get_instance
 
 
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read the query restore option from the release AscendConfig singleton.
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
+
+
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
