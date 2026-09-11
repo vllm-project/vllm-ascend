@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -359,6 +360,10 @@ def sfa_dcp_a2a_fused_combine(
     group: dist.ProcessGroup,
 ) -> torch.Tensor:
     """Run stride-aware pack, one HCCL All2All, and fused LSE combine."""
+    # Native head-sharded decode only; DSA-CP and other geometry keep the
+    # upstream pack/combine. Stay inside the existing custom-op boundary.
+    if dcp_size == 8 and scatter_dim == 1 and can_exchange(sfa_output, softmax_lse):
+        return exchange(sfa_output, softmax_lse, group).to(sfa_output.dtype)
     send = pack_sfa_dcp_output_lse(
         sfa_output,
         softmax_lse,

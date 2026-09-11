@@ -33,6 +33,7 @@ def remap_sparse_indices_fused_kernel(
     dcp_size,
     interleave_size,
     dcp_rank,
+    EXACT_DCP8: tl.constexpr,
     INTERLEAVE_ONE: tl.constexpr,
     BLOCK: tl.constexpr,
     NUM_CHUNKS: tl.constexpr,
@@ -53,18 +54,20 @@ def remap_sparse_indices_fused_kernel(
     in_bounds = offsets < topk_count
 
     idx = tl.load(indices_ptr + row * topk_count + offsets, mask=in_bounds, other=-1)
-    # Integer remap math: matches the fp32 torch fallback bit-exactly
-    # (indices are far below 2^24), and the int32/fp32 variants measured
-    # identically on NPU.
-    block_idx = idx // interleave_size
-    owner = block_idx - (block_idx // dcp_size) * dcp_size
-    valid = (idx >= 0) & (owner == dcp_rank)
-
-    if INTERLEAVE_ONE:
-        remapped = idx // dcp_size
+    # This backend's vector divsi loses integer boundaries above 2**24.
+    # Keep the native DCP8/interleave128 path entirely in bit operations.
+    if EXACT_DCP8:
+        owner = (idx >> 7) & 7
+        remapped = ((idx >> 10) << 7) + (idx & 127)
     else:
-        local_offsets = idx - block_idx * interleave_size
-        remapped = (idx // (dcp_size * interleave_size)) * interleave_size + local_offsets
+        block_idx = idx // interleave_size
+        owner = block_idx - (block_idx // dcp_size) * dcp_size
+        if INTERLEAVE_ONE:
+            remapped = idx // dcp_size
+        else:
+            local_offsets = idx - block_idx * interleave_size
+            remapped = (idx // (dcp_size * interleave_size)) * interleave_size + local_offsets
+    valid = (idx >= 0) & (owner == dcp_rank)
 
     valid_i32 = valid.to(tl.int32)
     chunk_out = chunk_out_ptr + (row * NUM_CHUNKS + chunk) * BLOCK
@@ -141,9 +144,9 @@ def remap_sparse_indices_triton(
         topk_indices = topk_indices.contiguous()
     indices = topk_indices if topk_indices.dtype == torch.int32 else topk_indices.to(torch.int32)
     topk_count = indices.shape[-1]
-    rows = indices.numel() // topk_count
-    if rows == 0 or topk_count == 0:
+    if indices.numel() == 0:
         return topk_indices
+    rows = indices.numel() // topk_count
     # The torch implementation operates per-row on the last dim, so arbitrary
     # leading dims (e.g. [dcp_size, 1, topk_count] from the DCP all_gather) can
     # be flattened to a 2D view and restored afterwards.
@@ -164,6 +167,7 @@ def remap_sparse_indices_triton(
         dcp_size,
         interleave_size,
         dcp_rank,
+        EXACT_DCP8=dcp_size == 8 and interleave_size == 128,
         INTERLEAVE_ONE=interleave_size == 1,
         BLOCK=block,
         NUM_CHUNKS=num_chunks,
