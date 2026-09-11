@@ -106,7 +106,6 @@ deployment:
         --port $SERVER_PORT
         --data-parallel-size 32
         --data-parallel-size-local 16
-        --data-parallel-start-rank 0
         --data-parallel-address $LOCAL_IP
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 1
