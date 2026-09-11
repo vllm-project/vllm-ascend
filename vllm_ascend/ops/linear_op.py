@@ -42,6 +42,7 @@ from types import SimpleNamespace
 
 import regex as re
 import torch
+import torch_npu
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
@@ -63,6 +64,7 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
+    enable_mm_comm_fuse,
     enable_sp,
     is_vl_model,
     mlp_tp_enable,
@@ -422,6 +424,116 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.unique_prefix = self.layer.unique_prefix
 
 
+class MatmulCommRowParallelOp(CustomRowParallelOp):
+    """Fuses matmul and all-reduce or reduce-scatter into a single HCCL op.
+
+    VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE=1: npu_mm_all_reduce_base, returns the
+    full [M, O] tensor (plain TP path).
+    VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE=2: npu_mm_reduce_scatter_base followed
+    by an all-gather, mathematically equivalent to all-reduce but with the
+    matmul pipelined into the communication stage.
+
+    The fused ops are only supported on A2 devices; enable_mm_comm_fuse()
+    clears the mode elsewhere so this class is never selected there.
+    """
+
+    _HCOMM_INFO = None
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.mm_comm_fuse_mode = enable_mm_comm_fuse()
+        self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
+
+    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if self.reduce_results and self.tp_size > 1:
+            # Both fused ops expect a contiguous [K, O] weight; prefer the
+            # pre-transposed (NZ-converted) copy stashed at load time and fall
+            # back to a zero-copy .t() view when it is absent.
+            weight = getattr(self.layer, "weight_t", None)
+            if weight is None:
+                weight = self.layer.weight.t()
+            if self.mm_comm_fuse_mode == 1:
+                output = torch_npu.npu_mm_all_reduce_base(input_parallel, weight, self.hcomm_info, bias=bias_)
+            else:
+                world_size = self.tp_size
+                # --------------- 1. Record original shape and convert to 2D ---------------
+                orig_shape = input_parallel.shape
+                # Merge all but the last dimension into 'num_tokens', last dim is the feature dimension
+                non_feature_shape = orig_shape[:-1]
+                hidden_dim = orig_shape[-1]
+                input_2d = input_parallel.reshape(-1, hidden_dim)
+                num_tokens = input_2d.shape[0]
+
+                # --------------- 2. Pad to make it divisible by world_size ---------------
+                pad_size = (world_size - (num_tokens % world_size)) % world_size
+                if pad_size > 0:
+                    # Pad 'pad_size' rows at the end of the num_tokens dimension (dim=0)
+                    input_2d = torch.cat(
+                        [input_2d, torch.zeros(pad_size, hidden_dim, device=input_2d.device, dtype=input_2d.dtype)],
+                        dim=0
+                    )
+
+                # --------------- 3. Call npu_mm_reduce_scatter_base ---------------
+                # Internally performs: matmul(input_2d, weight) -> reduce_scatter.
+                # Output shape: [(num_tokens + pad_size) // world_size, out_features].
+                # bias is not supported by this op yet, so add it after the gather.
+                rs_output = torch_npu.npu_mm_reduce_scatter_base(
+                    input_2d,
+                    weight,
+                    self.hcomm_info,
+                    world_size,
+                    reduce_op="sum",
+                    comm_turn=0,
+                    comm_mode="aiv",
+                )
+
+                # --------------- 4. AllGather to collect the complete result ---------------
+                # Allocate the receive buffer with the size of the full padded output
+                out_features = rs_output.shape[1]
+                full_output_2d = torch.empty(
+                    input_2d.shape[0], out_features,
+                    device=rs_output.device,
+                    dtype=rs_output.dtype
+                )
+                # Use all_gather_into_tensor for efficient collection across ranks
+                dist.all_gather_into_tensor(full_output_2d, rs_output, group=self.comm_group.device_group)
+
+                # --------------- 5. Slice off the padded part and restore original shape ---------------
+                if pad_size > 0:
+                    full_output_2d = full_output_2d[:-pad_size, :]
+
+                # Reshape 'num_tokens' back to the original leading dimensions
+                output = full_output_2d.reshape(*non_feature_shape, out_features)
+
+                # All ranks hold the identical full output after the gather,
+                # so every rank adds the (replicated) bias itself.
+                if not self.skip_bias_add and self.bias is not None:
+                    output = output + self.bias
+
+        else:
+            assert self.quant_method is not None
+            output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    @classmethod
+    def get_hcomm_info(cls, group: dist.ProcessGroup) -> str:
+        """Get the HCCL communication information for the given group."""
+        if cls._HCOMM_INFO is not None:
+            return cls._HCOMM_INFO
+
+        rank = torch.distributed.get_rank(group)
+        if torch.__version__ > "2.0":
+            global_rank = torch.distributed.get_global_rank(group, rank)
+            cls._HCOMM_INFO = group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+        else:
+            cls._HCOMM_INFO = group.get_hccl_comm_name(rank)
+        return cls._HCOMM_INFO
+
+
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):
     @property
     def comm_group(self):
@@ -496,7 +608,7 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
+) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | MatmulCommRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -518,6 +630,9 @@ def _get_row_parallel_op(
             if a_prefix in prefix:
                 return SequenceRowParallelOp(layer)
 
+    if enable_mm_comm_fuse():
+        return MatmulCommRowParallelOp(layer)
+
     return None
 
 
@@ -538,6 +653,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct, output_size: int | None =
         | DSV4OProjRowParallelOp
         | SequenceRowParallelOp
         | ShardedCPColumnParallelOp
+        | MatmulCommRowParallelOp
         | None
     ) = None
     if direct == "row":

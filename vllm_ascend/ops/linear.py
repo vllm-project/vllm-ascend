@@ -43,6 +43,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_mm_comm_fuse,
     enable_sp,
     get_ascend_device_type,
     is_310p,
@@ -98,6 +99,11 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
+                if enable_mm_comm_fuse():
+                    # Fused matmul+comm ops consume a contiguous [K, O] weight;
+                    # stash a transposed (and NZ-converted) copy, keeping
+                    # layer.weight untouched for the fallback path.
+                    layer.weight_t = maybe_trans_nz(layer.weight.t().contiguous())
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
 
     def apply(
