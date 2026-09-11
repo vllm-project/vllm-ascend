@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,25 @@ with patch.dict(
 ):
     import vllm_ascend.models.glm5next.sparse_attn_indexer_kpool as kpool_module
     from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
+
+
+def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
+    module_name = f"{backend_module.__name__}_import_test"
+    spec = importlib.util.spec_from_file_location(module_name, backend_module.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict(
+        "sys.modules",
+        {
+            module_name: module,
+            "vllm_ascend.attention.indexer": None,
+            "vllm_ascend.models.glm5next.sparse_attn_indexer_kpool": None,
+        },
+    ):
+        spec.loader.exec_module(module)
+
+    assert module.AscendIndexerKPoolBackend.get_builder_cls() is module.AscendIndexerKPoolMetadataBuilder
+    assert module.AscendIndexerKPoolStateBackend.get_builder_cls() is module.AscendIndexerKPoolStateMetadataBuilder
 
 
 @pytest.mark.parametrize("pool_size", [1, 4])

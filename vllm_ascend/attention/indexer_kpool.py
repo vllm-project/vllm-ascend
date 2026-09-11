@@ -21,7 +21,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     get_kv_cache_compression_ratio,
@@ -335,11 +334,15 @@ class AscendIndexerKPoolStateBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
 
-class Glm5NextKPoolIndexerBackend(AscendSFAIndexerBackend):
-    """Triton KPool implementation of the unified seven-argument indexer API."""
+class Glm5NextKPoolIndexerBackend(nn.Module):
+    """Model-side implementation of the unified seven-argument indexer API.
+
+    The cache-only backends above own the engine-facing attention contracts.
+    Keep execution independent of the standard SFA indexer and its operators.
+    """
 
     def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
-        nn.Module.__init__(self)
+        super().__init__()
         if qk_rope_head_dim != 0:
             raise ValueError(
                 f"GLM-Next KPool indexing supports NoPE queries only, got qk_rope_head_dim={qk_rope_head_dim}."
