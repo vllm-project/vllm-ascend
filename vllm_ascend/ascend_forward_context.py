@@ -148,9 +148,20 @@ def set_ascend_forward_context(
             max_num_tokens,
             vllm_config,
         )
+        compiled_moe_comm_type = get_compiled_moe_comm_type(vllm_config)
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        forward_context.compiled_moe_comm_type = compiled_moe_comm_type
+        if not in_profile_run and moe_comm_contract_mismatch(
+            moe_comm_type,
+            compiled_moe_comm_type,
+            vllm_config.parallel_config.use_sequence_parallel_moe,
+        ):
+            # The compiled MoE graph uses the decode/capture communication
+            # contract.  Large prefill batches may select a method with a
+            # different reduction contract, so execute those calls eagerly.
+            forward_context.skip_compiled = True
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
 
@@ -382,12 +393,50 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     return moe_comm_type
 
 
+def moe_output_is_reduced(
+    moe_comm_type: MoECommType | None,
+    sequence_parallel: bool,
+) -> bool:
+    """Return the routed-output reduction contract for a MoE method."""
+    return moe_comm_type in {
+        MoECommType.ALLTOALL,
+        MoECommType.MC2,
+        MoECommType.FUSED_MC2,
+    } or (moe_comm_type == MoECommType.ALLGATHER and sequence_parallel)
+
+
+def get_compiled_moe_comm_type(vllm_config: VllmConfig) -> MoECommType | None:
+    """Return the MoE method whose outer contract is baked into V1 graphs."""
+    mc2_tokens_capacity = get_mc2_tokens_capacity()
+    if mc2_tokens_capacity is None:
+        return None
+    return select_moe_comm_method(mc2_tokens_capacity, vllm_config)
+
+
+def moe_comm_contract_mismatch(
+    moe_comm_type: MoECommType | None,
+    compiled_moe_comm_type: MoECommType | None,
+    sequence_parallel: bool,
+) -> bool:
+    """Whether a runtime MoE method disagrees with the compiled graph."""
+    if compiled_moe_comm_type is None:
+        return False
+    return moe_output_is_reduced(
+        moe_comm_type,
+        sequence_parallel,
+    ) != moe_output_is_reduced(
+        compiled_moe_comm_type,
+        sequence_parallel,
+    )
+
+
 class _ExtraForwardContextProxy:
     """Unified forward-context access for v1/v2 model runners."""
 
     extra_attrs = (
         "capturing",
         "moe_comm_type",
+        "compiled_moe_comm_type",
         "moe_comm_method",
         "is_decode_only_node",
         "use_mega_moe",

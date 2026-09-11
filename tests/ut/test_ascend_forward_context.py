@@ -39,6 +39,7 @@ def _make_vllm_config(
     kv_connector: str | None = None,
     kv_role: str | None = None,
     recompute_scheduler_enable: bool = False,
+    use_sequence_parallel_moe: bool = False,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -56,6 +57,7 @@ def _make_vllm_config(
         world_size_across_dp=world_size,
         pipeline_parallel_size=pipeline_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
+        use_sequence_parallel_moe=use_sequence_parallel_moe,
     )
     compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
@@ -470,6 +472,96 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
+
+
+@pytest.mark.parametrize(
+    ("actual", "compiled", "sequence_parallel", "expected"),
+    [
+        (MoECommType.ALLGATHER, MoECommType.MC2, False, True),
+        (MoECommType.ALLGATHER, MoECommType.MC2, True, False),
+        (MoECommType.MC2, MoECommType.FUSED_MC2, False, False),
+        (MoECommType.ALLTOALL, MoECommType.MC2, False, False),
+        (MoECommType.ALLGATHER, MoECommType.ALLGATHER, False, False),
+        (MoECommType.ALLGATHER, None, False, False),
+    ],
+)
+def test_moe_comm_contract_mismatch(actual, compiled, sequence_parallel, expected):
+    assert afc.moe_comm_contract_mismatch(actual, compiled, sequence_parallel) is expected
+
+
+def test_set_ascend_forward_context_skips_mismatched_compiled_moe(monkeypatch):
+    vllm_config = _make_vllm_config()
+    forward_context = SimpleNamespace(dp_metadata=None, skip_compiled=False)
+
+    @contextmanager
+    def fake_set_current(_config):
+        yield
+
+    @contextmanager
+    def fake_set_forward_context(**kwargs):
+        forward_context.skip_compiled = kwargs["skip_compiled"]
+        yield
+
+    monkeypatch.setattr(afc, "set_current_vllm_config", fake_set_current)
+    monkeypatch.setattr(afc, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: 128)
+    monkeypatch.setattr(
+        afc,
+        "select_moe_comm_method",
+        lambda num_tokens, _config: MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLGATHER,
+    )
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _type: None)
+
+    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=129):
+        assert forward_context.moe_comm_type == MoECommType.ALLGATHER
+        assert forward_context.compiled_moe_comm_type == MoECommType.MC2
+        assert forward_context.skip_compiled is True
+
+
+def test_set_ascend_forward_context_keeps_profile_compiled(monkeypatch):
+    vllm_config = _make_vllm_config()
+    forward_context = SimpleNamespace(dp_metadata=None, skip_compiled=False)
+
+    @contextmanager
+    def fake_set_current(_config):
+        yield
+
+    @contextmanager
+    def fake_set_forward_context(**kwargs):
+        forward_context.skip_compiled = kwargs["skip_compiled"]
+        yield
+
+    monkeypatch.setattr(afc, "set_current_vllm_config", fake_set_current)
+    monkeypatch.setattr(afc, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: 128)
+    monkeypatch.setattr(
+        afc,
+        "select_moe_comm_method",
+        lambda num_tokens, _config: MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLGATHER,
+    )
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _type: None)
+
+    with afc.set_ascend_forward_context(
+        None,
+        vllm_config,
+        num_tokens=129,
+        in_profile_run=True,
+    ):
+        assert forward_context.skip_compiled is False
 
 
 def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
