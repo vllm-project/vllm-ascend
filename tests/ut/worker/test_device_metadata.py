@@ -61,8 +61,8 @@ def executor_env(monkeypatch):
     allocations: list[str] = []
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
-    event_names = iter(("inputs", "reusable", "compressor", "indexer", "attention", "indexer-2"))
-    external_event_names = iter(f"external-{index}" for index in range(6))
+    event_names = iter(("inputs", "reusable", "compressor", "attention", "indexer", "extra-0", "extra-1", "extra-2"))
+    external_event_names = iter(f"external-{index}" for index in range(12))
 
     def make_stream():
         allocations.append("stream")
@@ -122,8 +122,8 @@ def test_stream_lifecycle_and_stage_frontiers(executor_env):
         "inputs",
         "reusable",
         "compressor",
-        "indexer",
         "attention",
+        "indexer",
     ]
 
     assert calls == [
@@ -131,10 +131,10 @@ def test_stream_lifecycle_and_stage_frontiers(executor_env):
         ("metadata", "wait", "inputs"),
         ("task", "compressor"),
         ("metadata", "record", "compressor"),
-        ("task", "indexer"),
-        ("metadata", "record", "indexer"),
         ("task", "attention"),
         ("metadata", "record", "attention"),
+        ("task", "indexer"),
+        ("metadata", "record", "indexer"),
     ]
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     executor.wait(DeviceMetadataStage.INDEXER, 2)
@@ -167,12 +167,12 @@ def test_external_events_are_reused_per_batch_descriptor(executor_env):
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     executor.wait(DeviceMetadataStage.INDEXER, 2)
     assert calls[-2:] == [
-        ("model", "external_wait", "external-1"),
-        ("model", "reset", "external-1"),
+        ("model", "external_wait", "external-2"),
+        ("model", "reset", "external-2"),
     ]
-    assert calls.count(("model", "external_wait", "external-1")) == 1
-    assert calls.count(("model", "reset", "external-1")) == 1
-    assert calls.index(("metadata", "record", "external-1")) < calls.index(("model", "external_wait", "external-1"))
+    assert calls.count(("model", "external_wait", "external-2")) == 1
+    assert calls.count(("model", "reset", "external-2")) == 1
+    assert calls.index(("metadata", "record", "external-2")) < calls.index(("model", "external_wait", "external-2"))
     executor.release()
     assert not executor.uses_external_events
     executor.submit(_tasks(calls), descriptor)
@@ -182,7 +182,8 @@ def test_external_events_are_reused_per_batch_descriptor(executor_env):
     assert allocations[-3:] == ["external-3", "external-4", "external-5"]
 
 
-def test_external_event_frontiers_must_remain_stable(executor_env):
+@pytest.mark.parametrize("changed_task", ["removed", "added", "replaced"])
+def test_external_event_frontiers_must_remain_stable(executor_env, changed_task):
     executor, calls, allocations = executor_env
     descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
 
@@ -191,12 +192,77 @@ def test_external_event_frontiers_must_remain_stable(executor_env):
     calls.clear()
     allocations_before = list(allocations)
 
+    tasks = _tasks(calls)[:-1]
+    if changed_task == "added":
+        tasks = _tasks(calls)
+    if changed_task != "removed":
+        tasks += (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 99),)
     with pytest.raises(RuntimeError, match="frontiers changed"):
-        executor.submit(_tasks(calls)[:-1], descriptor)
+        executor.submit(tasks, descriptor)
 
     assert calls == []
     assert allocations == allocations_before
     assert not executor.submission_in_flight
+
+
+@pytest.mark.parametrize("consumer_order", [(10, 20), (20, 10)])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_sas_order_follows_first_consumption(executor_env, consumer_order, full_graph):
+    executor, calls, allocations = executor_env
+    compressor = DeviceMetadataStage.COMPRESSOR
+    attention = DeviceMetadataStage.ATTENTION
+    indexer = DeviceMetadataStage.INDEXER
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=4) if full_graph else None
+
+    def task(stage, group_id):
+        return DeviceMetadataTask(stage, lambda: calls.append(("task", stage, group_id)), group_id)
+
+    tasks = (task(indexer, 1), task(attention, 10), task(compressor, 10), task(attention, 20), task(compressor, 20))
+    executor.submit(tasks, descriptor)
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        (attention, 10),
+        (attention, 20),
+        (indexer, 1),
+    ]
+    for group_id in consumer_order:
+        executor.wait(attention, group_id)
+        executor.wait(attention, group_id)
+    executor.release()
+    allocations_before = list(allocations)
+    calls.clear()
+
+    executor.submit(tasks, descriptor)
+    assert allocations == allocations_before
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        *((attention, group_id) for group_id in consumer_order),
+        (indexer, 1),
+    ]
+    first_sas = calls.index(("task", attention, consumer_order[0]))
+    ready_event = calls[first_sas + 1][2]
+    assert calls[first_sas + 1][:2] == ("metadata", "record")
+    assert first_sas < calls.index(("task", indexer, 1))
+    executor.wait(attention, consumer_order[0])
+    executor.wait(attention, consumer_order[0])
+    wait_kind = "external_wait" if full_graph else "wait"
+    assert calls.count(("model", wait_kind, ready_event)) == 1
+    executor.release()
+    calls.clear()
+
+    # A new graph shape reuses the order and keeps unseen SAS groups at the tail.
+    next_descriptor = BatchDescriptor(num_tokens=8, num_reqs=8) if full_graph else None
+    executor.submit((task(attention, 30), *tasks), next_descriptor)
+    assert [call[1:] for call in calls if call[0] == "task"] == [
+        (compressor, 10),
+        (compressor, 20),
+        *((attention, group_id) for group_id in consumer_order),
+        (attention, 30),
+        (indexer, 1),
+    ]
+    executor.release()
 
 
 def test_submit_failure_keeps_partial_submission_in_flight(executor_env):

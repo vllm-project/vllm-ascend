@@ -24,8 +24,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, is_forwar
 
 class DeviceMetadataStage(IntEnum):
     COMPRESSOR = 0
-    INDEXER = 1
-    ATTENTION = 2
+    ATTENTION = 1
+    INDEXER = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,12 +50,14 @@ class DeviceMetadataExecutor:
         self._inputs_ready = torch.npu.Event()
         self._stage_ready: dict[tuple[DeviceMetadataStage, int], torch.npu.Event] = {}
         self._external_stage_ready: dict[tuple[BatchDescriptor, DeviceMetadataStage, int], torch.npu.ExternalEvent] = {}
-        self._external_frontiers: dict[BatchDescriptor, tuple[tuple[DeviceMetadataStage, int], ...]] = {}
+        self._external_frontiers: dict[BatchDescriptor, set[tuple[DeviceMetadataStage, int]]] = {}
         self._buffer_reusable = torch.npu.Event()
         self._has_reuse_fence = False
         self._submission_in_flight = False
         self._waited_stages: set[tuple[DeviceMetadataStage, int]] = set()
         self._batch_descriptor: BatchDescriptor | None = None
+        # Reuse each SAS group's first-consumption order across batch shapes.
+        self._attention_order: dict[int, int] = {}
 
     @property
     def submission_in_flight(self) -> bool:
@@ -72,10 +74,19 @@ class DeviceMetadataExecutor:
     ) -> None:
         if self._submission_in_flight:
             raise RuntimeError("The previous device metadata submission has not been released")
-        ordered_tasks = tuple(sorted(tasks, key=lambda task: task.stage))
+        ordered_tasks = sorted(
+            tasks,
+            key=lambda task: (
+                task.stage,
+                self._attention_order.get(task.group_id, len(self._attention_order))
+                if task.stage == DeviceMetadataStage.ATTENTION
+                else 0,
+            ),
+        )
         if not ordered_tasks:
             raise ValueError("At least one device metadata task is required")
-        submitted_frontiers = tuple(dict.fromkeys((task.stage, task.group_id) for task in ordered_tasks))
+        # Graph waits bind to event keys, independently of producer order.
+        submitted_frontiers = {(task.stage, task.group_id) for task in ordered_tasks}
         expected_frontiers = self._external_frontiers.get(batch_descriptor) if batch_descriptor is not None else None
         if expected_frontiers is not None and expected_frontiers != submitted_frontiers:
             raise RuntimeError("Device metadata frontiers changed for an existing full-graph batch descriptor")
@@ -123,6 +134,8 @@ class DeviceMetadataExecutor:
                 event.wait(stream)
                 event.reset(stream)
             self._waited_stages.add(frontier)
+            if stage == DeviceMetadataStage.ATTENTION:
+                self._attention_order.setdefault(group_id, len(self._attention_order))
 
     def release(self) -> None:
         if not self._submission_in_flight:

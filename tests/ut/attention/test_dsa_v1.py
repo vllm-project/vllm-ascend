@@ -326,7 +326,7 @@ def test_draft_swa_metadata_rejects_rows_above_buffer_capacity():
 @pytest.mark.parametrize(
     ("compressor_ratio", "expected_stages"),
     [
-        (4, list(DeviceMetadataStage)),
+        (4, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]),
         (128, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]),
     ],
 )
@@ -458,7 +458,18 @@ def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
         "expected_stages",
     ),
     [
-        (4, False, 3, None, [DeviceMetadataStage.COMPRESSOR, *list(DeviceMetadataStage)]),
+        (
+            4,
+            False,
+            3,
+            None,
+            [
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.INDEXER,
+                DeviceMetadataStage.ATTENTION,
+            ],
+        ),
         (
             128,
             False,
@@ -466,7 +477,18 @@ def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
             None,
             [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION],
         ),
-        (4, True, 4, 1, [DeviceMetadataStage.COMPRESSOR, *list(DeviceMetadataStage)]),
+        (
+            4,
+            True,
+            4,
+            1,
+            [
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.INDEXER,
+                DeviceMetadataStage.ATTENTION,
+            ],
+        ),
     ],
 )
 def test_dsa_cp_device_metadata_tasks(
