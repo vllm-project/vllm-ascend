@@ -1232,8 +1232,10 @@ A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # getattr: non-ModelSlim quant configs (fp8/mxfp8/compressed-tensors/...)
     # do not define this attribute; this helper runs for every engine start
-    # via refresh_block_size.
-    return vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_mxfp_c8_quant", False)
+    # via refresh_block_size. The strict `is True` comparison also keeps
+    # MagicMock-based unit tests (quant_config is a bare Mock, so the
+    # attribute resolves to a truthy Mock) off the C8 path.
+    return vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_mxfp_c8_quant", False) is True
 
 
 def refresh_block_size(vllm_config):
