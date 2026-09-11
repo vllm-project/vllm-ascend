@@ -292,6 +292,7 @@ def _deepseek_v2_mla_attention_init(
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
+# TODO: Remove this PP aux-state patch after the next main2main.
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
