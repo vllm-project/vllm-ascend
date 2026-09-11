@@ -37,7 +37,7 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
-For DSpark speculative decoding in mixed or PD separation deployments, download the [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) MLA draft-model checkpoint in addition to the target-model checkpoint.
+For DSpark speculative decoding in mixed or PD separation deployments, download the [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) GQA draft-model checkpoint in addition to the target-model checkpoint.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -276,9 +276,6 @@ If you want to deploy multi-node environment, you need to set up environment on 
 Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsing are registered by vLLM-Ascend. Use a vLLM and vLLM-Ascend source revision that matches the validated version in this document.
 
 ## 5 Online Service Deployment
-
-!!! warning "DSpark long-context limitation"
-    For the current `Inferact/Kimi-K3-DSpark` draft weights, DSpark acceptance is low for approximately 20K–40K-token inputs and remains low for longer contexts. Consequently, 128K inputs may receive no effective speculative-decoding benefit. This is a limitation of the current draft weights, not of the DSpark framework; validate acceptance and end-to-end performance for the target workload before enabling the draft model.
 
 The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
 
@@ -813,7 +810,7 @@ Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs
 
 On Atlas 800 A3 and Atlas 950DT, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
 
-This deployment supports DSpark speculative decoding. Configure the same `Inferact/Kimi-K3-DSpark` draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
+This deployment supports DSpark speculative decoding. Configure the same `RadixArk/Kimi-K3-DSpark` GQA draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
 
 #### 5.2.1 Create the engine templates
 
@@ -1222,4 +1219,4 @@ A: Configure `--tokenizer-mode kimi_k3`, `--enable-auto-tool-choice`, `--reasoni
 - **Q: How should TP size be selected?**
 A: TP size must divide the checkpoint's attention-head count. It also affects KDA state layout and expert placement, so validate memory capacity and communication performance together.
 - **Q: How is DSpark enabled in PD separation?**
-A: Download `Inferact/Kimi-K3-DSpark`, set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes, and pass the same `--speculative-config` to both. Prefill must retain `--enforce-eager`.
+A: Download `RadixArk/Kimi-K3-DSpark`, set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes, and pass the same `--speculative-config` to both. Prefill must retain `--enforce-eager`.
