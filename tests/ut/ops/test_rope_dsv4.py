@@ -36,8 +36,8 @@ def _assert_rope(state, result, positions):
 def test_global_local_rope_buffers_survive_interleaved_cache_groups(rope_state):
     # Each PCP cache-group builder owns its global buffers, while local
     # metadata reuses the first group's result for the rest of the step.
-    global_buffers = [{}, {}, {}]
-    addresses = {}
+    global_buffers: list[dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]]] = [{}, {}, {}]
+    addresses: dict[tuple[int, str, str, int], int] = {}
     for count in (2, 16, 5, 16, 2):
         global_pos = {"default": torch.arange(count), "compressed": torch.arange(count) + 1}
         local_pos = {group: pos.flip(0)[: max(1, count - 1)] + 3 for group, pos in global_pos.items()}
@@ -64,7 +64,7 @@ def test_global_local_rope_buffers_survive_interleaved_cache_groups(rope_state):
 
 @pytest.mark.parametrize("draft_index", [None, 1])
 def test_uncached_rope_does_not_allocate_caller_buffers(rope_state, draft_index):
-    buffers = {}
+    buffers: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
     positions = {"default": torch.tensor([3, 1, 7])}
     result = rope_dsv4.get_cos_and_sin_dsa(positions, draft_index=draft_index, runtime_buffer=buffers)
     _assert_rope(rope_state, result, positions)
@@ -72,7 +72,7 @@ def test_uncached_rope_does_not_allocate_caller_buffers(rope_state, draft_index)
 
 
 def test_draft_rope_keeps_existing_speculative_buffers(rope_state):
-    buffers = {}
+    buffers: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] = {}
     positions = {"default": torch.tensor([3, 1, 7])}
     result = rope_dsv4.get_cos_and_sin_dsa(positions, use_cache=True, draft_index=1, runtime_buffer=buffers)
     _assert_rope(rope_state, result, positions)

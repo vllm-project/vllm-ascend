@@ -1707,13 +1707,13 @@ def test_pcp_builders_keep_global_rope_separate_from_reused_local_metadata(monke
         )
         AscendDSAMetadataBuilder.build(builder, 0, common, common_ratio_to_sas_metadata=shared)
 
-    addresses = {}
+    addresses: dict[tuple[int | str, str], int] = {}
     for count in (4, 16, 6):
         global_pos, local_pos = torch.arange(count), torch.arange(count - 1) + 5
-        local_cache = {}
+        local_cache: dict[str, Any] = {}
         global_caches = []
         for index, builder in enumerate(builders):
-            global_cache = {}
+            global_cache: dict[str, Any] = {}
             build(builder._global_metadata_builder, global_pos, global_cache)
             global_caches.append(global_cache)
             build(builder, local_pos, local_cache)
