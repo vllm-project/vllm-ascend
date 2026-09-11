@@ -37,7 +37,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -197,22 +197,25 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _draft_sparse_flash_mla_kwargs(vllm_config: VllmConfig) -> dict[str, int]:
-    # Visibility comes from explicit indices. A5 disables band windows with -1;
-    # the A2/A3 explicit sparse template requires non-negative window values.
-    window = -1 if is_a5_bf16_kv_enabled(vllm_config) else 0
-    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=window, ori_win_right=window)
+def _draft_sparse_flash_mla_kwargs() -> dict[str, int]:
+    # DSpark supplies visibility through ori_sparse_indices. On A5 the explicit
+    # sparse mode disables both window bounds with -1.
+    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=-1, ori_win_right=-1)
 
 
 def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
-    return (
-        get_dsa_attn_kv_plan(vllm_config).uses_sparse_flash_mla
-        or get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.STANDARD
-    )
+    return get_dsa_attn_kv_plan(vllm_config).uses_sparse_flash_mla
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
     return get_dsa_attn_kv_plan(vllm_config).layout_kv
+
+
+def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
+    """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
+    if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
+        return 0
+    return max(compress_ratio, 1)
 
 
 class AscendDSABackend(AttentionBackend):
@@ -935,7 +938,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
+            cmp_ratio = (
+                _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
+                if self.compressor_ratio <= 1
+                else 4
+                if self.compressor_ratio == 4
+                else 128
+            )
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
             metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -999,7 +1008,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_cmp_kv=False,
         )
         call_kwargs.update(metadata_kwargs)
-        call_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
+        call_kwargs.update(_draft_sparse_flash_mla_kwargs())
         return sparse_flash_mla_metadata(**call_kwargs)
 
     def _build_qli_metadata(
@@ -2317,7 +2326,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio, self.vllm_config),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
@@ -2336,7 +2345,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert common_metadata.dspark_swa_indices is not None
                 assert common_metadata.dspark_swa_topk_lengths is not None
                 attn_op = sparse_flash_mla
-                attn_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
+                attn_kwargs.update(_draft_sparse_flash_mla_kwargs())
                 attn_kwargs.update(
                     ori_sparse_indices=common_metadata.dspark_swa_indices,
                     ori_topk_length=common_metadata.dspark_swa_topk_lengths,
