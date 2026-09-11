@@ -43,7 +43,7 @@ reduces duplicate computation and unnecessary communication.
 
 Steps to follow to enable SP currently:
 
-- `tensor_parallel_size > 1` and `data_parallel_size > 1`.
+- `tensor_parallel_size > 1`.
 - `enable_expert_parallel` is set (MoE models only).
 - `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1`
 
