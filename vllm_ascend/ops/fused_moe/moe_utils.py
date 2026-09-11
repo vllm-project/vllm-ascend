@@ -282,6 +282,7 @@ def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
     a slice of a cached zero block: value-equivalent to
     `F.pad(x, (0, 0, 0, padded_len - n))` at one kernel instead of two."""
     pad_rows = padded_len - x.shape[0]
+    assert pad_rows >= 0, f"padded_len ({padded_len}) is smaller than the input's token dim ({x.shape[0]})"
     vllm_config = get_current_vllm_config_or_none()
     tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config is not None else 0
     if pad_rows > tp_size:
