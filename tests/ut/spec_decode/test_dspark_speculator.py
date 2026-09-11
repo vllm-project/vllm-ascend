@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the MRV2 GQA DSpark target/draft contract."""
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models.qwen3_dspark import (
@@ -121,38 +124,86 @@ def test_injects_rotation_before_draft_construction(monkeypatch):
         "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
         lambda config: "/rotation",
     )
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_target_lm_head",
-        lambda *args: target.lm_head,
-    )
     spec = _spec(_vllm_config(quarot=True), draft_config)
 
     assert spec.load_draft_model(target, set()) is draft
     assert not hasattr(draft_config, "_ascend_target_rotation_path")
 
 
-def test_rejects_shared_quarot_embedding(monkeypatch):
+def test_injected_rotation_path_is_removed_when_loading_fails(monkeypatch):
     draft_config = _gqa_config()
     target = _target()
-    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=target.model.embed_tokens), lm_head=object())
-    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", lambda *args: draft)
+
+    def fail_load(*args):
+        raise ValueError("checkpoint load failed")
+
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", fail_load)
     monkeypatch.setattr(
         "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
         lambda config: "/rotation",
     )
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_target_lm_head",
-        lambda *args: target.lm_head,
-    )
     spec = _spec(_vllm_config(quarot=True), draft_config)
 
-    with pytest.raises(RuntimeError, match="must not share target embed_tokens"):
+    with pytest.raises(ValueError, match="checkpoint load failed"):
         spec.load_draft_model(target, set())
+    assert not hasattr(draft_config, "_ascend_target_rotation_path")
 
 
 def test_injected_rotation_path_does_not_require_draft_quant_config():
     config = SimpleNamespace(_ascend_target_rotation_path="/rotation")
     assert _get_draft_rotation_path(SimpleNamespace(quant_config=None), config) == Path("/rotation")
+
+
+def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):
+    draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.model = torch.nn.Module()
+    draft.model.embed_tokens = torch.nn.Embedding(4, 2)
+    draft.lm_head = torch.nn.Linear(2, 4, bias=False)
+    draft.rotation_path = Path("/rotation")
+    draft.target_model_path = Path("/target")
+    draft.has_own_embed_tokens = False
+    draft.has_own_lm_head = False
+    loaded_layers = []
+
+    def load_layer(layer, *args):
+        loaded_layers.append(layer)
+        with torch.no_grad():
+            layer.weight.fill_(len(loaded_layers))
+
+    monkeypatch.setattr(Qwen3DSparkForCausalLM, "load_weights", lambda self, weights: set())
+    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.get_rotation_matrix", lambda path: torch.eye(2))
+    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.load_quarot_target_layer", load_layer)
+    draft.load_weights([])
+    assert draft.has_own_embed_tokens and draft.has_own_lm_head
+
+    target = _target()
+    target.model.embed_tokens = torch.nn.Embedding(4, 2)
+    target.lm_head = torch.nn.Linear(2, 4, bias=False)
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=_gqa_config(), model="/draft"),
+            attention_backend=None,
+            kv_cache_dtype=None,
+        ),
+        attention_config=SimpleNamespace(backend=None),
+        cache_config=object(),
+        model_config=SimpleNamespace(model="/target"),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+    )
+    monkeypatch.setattr(dspark_utils, "replace", lambda obj, **kwargs: SimpleNamespace(**(vars(obj) | kwargs)))
+    monkeypatch.setattr(dspark_utils, "get_model", lambda **kwargs: draft)
+    monkeypatch.setattr(dspark_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(dspark_utils, "get_target_lm_head", lambda *args: target.lm_head)
+    monkeypatch.setattr("vllm.compilation.backends.set_model_tag", lambda *args: nullcontext())
+    monkeypatch.setattr("vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal", lambda config: False)
+    monkeypatch.setattr("vllm.model_executor.models.utils.get_draft_quant_config", lambda config: None)
+
+    result = dspark_utils.load_dspark_model(target, config)
+    assert result.model.embed_tokens is loaded_layers[0]
+    assert result.lm_head is loaded_layers[1]
+    torch.testing.assert_close(result.model.embed_tokens.weight, torch.ones(4, 2))
+    torch.testing.assert_close(result.lm_head.weight, torch.full((4, 2), 2.0))
 
 
 def test_process_weight_preserves_the_unrotated_projection():

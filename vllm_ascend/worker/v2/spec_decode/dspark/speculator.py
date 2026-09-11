@@ -27,7 +27,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 from vllm_ascend.utils import (
     get_rotation_path,
@@ -72,17 +71,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             if injected_rotation:
                 delattr(draft_hf_config, "_ascend_target_rotation_path")
 
-        if injected_rotation:
-            target_language_model = (
-                target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
-            )
-            target_inner = target_language_model.model
-            target_lm_head = get_target_lm_head(target_model, target_language_model)
-            draft_inner = model.model
-            if getattr(draft_inner, "embed_tokens", None) is getattr(target_inner, "embed_tokens", None):
-                raise RuntimeError("QuaRot GQA DSpark must not share target embed_tokens.")
-            if getattr(model, "lm_head", None) is target_lm_head:
-                raise RuntimeError("QuaRot GQA DSpark must not share target lm_head.")
         return model
 
     @staticmethod
@@ -160,22 +148,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
-        if active_layer_names is not None:
-            missing_layers = active_layer_names.difference(attn_backends)
-            if missing_layers:
-                raise RuntimeError(
-                    f"DSpark attention layers were not mapped to KV-cache groups: {sorted(missing_layers)}."
-                )
-
-    def get_draft_graph_backend(self) -> type[AttentionBackend]:
-        """Return the one GQA attention backend supported by draft ACL graph."""
-        attn_backends = getattr(self, "attn_backends", None) or {}
-        if not attn_backends:
-            raise RuntimeError("DSpark ACL graph requires at least one active draft attention backend.")
-        backends = set(attn_backends.values())
-        if len(backends) != 1:
-            raise NotImplementedError("DSpark ACL graph currently supports one GQA attention backend.")
-        return next(iter(backends))
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
@@ -199,9 +171,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
-        attn_metadata = self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
-        self._validate_draft_attn_metadata(attn_metadata, num_reqs_padded)
-        return [attn_metadata]
+        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -222,18 +192,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         for metadata in attn_metadata.values():
             metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
-
-    def _validate_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Validate the GQA draft metadata before graph submission."""
-        if not attn_metadata:
-            raise RuntimeError("DSpark ACL graph produced no draft attention metadata.")
-        expected = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for layer_name, metadata in attn_metadata.items():
-            actual = list(getattr(metadata, "actual_seq_lengths_q", ()))
-            if actual != expected:
-                raise RuntimeError(
-                    f"DSpark ACL graph query-length mismatch for {layer_name}: expected {expected}, got {actual}."
-                )
 
     def propose(
         self,
