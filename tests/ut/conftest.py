@@ -114,6 +114,10 @@ if not _npu_available:
     mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
     mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
     sys.modules["mooncake.engine"] = mooncake_engine
+    # Fusion patterns import npugraph_ex, then torchair. Neither is installed
+    # on CPU UT runners; mock them so those tests can be collected.
+    sys.modules.setdefault("npugraph_ex", MagicMock())
+    sys.modules.setdefault("torchair", MagicMock())
     import torch
 
     try:  # noqa: SIM105

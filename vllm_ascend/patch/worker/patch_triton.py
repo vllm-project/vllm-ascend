@@ -2,7 +2,6 @@ import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import next_power_of_2
 
@@ -317,24 +316,6 @@ try:
     _mhc_mod.MHCFusedPostPreOp.forward_native = _mhc_fused_post_pre_npu
 except ImportError:
     pass
-
-# npu_kda_causal_conv1d_triton: the PyTorch fallback calls .item() per
-# request, which aborts ACL graph capture. The upstream NPU Triton kernel has
-# no host sync and accepts the spec-decode kwargs the fallback had to drop.
-try:
-    from vllm_ascend.ops.triton.mamba.causal_conv1d import (  # type: ignore[attr-defined]
-        causal_conv1d_update_npu as _cc1d_update_npu,
-    )
-
-    _cc1d.causal_conv1d_update = _cc1d_update_npu
-    logger.debug("Bound the NPU Triton causal_conv1d_update for the KDA layers.")
-except Exception as _cc1d_err:
-    logger.warning(
-        "NPU Triton causal_conv1d_update is unavailable (%s); falling back to the"
-        " PyTorch implementation, which syncs per request and therefore stalls ACL"
-        " graph capture at decode-FULL.",
-        _cc1d_err,
-    )
 
 # npu_mamba_state_ops: gather_initial_states / scatter_states assert
 # state.is_cuda and launch Triton kernels that reference

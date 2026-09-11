@@ -1435,7 +1435,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
-        if not self.use_mla_rope:
+        # Only layers that keep a rope cache take the K3 path below; a NoPE
+        # model has none, and reshape_and_cache would get an empty operand and
+        # a possibly padded (non-contiguous) cache. Fall through to the
+        # qk_rope_head_dim == 0 branch, which scatters the nope cache itself.
+        if not self.use_mla_rope and self.qk_rope_head_dim > 0:
             self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
             return kv_cache[1], kv_cache[0]
 
@@ -1475,7 +1479,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        if not self.use_mla_rope:
+        # See exec_kv_decode: NoPE layers fall through to their own branch.
+        if not self.use_mla_rope and self.qk_rope_head_dim > 0:
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
 
         pcp_prefill_range = None
@@ -2060,8 +2065,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        can_use_decode_prolog = self.use_mla_rope or get_current_hardware_profile().supports(
-            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
+        # The prolog takes the rope cache as an operand even with the RoPE
+        # inputs omitted, and its tiling wants that operand's inner strides to
+        # be zero. A NoPE model's rope cache is empty, which torch strides as if
+        # the last dim were one, so the op rejects it: keep NoPE layers on the
+        # unfused preprocess, which writes the nope cache directly.
+        can_use_decode_prolog = self.use_mla_rope or (
+            self.qk_rope_head_dim > 0
+            and get_current_hardware_profile().supports(HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE)
         )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
