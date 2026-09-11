@@ -23,7 +23,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -365,13 +364,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
-        # Filter to only layers that have KV cache specs.
+        # Filter to only layers that have KV cache specs. Split indexer cache
+        # layers must stay in this set: they now own a metadata builder even
+        # though the draft model shares their physical cache with the target.
         self._draft_attn_layer_names = {
             name
             for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
-        } - all_indexer_layer_names
+        }
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -756,7 +756,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
                 assert len(self.draft_attn_groups) > 0
-                builder = self.draft_attn_groups[0].get_metadata_builder()
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -779,23 +778,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.dcp_size > 1 and draft_index > 0:
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
-                    if not self.use_compress or draft_index == 0:
-                        attn_metadata_eagle = builder.build_for_graph_capture(
-                            common_attn_metadata,
-                            AscendAttentionState.SpecDecoding
-                            if self.method == "mtp"
-                            else AscendAttentionState.ChunkedPrefill,
-                            **extra_attn_metadata_args,
-                        )
-                    else:
-                        attn_metadata_eagle = builder.build_for_drafting(
-                            common_attn_metadata,
-                            draft_index,
-                            **extra_attn_metadata_args,
-                        )
                     per_layer_attn_metadata = dict()
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata_eagle
+                    for attn_group in self.draft_attn_groups:
+                        builder = attn_group.get_metadata_builder()
+                        if not self.use_compress or draft_index == 0:
+                            attn_metadata_eagle = builder.build_for_graph_capture(
+                                common_attn_metadata,
+                                AscendAttentionState.SpecDecoding
+                                if self.method == "mtp"
+                                else AscendAttentionState.ChunkedPrefill,
+                                **extra_attn_metadata_args,
+                            )
+                        else:
+                            attn_metadata_eagle = builder.build_for_drafting(
+                                common_attn_metadata,
+                                draft_index,
+                                **extra_attn_metadata_args,
+                            )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata_eagle
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
@@ -1138,8 +1139,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
-                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                if self.method == "mtp" and len(self.draft_attn_groups) > 1:
+                    # SFA and its split indexer have distinct metadata groups,
+                    # but they describe the same draft-token step. Advance the
+                    # shared sequence/position/slot state exactly once, then
+                    # let every remaining builder derive its own metadata from
+                    # that updated common view.
+                    primary_group = next(
+                        (
+                            group
+                            for group in self.draft_attn_groups
+                            if not all(name.endswith(".indexer.k_cache") for name in group.layer_names)
+                        ),
+                        self.draft_attn_groups[0],
+                    )
+                    common_attn_metadata, primary_metadata = self.attn_update_stack_num_spec_norm(
                         draft_index,
                         common_attn_metadata,
                         batch_size,
@@ -1147,10 +1161,34 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         used_update_positions,
                         aclgraph_runtime_mode,
                         **draft_cp_kwargs,
-                        attn_group=attn_group,
+                        attn_group=primary_group,
                     )
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata
+                    for layer_name in primary_group.layer_names:
+                        per_layer_attn_metadata[layer_name] = primary_metadata
+                    for attn_group in self.draft_attn_groups:
+                        if attn_group is primary_group:
+                            continue
+                        builder = attn_group.get_metadata_builder()
+                        attn_metadata = builder.build_for_drafting(
+                            common_attn_metadata,
+                            draft_index,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata
+                else:
+                    for attn_group in self.draft_attn_groups:
+                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                            draft_index,
+                            common_attn_metadata,
+                            batch_size,
+                            num_input_tokens,
+                            used_update_positions,
+                            aclgraph_runtime_mode,
+                            **draft_cp_kwargs,
+                            attn_group=attn_group,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]

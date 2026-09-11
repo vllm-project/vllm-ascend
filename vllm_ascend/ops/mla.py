@@ -86,13 +86,11 @@ class IndexerWrapper(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
+        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):

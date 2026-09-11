@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -140,6 +141,157 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert torch.equal(expect_value, actual_value), f"{attr_name} tensor mismatch"
     else:
         assert expect_value == actual_value, f"{attr_name} value mismatch"
+
+
+def test_load_model_retains_split_indexer_metadata_dependency():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = "mtp"
+    proposer.vllm_config = MagicMock()
+    proposer.maybe_eager_context = nullcontext()
+    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = False
+    proposer.draft_window_size = None
+    proposer.sliding_window = None
+    proposer._maybe_share_embeddings = MagicMock()
+    proposer._maybe_share_topk_indices = MagicMock()
+    proposer._maybe_share_lm_head = MagicMock()
+
+    target_name = "model.layers.0.self_attn.attn"
+    draft_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    target_layer = MagicMock()
+    draft_layer = MagicMock()
+    indexer_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = MagicMock()
+    indexer_layer.get_kv_cache_spec.return_value = MagicMock()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [128]
+
+    target_model = MagicMock()
+    with (
+        patch.object(llm_base_proposer, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch.object(llm_base_proposer, "supports_multimodal", return_value=False),
+        patch.object(
+            llm_base_proposer,
+            "get_layers_from_vllm_config",
+            side_effect=[
+                {target_name: target_layer},
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+            ],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+    ):
+        proposer.load_model(target_model)
+
+    assert proposer._draft_attn_layer_names == {draft_name, indexer_name}
+    assert proposer.attn_layer_names == [draft_name, indexer_name]
+
+
+def test_dummy_run_full_graph_builds_metadata_for_each_draft_group():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.num_speculative_tokens = 2
+    proposer.dcp_size = 1
+    proposer.use_cuda_graph = True
+    proposer.use_compress = False
+    proposer.method = "mtp"
+    proposer.device = torch.device("cpu")
+    proposer.kv_cache_gid = 0
+    proposer.supports_mm_inputs = False
+    proposer.extra_slots_per_request = 1
+    proposer.vllm_config = MagicMock()
+    proposer.block_table_tensor_clone = None
+    proposer.positions = torch.arange(6, dtype=torch.int32)
+    proposer.token_indices_to_sample = torch.zeros(8, dtype=torch.int32)
+    proposer.slot_mapping_group = [torch.zeros(8, dtype=torch.int32) for _ in range(2)]
+    proposer.seq_lens_group = [torch.zeros(4, dtype=torch.int32) for _ in range(2)]
+    proposer.query_start_loc_group = [torch.zeros(4, dtype=torch.int32) for _ in range(2)]
+    proposer.query_start_loc = SimpleNamespace(
+        cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+        gpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+        copy_to_gpu=lambda: None,
+    )
+    proposer._get_positions = MagicMock(return_value=proposer.positions)
+    proposer._runnable = MagicMock()
+
+    main_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    main_metadata = object()
+    indexer_metadata = object()
+    main_builder = MagicMock()
+    main_builder.build_for_graph_capture.return_value = main_metadata
+    indexer_builder = MagicMock()
+    indexer_builder.build_for_graph_capture.return_value = indexer_metadata
+    main_group = MagicMock()
+    main_group.layer_names = [main_name]
+    main_group.backend = None
+    main_group.get_metadata_builder.return_value = main_builder
+    indexer_group = MagicMock()
+    indexer_group.layer_names = [indexer_name]
+    indexer_group.get_metadata_builder.return_value = indexer_builder
+    proposer.draft_attn_groups = [main_group, indexer_group]
+
+    block_table = MagicMock()
+    block_table.get_device_tensor.return_value = torch.zeros((2, 2), dtype=torch.int32)
+    block_table.slot_mapping.gpu = torch.arange(6, dtype=torch.int32)
+    runner = MagicMock()
+    runner._sync_metadata_across_dp.return_value = (6, None, CUDAGraphMode.NONE)
+    runner.dcp_manager = None
+    runner.attn_groups = [MagicMock()]
+    runner.synchronize_input_prep.return_value = nullcontext()
+    runner.query_start_loc = SimpleNamespace(
+        cpu=torch.tensor([0, 3, 6], dtype=torch.int32),
+    )
+    runner.input_batch.num_computed_tokens_cpu_tensor = torch.tensor([0, 0], dtype=torch.int32)
+    runner.input_batch.block_table = {0: block_table}
+    runner.optimistic_seq_lens_cpu = torch.tensor([3, 3], dtype=torch.int32)
+    runner.seq_lens = torch.tensor([3, 3], dtype=torch.int32)
+    runner.actual_seq_lengths_q = [3, 3]
+    runner.attn_state = AscendAttentionState.SpecDecoding
+    runner.decode_token_per_req = 3
+    runner.group_len.gpu = torch.zeros(2, dtype=torch.int32)
+    runner.group_key_idx.gpu = torch.zeros(2, dtype=torch.int32)
+    runner.group_key_cache_idx.gpu = torch.zeros(2, dtype=torch.int32)
+    runner._dsa_positions_cpu_buf = None
+    runner.dynamic_eplb = False
+    runner.eplb_heat_collection_status = False
+    proposer.runner = runner
+
+    forward_context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE, moe_layer_index=0)
+    with (
+        patch.object(
+            llm_base_proposer,
+            "prepare_sparse_kv_offload_mtp_dummy_metadata",
+            return_value=(None, None),
+        ),
+        patch.object(llm_base_proposer, "set_ascend_forward_context") as mock_set_context,
+        patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
+    ):
+        mock_set_context.return_value = nullcontext()
+        proposer.dummy_run(
+            num_tokens=6,
+            num_reqs=2,
+            in_graph_capturing=True,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+
+    draft_metadatas = mock_set_context.call_args.kwargs["draft_attn_metadatas"]
+    assert len(draft_metadatas) == proposer.num_speculative_tokens
+    assert main_builder.build_for_graph_capture.call_count == proposer.num_speculative_tokens
+    assert indexer_builder.build_for_graph_capture.call_count == proposer.num_speculative_tokens
+    for per_layer_metadata in draft_metadatas:
+        assert per_layer_metadata == {
+            main_name: main_metadata,
+            indexer_name: indexer_metadata,
+        }
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
@@ -966,14 +1118,30 @@ class TestEagleProposerPropose:
             self.proposer.hidden_states = torch.zeros(8192, 7168, device=self.device, dtype=torch.bfloat16)
         else:
             self.proposer.hidden_states = torch.zeros(8192, 4096, device=self.device, dtype=torch.bfloat16)
+        main_layer_name = 'model.layers.36.self_attn.attn'
+        indexer_layer_name = 'model.layers.36.self_attn.indexer.k_cache'
         mock_attn_group = MagicMock()
         mock_builder = MagicMock()
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
-        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
+        mock_attn_group.layer_names = [main_layer_name]
         self.proposer.draft_attn_groups = [mock_attn_group]
-        self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
+        self.proposer.attn_layer_names = [main_layer_name]
+        mock_indexer_builder = None
+        mock_indexer_metadata = None
+        mock_indexer_draft_metadata = None
+        if model_type == 'deepseek':
+            mock_indexer_group = MagicMock()
+            mock_indexer_builder = MagicMock()
+            mock_indexer_metadata = object()
+            mock_indexer_draft_metadata = object()
+            mock_indexer_builder.build.return_value = mock_indexer_metadata
+            mock_indexer_builder.build_for_drafting.return_value = mock_indexer_draft_metadata
+            mock_indexer_group.get_metadata_builder.return_value = mock_indexer_builder
+            mock_indexer_group.layer_names = [indexer_layer_name]
+            self.proposer.draft_attn_groups.append(mock_indexer_group)
+            self.proposer.attn_layer_names.append(indexer_layer_name)
         self.proposer.kernel_block_size = 128
         self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
@@ -1122,7 +1290,11 @@ class TestEagleProposerPropose:
 
         #run
         with (
-            patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
+            patch.object(
+                self.proposer,
+                'attn_update_stack_num_spec_norm',
+                side_effect=side_effect,
+            ) as mock_update_metadata,
             set_current_vllm_config(self.vllm_config),
         ):
             self.proposer._propose(self.proposer.num_speculative_tokens,
@@ -1132,6 +1304,23 @@ class TestEagleProposerPropose:
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                 )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            if model_type == 'deepseek':
+                expected_followup_steps = self.proposer.num_speculative_tokens - 1
+                assert mock_update_metadata.call_count == expected_followup_steps
+                assert all(call.kwargs['attn_group'] is mock_attn_group for call in mock_update_metadata.call_args_list)
+                assert mock_indexer_builder is not None
+                assert mock_indexer_builder.build_for_drafting.call_count == expected_followup_steps
+
+                multi_steps_attn_metadata = self.proposer._runnable.call_args.kwargs['multi_steps_attn_metadata']
+                assert len(multi_steps_attn_metadata) == self.proposer.num_speculative_tokens
+                assert multi_steps_attn_metadata[0] == {
+                    main_layer_name: mock_attn_metadata,
+                    indexer_layer_name: mock_indexer_metadata,
+                }
+                for per_layer_metadata in multi_steps_attn_metadata[1:]:
+                    assert set(per_layer_metadata) == {main_layer_name, indexer_layer_name}
+                    assert per_layer_metadata[indexer_layer_name] is mock_indexer_draft_metadata
+                    assert per_layer_metadata[main_layer_name] is not mock_indexer_draft_metadata
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
