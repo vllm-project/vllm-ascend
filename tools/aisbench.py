@@ -264,13 +264,14 @@ class AisbenchRunner:
             f"The current Output Token Throughput is {output_throughput} token/s, "
             f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
         )
-        input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
-        assert float(input_throughput) >= self.input_throughput_threshold * self.input_throughput_baseline, (
-            "Input Token verification failed. "
-            f"The current Input Token Throughput is {input_throughput} token/s, "
-            f"which is not greater than or equal to "
-            f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
-        )
+        if self.input_throughput_threshold is not None:
+            input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
+            assert float(input_throughput) >= float(self.input_throughput_threshold) * float(self.input_throughput_baseline), (
+                "Input Token verification failed. "
+                f"The current Input Token Throughput is {input_throughput} token/s, "
+                f"which is not greater than or equal to "
+                f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
+            )
 
         if self.tpot_threshold is not None:
             tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
