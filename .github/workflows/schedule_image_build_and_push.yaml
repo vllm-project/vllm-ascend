@@ -231,8 +231,13 @@ jobs:
     runs-on: linux-amd64-cpu-4
     steps:
       - name: Dispatch sync-vllm-ascend
-        env:
-          GH_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
-        run: |
-          gh workflow run sync-vllm-ascend.yml \
-            --repo ascend-gha-runners/sync-tools
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });

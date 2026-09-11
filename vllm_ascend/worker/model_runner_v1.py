@@ -211,7 +211,11 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
-from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.dcp_utils import (
+    DCPAsyncSpecDecodeRebuildResult,
+    DCPDummyRunMetadata,
+    DCPManager,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
     DeviceMetadataTask,
@@ -247,6 +251,10 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
+)
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _finish_profiling_chunk_timing,
+    _start_profiling_chunk_timing,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -2132,17 +2140,12 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._cpp_execution_time_ms = None
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        if profiling_chunk_config.enabled and profiling_chunk_config.need_timing:
-            # Check if the scheduler signaled that calibration is complete.
-            # This flag is set cross-process via scheduler_output because
-            # modifying the config singleton in the scheduler process does
-            # not affect this worker process.
-            if getattr(scheduler_output, "disable_profiling_timing", False):
-                profiling_chunk_config.need_timing = False
-            else:
-                self._sync_device()
-                self._execution_start_time = time.perf_counter()
+        execution_start_time = _start_profiling_chunk_timing(
+            profiling_chunk_config,
+            scheduler_output,
+        )
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
 
@@ -2489,6 +2492,10 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+                profiling_chunk_config,
+                execution_start_time,
+            )
             # Verify every scheduled layer executed its deferred copy.
             if self.cache_config.mamba_cache_mode == "align" and mamba_copy_connector is not None:
                 mamba_copy_connector.finish_mamba_state_copy()
@@ -2568,7 +2575,6 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2732,14 +2738,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if (
-            profiling_chunk_config.enabled
-            and profiling_chunk_config.need_timing
-            and hasattr(self, "_execution_start_time")
-        ):
-            self._sync_device()
-            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
-
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
@@ -3036,6 +3034,8 @@ class NPUModelRunner(GPUModelRunner):
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            self.model.set_attn_backend(self.attn_backend)
 
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
@@ -3136,9 +3136,12 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A stateful P/D handoff can use a uniform decode graph even at
-        # prompt_len - 1 computed tokens. Keep first-token prefills out.
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        if self.use_dcp:
+            # DCP decode graphs require the full prompt to be computed.
+            has_initial_state = has_initial_state and np.all(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs]
+            )
         uniform_decode = (
             (
                 has_initial_state
@@ -3229,6 +3232,7 @@ class NPUModelRunner(GPUModelRunner):
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
+        dcp_dummy_metadata: DCPDummyRunMetadata | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
@@ -3276,7 +3280,9 @@ class NPUModelRunner(GPUModelRunner):
                 return None, block_table_tensor
 
             fixed_decode_seq_lens_cpu = None
-            if self.use_async_spec_decode:
+            if dcp_dummy_metadata is not None:
+                fixed_decode_seq_lens_cpu = dcp_dummy_metadata.seq_lens_cpu
+            elif self.use_async_spec_decode:
                 fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
 
             assert num_reqs_padded is not None
@@ -3328,14 +3334,27 @@ class NPUModelRunner(GPUModelRunner):
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
-        is_prefilling[num_reqs:] = False
+        if dcp_dummy_metadata is not None:
+            # A DCP dummy decode must not inherit request state from the
+            # previous real batch. Keep this local to metadata construction so
+            # the persistent input batch is not modified.
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ].clone()
+            num_computed_tokens_cpu.zero_()
+            num_computed_tokens_cpu[:num_reqs].copy_(
+                torch.from_numpy(dcp_dummy_metadata.num_computed_tokens_cpu)
+            )
+            is_prefilling = torch.zeros_like(num_computed_tokens_cpu, dtype=torch.bool)
+        else:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+            is_prefilling[num_reqs:] = False
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
@@ -3704,16 +3723,7 @@ class NPUModelRunner(GPUModelRunner):
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
         )
-        if self.use_dcp:
-            self.dcp_manager.init_batch_info(
-                num_scheduled_tokens,
-                num_reqs,
-                self.input_batch.num_computed_tokens_cpu,
-                self.input_batch.num_prompt_tokens,
-            )
-            if self.speculative_config:
-                self.dcp_manager.query_lens_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
-                self.dcp_manager.query_lens_full.copy_to_gpu()
+        dcp_dummy_metadata = None
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
@@ -3766,6 +3776,22 @@ class NPUModelRunner(GPUModelRunner):
                         if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                         else max_query_len
                     )  # type: ignore[assignment]
+
+                if self.use_dcp:
+                    dcp_dummy_metadata = (
+                        self.dcp_manager.prepare_dummy_run_metadata(
+                            num_scheduled_tokens=num_scheduled_tokens,
+                            num_reqs=num_reqs,
+                            seq_len=int(seq_lens),
+                            num_computed_tokens=(
+                                self.input_batch.num_computed_tokens_cpu
+                            ),
+                            num_prompt_tokens=self.input_batch.num_prompt_tokens,
+                            uniform_decode=uniform_decode,
+                        )
+                    )
+                    if dcp_dummy_metadata is not None:
+                        seq_lens = dcp_dummy_metadata.seq_len
 
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -3820,6 +3846,7 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
+                    dcp_dummy_metadata=dcp_dummy_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     skip_gdn_state_update=skip_gdn_state_update,
@@ -4116,9 +4143,12 @@ class NPUModelRunner(GPUModelRunner):
 
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
-
+            
             if self.drafter is not None:
-                self.drafter.update_stream = self.update_stream
+                if hasattr(self.drafter, "set_update_stream"):
+                    self.drafter.set_update_stream(self.update_stream)
+                else:
+                    self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
             if (
@@ -4146,6 +4176,7 @@ class NPUModelRunner(GPUModelRunner):
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
+                    update_stream=self.update_stream,
                 )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:

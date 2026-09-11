@@ -253,6 +253,7 @@ jobs:
           BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
+          OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
         run: |
           set -euo pipefail
 
@@ -300,7 +301,7 @@ jobs:
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
             -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
-            -D openlibing_secret="$OPENLIBING_SECRET" \
+            -D openlibing_secret="${OPENLIBING_SECRET:-}" \
             -D vllm_ascend_branch="${{ inputs.vllm_ascend_branch }}" \
             -D soc_version="${{ inputs.soc_version }}" \
             -D npu_resource_name="${npu_resource_name:-}" \

@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -58,12 +59,13 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
+from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -184,6 +186,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
 
         self.dcp_size = self.runner.dcp_size
+        self.dcp_rank = self.runner.dcp_rank
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -275,7 +278,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # since final block table tensor is not ready in __init__, it is delayed until dummy_run
         self.block_table_tensor_clone: torch.Tensor | None = None
 
-        self._runnable = self._run_merged_draft
+        self._runnable: Any = self._run_merged_draft
         if self.uses_mrope:
             self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -615,6 +618,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 enable_enpu=self.enable_enpu,
             )
 
+    def set_update_stream(self, update_stream):
+        if hasattr(self._runnable, "set_update_stream"):
+            self._runnable.set_update_stream(update_stream)
+        self.update_stream = update_stream
+
+    def _maybe_update_metadata(self, att_backend, aclgraph_runtime_mode, multi_steps_attn_metadata):
+        if use_updatable_graph(att_backend):
+            update_params = []
+            for per_layer_metadata in multi_steps_attn_metadata:
+                metadata = next(iter(per_layer_metadata.values()))
+                update_params.append(
+                    {
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+            self._runnable.update_draft_model_metadata(update_params)  # type: ignore
+            self._runnable.set_attn_backend(att_backend)  # type: ignore
+
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
@@ -799,6 +822,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.token_indices_to_sample.fill_(0)
 
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                aclgraph_runtime_mode,
+                multi_steps_attn_metadata,
+            )
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
@@ -915,7 +945,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
 
@@ -1089,7 +1119,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -1130,6 +1160,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                aclgraph_runtime_mode,
+                multi_steps_attn_metadata,
+            )
 
         active_device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
@@ -1281,6 +1318,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model = getattr(self.model, "model", None)
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
+            if hasattr(draft_model, "compact_topk_indices"):
+                compact_mtp_topk_indices(
+                    draft_model,
+                    token_indices_to_sample,
+                    num_input_tokens,
+                    tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
+                )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():

@@ -975,18 +975,16 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -998,14 +996,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1649,3 +1647,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

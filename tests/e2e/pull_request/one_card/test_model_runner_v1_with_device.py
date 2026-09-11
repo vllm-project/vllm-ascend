@@ -435,6 +435,7 @@ def test_stateful_handoff_preserves_decode_graph(
 ):
     # Exercise the real dispatcher and DP synchronization using CPU metadata only.
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dcp_size = 1
     runner.dp_size = dp_size
     runner.dp_rank = 0
     runner.parallel_config = SimpleNamespace(

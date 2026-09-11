@@ -115,6 +115,10 @@ TITLES = {
         "en": "DeepSeek-V4-Flash-Vision-Exp (Experimental)",
         "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
     },
+    "tutorials/models/DeepSeek-V4.1-Flash.md": {
+        "en": "DeepSeek-V4.1-Flash",
+        "zh": "DeepSeek-V4.1-Flash",
+    },
     "tutorials/models/DeepSeek-V4-Pro.md": {"en": "DeepSeek-V4-Pro", "zh": "DeepSeek-V4-Pro"},
     "tutorials/models/DeepSeekOCR2.md": {"en": "DeepSeek-OCR-2", "zh": "DeepSeek-OCR-2"},
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
@@ -209,6 +213,10 @@ TITLES = {
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
+    "user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md": {
+        "en": "Mooncake Layerwise Adaptation and Optimization",
+        "zh": "Mooncake Layerwise 适配与优化",
+    },
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",

@@ -12,15 +12,17 @@ import torch
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
+from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
     parse_qos_from_extra_config,
+    require_aligned_batch_results,
+    set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -28,6 +30,30 @@ from vllm_ascend.distributed.parallel_state import get_global_rank
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_TENANT_ID = "default"
+MOONCAKE_LAYERWISE_CLIENT_METHODS = (
+    "batch_put_session_start",
+    "batch_put_from_multi_buffer_ranges",
+    "batch_put_session_end",
+    "batch_put_session_revoke",
+    "batch_get_session_start",
+    "batch_get_into_multi_buffer_ranges",
+    "batch_get_session_end",
+)
+_KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
+
+
+def _emit_whole_key_debug_event(direction: str, key_count: int) -> None:
+    try:
+        if not envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG:
+            return
+        payload = {
+            "event": "whole_key",
+            "direction": direction,
+            "key_count": int(key_count),
+        }
+        logger.info("%s %s", _KVPOOL_RANGE_DEBUG_PREFIX, json.dumps(payload, separators=(",", ":")))
+    except Exception:
+        pass
 
 
 @functools.lru_cache(maxsize=1)
@@ -168,6 +194,7 @@ class MooncakeBackend(Backend):
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _inject_store_qos(extra_config)
         _validate_store_qos()
+        self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
@@ -207,6 +234,7 @@ class MooncakeBackend(Backend):
                 "to run vLLM with MooncakeConnector."
             ) from e
 
+        self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
         ssd_kwargs = _ssd_setup_kwargs(self.config)
@@ -274,13 +302,11 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
+        set_scheduler_device(parallel_config)
         return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
-        local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
-        torch.npu.set_device(device)
+        torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         if self._use_store_independent_te:
@@ -309,14 +335,101 @@ class MooncakeBackend(Backend):
         assert self.store is not None
         return self.store.batch_is_exist(keys)
 
+    def _build_replicate_config(self) -> ReplicateConfig:
+        config = ReplicateConfig()
+        if self.config.preferred_segment:
+            config.preferred_segment = self.local_seg
+        config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
+        return config
+
+    def validate_layerwise_support(self) -> None:
+        """Fail before serving traffic when the installed client is too old."""
+        self.ensure_initialized()
+        missing_methods = [
+            method_name
+            for method_name in MOONCAKE_LAYERWISE_CLIENT_METHODS
+            if self.store is None or not callable(getattr(self.store, method_name, None))
+        ]
+        if missing_methods:
+            raise RuntimeError(
+                "Mooncake layerwise requires a client containing the session/range APIs "
+                "from Mooncake PR #2881. Missing methods: " + ", ".join(missing_methods)
+            )
+
+    def _call_layerwise_batch(self, operation: str, keys: list[str], *args: object) -> list[int]:
+        self.ensure_initialized()
+        if self.store is None:
+            raise RuntimeError(f"Mooncake store is unavailable for {operation}")
+        method = getattr(self.store, operation, None)
+        if not callable(method):
+            raise RuntimeError(f"Mooncake client does not support {operation}")
+        return require_aligned_batch_results(operation, keys, method(*args))
+
+    def batch_put_start(self, keys: list[str], sizes: list[int]) -> list[int]:
+        return self._call_layerwise_batch(
+            "batch_put_session_start",
+            keys,
+            keys,
+            sizes,
+            self._build_replicate_config(),
+        )
+
+    def batch_copy_put(
+        self,
+        keys: list[str],
+        all_buffers: list[list[int]],
+        all_sizes: list[list[int]],
+        all_dst_offsets: list[list[int]],
+    ) -> list[int]:
+        return self._call_layerwise_batch(
+            "batch_put_from_multi_buffer_ranges",
+            keys,
+            keys,
+            all_buffers,
+            all_sizes,
+            all_dst_offsets,
+        )
+
+    def batch_commit(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_put_session_end", keys, keys)
+
+    def batch_revoke(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_put_session_revoke", keys, keys)
+
+    def batch_get_start(self, keys: list[str]) -> list[int]:
+        return self._call_layerwise_batch("batch_get_session_start", keys, keys)
+
+    def batch_copy_get(
+        self,
+        keys: list[str],
+        all_buffers: list[list[int]],
+        all_sizes: list[list[int]],
+        all_src_offsets: list[list[int]],
+    ) -> list[int]:
+        return self._call_layerwise_batch(
+            "batch_get_into_multi_buffer_ranges",
+            keys,
+            keys,
+            all_buffers,
+            all_sizes,
+            all_src_offsets,
+        )
+
+    def batch_get_end(self, keys: list[str]) -> int:
+        self.ensure_initialized()
+        if self.store is None:
+            raise RuntimeError("Mooncake store is unavailable for batch_get_session_end")
+        method = getattr(self.store, "batch_get_session_end", None)
+        if not callable(method):
+            raise RuntimeError("Mooncake client does not support batch_get_session_end")
+        return int(method(keys))
+
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         self.ensure_initialized()
         assert self.store is not None
         try:
-            config = ReplicateConfig()
-            if self.config.preferred_segment:
-                config.preferred_segment = self.local_seg
-            config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
+            config = self._build_replicate_config()
+            _emit_whole_key_debug_event("put", len(keys))
             res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
             failed_codes = [int(value) for value in res if value < 0]
             failed_count = len(failed_codes)
@@ -360,6 +473,7 @@ class MooncakeBackend(Backend):
             keys[:3],
         )
         try:
+            _emit_whole_key_debug_event("get", len(keys))
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
             failed_codes = [int(value) for value in res_list if value < 0]

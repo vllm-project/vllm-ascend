@@ -128,6 +128,13 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -147,6 +154,42 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
+
+    def build_fia_params(
+        self,
+        num_reqs_padded: int,
+        is_draft_model_prefill: bool,
+    ) -> list[dict[str, Any]]:
+        metadata = next(
+            metadata
+            for layer_name, metadata in self.model_state.attn_metadata.items()
+            if layer_name in self.draft_attn_layer_names
+        )
+        if is_draft_model_prefill:
+            return [
+                {
+                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": metadata.seq_lens_list,
+                    "block_table": metadata.block_tables,
+                }
+            ]
+        assert self.input_batch is not None
+        num_reqs = self.input_batch.num_reqs
+        query_start_loc = list(range(1, num_reqs_padded + 1))
+        fia_params: list[dict[str, Any]] = []
+        for step in range(1, self.num_speculative_steps):
+            seq_lens = [
+                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+            ]
+            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            fia_params.append(
+                {
+                    "actual_seq_lengths": query_start_loc,
+                    "actual_seq_lengths_kv": seq_lens,
+                    "block_table": metadata.block_tables,
+                }
+            )
+        return fia_params
 
 
 # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
