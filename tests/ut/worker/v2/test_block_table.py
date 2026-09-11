@@ -40,7 +40,11 @@ def _parent_init(
 def test_init_defaults_kernel_sizes_and_rebuilds_int32_slots():
     with (
         patch.object(BlockTables, "__init__", _parent_init),
-        patch("vllm_ascend.worker.v2.block_table.triton.next_power_of_2", return_value=16),
+        patch(
+            "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
+            return_value=16,
+            create=True,
+        ),
     ):
         tables = AscendBlockTables([4], 2, 8, [4], torch.device("cpu"))
     assert tables.kernel_block_sizes == [4]
@@ -52,7 +56,11 @@ def test_init_defaults_kernel_sizes_and_rebuilds_int32_slots():
 def test_init_keeps_explicit_kernel_block_sizes():
     with (
         patch.object(BlockTables, "__init__", _parent_init),
-        patch("vllm_ascend.worker.v2.block_table.triton.next_power_of_2", return_value=8),
+        patch(
+            "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
+            return_value=8,
+            create=True,
+        ),
     ):
         tables = AscendBlockTables(
             [8],
