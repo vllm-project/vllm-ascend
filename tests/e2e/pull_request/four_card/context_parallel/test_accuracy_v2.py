@@ -148,34 +148,6 @@ def _run_accuracy_case(case: AccuracyCase) -> None:
             raise AssertionError(f"Output did not match any of the expected output sets:\n{failure_details}")
 
 
-DSV3_2_SFA_DCP_CASE = AccuracyCase(
-    name="dsv3_2_sfa_dcp_replicated_indexer_mrv2_tp2_dcp2",
-    model=DSV3_2_MODEL,
-    prompts=DSV3_2_PROMPTS,
-    expected_outputs=DSV3_2_SFA_DCP_GOLDENS,
-    max_tokens=5,
-    runner_kwargs={
-        "max_model_len": 1024,
-        "max_num_seqs": MAX_NUM_SEQS,
-        "max_num_batched_tokens": 1024,
-        "tensor_parallel_size": 2,
-        "decode_context_parallel_size": 2,
-        "enable_expert_parallel": True,
-        "gpu_memory_utilization": 0.4,
-        "block_size": 128,
-        "quantization": "ascend",
-        "compilation_config": FULL_DECODE_GRAPH,
-        "additional_config": {
-            "enable_dsa_cp": False,
-            "enable_sparse_li_c8": False,
-        },
-        "speculative_config": {
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        },
-    },
-)
-
 DSV3_2_SFA_PCP_CASE = AccuracyCase(
     name="dsv3_2_sfa_pcp_mrv2_full_decode_only",
     model=DSV3_2_MODEL,
@@ -199,20 +171,33 @@ DSV3_2_SFA_PCP_CASE = AccuracyCase(
     },
 )
 
-
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_BATCH_INVARIANT": "1",
-        "HCCL_BUFFSIZE": "768",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
+    name="dsv3_2_sfa_pcp_dcp_replicated_indexer_mrv2_tp2_pcp2_dcp4",
+    model=DSV3_2_MODEL,
+    prompts=DSV3_2_PROMPTS,
+    expected_outputs=DSV3_2_SFA_DCP_GOLDENS,
+    max_tokens=5,
+    runner_kwargs={
+        "max_model_len": 1024,
+        "max_num_seqs": MAX_NUM_SEQS,
+        "max_num_batched_tokens": 1024,
+        "tensor_parallel_size": 2,
+        "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 4,
+        "enable_expert_parallel": True,
+        "enable_chunked_prefill": True,
+        "enable_prefix_caching": True,
+        "gpu_memory_utilization": 0.8,
+        "cp_kv_cache_interleave_size": 128,
+        "block_size": 128,
+        "quantization": "ascend",
+        "compilation_config": FULL_DECODE_GRAPH,
+        "additional_config": {
+            "enable_dsa_cp": False,
+            "enable_sparse_li_c8": False,
+        },
     },
 )
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_dcp_tp2_dcp2_model_runner_v2_accuracy() -> None:
-    """Guard MRV2 accuracy."""
-    _run_accuracy_case(DSV3_2_SFA_DCP_CASE)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
@@ -239,6 +224,32 @@ def test_dsv3_2_sfa_dcp_tp2_dcp2_model_runner_v2_accuracy() -> None:
 def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_CASE)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="sfa_pcp",
+    parallel="TP,EP,PCP,DCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
+    """Guard MRV2 SFA PCP+DCP full-decode-only graph accuracy."""
+    _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
 
 
 def _run_pcp_spec_decode(

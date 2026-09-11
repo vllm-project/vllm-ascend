@@ -196,6 +196,11 @@ def test_unquantized_apply_310_uses_preselected_experts():
     assert fused_experts_input.topk_ids is topk_ids
     assert fused_experts_input.routing.expert_map is expert_map
     assert fused_experts_input.routing.apply_router_weight_on_input is True
+    # Post-refactor contract: the layer is carried on the input so the MLP
+    # gmm hooks can read the weights, and the method passes itself as the
+    # quant_method dispatcher.
+    assert fused_experts_input.layer is layer
+    assert comm_method.fused_experts.call_args.kwargs["quant_method"] is method
 
 
 class _Projection(nn.Module):

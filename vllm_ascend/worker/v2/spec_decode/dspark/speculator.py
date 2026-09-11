@@ -18,7 +18,7 @@
 from typing import Any, cast
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -37,12 +37,14 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
@@ -84,29 +86,31 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
-        self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
-        # npu needs attn_backends to update full graph params in run_fullgraph.
-        attn_backends: dict[str, type[AttentionBackend]] = {}
-        active_layer_names = self.draft_attn_layer_names
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            layer_names = kv_cache_group_spec.layer_names
-            if active_layer_names is not None:
-                layer_names = list(active_layer_names.intersection(layer_names))
+        # Initialize the draft attention backend with its PCP=1 config.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
+            self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+            # npu needs attn_backends to update full graph params in run_fullgraph.
+            attn_backends: dict[str, type[AttentionBackend]] = {}
+            active_layer_names = self.draft_attn_layer_names
+            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+                layer_names = kv_cache_group_spec.layer_names
+                if active_layer_names is not None:
+                    layer_names = list(active_layer_names.intersection(layer_names))
 
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+                layer_type = cast(type[Any], AttentionLayerBase)
+                attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
 
-            for layer_name in layer_names:
-                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                for layer_name in layer_names:
+                    attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
-        self.attn_backends = attn_backends
+            self.attn_backends = attn_backends
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
@@ -176,6 +180,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(

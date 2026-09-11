@@ -70,10 +70,10 @@ skip_tests:
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
   # Temporarily skip this DeepSeek V4 test
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
+  # Temporarily skip the Qwen3.6 MTP e2e test
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
-  # The use case is unstable and temporarily taken offline
-  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
 
 # === Accuracy Tests ===
 # The accuracy tests. When at least one of these files is selected,
@@ -81,6 +81,7 @@ skip_tests:
 # 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
 # their normal directory-based partitions.
 accuracy_tests:
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
   - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
@@ -91,6 +92,7 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
+  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
   - tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
@@ -165,6 +167,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 450
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 1590
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
+  # Initial estimate for two models with fixed goldens on MRV2.
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
@@ -189,9 +193,10 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 590
-  tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 310
+  tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
+  tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 730
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
@@ -220,11 +225,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 60
-  tests/e2e/pull_request/one_card/test_w4a4_flatquant.py: 40
-  tests/e2e/pull_request/one_card/test_w4a4_laos_dynamic.py: 40
-  tests/e2e/pull_request/one_card/test_w8a16.py: 40
-  tests/e2e/pull_request/one_card/test_w8a8_dynamic.py: 30
-  tests/e2e/pull_request/one_card/test_w8a8_static.py: 40
+  tests/e2e/pull_request/one_card/test_linear_quantization.py: 60
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 110
   tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
 
@@ -259,13 +260,13 @@ partition:
     runner_label: linux-aarch64-a2b3-1
     count: 5
   a3-2:
-    runner_label: linux-aarch64-a3-2-
-    count: 2
+    runner_label: linux-aarch64-a3-2
+    count: 4
   a3-4:
-    runner_label: linux-aarch64-a3-4-
-    count: 2
+    runner_label: linux-aarch64-a3-4
+    count: 4
   a3-8:
-    runner_label: linux-aarch64-a3-8-
+    runner_label: linux-aarch64-a3-8
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk

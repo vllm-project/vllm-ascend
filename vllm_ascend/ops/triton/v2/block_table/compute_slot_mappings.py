@@ -14,6 +14,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,
     block_table_strides,
     block_sizes,
+    kernel_block_sizes,
     slot_mappings_ptr,
     slot_mappings_stride,
     cp_rank,
@@ -21,8 +22,7 @@ def _compute_slot_mappings_kernel(
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
-    BLOCK_TABLE_PAD_SIZE: tl.constexpr,
-    USE_BLOCK_TABLE_STAGING: tl.constexpr,
+    BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -37,45 +37,55 @@ def _compute_slot_mappings_kernel(
 
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
-    block_size = tl.load(block_sizes + group_id)
+    kv_block_size = tl.load(block_sizes + group_id)
+    kernel_block_size = tl.load(kernel_block_sizes + group_id)
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
 
     lane_offsets = tl.arange(0, TRITON_BLOCK_SIZE)
-    if USE_BLOCK_TABLE_STAGING:
-        # BLOCK_TABLE_PAD_SIZE is a compile-time upper bound for every group's
-        # row. The runtime stride mask keeps loads within the current group's
-        # row. Large rows deliberately skip this allocation because staging a
-        # complete fp32 row can exceed UB during Triton compilation.
-        block_table_offsets = tl.arange(0, BLOCK_TABLE_PAD_SIZE)
-        block_table_values = tl.load(
-            block_table_ptr + req_state_idx * block_table_stride + block_table_offsets,
-            mask=block_table_offsets < block_table_stride,
-            other=0,
-        ).to(tl.float32)
-
+    block_table_offsets = tl.arange(0, BLOCK_TABLE_WINDOW_SIZE)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + lane_offsets
         valid = offset < end_idx
         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
-        block_indices = positions // (block_size * CP_SIZE)
-        # block_offset = positions % (block_size * CP_SIZE). Replacing the
-        # remainder with multiply/subtract avoids scalar fallback on Ascend.
-        block_offsets = positions - (block_size * CP_SIZE) * block_indices
-        if USE_BLOCK_TABLE_STAGING:
-            block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
-        else:
-            block_numbers = tl.load(block_table_ptr + req_state_idx * block_table_stride + block_indices)
 
         if CP_SIZE == 1:
-            slot_ids = block_numbers * block_size + block_offsets
+            local_positions = positions
+            is_local = True
         else:
-            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-            remainder = block_offsets % CP_INTERLEAVE
+            virtual_block_size = kv_block_size * CP_SIZE
+            virtual_block_indices = positions // virtual_block_size
+            virtual_block_offsets = positions - virtual_block_indices * virtual_block_size
+            is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            rounds = virtual_block_offsets // (CP_INTERLEAVE * CP_SIZE)
+            remainder = virtual_block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
-            slot_ids = block_numbers * block_size + local_offsets
+            local_positions = virtual_block_indices * kv_block_size + local_offsets
+
+        block_indices = local_positions // kernel_block_size
+        # Replace the remainder with multiply/subtract to avoid scalar fallback
+        # on Ascend.
+        block_offsets = local_positions - kernel_block_size * block_indices
+
+        # Stage only the contiguous portion of this request row used by the
+        # current token tile. The window bound is selected at launch from the
+        # smallest group block size. Empty requests do not enter this loop, so
+        # their -1 idx_mapping sentinel is never used to address block_table.
+        INT32_MAX = 2147483647
+        valid_block_indices = tl.where(valid, block_indices, INT32_MAX)
+        block_idx_base = tl.min(valid_block_indices, axis=0)
+        window_offsets = block_idx_base + block_table_offsets
+        block_table_window = tl.load(
+            block_table_ptr + req_state_idx * block_table_stride + window_offsets,
+            mask=window_offsets < block_table_stride,
+            other=0,
+        ).to(tl.float32)
+        relative_block_indices = tl.where(valid & is_local, block_indices - block_idx_base, 0)
+        block_numbers = tl.gather(block_table_window, relative_block_indices, 0).to(tl.int32)
+
+        slot_ids = block_numbers * kernel_block_size + block_offsets
+        if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)

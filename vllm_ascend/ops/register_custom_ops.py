@@ -41,15 +41,15 @@ def _pad_to_ep_local_size(x: torch.Tensor, max_local_size: int) -> torch.Tensor:
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
-    """仅用于 EP 通信场景：EP all_gather + 按 DP token 分布 unpad。"""
+    """EP communication only: EP all_gather followed by unpad according to the DP token distribution."""
     forward_context = get_forward_context()
     dp_metadata = forward_context.dp_metadata
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(dp_metadata, ep_group)
     if local_sizes is not None:
         max_local_size = max(local_sizes)
-        # all_gather 要求各 rank 输入等长：先 pad 到 max_local_size，
-        # gather 后再按各 rank 真实的 local_sizes 截回。
+        # all_gather requires equal-length inputs on every rank: pad to
+        # max_local_size first, then trim back to each rank's real local size.
         x = _pad_to_ep_local_size(x, max_local_size)
     # need to unpad from ep size
     x = ep_group.all_gather(x, 0)
@@ -73,7 +73,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
 
 
 def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
-    """仅用于 EP 通信场景：按 DP token 分布 pad 后做 EP reduce_scatter。"""
+    """EP communication only: pad according to the DP token distribution, then EP reduce_scatter."""
     forward_context = get_forward_context()
 
     if _EXTRA_CTX.is_draft_model and is_vl_model():

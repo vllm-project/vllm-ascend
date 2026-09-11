@@ -2,6 +2,7 @@ The following Qwen3-0.6B example has been validated using the default model load
 
 In the container terminal, create `example.py` with the following code:
 
+<!-- doctest: quickstart-standard-offline -->
 ```python
 from vllm import LLM, SamplingParams
 
@@ -28,6 +29,7 @@ for output in outputs:
 
 Run the example:
 
+<!-- doctest: quickstart-standard-offline-run -->
 ```bash
 python3 example.py
 ```
