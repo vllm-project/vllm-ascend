@@ -9,6 +9,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
+    select_mega_moe_activation_kwargs,
 )
 
 
@@ -70,6 +71,35 @@ class TestSwigluScaleHelpers(unittest.TestCase):
         out = _prepare_dequant_swiglu_weight_scale([single], False)
         self.assertEqual(out.dtype, torch.float32)
         self.assertEqual(out.shape, (4,))
+
+
+class TestMegaMoeActivationKwargs(unittest.TestCase):
+    def test_select_mega_moe_activation_kwargs_keeps_clamp_only_for_legacy_op(self):
+        def mega_moe(*args, activation_clamp=None, **kwargs):
+            return args, activation_clamp, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs, {"activation_clamp": 7.0})
+
+    def test_select_mega_moe_activation_kwargs_binds_oai_when_supported(self):
+        def mega_moe(*args, activation_clamp=None, glu_alpha=1.0, glu_bias=0.0, **kwargs):
+            return args, activation_clamp, glu_alpha, glu_bias, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs["activation_clamp"], 7.0)
+        self.assertEqual(kwargs["glu_alpha"], 1.702)
+        self.assertEqual(kwargs["glu_bias"], 1.0)
+        self.assertNotIn("swiglu_alpha", kwargs)
 
 
 if __name__ == "__main__":

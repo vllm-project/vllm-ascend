@@ -430,6 +430,12 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias
+        activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
+            self.mega_moe,
+            activation_clamp=activation_clamp,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_beta=self.swiglu_beta,
+        )
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
@@ -443,9 +449,9 @@ class FusedMC2CommImpl(MoECommMethod):
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
-            activation_clamp=activation_clamp,
             weight1_type=weight_type,
             weight2_type=weight_type,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a

@@ -334,12 +334,13 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         """Normalized weight payload for the FUSED_MC2 comm path."""
         activation = getattr(layer, "activation", "silu")
         act_name = getattr(activation, "value", activation)
-        fused_scale_flag = (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
-            and get_ascend_config().enable_fused_mc2 == 1
-            and act_name != "swigluoai_uninterleave"
+        is_fused_mc2 = (
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
         )
-        use_mega_moe = fused_scale_flag and _EXTRA_CTX.use_mega_moe
+        # dispatch_ffn_combine does not support SwiGLU-OAI fused scales.
+        # MegaMoe can still consume the per-expert NZ weight/scale lists.
+        fused_scale_flag = is_fused_mc2 and act_name != "swigluoai_uninterleave"
+        use_mega_moe = is_fused_mc2 and _EXTRA_CTX.use_mega_moe
         if self.use_expert_weight_list:
             if use_mega_moe:
                 return MoEWeights(
