@@ -790,18 +790,7 @@ def test_build_attn_metadata_propagates_prefill_state():
     assert metadata["layer.0"] is is_prefilling
 
 
-def test_build_dcp_metadata_uses_full_decode_and_cached_prefill_lens(monkeypatch):
-    monkeypatch.setattr(
-        attn_utils,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                decode_context_parallel_size=2,
-                cp_kv_cache_interleave_size=4,
-            ),
-        ),
-    )
-
+def test_build_dcp_metadata_uses_full_decode_and_cached_prefill_lens():
     metadata = attn_utils._build_dcp_metadata(
         seq_lens_cpu=torch.tensor([9, 14], dtype=torch.int32),
         num_computed_tokens_cpu=torch.tensor([8, 6], dtype=torch.int32),
@@ -809,6 +798,8 @@ def test_build_dcp_metadata_uses_full_decode_and_cached_prefill_lens(monkeypatch
         is_prefilling=torch.tensor([False, True]),
         num_reqs=2,
         num_actual_reqs=2,
+        dcp_size=2,
+        interleave_size=4,
     )
 
     np.testing.assert_array_equal(

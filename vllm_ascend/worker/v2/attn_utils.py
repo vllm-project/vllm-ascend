@@ -196,6 +196,8 @@ def _build_dcp_metadata(
     is_prefilling: torch.Tensor | None,
     num_reqs: int,
     num_actual_reqs: int,
+    dcp_size: int,
+    interleave_size: int,
 ) -> AscendDCPMetadata:
     """Build the host-side DCP lengths consumed by MLA FIA.
 
@@ -204,10 +206,6 @@ def _build_dcp_metadata(
     lengths contain only the cached prefix; the current query chunk is handled
     by the regular prefill path.
     """
-    parallel_config = get_current_vllm_config().parallel_config
-    dcp_size = parallel_config.decode_context_parallel_size
-    interleave_size = parallel_config.cp_kv_cache_interleave_size
-
     seq_lens_cpu = seq_lens_cpu[:num_reqs]
     query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
 
@@ -315,9 +313,15 @@ def build_attn_metadata(
         )
         attn_metadata_builders = [attn_group.get_metadata_builder(0) for attn_group in attn_groups[i]]
         context_parallel_metadata = None
-        if dcp_local_seq_lens is not None and any(
-            isinstance(builder, AscendMlaDCPMetadataBuilder) for builder in attn_metadata_builders
-        ):
+        dcp_builder = next(
+            (
+                builder
+                for builder in attn_metadata_builders
+                if isinstance(builder, AscendMlaDCPMetadataBuilder)
+            ),
+            None,
+        )
+        if dcp_local_seq_lens is not None and dcp_builder is not None:
             context_parallel_metadata = _build_dcp_metadata(
                 seq_lens_cpu=seq_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
@@ -325,6 +329,8 @@ def build_attn_metadata(
                 is_prefilling=common_is_prefilling,
                 num_reqs=num_reqs,
                 num_actual_reqs=num_actual_reqs,
+                dcp_size=dcp_builder.dcp_size,
+                interleave_size=dcp_builder.cp_local_block_size,
             )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
