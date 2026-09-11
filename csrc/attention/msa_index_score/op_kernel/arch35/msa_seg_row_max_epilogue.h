@@ -159,6 +159,8 @@ public:
         stageBlkEnd_ = 0;
         rowInReqBase_ = task.mStart + mOff_;
         tokenBase0_ = task.cuQStart;
+        writeLo_ = task.sBlkBegin;
+        writeHi_ = task.writeTailFill ? strideOutToken_ : task.sBlkEnd;
         if constexpr (MSA_A5_USE_C2UB) {
             // 禁止 4B DataCopyPad：MTE3 会按 32B 写出，把后面的 fill 槽写成 0。
             // UB 一次最多攒 MSA_STAGE_BLOCKS 列；block_table 宽 >256 时 score 末维
@@ -286,7 +288,7 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
             }
         }
-        if (col == (MSA_BLOCKS_PER_STILE - 1U) || (blk + 1U) == task.visibleEndBlk) {
+        if (col == (MSA_BLOCKS_PER_STILE - 1U) || (blk + 1U) == task.sBlkEnd || (blk + 1U) == task.visibleEndBlk) {
             ReduceStileToStage(task, blk - col);
         }
     }
@@ -421,12 +423,12 @@ private:
         }
     }
 
-    /// 当前窗 + 一直到 score 末维的后续纯 -inf 窗。
+    /// 当前窗中本 chunk 负责的列；writeTailFill 时 writeHi_ 延到 score 末维。
     __aicore__ inline void FlushStageToStrideEnd()
     {
         FlushStage();
         if constexpr (MSA_A5_USE_C2UB) {
-            while (stageOn_ && stageBlkEnd_ < strideOutToken_) {
+            while (stageOn_ && stageBlkEnd_ < writeHi_) {
                 OpenStageWindow(stageBlkEnd_);
                 FlushStage();
             }
@@ -439,16 +441,22 @@ private:
         if (!stageOn_ || stageBlkEnd_ <= stageBlkBase_) {
             return;
         }
-        const uint32_t count = MsaMinU32(stageBlkEnd_ - stageBlkBase_, MSA_STAGE_BLOCKS);
+        const uint32_t lo = (writeLo_ > stageBlkBase_) ? writeLo_ : stageBlkBase_;
+        const uint32_t hi = (writeHi_ < stageBlkEnd_) ? writeHi_ : stageBlkEnd_;
+        if (hi <= lo) {
+            return;
+        }
+        const uint32_t count = hi - lo;
+        const uint32_t ubOff = lo - stageBlkBase_;
         AscendC::PipeBarrier<PIPE_ALL>();
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         uint32_t tOff = rowInReqBase_ / numQHeads_;
         uint32_t h = rowInReqBase_ - tOff * numQHeads_;
-        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + stageBlkBase_;
+        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + lo;
         for (uint32_t r = 0; r < mSub_; ++r) {
             AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_],
-                              ubStage_[r * MSA_STAGE_BLOCKS], count);
+                              ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
             if (++h == numQHeads_) {
                 h = 0;
                 tokenBase += strideOutToken_;
@@ -967,6 +975,8 @@ private:
     uint32_t tokenBase0_ = 0;
     uint32_t stageBlkBase_ = 0;
     uint32_t stageBlkEnd_ = 0;
+    uint32_t writeLo_ = 0;
+    uint32_t writeHi_ = 0;
     bool stageOn_ = false;
 
     uint32_t numQHeads_ = 1;
