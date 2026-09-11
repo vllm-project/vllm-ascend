@@ -99,10 +99,11 @@ RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
         x86_64) ARCH=x86_64-unknown-linux-gnu ;; \
         aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
       esac && \
-      curl -fsSL "${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
+      curl --retry 3 --retry-delay 2 -sSfL "${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
       chmod +x /tmp/rustup-init && \
-      /tmp/rustup-init -y --default-toolchain none && \
-      rm /tmp/rustup-init; \
+      /tmp/rustup-init -y --default-toolchain "${RUSTUP_TOOLCHAIN:-1.95}" && \
+      rm /tmp/rustup-init && \
+      . "$HOME/.cargo/env"; \
     fi
 ENV PATH="$HOME/.cargo/bin:$PATH"
 RUN cd /vllm-workspace/vllm && \
