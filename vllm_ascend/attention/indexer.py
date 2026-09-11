@@ -702,9 +702,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 local_phys_blocks * total_cp_size + rank_in_replicated_view
             ) * blocks_per_phys_block + local_sub_blocks
 
-        valid_req_mask = (
-            (seq_lens[:num_reqs].to(device=block_table.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
-        )
+        valid_req_mask = (seq_lens[:num_reqs].to(device=block_table.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
         replicated_blocks = replicated_blocks * valid_req_mask
         block_table_replicated_view.copy_(replicated_blocks)
         return block_table_replicated_view
