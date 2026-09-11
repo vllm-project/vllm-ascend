@@ -261,17 +261,22 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
         fused preprocess paths, prepared states on native paths). SFA then
         persists the result through ``write_cache`` before the top-k stage
-        runs, since the top-k kernel reads the freshly written cache."""
+        runs, since the top-k kernel reads the freshly written cache.
+
+        Also returns the non-K tail of the ``wk_weights_proj`` GEMM output
+        (``indexer_weights``) so the top-k stage can reuse it instead of
+        re-running the same GEMM on the same hidden states."""
         assert self.wk_weights_proj is not None
         assert self.k_norm is not None
 
         kw, _ = self.wk_weights_proj(hidden_states)
         k_li = kw[:, : self.head_dim]
+        indexer_weights = kw[:, self.head_dim :]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
@@ -303,7 +308,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             k_li_scale = None
 
-        return k_li, k_li_scale
+        return k_li, k_li_scale, indexer_weights
 
     def _gather_cache_inputs(
         self,
@@ -371,7 +376,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         DSA-CP shards them to the local token shard, matching the sharded
         inputs. ``indexer_metadata`` carries the indexer's own cache view
         plus the parallel-layout values injected by SFA."""
-        k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin)
+        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -382,8 +387,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         assert indexer_metadata.actual_seq_lengths_query is not None
         assert indexer_metadata.actual_seq_lengths_key is not None
 
-        kw, _ = self.wk_weights_proj(hidden_states)
-        weights = kw[:, self.head_dim :]
+        if hidden_states is k_hidden_states:
+            # The k path already ran wk_weights_proj on these hidden states
+            # (SFA hands both stages the same tensor); reuse its weights tail
+            # instead of duplicating the GEMM.
+            weights = indexer_weights
+        else:
+            kw, _ = self.wk_weights_proj(hidden_states)
+            weights = kw[:, self.head_dim :]
+
         if isinstance(q_c, tuple):
             q_c_tensor, q_c_scale = q_c
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
