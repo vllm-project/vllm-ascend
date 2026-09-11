@@ -34,6 +34,7 @@ from vllm_ascend.models.deepseek_v4.vision import (
     DeepseekV4Aligner,
     DeepseekV4ViT,
 )
+from vllm_ascend.models.deepseek_v4.vision_dp import run_dp_sharded_deepseek_v4_vision
 
 
 def _vision_parameter_name(name: str) -> str | None:
@@ -59,6 +60,7 @@ class AscendDeepseekV4ForConditionalGeneration(
     """DeepSeek-V4 vision entry point using the Ascend text backbone."""
 
     requires_raw_input_tokens = True
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -77,6 +79,7 @@ class AscendDeepseekV4ForConditionalGeneration(
         self.config = config
         self.multimodal_config = model_config.multimodal_config
         assert self.multimodal_config is not None
+        self.use_data_parallel = self.multimodal_config.mm_encoder_tp_mode == "data"
 
         image_enabled = config.vision_n_layers > 0 and self.multimodal_config.get_limit_per_prompt("image") > 0
         with self._mark_tower_model(vllm_config, {"image"}):
@@ -134,6 +137,8 @@ class AscendDeepseekV4ForConditionalGeneration(
         perm: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         assert self.vision is not None and self.aligner is not None
+        if self.use_data_parallel:
+            return run_dp_sharded_deepseek_v4_vision(self.vision, self.aligner, patches, vit_grid, llm_grid, perm)
         patches = patches.to(self.aligner.w1.weight.dtype)
 
         embeds: list[torch.Tensor] = []
