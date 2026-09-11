@@ -77,7 +77,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
             # (no ``weight``). Keep the draft's own copy instead of sharing.
             if flag == "has_own_embed_tokens":
                 return False
-            if isinstance(target, model_utils.PPMissingLayer):
+            if target is not None and not hasattr(target, "weight"):
                 return False
             return original_eagle_should_share(eagle, flag, draft, target)
 
