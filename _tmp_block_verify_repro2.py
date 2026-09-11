@@ -132,7 +132,7 @@ d1d = torch.randn(V, device=DEVICE)
 p, q = torch.softmax(t1d, 0), torch.softmax(d1d, 0)
 S = torch.arange(0, 32, dtype=torch.int64, device=DEVICE) * 100 + 3
 N = 16384
-tokens = S.repeat(N // 32, 1)
+tokens = S.repeat(N // 32).unsqueeze(1)
 inputs = make_inputs(t1d, d1d, 1, N, draft_tokens=tokens)
 blk = rejection_sample(**inputs, num_speculative_steps=1, use_block_verification=True)
 acc = (blk[1] == 2)
