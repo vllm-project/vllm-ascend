@@ -3,7 +3,7 @@
 import math
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -1010,6 +1010,39 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
+    """Mamba states are replicated, unlike DCP-sharded attention KV cache."""
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+
+    # The patch module replaces vLLM's public MambaManager symbol with the
+    # Ascend subclass, so patch the subclass's direct base explicitly.
+    base_mamba_manager = AscendMambaManager.__base__
+    assert base_mamba_manager is not None
+    with patch.object(
+        base_mamba_manager,
+        "find_longest_cache_hit",
+        return_value=((), 0),
+    ) as find_cache_hit:
+        AscendMambaManager.find_longest_cache_hit(
+            block_hashes=[],
+            max_length=0,
+            kv_cache_group_ids=[1],
+            block_pool=MagicMock(),
+            kv_cache_spec=mamba_spec,
+            alignment_tokens=16,
+            dcp_world_size=8,
+            pcp_world_size=1,
+            drop_eagle_block=False,
+        )
+
+    assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
