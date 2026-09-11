@@ -23,6 +23,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -524,3 +525,79 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_should_not_skip_dp_sync_when_a5_mega_moe_can_be_selected():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.scheduler_config.max_num_batched_tokens = 2048
+    ascend_config = SimpleNamespace(
+        enable_fused_mc2=1,
+        get_mc2_comm_alg=lambda: "",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
+    )
+
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_ascend_device_type", return_value=utils.AscendDeviceType.A5),
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            side_effect=lambda num_tokens, *_args, **_kwargs: (
+                MoECommType.FUSED_MC2 if num_tokens == 1 else MoECommType.MC2
+            ),
+        ) as select_method,
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config) is False
+
+    select_method.assert_called_once_with(1, vllm_config, is_draft_model=False)
+
+
+def test_should_not_skip_dp_sync_before_a5_capability_is_resolved():
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=2048),
+    )
+    ascend_config = SimpleNamespace(
+        enable_fused_mc2=1,
+        get_mc2_comm_alg=lambda: "",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
+    )
+
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_ascend_device_type", return_value=utils.AscendDeviceType.A5),
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            return_value=MoECommType.MC2,
+        ) as select_method,
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config) is False
+
+    select_method.assert_called_once_with(1, vllm_config, is_draft_model=False)
+
+
+def test_should_skip_dp_sync_for_regular_mc2_only():
+    vllm_config = mock.MagicMock()
+    vllm_config.kv_transfer_config.is_kv_consumer = True
+    vllm_config.scheduler_config.max_num_batched_tokens = 120
+    vllm_config.compilation_config.cudagraph_mode.separate_routine.return_value = False
+    ascend_config = SimpleNamespace(
+        enable_fused_mc2=0,
+        get_mc2_comm_alg=lambda: "",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
+    )
+
+    with (
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_ascend_device_type", return_value=utils.AscendDeviceType.A3),
+        mock.patch("vllm_ascend.utils.get_potential_max_tokens", return_value=30),
+        mock.patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            return_value=MoECommType.MC2,
+        ),
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config) is True

@@ -27,6 +27,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
+from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -40,6 +41,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
+    PrepareAndFinalizeWithMegaMoE,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
@@ -48,6 +50,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -271,6 +274,14 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
+class _MegaMoEBypassTokenDispatcher(MoETokenDispatcher[None]):
+    def token_dispatch(self, token_dispatch_input):
+        raise RuntimeError("A5 MegaMoE owns token dispatch; the bypass dispatcher must not be called.")
+
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        raise RuntimeError("A5 MegaMoE owns token combine; the bypass dispatcher must not be called.")
+
+
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -282,12 +293,16 @@ class FusedMC2CommImpl(MoECommMethod):
     """
 
     def __init__(self, moe_config):
+        self.uses_a5_mega_moe = (
+            get_ascend_device_type() == AscendDeviceType.A5 and get_ascend_config().enable_fused_mc2 == 1
+        )
         super().__init__(moe_config)
-        if _CANN_OPS_TRANSFORMER_AVAILABLE:
+        self._a5_mega_moe_backend = MegaMoEBackend(moe_config) if self.uses_a5_mega_moe else None
+        if _CANN_OPS_TRANSFORMER_AVAILABLE and not self.uses_a5_mega_moe:
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
 
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if get_ascend_config().enable_fused_mc2 == 1 and not self.uses_a5_mega_moe:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -296,9 +311,13 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
+        if self.uses_a5_mega_moe:
+            return _MegaMoEBypassTokenDispatcher()
         return TokenDispatcherWithMC2(is_fused_mc2=True)
 
     def _get_prepare_finalize(self):
+        if self.uses_a5_mega_moe:
+            return PrepareAndFinalizeWithMegaMoE(self.moe_config)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def _init_mega_moe_symm_buffer(
@@ -471,6 +490,17 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        if self.uses_a5_mega_moe:
+            assert self._a5_mega_moe_backend is not None
+            out, expert_tokens = self._a5_mega_moe_backend.fused_experts(fused_experts_input)
+            return FusedExpertsResult(
+                routed_out=out,
+                expert_tokens=expert_tokens,
+                swiglu_limit=fused_experts_input.swiglu_limit,
+                swiglu_alpha=fused_experts_input.swiglu_alpha,
+                swiglu_beta=fused_experts_input.swiglu_beta,
+            )
+
         # SiTU is implemented by the generic MoE path. Keep other activations
         # on the upstream MegaMoE path, including unquantized shared experts.
         if isinstance(fused_experts_input.activation, SituActivationConfig):

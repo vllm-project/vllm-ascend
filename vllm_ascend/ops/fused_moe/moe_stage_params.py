@@ -53,6 +53,7 @@ class MoEMxfpParams:
     scale_dtype: torch.dtype | None = None
     per_token_scale_dtype: torch.dtype | None = None
     use_bf16: bool = True
+    group_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
