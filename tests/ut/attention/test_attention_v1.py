@@ -491,6 +491,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                 create=True,
             ) as scatter,
             patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+            patch("vllm_ascend.attention.attention_v1.is_950", return_value=False),
             patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
         ):
             self.impl.reshape_and_cache(query, key, value, kv_cache, metadata, output)
@@ -499,6 +500,47 @@ class TestAscendAttentionBackendImpl(TestBase):
         reshape_and_cache.assert_not_called()
         self.assertEqual(scatter.call_args.kwargs["cache_mode"], "Norm")
         self.assertEqual(scatter.call_args.kwargs["scatter_mode"], "NHSD")
+
+    def test_hnd_reshape_and_cache_uses_bsnd_view_on_a5(self):
+        self.impl.use_bnsd_kv_cache = True
+        query = torch.empty(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+
+        with (
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_scatter_pa_kv_cache",
+                create=True,
+            ) as scatter,
+            patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+            patch("vllm_ascend.attention.attention_v1.is_950", return_value=True),
+            patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
+        ):
+            self.impl.reshape_and_cache(
+                query,
+                key,
+                value,
+                (key_cache, value_cache),
+                metadata,
+                output,
+            )
+
+        scatter.assert_not_called()
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertEqual(call_kwargs["key_cache"].shape, (4, 128, 8, 64))
+        self.assertEqual(call_kwargs["value_cache"].shape, (4, 128, 8, 64))
+        self.assertFalse(call_kwargs["key_cache"].is_contiguous())
+        self.assertFalse(call_kwargs["value_cache"].is_contiguous())
+        self.assertEqual(call_kwargs["key_cache"].data_ptr(), key_cache.data_ptr())
+        self.assertEqual(call_kwargs["value_cache"].data_ptr(), value_cache.data_ptr())
 
     def test_get_fia_params_uses_layout_specific_cache_view(self):
         metadata = MagicMock()
