@@ -21,7 +21,6 @@
 Run "pytest tests/e2e/pull_request/two_card/spec_decode/test_dflash2_qwen38_27b.py".
 """
 
-import json
 import os
 from unittest.mock import patch
 
