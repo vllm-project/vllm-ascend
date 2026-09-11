@@ -1,0 +1,79 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--trust-remote-code"
+  - "--max-num-seqs"
+  - "32"
+  - "--max-model-len"
+  - "20240"
+  - "--gpu-memory-utilization"
+  - "0.6"
+  - "--mamba-ssm-cache-dtype"
+  - "float16"
+  - "--dtype"
+  - "float16"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--additional-config"
+  - '{"ascend_compilation_config":{"enable_npugraph_ex":false}}'
+  - "--default-chat-template-kwargs"
+  - '{"enable_thinking": false}'
+
+_benchmarks_acc: &benchmarks_acc
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/textvqa-lite
+    request_conf: vllm_api_stream_chat
+    dataset_conf: textvqa/textvqa_gen_base64
+    max_out_len: 10240
+    batch_size: 32
+    baseline: 76.06
+    threshold: 1
+_benchmarks_perf: &benchmarks_pref
+    perf:
+      case_type: performance
+      dataset_path: vllm-ascend/textvqa-perf-1080p
+      request_conf: vllm_api_stream_chat
+      dataset_conf: textvqa/textvqa_gen_base64
+      num_prompts: 12
+      max_out_len: 512
+      batch_size: 1
+      request_rate: 0
+      baseline: 35.31
+      threshold: 0.97
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen35-2B-acc"
+    model: "Qwen/Qwen3.5-2B"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32]}'
+    benchmarks:
+      <<: *benchmarks_acc
+
+  - name: "Qwen35-2B-perf"
+    model: "Qwen/Qwen3.5-2B"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,4,2,8,16]}'
+    benchmarks:
+      <<: *benchmarks_pref
+
