@@ -311,6 +311,9 @@ def test_init_without_spec_pp():
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
             return_value=False,
         ),
+        patch("torch.npu.Event", return_value="event"),
+        patch("torch.npu.Stream", return_value="stream"),
+        patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     assert runner.eplb == "eplb"
@@ -532,8 +535,11 @@ def _fake_async_copy(src, device=None, out=None):
 
 
 def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_028=False):
-    batch = object()
-    partitioned = object()
+    batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
+
+    def _partition(_pcp_manager, input_batch, **_kwargs):
+        return input_batch
+
     with (
         patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
         patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
@@ -549,11 +555,15 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
             return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
         ),
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
-        patch.object(vllm_model_runner.pcp, "maybe_partition_pcp_batch", return_value=partitioned),
+        patch.object(
+            vllm_model_runner,
+            "pcp",
+            SimpleNamespace(maybe_partition_pcp_batch=_partition),
+        ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
         patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_028),
     ):
-        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), partitioned
+        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
 
 
 def test_prepare_inputs_common_path():
