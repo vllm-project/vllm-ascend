@@ -268,7 +268,11 @@ ge::graphStatus Tiling4ChunkKdaFwd(gert::TilingContext *context)
 
     const uint64_t postWuScratchOffset = AlignWorkspace(cursor);
     if (!arch35Options.fusePostWu && !arch35Options.fusePostWuIntoFwdH) {
-        cursor = postWuScratchOffset + tokenHeads * shape.kDim * sizeof(float);
+        // WScratchOffset stores each chunk with chunkSize rows, including
+        // padding for short sequences. Packed token counts underallocate this
+        // region and let full-chunk writes overwrite the following workspace.
+        cursor = postWuScratchOffset + hChunkCount * shape.vHeads * chunkSize *
+            shape.kDim * sizeof(float);
     }
 
     const uint64_t fwdHWorkspaceBaseOffset = AlignWorkspace(cursor);
