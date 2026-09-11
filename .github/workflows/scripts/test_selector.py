@@ -404,9 +404,7 @@ class CoverageSelector:
             class_lines = self._get_class_def_lines(filepath)
             docstring_lines = self._get_docstring_lines(filepath)
             blank_lines = self._get_blank_lines(filepath)
-            self._noise_lines_cache[filepath] = (
-                import_lines | def_lines | class_lines | docstring_lines | blank_lines
-            )
+            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines | blank_lines
 
         return lines - self._noise_lines_cache[filepath]
 
