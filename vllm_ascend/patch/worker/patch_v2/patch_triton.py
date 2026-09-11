@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import speculator
 from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitmask_kernel
 from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
+from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
