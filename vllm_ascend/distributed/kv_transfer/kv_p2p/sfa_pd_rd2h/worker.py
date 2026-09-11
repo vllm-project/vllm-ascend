@@ -58,6 +58,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     validate_register_region_count,
 )
+from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
@@ -72,14 +73,6 @@ CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS = 10.0
 PD_READ_WAIT_LOG_INTERVAL_SECONDS = 10.0
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
-
-
-def _get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
-    # PR2 owns this torch-only helper. Keep the dependency lazy so importing the
-    # connector does not force worker layout dependencies in scheduler-only use.
-    from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent
-
-    return get_sfa_kv_parent(nope, rope)
 
 
 def _layer_idx(layer_name: str) -> int:
@@ -658,7 +651,7 @@ class SFAPDRD2HProducerWorker:
             if not isinstance(main_cache, (list, tuple)) or len(main_cache) != 2:
                 raise RuntimeError(f"SFAPD producer layer {main_name} must expose NoPE/RoPE views")
             nope, rope = main_cache
-            parent = _get_sfa_kv_parent(nope, rope)
+            parent = get_sfa_kv_parent(nope, rope)
             self._registered_parent_caches[main_name] = parent
             _append_cache_tensors(layer_meta, parent, layer2group_ids[main_name])
             layer_meta.main_tensor_count = len(layer_meta.kv_caches_base_addr)
