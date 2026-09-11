@@ -9,6 +9,20 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.utils import vllm_version_is
+
+
+def make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        offset=0,
+        layer_stride=page_size,
+        block_stride=page_size,
+    )
 
 
 def layer_name(index):
@@ -65,12 +79,10 @@ def make_cache_config(specs, num_blocks=3):
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * spec.page_size_bytes,
-                layers=[name],
-                offset=0,
-                layer_stride=spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
+                layer_names=[name],
+                page_size=spec.page_size_bytes,
             )
             for name, spec in specs.items()
         ],

@@ -18,8 +18,21 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
+from vllm_ascend.utils import vllm_version_is
 
 from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
+
+
+def _make_kv_cache_tensor(size: int, layer_names: list[str], layer_stride: int, block_stride: int) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
@@ -48,9 +61,9 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            _make_kv_cache_tensor(
                 size=k_cache.nbytes + v_cache.nbytes,
-                layers=["layer.0"],
+                layer_names=["layer.0"],
                 layer_stride=k_cache.nbytes + v_cache.nbytes,
                 block_stride=spec.page_size_bytes,
             )
@@ -97,9 +110,9 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(
+            _make_kv_cache_tensor(
                 size=raw_cache.nbytes,
-                layers=["layer.0"],
+                layer_names=["layer.0"],
                 layer_stride=raw_cache.nbytes,
                 block_stride=128,
             )
@@ -152,9 +165,9 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            _make_kv_cache_tensor(
                 size=cache.nbytes,
-                layers=["layer.0.indexer"],
+                layer_names=["layer.0.indexer"],
                 layer_stride=cache.nbytes,
                 block_stride=cache.stride(0) * cache.element_size(),
             )
@@ -194,9 +207,9 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            _make_kv_cache_tensor(
                 size=64,
-                layers=["layer.0"],
+                layer_names=["layer.0"],
                 layer_stride=64,
                 block_stride=spec.page_size_bytes,
             )

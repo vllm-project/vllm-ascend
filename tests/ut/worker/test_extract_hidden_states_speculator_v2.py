@@ -14,12 +14,11 @@ from typing import Any, cast
 
 import pytest
 import torch
-import vllm.v1.worker.gpu.spec_decode.extract_hidden_states as upstream_spec_module
-from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
-    ExtractHiddenStatesSpeculator,
-)
 
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+
+upstream_spec_module = pytest.importorskip("vllm.v1.worker.gpu.spec_decode.extract_hidden_states")
+ExtractHiddenStatesSpeculator = upstream_spec_module.ExtractHiddenStatesSpeculator
 
 
 class _RecordingModel(torch.nn.Module):

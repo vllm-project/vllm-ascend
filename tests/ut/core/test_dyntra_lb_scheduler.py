@@ -31,6 +31,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -406,11 +407,11 @@ def test_dyntra_lb_v026_waits_for_paused_in_flight_output():
     )
 
     assert DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
+        scheduler,  # type: ignore[arg-type]
         paused_request,
     )
     assert not DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
+        scheduler,  # type: ignore[arg-type]
         normally_preempted_request,
     )
 
@@ -525,6 +526,10 @@ def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="KVCacheManager.take_boundary_state_offloads is main-only (#51358)",
+)
 def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     vllm_config = make_dyntra_test_config()
     scheduler = create_dyntra_lb_scheduler(

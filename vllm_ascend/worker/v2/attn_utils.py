@@ -1043,10 +1043,14 @@ def _reshape_kv_cache_v2(
                 # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
                 # Spec properties already give the [B, H, N, C] layout that
                 # basic_cache writes as kv_cache[block, :, offset].
+                if vllm_version_is("0.28.0"):
+                    num_states = kv_cache_spec.storage_block_size
+                else:
+                    num_states = kv_cache_spec.num_states
                 kv_cache_shape = (
                     num_blocks,
                     kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
+                    num_states,
                     kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
                 )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)

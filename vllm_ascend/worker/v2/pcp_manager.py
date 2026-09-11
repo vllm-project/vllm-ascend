@@ -93,6 +93,16 @@ class AscendPCPManager(PCPManager):
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
 
     @property
+    def input_buffers(self) -> AscendInputBuffers:
+        """Expose the PCP-local buffers on both lanes.
+
+        vLLM #53515 added this property on main; 0.28.0 keeps the buffers
+        private, so the override gives the same accessor on the release lane.
+        """
+        assert self._input_buffers is not None
+        return self._input_buffers
+
+    @property
     def global_batch(self) -> AscendInputBatch:
         """Return the scheduled batch retained before PCP partitioning."""
         global_batch = self._global_batch

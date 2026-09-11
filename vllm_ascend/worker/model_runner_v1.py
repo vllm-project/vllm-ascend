@@ -1718,8 +1718,13 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
+        # Pinning is only needed for the async H2D copies; a CPU runner returns
+        # early from _copy_spec_decode_metadata_to_device, and calling
+        # Tensor.pin_memory() there requires a registered accelerator hooks
+        # interface (absent in CPU UT environments).
+        pin_cpu_metadata = self.device.type != "cpu"
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            torch.from_numpy(value).pin_memory() if pin_cpu_metadata else torch.from_numpy(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,
@@ -5443,14 +5448,28 @@ class NPUModelRunner(GPUModelRunner):
             )
             max_num_blocks.append(max_num_blocks_per_req)
 
+        # main (vllm #50611): the interleave snapshot taken in __init__ must be
+        # refreshed here so a PD-driven adjustment (adjust_dcp_kv_cache_interleave_size)
+        # after __init__ forces the input batch to be rebuilt. The pinned release
+        # tree has no such snapshot, so the check is a no-op there.
+        cp_interleave_snapshot = getattr(self, "cp_kv_cache_interleave_size", None)
+        cp_interleave_changed = (
+            cp_interleave_snapshot is not None
+            and cp_interleave_snapshot != self.parallel_config.cp_kv_cache_interleave_size
+        )
         if (block_sizes != [self.cache_config.block_size]
                 or self.kernel_block_sizes != [[self.cache_config.block_size]]
-                or len(kv_cache_config.kv_cache_groups) > 1):
+                or len(kv_cache_config.kv_cache_groups) > 1
+                or cp_interleave_changed):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
+            if cp_interleave_snapshot is not None:
+                self.cp_kv_cache_interleave_size = (
+                    self.parallel_config.cp_kv_cache_interleave_size
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,

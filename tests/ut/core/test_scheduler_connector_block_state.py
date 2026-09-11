@@ -10,8 +10,13 @@ from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, m
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
+from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="KVCacheManager.take_boundary_state_offloads is main-only (#51358)",
+)
 @pytest.mark.parametrize(
     "scheduler_cls",
     [DyntraLBScheduler, AsyncDyntraLBScheduler, BalanceScheduler, ProfilingChunkScheduler],
