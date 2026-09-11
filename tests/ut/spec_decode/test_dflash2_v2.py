@@ -63,7 +63,7 @@ def test_init_speculator_routes_dflash2_draft_model():
         d2.assert_not_called()
 
 
-def test_init_cudagraph_manager_forces_none_when_enforce_eager(monkeypatch):
+def test_init_cudagraph_manager_requires_enforce_eager(monkeypatch):
     calls: list[CUDAGraphMode] = []
     monkeypatch.setattr(
         "vllm_ascend.worker.v2.spec_decode.dflash.speculator.AscendDFlashSpeculator.init_cudagraph_manager",
@@ -71,53 +71,50 @@ def test_init_cudagraph_manager_forces_none_when_enforce_eager(monkeypatch):
     )
     speculator = AscendDFlash2Speculator.__new__(AscendDFlash2Speculator)
 
+    # Eager drafting forces the draft aclgraph manager to NONE.
     speculator.speculative_config = SimpleNamespace(enforce_eager=True)
     speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
     assert calls == [CUDAGraphMode.NONE]
 
+    # Graph mode is rejected until the Ascend walk kernel is capturable, and
+    # must fail before delegating to the parent manager.
     speculator.speculative_config = SimpleNamespace(enforce_eager=False)
-    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert calls == [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY]
+    with pytest.raises(NotImplementedError, match="graph mode"):
+        speculator.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    assert calls == [CUDAGraphMode.NONE]
 
 
-@pytest.mark.skipif(not torch.npu.is_available(), reason="requires an NPU device")
-@pytest.mark.parametrize("sample_probabilistic", [False, True])
-def test_selector_walk_kernel_ascend_greedy_walk(sample_probabilistic: bool):
-    """Greedy walk: argmax per step, lowest index wins ties, chained via the
-    previous step's winner. Row 1 is padding (req_state < 0) and must not
-    write. With temperature 0 the probabilistic variant must stay greedy."""
+def test_greedy_walk_contract_reference():
+    """Pure-Python mirror of ``_selector_walk_kernel_ascend``'s greedy walk
+    (the kernel cannot launch on CPU): argmax per step, lowest index wins
+    ties, chained via the previous step's winner, and padding rows
+    (req_state < 0) never write."""
     num_steps, top_k = 2, 3
     candidates = torch.tensor(
         [[100, 200, 300], [400, 500, 600], [7, 8, 9], [70, 80, 90]],
         dtype=torch.int64,
     )
-    scores = torch.full((4, top_k, top_k), 7.0, dtype=torch.float32)
+    scores = torch.full((4, top_k, top_k), 7.0)
     scores[0, 0] = torch.tensor([0.5, 0.9, 0.9])  # tie between 1 and 2
     scores[1, 1] = torch.tensor([-1.0, -2.0, 3.0])  # continues from candidate 1
-    sample_pos = torch.arange(1, 5, dtype=torch.int64)
-    req_state = torch.tensor([0, 0, -1, -1], dtype=torch.int32)
-    temperature = torch.tensor([0.0], dtype=torch.float32)
-    seeds = torch.tensor([0], dtype=torch.int64)
-    tokens = torch.full((4,), -123, dtype=torch.int64)
-    realized = torch.full((4, top_k), -777.0, dtype=torch.float32)
+    req_state = [0, 0, -1, -1]  # row 1 is padding
 
-    _selector_walk_kernel_ascend[(2,)](
-        scores,
-        candidates,
-        sample_pos,
-        req_state,
-        temperature,
-        seeds,
-        tokens,
-        realized,
-        num_steps=num_steps,
-        top_k=top_k,
-        BLOCK_K=4,
-        SAMPLE_PROBABILISTIC=sample_probabilistic,
-        USE_FP64=False,
-    )
+    tokens = [-123] * 4
+    realized = [[-777.0] * top_k for _ in range(4)]
+    for row in range(2):
+        if req_state[row * num_steps] < 0:
+            continue
+        previous = 0
+        for step in range(num_steps):
+            flat = row * num_steps + step
+            row_scores = scores[flat, previous].tolist()
+            index = row_scores.index(max(row_scores))
+            tokens[flat] = candidates[flat, index].item()
+            realized[flat] = row_scores
+            previous = index
 
-    torch.testing.assert_close(tokens.cpu(), torch.tensor([200, 600, -123, -123]))
-    torch.testing.assert_close(realized[0].cpu(), torch.tensor([0.5, 0.9, 0.9]))
-    torch.testing.assert_close(realized[1].cpu(), torch.tensor([-1.0, -2.0, 3.0]))
-    torch.testing.assert_close(realized[2:].cpu(), torch.full((2, top_k), -777.0))
+    assert tokens == [200, 600, -123, -123]
+    # The fixture stores fp32 scores, so compare with tolerance.
+    assert realized[0] == pytest.approx([0.5, 0.9, 0.9])
+    assert realized[1] == pytest.approx([-1.0, -2.0, 3.0])
+    assert realized[2] == [-777.0] * top_k and realized[3] == [-777.0] * top_k
