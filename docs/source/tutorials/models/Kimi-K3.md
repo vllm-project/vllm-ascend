@@ -3,13 +3,13 @@
 ## 1 Introduction
 
 !!! warning "Experimental support"
-    Kimi K3 support in vLLM-Ascend 0.27.1 is an initial experimental release. It is intended for evaluation and validation with the fixed deployment configurations in this guide. Supported scenarios, performance, and configuration interfaces may evolve in later releases; do not treat this guide as a production support commitment.
+    Kimi K3 support in vLLM-Ascend `v0.27.1rc` is an initial experimental release. It is intended for evaluation and validation with the fixed deployment configurations in this guide. Supported scenarios, performance, and configuration interfaces may evolve in later releases; do not treat this guide as a production support commitment.
 
 Kimi K3 is a native multimodal Mixture-of-Experts (MoE) model. Its language backbone combines Kimi Delta Attention (KDA) with periodic Gated Multi-head Latent Attention (MLA), and uses Stable LatentMoE for expert computation. The model also integrates a MoonViT vision encoder and supports text, image understanding, reasoning, and tool calling.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, multi-node deployment on Atlas 800 A3, Atlas 800 A2, and Atlas 950DT, functional verification, and AISBench evaluation.
 
-This document is validated and written based on **vLLM-Ascend 0.27.1**.
+This document is validated and written based on **vLLM-Ascend `v0.27.1rc`**.
 
 The current release includes a subset of the Kimi K3 optimization features that have been validated for this version. To provide a reproducible and supportable baseline, this guide uses fixed deployment configurations instead of exposing every tunable optimization.
 
@@ -1166,6 +1166,8 @@ Here is one accuracy evaluation method for Kimi K3.
 2. Run AISBench against the Kimi K3 service and collect the generated result files. Keep the model and tokenizer revisions, chat template, sampling settings, dataset, and evaluator revision fixed when comparing results.
 
 ## 8 Performance Evaluation
+
+The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](#5-online-service-deployment).
 
 ### Using AISBench
 
