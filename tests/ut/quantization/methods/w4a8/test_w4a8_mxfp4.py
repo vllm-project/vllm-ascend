@@ -83,6 +83,44 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
 
+    def test_model_runner_v2_eplb_uses_expert_weight_list(self):
+        vllm_config = create_mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
+                return_value=create_mock_ascend_config(),
+            ),
+        ):
+            scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
+
+        self.assertTrue(scheme.use_expert_weight_list)
+
+    def test_model_runner_v1_dynamic_eplb_uses_expert_weight_list(self):
+        vllm_config = create_mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        ascend_config = create_mock_ascend_config()
+        ascend_config.eplb_config.dynamic_eplb = True
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config",
+                return_value=vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
+                return_value=ascend_config,
+            ),
+        ):
+            scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
+
+        self.assertTrue(scheme.dynamic_eplb)
+        self.assertTrue(scheme.use_expert_weight_list)
+
     def test_get_weight_static_method(self):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(result["w13_weight"].dtype, torch.uint8)
@@ -119,6 +157,39 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch.npu.empty_cache")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_process_weights_creates_eplb_weight_lists(self, mock_npu, mock_empty_cache):
+        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
+        self.scheme.use_expert_weight_list = True
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False
+        )
+
+        self.scheme.process_weights_after_loading(layer)
+
+        weight_views = self.scheme.get_eplb_weight_views(layer)
+        self.assertEqual(len(weight_views), 4)
+        self.assertEqual(layer.w13_weight_list[0].shape, (64, 256))
+        self.assertEqual(layer.w2_weight_list[0].shape, (128, 128))
+        self.assertEqual(layer.w13_weight_scale_list[0].shape, (2, 256, 2))
+        self.assertEqual(layer.w2_weight_scale_list[0].shape, (4, 128, 2))
+        for expert_list in weight_views:
+            self.assertEqual(len(expert_list), self.num_experts)
+            self.assertTrue(all(expert.storage_offset() == 0 for expert in expert_list))
+        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
+        mock_empty_cache.assert_called_once_with()
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertFalse(hasattr(layer, "w2_weight"))
+        self.assertFalse(hasattr(layer, "w13_weight_scale"))
+        self.assertFalse(hasattr(layer, "w2_weight_scale"))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX")
