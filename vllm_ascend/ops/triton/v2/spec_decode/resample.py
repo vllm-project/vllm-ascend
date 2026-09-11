@@ -325,22 +325,22 @@ def _categorical_finalize_kernel(
             draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
         ).to(tl.float32)
         draft_prob = tl.exp(draft_block_logits - draft_lse)
-        if USE_BLOCK_VERIFICATION:
-            # Block verification (Sun et al., 2024): the residual is
-            #   max(p_tau * p(x) - q(x), 0) / Z.
-            # Scale the target probabilities by the accepted prefix's joint
-            # ratio p_tau, mirroring _resample_kernel so the block selection
-            # and the within-block token selection stay consistent.
-            # cumulative_log_p[start + i] = log(p_{i+1}), so the ratio after
-            # tau = resample_idx accepted tokens lives at
-            # resample_token_idx - 1. p_0 = 1 (nothing accepted), so skip
-            # the load when resample_idx == 0.
-            if resample_idx > 0:
-                log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1).to(tl.float32)
-                target_prob = target_prob * tl.exp(log_p_tau)
-        # A -1 placeholder draft token means verification stopped at the
-        # placeholder; the residual is then the full target distribution
-        # (the draft logits at a placeholder step are stale).
+        # Block verification (Sun et al., 2024): the residual is
+        #   max(p_tau * p(x) - q(x), 0) / Z.
+        # Scale the target probabilities by the accepted prefix's joint
+        # ratio p_tau, mirroring _resample_kernel so the block selection
+        # and the within-block token selection stay consistent.
+        # cumulative_log_p[start + i] = log(p_{i+1}), so the ratio after
+        # tau = resample_idx accepted tokens lives at
+        # resample_token_idx - 1. p_0 = 1 (nothing accepted), so skip
+        # the load when resample_idx == 0. A -1 placeholder draft token
+        # means verification stopped at the placeholder; that residual is
+        # the full target distribution (the draft logits at a placeholder
+        # step are stale) and must stay unscaled to match _resample_kernel's
+        # block masses on the same path.
+        if USE_BLOCK_VERIFICATION and (is_valid_rejected_draft and resample_idx > 0):
+            log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1).to(tl.float32)
+            target_prob = target_prob * tl.exp(log_p_tau)
         residual_token_mass = tl.where(
             is_valid_rejected_draft,
             tl.maximum(target_prob - draft_prob, 0.0),
