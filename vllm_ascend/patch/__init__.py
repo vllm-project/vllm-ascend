@@ -1471,3 +1471,30 @@
 #    Future Plan:
 #       Remove this patch when upstream vLLM exposes a token-native internal
 #       resume input for chat-completion P/D proxies.
+#
+# ** 35. File: worker/patch_moe_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner.forward`
+#    Why:
+#       Upstream `MoERunner.forward` inlines the shared+routed output combine
+#       (`shared_output + fused_output`) without exposing it as an overridable
+#       hook. On NPU the combine should go through the fused multi-tensor add
+#       kernel (`torch._foreach_add`), whose kernel launch count is independent
+#       of the tensor-list length and which is the NPU-validated fast path for
+#       the MoE combine.
+#    How:
+#       Replace `MoERunner.forward` with a mirror of the v0.26.0 upstream
+#       pipeline where only the combine is switched to
+#       `torch._foreach_add([shared_output], [fused_output])[0]`. All
+#       reduction/scaling steps keep calling the overridable hooks, which
+#       `AscendMoERunner` already overrides. `AscendMoERunner` does not define
+#       `forward`, so every Ascend MoE layer picks up the patched method
+#       through inheritance.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific NPU kernel choice for the MoE shared+routed
+#       combine.
+#    Future Plan:
+#       Remove this patch once CANN ships the aclnnAdd_AddAiCore_Add fused-add
+#       operator in the supported release, so the plain add already lowers to
+#       the fused kernel and the foreach form is no longer needed.
+#
