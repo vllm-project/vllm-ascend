@@ -523,6 +523,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 assert prepared_attn_metadata is not None
                 attn_metadata = prepared_attn_metadata
             else:
+                # TODO: Once FIA supports padded Query tensors whose token count
+                # exceeds the cumulative query length, use
+                # _prepare_replicated_prefill_attn for MLA/GQA too and remove this
+                # mapping-only branch. The shared path must still refresh mappings.
                 self._refresh_replicated_prefill_mappings(num_reqs_padded, num_tokens_padded)
             return [attn_metadata]
 
