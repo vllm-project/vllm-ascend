@@ -1279,3 +1279,26 @@
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
 #
+# ** 32. File: worker/patch_moe_runner.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner.forward`
+#    Why:
+#       Upstream `MoERunner.forward` inlines the shared+routed output combine
+#       (`shared_output + fused_output`) without exposing it as an overridable
+#       hook. On NPU the combine should go through the fused multi-tensor add
+#       kernel (`torch._foreach_add`), whose kernel launch count is independent
+#       of the tensor-list length and which is the NPU-validated fast path for
+#       the MoE combine.
+#    How:
+#       Replace `MoERunner.forward` with a mirror of the upstream pipeline
+#       (the body is identical across the supported vLLM versions v0.27.1 and
+#       main) where only the combine is switched to
+#       `torch._foreach_add([shared_output], [fused_output])[0]`. All
+#       reduction/scaling steps keep calling the overridable hooks, which
+#       `AscendMoERunner` already overrides. `AscendMoERunner` does not define
+#       `forward`, so every Ascend MoE layer picks up the patched method
+#       through inheritance.
+#    Future Plan:
+#       The aclnnAdd_AddAiCore_Add operator supports the version after the sk is integrated. 
+#       Therefore, this patch can be removed.
+#
