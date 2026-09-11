@@ -47,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_mooncake_layerwise_namespace,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -181,6 +182,11 @@ class KVPoolScheduler:
             self.backend_name,
             self.use_layerwise,
         )
+        self.mooncake_layerwise_namespace = (
+            get_mooncake_layerwise_namespace(vllm_config.model_config, vllm_config.parallel_config)
+            if self.use_block_key_layerwise
+            else ""
+        )
         if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
             raise ValueError("Mooncake layerwise does not yet support hybrid or multi-group KV cache layouts")
         if self.backend_name == "mooncake" and self.use_layerwise and self.tp_mismatch:
@@ -217,6 +223,8 @@ class KVPoolScheduler:
             self.put_step = self.tp_size // self.num_kv_head
         else:
             self.put_step = 1
+        if self.use_block_key_layerwise and self.put_step % self.dcp_size != 0:
+            raise ValueError("Mooncake layerwise DCP groups must fit within a replicated KV-head group")
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
         if self.use_layerwise_transfer:
@@ -521,14 +529,19 @@ class KVPoolScheduler:
                     self.model_name,
                     block_hash_to_str(block_hash),
                     head_or_tp_rank,
+                    namespace=self.mooncake_layerwise_namespace,
+                    pp_rank=pp_rank,
+                    dcp_rank=dcp_rank,
                 )
+                for pp_rank in range(self.pp_size)
+                for dcp_rank in range(self.dcp_size)
                 for head_or_tp_rank in range(head_or_tp_ranks)
             ]
             for block_hash in block_hashes
         ]
         all_keys = [key for block_keys in keys_by_block for key in block_keys]
         batch_size = (
-            self.layerwise_max_transfer_blocks * head_or_tp_ranks
+            self.layerwise_max_transfer_blocks * head_or_tp_ranks * self.pp_size * self.dcp_size
             if self.layerwise_max_transfer_blocks > 0
             else max(1, len(all_keys))
         )
