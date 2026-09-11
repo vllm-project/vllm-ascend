@@ -223,7 +223,7 @@ class AscendIndexerOps:
             query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
-            quant_mode=2,
+            quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
             cu_seqlens_q=metadata.qli_cu_seqlens_q,
             seqused_k=metadata.qli_seqused_k,
             cmp_residual_k=metadata.qli_cmp_residual_k,
