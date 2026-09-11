@@ -8,7 +8,7 @@ import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
-from vllm_ascend.worker.v2.block_table import AscendBlockTables, _MAX_STAGED_BLOCK_TABLE_PAD_SIZE
+from vllm_ascend.worker.v2.block_table import _MAX_STAGED_BLOCK_TABLE_PAD_SIZE, AscendBlockTables
 
 
 def _parent_init(
@@ -92,9 +92,7 @@ def test_compute_slot_mappings_launches_kernel_and_honors_out():
 
     with patch("vllm_ascend.worker.v2.block_table._compute_slot_mappings_kernel", kernel):
         sliced = tables.compute_slot_mappings(idx_mapping, query_start_loc, positions, 3)
-        reused = tables.compute_slot_mappings(
-            idx_mapping, query_start_loc, positions, 4, out=custom_out
-        )
+        reused = tables.compute_slot_mappings(idx_mapping, query_start_loc, positions, 4, out=custom_out)
 
     kernel.__getitem__.assert_called_with((2, 3))
     assert kernel.__getitem__.call_count == 2

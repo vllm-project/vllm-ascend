@@ -578,9 +578,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
     )
-    out, partitioned = _run_prepare_inputs(
-        runner, scheduler_output, batch_req_state, batch_desc, version_028=True
-    )
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_028=True)
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
