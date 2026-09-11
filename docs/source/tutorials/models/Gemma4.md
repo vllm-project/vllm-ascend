@@ -260,6 +260,15 @@ Recommended tuning order:
 | Piecewise ACLGraph | `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` | Enables segmented graph execution. | Supported when piecewise graph execution is required. |
 | Tensor parallelism | `--tensor-parallel-size` | Splits model computation across multiple NPUs. | Adjust according to model size and available devices. |
 | Expert parallelism | `--enable-expert-parallel` | Distributes experts for MoE variants. | Enable only for MoE deployment plans that use EP. |
+| Fused GeGLU on Ascend 950 | Automatic for MoE `gelu_tanh` activation. | Combines GELU-tanh and multiplication in one operator. | Preserves the original expert dimensions; MXFP activation quantization remains a separate step. |
+
+To compare the unfused and fused activation, including the following MXFP4 quantization step, run this benchmark from the repository root on Ascend 950:
+
+```bash
+python benchmarks/benchmark_gemma4_geglu.py --rows 1 8 32 128 512 --width 704
+```
+
+The benchmark reports median device times under graph replay. These measurements cover the activation segment only; use a serving benchmark to measure end-to-end performance. GeGLU fusion does not enable MegaMoE or require `enable_fused_mc2`.
 
 ## 10 FAQ
 

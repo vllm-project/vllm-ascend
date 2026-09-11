@@ -85,8 +85,7 @@ def _unified_apply_activation(
         gate, up = hidden_states.chunk(2, dim=-1)
         hidden_states = torch.nn.functional.gelu(gate) * up
     elif activation == MoEActivation.GELU_TANH:
-        gate, up = hidden_states.chunk(2, dim=-1)
-        hidden_states = torch.nn.functional.gelu(gate, approximate="tanh") * up
+        hidden_states = DeviceOperator.gelu_tanh_and_mul(hidden_states)
     else:
         if mlp_compute_input.swiglu_limit > 0:
             gate, up = hidden_states.chunk(2, dim=-1)

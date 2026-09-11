@@ -1,8 +1,32 @@
 from unittest import mock
 
+import pytest
 import torch
 
-from vllm_ascend.device.device_op import BaseDeviceAdaptor
+from vllm_ascend.device.device_op import A5DeviceAdaptor, Ascend310PDeviceAdaptor, BaseDeviceAdaptor
+
+
+@pytest.mark.parametrize("adaptor", [BaseDeviceAdaptor, Ascend310PDeviceAdaptor])
+@pytest.mark.parametrize("rows", [0, 3])
+def test_gelu_tanh_and_mul_fallback(adaptor, rows):
+    # Distinct halves catch accidentally activating up instead of gate.
+    x = torch.linspace(-3, 5, rows * 1408).reshape(rows, 1408)
+    gate, up = x.chunk(2, dim=-1)
+    expected = torch.nn.functional.gelu(gate, approximate="tanh") * up
+    torch.testing.assert_close(adaptor.gelu_tanh_and_mul(x), expected)
+
+
+def test_a5_gelu_tanh_and_mul_activates_gate_and_discards_auxiliary_output():
+    x = torch.randn(3, 1408)
+    expected = torch.randn(3, 704)
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_geglu",
+        create=True,
+        return_value=(expected, torch.empty_like(expected)),
+    ) as geglu:
+        out = A5DeviceAdaptor.gelu_tanh_and_mul(x)
+    geglu.assert_called_once_with(x, dim=-1, approximate=1, activate_left=True)
+    assert out is expected
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
