@@ -39,7 +39,7 @@ Refer to ``examples/rl/rlhf_http_hccl.py`` for the end-user workflow.
 
 Run with::
 
-    pytest tests/e2e/multicard/2-cards/test_weight_transfer_hccl.py
+    pytest tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py
 """
 
 import os

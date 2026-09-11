@@ -19,10 +19,10 @@
 
 Unlike the HCCL engine, NPU IPC requires the trainer and the inference worker
 to be co-located on the *same* physical NPU chip, so only a single NPU is
-needed. The trainer model is built from the architecture config with random
-weights (download-free); set ``WEIGHT_TRANSFER_TEST_MODEL=/path/to/checkpoint``
-to share real weights instead. See ``examples/rl/rlhf_http_npu_ipc.py`` for the
-end-user workflow.
+used even though this test runs in the two-card RLHF lane. The trainer model is
+built from the architecture config with random weights (download-free); set
+``WEIGHT_TRANSFER_TEST_MODEL=/path/to/checkpoint`` to share real weights
+instead. See ``examples/rl/rlhf_http_npu_ipc.py`` for the end-user workflow.
 """
 
 import os
@@ -79,7 +79,8 @@ def _generate(client, model, prompts):
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
 )
-def test_npu_ipc_weight_transfer_updates_server_weights():
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_npu_ipc_weight_transfer_updates_server_weights(packed):
     from vllm.utils.network_utils import get_open_port
 
     port = get_open_port()
@@ -139,24 +140,17 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
             NPUIPCTrainerInitInfo,
         )
 
-        _post(server, "init_weight_transfer_engine", json={"init_info": {}})
-
         _post(server, "pause")
-        _post(server, "start_weight_update")
 
         register_engine()
-
-        # The lifecycle probe above left a weight update active; the
-        # stateful engine drives its own start/finish lifecycle, so close
-        # the probe's update first.
-        _post(server, "finish_weight_update")
-
-        init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+        init_info = NPUIPCTrainerInitInfo(rank=0, packed=packed)
         engine = WeightTransferTrainerFactory.trainer_init(
             init_info,
             client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
             source=ModuleSource(train_model),
         )
+        # send_weights drives START -> LOAD -> FINISH. Both packed modes must
+        # run the same layerwise reload transaction and update model state.
         engine.send_weights()
 
         _post(server, "resume")
