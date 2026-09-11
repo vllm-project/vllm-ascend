@@ -20,16 +20,16 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
-from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
-    get_rotation_matrix,
     get_rotation_path,
     vllm_version_is,
 )
@@ -38,6 +38,8 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_draft_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
+
+DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED = "materialized"
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -53,20 +55,65 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
-        # Upstream load_dspark_model overrides the drafter's quant_config with
-        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
-        # __init__ derives rotation_path=None and its fc projection is loaded
-        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
-        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
-        # project them back to model space.
+        draft_hf_config = self.draft_model_config.hf_config
+        self._configure_target_aux_hidden_state_format(target_model, draft_hf_config)
+
+        # Upstream clears the target quant config before constructing a BF16
+        # draft. Preserve only the target QuaRot path so the draft can align
+        # FC, embedding and lm_head before upstream decides whether to share
+        # target weights.
         rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None and hasattr(model.model, "fc"):
-            rotation_weight = get_rotation_matrix(rotation_path)
-            fc = model.model.fc
-            with torch.no_grad():
-                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+        injected_rotation = rotation_path is not None and self._is_qwen3_gqa_draft(draft_hf_config)
+        if injected_rotation:
+            draft_hf_config._ascend_target_rotation_path = str(rotation_path)
+        try:
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        finally:
+            if injected_rotation:
+                delattr(draft_hf_config, "_ascend_target_rotation_path")
+
+        if injected_rotation:
+            target_language_model = (
+                target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
+            )
+            target_inner = target_language_model.model
+            target_lm_head = get_target_lm_head(target_model, target_language_model)
+            draft_inner = model.model
+            if getattr(draft_inner, "embed_tokens", None) is getattr(target_inner, "embed_tokens", None):
+                raise RuntimeError("QuaRot GQA DSpark must not share target embed_tokens.")
+            if getattr(model, "lm_head", None) is target_lm_head:
+                raise RuntimeError("QuaRot GQA DSpark must not share target lm_head.")
         return model
+
+    @staticmethod
+    def _is_qwen3_gqa_draft(config: Any) -> bool:
+        architectures = getattr(config, "architectures", ()) or ()
+        return getattr(config, "model_type", None) == "qwen3" or any(
+            architecture in ("Qwen3DSparkModel", "DSparkDraftModel") for architecture in architectures
+        )
+
+    @staticmethod
+    def _configure_target_aux_hidden_state_format(target_model: torch.nn.Module, format_provider: Any) -> None:
+        aux_hidden_format = getattr(format_provider, "dspark_aux_hidden_state_format", None)
+        if aux_hidden_format is None and AscendDSparkSpeculator._is_qwen3_gqa_draft(format_provider):
+            aux_hidden_format = DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+        if aux_hidden_format is None:
+            return
+        if aux_hidden_format != DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED:
+            raise ValueError(f"Unsupported GQA DSpark auxiliary hidden-state format {aux_hidden_format!r}.")
+
+        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            raise RuntimeError(
+                f"GQA DSpark requires materialized auxiliary hidden states, but target "
+                f"{type(target_model).__name__} has no capture-mode setter."
+            )
+        set_capture_mode(True)
+        logger.info("GQA DSpark target auxiliary hidden-state format: materialized.")
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -102,7 +149,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    # Preserve cache-group order so captured graph tasks and
+                    # runtime metadata stay aligned.
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
@@ -111,6 +160,22 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
+        if active_layer_names is not None:
+            missing_layers = active_layer_names.difference(attn_backends)
+            if missing_layers:
+                raise RuntimeError(
+                    f"DSpark attention layers were not mapped to KV-cache groups: {sorted(missing_layers)}."
+                )
+
+    def get_draft_graph_backend(self) -> type[AttentionBackend]:
+        """Return the one GQA attention backend supported by draft ACL graph."""
+        attn_backends = getattr(self, "attn_backends", None) or {}
+        if not attn_backends:
+            raise RuntimeError("DSpark ACL graph requires at least one active draft attention backend.")
+        backends = set(attn_backends.values())
+        if len(backends) != 1:
+            raise NotImplementedError("DSpark ACL graph currently supports one GQA attention backend.")
+        return next(iter(backends))
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
@@ -134,7 +199,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
-        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+        attn_metadata = self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        self._validate_draft_attn_metadata(attn_metadata, num_reqs_padded)
+        return [attn_metadata]
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -155,6 +222,18 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         for metadata in attn_metadata.values():
             metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
+
+    def _validate_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+        """Validate the GQA draft metadata before graph submission."""
+        if not attn_metadata:
+            raise RuntimeError("DSpark ACL graph produced no draft attention metadata.")
+        expected = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
+        for layer_name, metadata in attn_metadata.items():
+            actual = list(getattr(metadata, "actual_seq_lengths_q", ()))
+            if actual != expected:
+                raise RuntimeError(
+                    f"DSpark ACL graph query-length mismatch for {layer_name}: expected {expected}, got {actual}."
+                )
 
     def propose(
         self,

@@ -1,24 +1,8 @@
-#
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Copyright 2023 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-"""Unit tests for ``AscendDSparkSpeculator.load_draft_model`` fc rotation."""
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for the MRV2 GQA DSpark target/draft contract."""
 
-from __future__ import annotations
-
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -26,75 +10,158 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.models.qwen3_dspark import (
+    AscendQwen3DSparkForCausalLM,
+    _get_draft_rotation_path,
+    process_weight,
+)
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
+    DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
     AscendDSparkSpeculator,
 )
 
 _HIDDEN = 8
-_FC_IN = 5 * _HIDDEN  # concatenated aux hidden states
-# Patch where load_draft_model looks it up (the speculator module binding).
-_ROT_MATRIX = "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_matrix"
 
 
-def _spec(vllm_config: SimpleNamespace) -> AscendDSparkSpeculator:
-    """Bypass the heavy ``__init__``; ``load_draft_model`` only reads
-    ``self.vllm_config`` and the patched parent call."""
+def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.vllm_config = vllm_config
+    spec.draft_model_config = SimpleNamespace(hf_config=draft_hf_config)
     return spec
 
 
-def _fake_draft() -> SimpleNamespace:
-    fc = torch.nn.Linear(_FC_IN, _HIDDEN, bias=False)
-    with torch.no_grad():
-        fc.weight.copy_(torch.randn_like(fc.weight))
-    return SimpleNamespace(model=SimpleNamespace(fc=fc))
-
-
-def _quarot_config() -> SimpleNamespace:
-    quarot = {"rotation_map": {"global_rotation": "x.safetensors"}}
+def _target() -> SimpleNamespace:
     return SimpleNamespace(
-        quant_config=SimpleNamespace(quant_description={"optional": {"quarot": quarot}}),
-        model_config=SimpleNamespace(model="/fake"),
+        model=SimpleNamespace(embed_tokens=object()),
+        lm_head=object(),
+        set_dspark_aux_capture_materialized=MagicMock(),
     )
 
 
-def _bf16_config() -> SimpleNamespace:
-    return SimpleNamespace(quant_config=None, model_config=SimpleNamespace())
+def _gqa_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        architectures=["Qwen3DSparkModel"],
+        model_type="qwen3",
+        dspark_aux_hidden_state_format=DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
+    )
 
 
-def _no_call(*args, **kwargs):
-    raise AssertionError("get_rotation_matrix must not be called without a rotation path")
+def _vllm_config(*, quarot: bool) -> SimpleNamespace:
+    quant_config = None
+    if quarot:
+        quant_config = SimpleNamespace(
+            quant_description={"optional": {"quarot": {"rotation_map": {"global_rotation": "rotation.safetensors"}}}}
+        )
+    return SimpleNamespace(
+        quant_config=quant_config,
+        model_config=SimpleNamespace(model="/target"),
+    )
 
 
-class TestLoadDraftModel:
-    """``load_draft_model`` rotates fc for a QuaRot target and is a no-op otherwise."""
+def test_qwen3_gqa_draft_declares_materialized_format():
+    assert AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format == "materialized"
 
-    @pytest.fixture
-    def captured(self, monkeypatch):
-        """Stub the heavy parent ``load_draft_model`` to return a fake draft and
-        snapshot its fc weight before the override mutates it in place."""
-        out: dict = {}
 
-        def _load(self, target_model, target_attn_layer_names):
-            draft = _fake_draft()
-            out["before"] = draft.model.fc.weight.data.clone()
-            out["draft"] = draft
-            return draft
+@pytest.mark.parametrize(
+    "config",
+    [
+        SimpleNamespace(architectures=["Qwen3DSparkModel"]),
+        SimpleNamespace(architectures=["DSparkDraftModel"], model_type="qwen3"),
+        SimpleNamespace(model_type="qwen3"),
+    ],
+)
+def test_qwen3_config_selects_materialized_target_capture(config):
+    target = _target()
+    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, config)
+    target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
-        monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
-        return out
 
-    def test_rotates_fc_for_quarot_target(self, captured, monkeypatch):
-        # R = 2*I -> W @ R == 2*W, an expectation independent of process_weight.
-        monkeypatch.setattr(_ROT_MATRIX, lambda path: torch.eye(_HIDDEN) * 2.0)
-        draft = _spec(_quarot_config()).load_draft_model(MagicMock(), set())
-        before = captured["before"]
-        assert draft is captured["draft"]
-        assert torch.allclose(draft.model.fc.weight.data, 2.0 * before, atol=1e-6)
-        assert not torch.allclose(draft.model.fc.weight.data, before)
+def test_undeclared_format_preserves_target_capture_mode():
+    target = _target()
+    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, SimpleNamespace())
+    target.set_dspark_aux_capture_materialized.assert_not_called()
 
-    def test_noop_for_bf16_target(self, captured, monkeypatch):
-        monkeypatch.setattr(_ROT_MATRIX, _no_call)
-        draft = _spec(_bf16_config()).load_draft_model(MagicMock(), set())
-        assert torch.equal(draft.model.fc.weight.data, captured["before"])
+
+def test_rejects_unknown_gqa_aux_hidden_format():
+    with pytest.raises(ValueError, match="Unsupported GQA DSpark"):
+        AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+            _target(),
+            SimpleNamespace(dspark_aux_hidden_state_format="raw"),
+        )
+
+
+def test_configures_capture_before_loading_draft(monkeypatch):
+    events = []
+    target = _target()
+    target.set_dspark_aux_capture_materialized = lambda enabled: events.append(("capture", enabled))
+    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=object()), lm_head=object())
+
+    def _load(self, target_model, target_attn_layer_names):
+        events.append(("load", None))
+        return draft
+
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
+    spec = _spec(_vllm_config(quarot=False), _gqa_config())
+
+    assert spec.load_draft_model(target, set()) is draft
+    assert events == [("capture", True), ("load", None)]
+
+
+def test_injects_rotation_before_draft_construction(monkeypatch):
+    draft_config = _gqa_config()
+    target = _target()
+    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=object()), lm_head=object())
+
+    def _load(self, target_model, target_attn_layer_names):
+        assert draft_config._ascend_target_rotation_path == "/rotation"
+        return draft
+
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
+        lambda config: "/rotation",
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_target_lm_head",
+        lambda *args: target.lm_head,
+    )
+    spec = _spec(_vllm_config(quarot=True), draft_config)
+
+    assert spec.load_draft_model(target, set()) is draft
+    assert not hasattr(draft_config, "_ascend_target_rotation_path")
+
+
+def test_rejects_shared_quarot_embedding(monkeypatch):
+    draft_config = _gqa_config()
+    target = _target()
+    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=target.model.embed_tokens), lm_head=object())
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", lambda *args: draft)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
+        lambda config: "/rotation",
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_target_lm_head",
+        lambda *args: target.lm_head,
+    )
+    spec = _spec(_vllm_config(quarot=True), draft_config)
+
+    with pytest.raises(RuntimeError, match="must not share target embed_tokens"):
+        spec.load_draft_model(target, set())
+
+
+def test_injected_rotation_path_does_not_require_draft_quant_config():
+    config = SimpleNamespace(_ascend_target_rotation_path="/rotation")
+    assert _get_draft_rotation_path(SimpleNamespace(quant_config=None), config) == Path("/rotation")
+
+
+def test_process_weight_preserves_the_unrotated_projection():
+    generator = torch.Generator().manual_seed(7)
+    rotation, _ = torch.linalg.qr(torch.randn(_HIDDEN, _HIDDEN, dtype=torch.float64, generator=generator))
+    inputs = torch.randn(3, 5, _HIDDEN, dtype=torch.float64, generator=generator)
+    weight = torch.randn(_HIDDEN, 5 * _HIDDEN, dtype=torch.float64, generator=generator)
+
+    expected = torch.nn.functional.linear(inputs.reshape(3, -1), weight)
+    actual = torch.nn.functional.linear((inputs @ rotation).reshape(3, -1), process_weight(weight, rotation))
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=3e-6)

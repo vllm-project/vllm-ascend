@@ -1054,15 +1054,22 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
-                # Spec properties already give the [B, H, N, C] layout that
-                # basic_cache writes as kv_cache[block, :, offset].
-                kv_cache_shape = (
-                    num_blocks,
-                    kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
-                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-                )
+                # vLLM 0.28 uses [B, N, H, C]. Upstream #51718 changed
+                # cache-only writes to [B, H, N, C].
+                if vllm_version_is("0.28.0"):
+                    kv_cache_shape = (
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                    )
+                else:
+                    kv_cache_shape = (
+                        num_blocks,
+                        kv_cache_spec.num_heads,
+                        kv_cache_spec.num_states,
+                        kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                    )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
                 page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
                 if page_size_padded is not None:
@@ -1197,11 +1204,13 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them or the Ascend attention state. The
+    latter must be ``SpecDecoding`` so draft tokens use speculative attention
+    semantics instead of being treated as independent requests. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
@@ -1209,6 +1218,7 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        kwargs["attn_state"] = AscendAttentionState.SpecDecoding
         return raw(*args, **kwargs)
 
     try:

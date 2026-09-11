@@ -1013,3 +1013,59 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
         decode_metadata.actual_seq_lengths,
         torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("live_requests", [1, 2])
+def test_spec_graph_fia_padding_refreshes_captured_buffers(live_requests):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    capture = create_common_attn_metadata(BatchSpec([8, 8], [8, 8]), 16, torch.device("cpu"))
+    capture.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 10
+    captured = builder.build(0, capture, torch.ones(2, dtype=torch.int32), torch.tensor([7, 7]))
+    stable = captured.spec_decode_metadata.spec_causal_conv1d
+    pointers = [
+        stable.query_start_loc.data_ptr(),
+        stable.cache_indices.data_ptr(),
+        stable.num_accepted_tokens.data_ptr(),
+    ]
+
+    lengths = [71, 34] if live_requests == 2 else [71, 0]
+    replay = create_common_attn_metadata(BatchSpec(lengths, [8, 8]), 16, torch.device("cpu"))
+    replay.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 30
+    drafts = torch.tensor([7, 7 if live_requests == 2 else -1])
+    runtime = builder.build(0, replay, torch.tensor([1, 1], dtype=torch.int32), drafts)
+
+    assert runtime.num_prefills == 0
+    assert runtime.num_spec_decodes == live_requests
+    actual = runtime.spec_decode_metadata.spec_causal_conv1d
+    assert pointers == [
+        actual.query_start_loc.data_ptr(),
+        actual.cache_indices.data_ptr(),
+        actual.num_accepted_tokens.data_ptr(),
+    ]
+    assert stable.query_start_loc.tolist() == [0, 8, 8 * live_requests]
+    assert stable.cache_indices[0].tolist() == list(range(30, 38))
+    if live_requests == 1:
+        assert torch.all(stable.cache_indices[1] == NULL_BLOCK_ID)
+    assert replay.query_start_loc_cpu.tolist() == [0, 8, 16]
+    assert replay.num_actual_tokens == 16
+
+
+def test_spec_graph_real_prefill_is_not_treated_as_padding():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([71, 8], [8, 8]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 10
+
+    runtime = builder.build(0, common, torch.ones(2, dtype=torch.int32), torch.tensor([7, -1]))
+
+    assert runtime.num_spec_decodes == 1
+    assert runtime.num_prefills == 1

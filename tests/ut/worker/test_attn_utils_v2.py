@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -239,6 +239,34 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     assert tensor_raw_caches[mtp_name].storage_offset() == (
         base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks
     )
+
+
+def test_build_draft_attn_metadata_forwards_ascend_context(monkeypatch):
+    captured_kwargs = {}
+
+    def raw_build_attn_metadata(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return "metadata"
+
+    monkeypatch.setattr(
+        attn_utils._BUILD_ATTN_METADATA_MODULE,
+        "build_attn_metadata",
+        raw_build_attn_metadata,
+    )
+    positions = torch.arange(8, dtype=torch.int32)
+    is_prefilling = torch.tensor([False, False])
+
+    with attn_utils.build_draft_attn_metadata_factory(
+        positions,
+        pad=5,
+        is_prefilling=is_prefilling,
+    ):
+        metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata()
+
+    assert metadata == "metadata"
+    torch.testing.assert_close(captured_kwargs["positions"], positions[:5])
+    assert captured_kwargs["is_prefilling"] is is_prefilling
+    assert captured_kwargs["attn_state"] is AscendAttentionState.SpecDecoding
 
 
 @pytest.mark.parametrize(
@@ -822,8 +850,12 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     )
     cache = reshaped[layer_name]
     assert isinstance(cache, torch.Tensor)
-    # vLLM #51718 standardized cache-only writes as kv_cache[block, :, pos].
-    assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
+    expected_shape = (
+        (num_blocks, block_size, num_kv_heads, head_size)
+        if attn_utils.vllm_version_is("0.28.0")
+        else (num_blocks, num_kv_heads, block_size, head_size)
+    )
+    assert cache.shape == expected_shape
     assert cache.dtype == dtype
 
 
