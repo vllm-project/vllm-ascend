@@ -21,7 +21,6 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.indexer import compose_indexer_cache_metadata
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
@@ -1331,13 +1330,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
         indexer_attn_metadata = self._get_indexer_attn_metadata()
-        if indexer_attn_metadata is not None:
-            indexer_attn_metadata = compose_indexer_cache_metadata(
-                indexer_attn_metadata,
-                attn_metadata,
-                self.indexer.k_cache.kv_cache,
-                pcp_active=self.vllm_config.parallel_config.prefill_context_parallel_size > 1,
-            )
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
