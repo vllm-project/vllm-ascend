@@ -23,11 +23,21 @@ from unittest.mock import patch
 
 import torch
 
+import vllm_ascend.models as ascend_models
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
 
 
 class TestQwen3DSparkWeightLoading:
     """Tests for Qwen3 DSpark weight loading."""
+
+    def test_qwen3_vl_uses_qwen3_dspark_runtime(self) -> None:
+        with patch.object(ascend_models.ModelRegistry, "register_model") as mock_register_model:
+            ascend_models.register_model()
+
+        mock_register_model.assert_any_call(
+            "Qwen3VLDSparkModel",
+            "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM",
+        )
 
     def test_rotates_only_fc_weights(self) -> None:
         """Rotate FC weights and preserve all other weights before delegation."""
