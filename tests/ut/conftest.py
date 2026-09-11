@@ -39,6 +39,13 @@ try:
 except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
+if _npu_available:
+    # Fully initialize torch_npu before importing vllm_ascend. Otherwise
+    # `from vllm_ascend.utils import ...` runs package __init__ -> logger ->
+    # vllm -> current_platform -> vllm_ascend.utils, which re-enters torch_npu
+    # mid-import and double-registers TORCH_LIBRARY `_inductor_test`.
+    import torch_npu  # noqa: F401
+
 if not _npu_available:
     triton_runtime = MagicMock()
     triton_runtime.driver.active.utils.get_device_properties.return_value = {
