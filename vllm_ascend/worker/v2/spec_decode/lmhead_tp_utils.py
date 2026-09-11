@@ -91,11 +91,10 @@ class LmheadTPDraftSamplingMixin:
                 f"lmhead TP draft rows ({num_logits}) exceed the group-agreed "
                 f"capacity ({capacity} = max_num_reqs * (num_speculative_steps + 1))."
             )
-        if num_logits == capacity:
-            return super().sample_draft(  # type: ignore[misc]
-                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
-            )
-        padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
+        padded = hidden_states
+        if num_logits < capacity:
+            # Zero rows carry no draft token; they are trimmed back off below.
+            padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
         out = super().sample_draft(  # type: ignore[misc]
             padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
         )
