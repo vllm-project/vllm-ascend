@@ -68,7 +68,7 @@ class AscendInputBatch(InputBatch):
 
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
-    # main (post-0.27.1): InputBatch gained max_query_len default field,
+    # InputBatch gained max_query_len default field,
     # requiring the child's first field to also have a default.
     seq_lens_np: np.ndarray = None  # type: ignore[assignment, no-redef]
     # attn_state is used to build attention metadata.

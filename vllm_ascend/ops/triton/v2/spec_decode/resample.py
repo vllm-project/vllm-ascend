@@ -103,6 +103,7 @@ def _resample_kernel(
                         mask=vocab_mask,
                         other=float("-inf"),
                     ).to(tl.float32)
+                    draft_block_logits = draft_block_logits / temperature
                     draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
                     draft_prob = tl.exp(draft_block_logits - draft_lse)
                     # NPU: upstream #46665 computes this residual in log space
@@ -263,6 +264,7 @@ def _categorical_finalize_kernel(
             mask=valid_token_mask & is_random_residual & has_total_mass,
             other=float("-inf"),
         ).to(tl.float32)
+        draft_block_logits = draft_block_logits / tl.where(temperature != 0.0, temperature, 1.0)
         draft_lse = tl.load(
             draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
         ).to(tl.float32)
@@ -321,6 +323,9 @@ def resample(
     written to ``sampled[req_idx, num_sampled[req_idx]]`` and ``num_sampled`` is
     advanced by one. Greedy non-bonus rows preserve the target argmax already
     written by the verification kernel and only advance ``num_sampled``.
+
+    ``draft_logits`` contains raw cached logits; draft logsumexp statistics
+    must include temperature scaling, as in the verification path.
 
     ``target_logits`` and full ``draft_logits`` support fp16, bf16, and fp32;
     probability-mass arithmetic is fp32. Their vocabulary dimension must be

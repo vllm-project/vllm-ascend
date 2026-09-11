@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import math
 import os
@@ -38,7 +39,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -625,7 +626,28 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+@torch._dynamo.disable
+def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
+    """Map untagged empty-device installs onto the matching release lane.
+
+    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
+    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
+    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
+    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
+    after the move on main.
+
+    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
+    must not be traced when version gates run during torch.compile.
+    """
+    if target_vllm_version != "0.28.0":
+        return False
+    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
+    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
+    return has_legacy_pcp and not has_main_pcp
+
+
 @functools.cache
+@torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
@@ -634,11 +656,16 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.27.1+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         vllm_version = vllm_version.split("+")[0]
-        return Version(vllm_version) == Version(target_vllm_version)
+        parsed = Version(vllm_version)
+        if parsed == Version(target_vllm_version):
+            return True
+        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
+            return _vllm_empty_device_matches_release(target_vllm_version)
+        return False
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -652,9 +679,9 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
-    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
@@ -1183,9 +1210,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
-    # When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic global_bs,
+    # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
+    # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
-    if ascend_config.get_mc2_comm_alg() == "hierarchy":
+    # TODO(zzzzwwjj): remove it when op can support dynamic bs.
+    if ascend_config.get_mc2_comm_alg() == "hierarchy" or is_mega_moe_supported():
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
@@ -1238,6 +1267,17 @@ def refresh_block_size(vllm_config):
     cache_config = vllm_config.cache_config
     scheduler_config = vllm_config.scheduler_config
     model_config = vllm_config.model_config
+
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and model_config is spec_cfg.draft_model_config
+        and model_config is not spec_cfg.target_model_config
+    ):
+        return
 
     if not cache_config:
         return
@@ -1340,7 +1380,7 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 
 
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
-    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 

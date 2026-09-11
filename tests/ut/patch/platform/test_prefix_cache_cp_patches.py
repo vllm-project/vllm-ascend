@@ -3,13 +3,16 @@
 import math
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashListWithBlockSize,
+    generate_scheduler_kv_cache_config,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -27,7 +30,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    AscendMLAAttentionSpec,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -36,20 +42,24 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4,
     _get_kv_cache_config_deepseek_v4_main,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
-    return {"tokens_per_state": ratio}
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 def _make_hybrid_kv_cache_config(
@@ -179,13 +189,14 @@ def _make_vllm_config(
     enable_prefix_caching: bool,
     dcp: int,
     block_size: int = 16,
+    prefix_match_unit: int | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
             mamba_cache_mode="align",
-            prefix_match_unit=None,
+            prefix_match_unit=prefix_match_unit,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
@@ -222,6 +233,7 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
 
 
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
+    legacy_layout_kwargs = {"indexes_kv_by_block_stride": True} if vllm_version_is("0.28.0") else {}
     spec = AscendMLAAttentionSpec(
         block_size=512,
         num_kv_heads=1,
@@ -233,6 +245,7 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         scale_dim=1,
         scale_dtype=torch.float16,
         **_ratio_kwargs(4),
+        **legacy_layout_kwargs,
     )
 
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
@@ -240,8 +253,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.block_size == spec.block_size
     assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
     assert merged.page_size_bytes == spec.page_size_padded
-    assert merged.tokens_per_state == spec.tokens_per_state
+    ratio_field = "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
+    assert getattr(merged, ratio_field) == getattr(spec, ratio_field)
     assert merged.model_version == spec.model_version
+    if vllm_version_is("0.28.0"):
+        assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
 
@@ -271,6 +287,115 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+@pytest.mark.parametrize(
+    ("full_block_size", "prefix_match_unit", "expected_hash_block_size"),
+    [
+        pytest.param(128, None, 16, id="default-prefix-match-unit"),
+        pytest.param(384, None, 16, id="non-power-of-two-full-block"),
+        pytest.param(384, 8, 8, id="configured-prefix-match-unit"),
+    ],
+)
+def test_glm5_next_hashes_use_state_granularity_after_engine_min_block_update(
+    full_block_size: int,
+    prefix_match_unit: int | None,
+    expected_hash_block_size: int,
+) -> None:
+    main_spec = MLAAttentionSpec(
+        block_size=full_block_size,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+    )
+    indexer_spec = MLAAttentionSpec(
+        block_size=full_block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+        **_ratio_kwargs(16),
+    )
+    state_spec = AscendIndexerKPoolStateSpec(
+        block_size=16,
+        sliding_window=16,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.float32,
+        model_version="glm5_next",
+        cache_role="indexer_state",
+    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.main": main_spec, "layer.indexer": indexer_spec})
+    state_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.state": state_spec})
+    mamba_spec = MambaSpec(
+        block_size=full_block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    mamba_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.mamba": mamba_spec})
+    assert full_group_spec is not None
+    assert state_group_spec is not None
+    assert mamba_group_spec is not None
+
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["layer.main", "layer.indexer"],
+                kv_cache_spec=full_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["layer.state"],
+                kv_cache_spec=state_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["layer.mamba"],
+                kv_cache_spec=mamba_group_spec,
+            ),
+        ],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    scheduler_full_spec = scheduler_config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(scheduler_full_spec, MLAAttentionSpec)
+    assert scheduler_full_spec.head_size == main_spec.head_size
+    ratio_field = "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
+    assert getattr(scheduler_full_spec, ratio_field) == 1
+
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        block_size=full_block_size,
+        prefix_match_unit=prefix_match_unit,
+    )
+    # Match EngineCore: the global block size becomes the smallest unwrapped
+    # scheduler group size, which is the indexer-state granularity here.
+    vllm_config.cache_config.block_size = min(
+        group.kv_cache_spec.block_size for group in scheduler_config.kv_cache_groups
+    )
+    assert vllm_config.cache_config.block_size == 16
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        scheduler_config,
+        vllm_config,
+    )
+    assert (scheduler_block_size, hash_block_size) == (
+        full_block_size,
+        expected_hash_block_size,
+    )
+
+    hashes_per_full_block = full_block_size // hash_block_size
+    base_hashes = [index.to_bytes(2, "little") for index in range(2 * hashes_per_full_block)]
+    full_group_hashes = BlockHashListWithBlockSize(
+        base_hashes,
+        hash_block_size,
+        scheduler_full_spec.block_size,
+    )
+    assert len(full_group_hashes) == 2
+    # vLLM hashes are chained across prefix blocks, so the last state-sized
+    # hash in a full block is already that full block's hash.
+    assert full_group_hashes[0] == base_hashes[hashes_per_full_block - 1]
 
 
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
@@ -368,6 +493,62 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     assert scheduler_config.needs_kv_cache_zeroing
 
 
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="shared_by planner is only installed on v0.28.0")
+def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
+    assert groups is not None
+    page_size = 488448
+    expected_num_blocks = 100
+    available_memory = page_size * 29 * expected_num_blocks
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        SimpleNamespace(),
+        groups,
+        available_memory,
+    )
+
+    assert num_blocks == expected_num_blocks
+    assert len(tensors) == 29
+    assert [len(get_kv_cache_tensor_layers(tensor)) for tensor in tensors] == [4] * 23 + [1] * 6
+    assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
+    assert sum(tensor.size for tensor in tensors) == available_memory
+
+
+def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
+    page_size = 940032
+    specs = _make_kimi_k3_dspark_kv_cache_specs(block_size=768, page_size=page_size)
+    for name, spec in list(specs.items()):
+        if isinstance(spec, MambaSpec):
+            specs[name] = replace(
+                spec,
+                block_size=200000,
+                shapes=((6, 4608), (12, 128, 128)),
+                mamba_cache_mode="none",
+                num_speculative_blocks=3,
+            )
+        elif name.startswith("model.layers."):
+            specs[name] = replace(spec, num_kv_heads=2)
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
+    assert groups is not None
+    assert [len(g.layer_names) for g in groups] == [29, 23, 23, 23]
+    assert [g.kv_cache_spec.block_size for g in groups] == [768, 200000, 200000, 200000]
+    config = _make_vllm_config(enable_prefix_caching=False, dcp=1, block_size=768)
+    config.cache_config.mamba_cache_mode = "none"
+    assert {g.kv_cache_spec.max_num_blocks_per_req(config, 200000) for g in groups[1:]} == {4}
+
+
+def test_kimi_k3_mixed_attention_still_requires_same_block_size() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs()
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is not None
+    name = "model.layers.93.self_attn.attn"
+    specs[name] = replace(specs[name], block_size=192)
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
     specs["unrecognized.layer"] = next(iter(specs.values()))
@@ -413,6 +594,7 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
     assert hash_block_size == 512
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only changed the main planner")
 def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
@@ -456,6 +638,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert needed_memory == expected_memory
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 introduced shared backing on main")
 def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     groups = kv_cache_config.kv_cache_groups
@@ -489,6 +672,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only re-plans ranks on main")
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
@@ -826,6 +1010,39 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
+    """Mamba states are replicated, unlike DCP-sharded attention KV cache."""
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+
+    # The patch module replaces vLLM's public MambaManager symbol with the
+    # Ascend subclass, so patch the subclass's direct base explicitly.
+    base_mamba_manager = AscendMambaManager.__base__
+    assert base_mamba_manager is not None
+    with patch.object(
+        base_mamba_manager,
+        "find_longest_cache_hit",
+        return_value=((), 0),
+    ) as find_cache_hit:
+        AscendMambaManager.find_longest_cache_hit(
+            block_hashes=[],
+            max_length=0,
+            kv_cache_group_ids=[1],
+            block_pool=MagicMock(),
+            kv_cache_spec=mamba_spec,
+            alignment_tokens=16,
+            dcp_world_size=8,
+            pcp_world_size=1,
+            drop_eagle_block=False,
+        )
+
+    assert find_cache_hit.call_args.kwargs["dcp_world_size"] == 1
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:

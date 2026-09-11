@@ -17,7 +17,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -352,15 +352,18 @@ def apply_layerwise_kv_cache_plan(
             raise ValueError(
                 "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
             )
-        new_tensors.append(
-            KVCacheTensor(
-                layers=shared_by,
-                size=cache_tensors[0].size,
-                layer_stride=cache_tensors[0].layer_stride,
-                block_stride=cache_tensors[0].block_stride,
-                offset=cache_tensors[0].offset,
+        if vllm_version_is("0.28.0"):
+            new_tensors.append(KVCacheTensor(shared_by=shared_by, size=cache_tensors[0].size))
+        else:
+            new_tensors.append(
+                KVCacheTensor(
+                    layers=shared_by,
+                    size=cache_tensors[0].size,
+                    layer_stride=cache_tensors[0].layer_stride,
+                    block_stride=cache_tensors[0].block_stride,
+                    offset=cache_tensors[0].offset,
+                )
             )
-        )
 
     new_tensors: list[KVCacheTensor] = []
     for slot in reuse_layout.buffer_slots:

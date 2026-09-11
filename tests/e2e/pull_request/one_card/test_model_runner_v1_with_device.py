@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -36,7 +37,9 @@ FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ut
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
-    """Build the vLLM main descriptor (vLLM #51718 layout)."""
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(
         size=size,
         layers=layer_names,
@@ -432,6 +435,7 @@ def test_stateful_handoff_preserves_decode_graph(
 ):
     # Exercise the real dispatcher and DP synchronization using CPU metadata only.
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dcp_size = 1
     runner.dp_size = dp_size
     runner.dp_rank = 0
     runner.parallel_config = SimpleNamespace(
@@ -448,6 +452,10 @@ def test_stateful_handoff_preserves_decode_graph(
         max_cudagraph_capture_size=32,
         compile_sizes=[],
     )
+    runner.model_config = SimpleNamespace(
+        is_encoder_decoder=False,
+        hf_text_config=SimpleNamespace(to_dict=lambda: {}),
+    )
     runner.vllm_config = SimpleNamespace(
         parallel_config=runner.parallel_config,
         compilation_config=runner.compilation_config,
@@ -455,8 +463,8 @@ def test_stateful_handoff_preserves_decode_graph(
         observability_config=SimpleNamespace(cudagraph_metrics=False),
         num_speculative_tokens=num_spec_tokens,
         lora_config=None,
+        model_config=runner.model_config,
     )
-    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),

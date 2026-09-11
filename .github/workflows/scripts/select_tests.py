@@ -111,16 +111,16 @@ _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 # --all-tests runs keep collecting CPU UT coverage.
 _SKIP_CPU_UT = False
 
-# Generic ``linux-aarch64-a3-N-`` labels are mixed pools of 560T and 752T
+# Generic ``linux-aarch64-a3-N`` labels are mixed pools of 560T and 752T
 # machines (i.e. random machine class). When accuracy tests are selected (or
 # the full suite runs), reroute those partitions to the dedicated 560T labels.
 # Accuracy tests are exactly the files listed in ``accuracy_tests`` in
 # test_config.yaml; they must run on 560T machines (800i labels), so 752T
 # machines are not started for runs that include them.
 _A3_560T_LABEL_MAP = {
-    "linux-aarch64-a3-2-": "linux-aarch64-a3-800i-2",
-    "linux-aarch64-a3-4-": "linux-aarch64-a3-800i-4",
-    "linux-aarch64-a3-8-": "linux-aarch64-a3-800i-8",
+    "linux-aarch64-a3-2": "linux-aarch64-a3-800i-2",
+    "linux-aarch64-a3-4": "linux-aarch64-a3-800i-4",
+    "linux-aarch64-a3-8": "linux-aarch64-a3-800i-8",
 }
 
 # Populated by _load_runner_mapping(). Ordered list of

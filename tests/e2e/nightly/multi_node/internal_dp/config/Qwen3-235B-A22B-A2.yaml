@@ -11,7 +11,6 @@ env_common: &env_common
   NUMEXPR_MAX_THREADS: 128
   TASK_QUEUE_ENABLE: 1
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
 
 deployment:
   -

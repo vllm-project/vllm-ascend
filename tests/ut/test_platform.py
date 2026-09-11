@@ -22,6 +22,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    vllm_version_is,
 )
 
 
@@ -1209,11 +1210,6 @@ class TestNPUPlatform(TestBase):
                 "batch_job_sched_config",
             ),
             (
-                "profiling_chunk",
-                lambda config, ascend: setattr(ascend.scheduler_config.profiling_chunk_config, "enabled", True),
-                "profiling_chunk_config",
-            ),
-            (
                 "kv_consumer",
                 lambda config, ascend: setattr(
                     config, "kv_transfer_config", MagicMock(kv_role="kv_consumer", engine_id="engine0")
@@ -1236,6 +1232,79 @@ class TestNPUPlatform(TestBase):
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_accepts_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = False
+
+        with (
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+        )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_rejects_async_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = True
+
+        with (
+            pytest.raises(
+                ValueError,
+                match="requires synchronous scheduling",
+            ),
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
@@ -1731,30 +1800,32 @@ class TestNPUPlatform(TestBase):
         )
         for use_mla, use_pcp, use_dcp, expected_backend in cases:
             with self.subTest(use_mla=use_mla, use_pcp=use_pcp, use_dcp=use_dcp):
-                attn_selector_config = AttentionSelectorConfig(
-                    dtype=torch.float16,
-                    head_size=0,
-                    kv_cache_dtype=None,
-                    block_size=128,
-                    use_mla=use_mla,
-                    use_sparse=False,
-                    use_pcp=use_pcp,
-                    use_dcp=use_dcp,
-                )
+                # use_dcp is a main-only AttentionSelectorConfig field; keep the
+                # attribute available on 0.28.0 via SimpleNamespace.
+                if vllm_version_is("0.28.0"):
+                    attn_selector_config = SimpleNamespace(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
+                else:
+                    attn_selector_config = AttentionSelectorConfig(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
-
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        attn_selector_config = AttentionSelectorConfig(
-            dtype=torch.float16,
-            head_size=0,
-            kv_cache_dtype=None,
-            block_size=128,
-            use_pcp=True,
-            use_dcp=True,
-        )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
 
     def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
         attn_selector_config = SimpleNamespace(

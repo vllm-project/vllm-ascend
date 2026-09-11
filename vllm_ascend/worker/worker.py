@@ -94,6 +94,7 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -291,6 +292,10 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        # vLLM main removed the post-KV-cache wake hook; keep it on v0.28.0.
+        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.28.0"):
+            self.model_runner.post_kv_cache_wake_up()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -653,6 +658,11 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
+        # #51718 multi-group scale is main-only. Also avoids
+        # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
+        if vllm_version_is("0.28.0"):
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -807,9 +817,6 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.use_v2_model_runner:
-            return self.model_runner.sample_tokens(grammar_output)
-
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
             self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,

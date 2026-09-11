@@ -316,12 +316,13 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def indexer_select_post_process(
-        sfa_impl,
         q_li: torch.Tensor,
         q_li_scale: torch.Tensor | None,
         q_li_shape_ori: tuple[Any, ...] | None,
         weights: torch.Tensor,
         kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
@@ -331,11 +332,12 @@ class BaseDeviceAdaptor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
-        indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
-        indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
+        indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
@@ -355,7 +357,7 @@ class BaseDeviceAdaptor:
                 sparse_count=2048,
                 sparse_mode=3,
             )
-        elif sfa_impl.use_torch_npu_lightning_indexer:
+        elif use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
@@ -563,6 +565,13 @@ class BaseDeviceAdaptor:
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """Non-A5: q/k are int8 with fp16 scales, so lightning indexer runs
+        in INT8 quant mode (QUANT_MODE_INT8 = 2 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 2
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -1158,6 +1167,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Lightning Indexer Dtype Prep =====
 
     @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """A5: q/k are fp8_e4m3fn with fp32 scales, so lightning indexer runs
+        in FP8 quant mode (QUANT_MODE_FP8 = 1 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 1
+
+    @staticmethod
     def prepare_dsa_indexer_weights(weights):
         """A5: cast indexer weights to float32 (fp8 scale format needs float)."""
         return weights.float()
@@ -1255,23 +1271,25 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def indexer_select_post_process(
-        sfa_impl,
         q_li: torch.Tensor,
         q_li_scale: torch.Tensor | None,
         q_li_shape_ori: tuple[Any, ...] | None,
         weights: torch.Tensor,
         kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
-        indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
+        indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
             assert q_li_shape_ori is not None
 
             if q_li_scale is not None:

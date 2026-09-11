@@ -18,11 +18,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
@@ -562,7 +564,11 @@ def test_packed_cache_tensor_descriptors_are_rejected():
     spec = _make_full_attention_spec()
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=[
-            KVCacheTensor(size=16, layers=[layer_name], layer_stride=16, block_stride=32, offset=8)
+            (
+                KVCacheTensor(size=16, shared_by=[layer_name], offset=8, block_stride=32)
+                if vllm_version_is("0.28.0")
+                else KVCacheTensor(size=16, layers=[layer_name], layer_stride=16, block_stride=32, offset=8)
+            )
             for layer_name in layer_names
         ],
         kv_cache_groups=[
