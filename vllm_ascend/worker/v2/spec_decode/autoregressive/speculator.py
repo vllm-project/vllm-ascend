@@ -112,7 +112,20 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         self.pcp_manager: AscendPCPManager | None = None
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
+        """Build the runtime config used while executing the draft model.
+
+        Mirrors the V1 proposer
+        (``AscendSpecDecodeBaseProposer._create_draft_vllm_config``): validate
+        the target-derived config, then swap in the draft model config without
+        re-validating it. EAGLE and DFlash draft heads are dense even when the
+        target is MoE, so re-validating the draft config would check that dense
+        head against the target-side fine-grained TP layout (MoE-only in
+        ``ascend_config``) and fail before the speculator can be built.
+
+        The additional config has to stay intact: ``init_ascend_config`` caches
+        the config it builds process-wide, so dropping the fine-grained TP entry
+        here would silently turn lmhead TP off for the draft sampling path.
+        """
         source_parallel_config = self.vllm_config.parallel_config
         dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
@@ -122,10 +135,14 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         )
         draft_config = replace(
             self.vllm_config,
-            model_config=self.draft_model_config,
             parallel_config=parallel_config,
             cache_config=replace(self.vllm_config.cache_config),
         )
+        # V1 parity: swap in the draft model config *after* validation. A dense
+        # EAGLE/DFlash head must not be re-validated against the target-side
+        # fine-grained TP layout (MoE-only in ``ascend_config``), which passing
+        # model_config through replace() above would do.
+        draft_config.model_config = self.draft_model_config
         if self.replicated_pcp:
             # TODO: Separate draft execution settings from worker topology.
             # Restore DCP only after the complete draft config reconstruction;

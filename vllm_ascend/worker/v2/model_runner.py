@@ -64,6 +64,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     kv_transfer_supports_shared_backing,
+    lmhead_tp_configured,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     set_potential_max_tokens,
@@ -84,7 +85,6 @@ from vllm_ascend.worker.v2.pp_utils import (
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
-from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import _lmhead_tp_configured
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -247,7 +247,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def sample_tokens(self, grammar_output):
         if (
-            _lmhead_tp_configured()
+            lmhead_tp_configured()
             and self.prompt_logprobs_worker is not None
             and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
         ):
@@ -349,7 +349,7 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
-        if dummy_run and _lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
+        if dummy_run and lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
             # lmhead TP: idle ranks never call sample(); join the target
             # LM-head collectives here with zero-indexed rows at the sample()
             # capacity (V1: ``need_dummy_logits``). Must run before the parent
