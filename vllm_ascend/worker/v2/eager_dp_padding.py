@@ -45,7 +45,7 @@ def sync_dp_group_max_tokens(num_tokens: int, dp_size: int, dp_rank: int) -> int
 
 
 def make_dp_padded_dummy_output(
-    scheduler_output: SchedulerOutput, group_max: int, decode_query_len: int
+    scheduler_output: SchedulerOutput, group_max: int, decode_query_len: int, max_num_reqs: int
 ) -> SchedulerOutput:
     """
     Rewrite a dummy scheduler output to forward exactly `group_max` tokens. The output
@@ -53,13 +53,18 @@ def make_dp_padded_dummy_output(
     """
     # decode_query_len-sized requests keep the dummy uniform-decode shaped, so it
     # still matches the captured decode graphs; one group_max-token request would
-    # drag the whole DP group to eager via the cg_mode min. A trailing remainder
-    # keeps the total exact; then the group-max rank is itself non-uniform and
-    # the step runs eager regardless.
+    # drag the step off them via the cg_mode min (to eager under FULL_DECODE_ONLY,
+    # to the mixed/piecewise graphs under the other modes). A trailing remainder
+    # keeps the total exact — the batch is non-uniform then, so no decode graph
+    # matches regardless of the dummy's shape. Past max_num_reqs the decode graphs
+    # cannot match either, so reuse _dummy_run's bounded even split there.
     num_full, remainder = divmod(group_max, decode_query_len)
     per_request = [decode_query_len] * num_full
     if remainder:
         per_request.append(remainder)
+    if len(per_request) > max_num_reqs:
+        num_reqs = min(group_max, max_num_reqs)
+        per_request = [group_max // num_reqs + (i >= num_reqs - group_max % num_reqs) for i in range(num_reqs)]
     return replace(
         scheduler_output,
         num_scheduled_tokens={f"_dummy_dp_padding_{i}": n for i, n in enumerate(per_request)},

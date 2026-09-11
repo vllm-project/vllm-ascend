@@ -285,7 +285,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             if dummy_run and self._dp_padding_aligned_tokens > 0:
                 scheduler_output = make_dp_padded_dummy_output(
-                    scheduler_output, self._dp_padding_aligned_tokens, self.decode_query_len
+                    scheduler_output,
+                    self._dp_padding_aligned_tokens,
+                    self.decode_query_len,
+                    self.max_num_reqs,
                 )
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
