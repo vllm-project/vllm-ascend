@@ -50,6 +50,7 @@
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
+#include "moe/custom_muls/custom_muls_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
@@ -2599,6 +2600,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                   bool activate_left=True, "
         "                   str quant_mode=\"dynamic\") -> (Tensor y, Tensor scale)");
     ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant);
+
+    ops.def("custom_muls(Tensor x, float scalar) -> Tensor");
+    ops.impl("custom_muls", torch::kPrivateUse1, &vllm_ascend::custom_muls);
 
     ops.def(
         "situ_mx_quant(Tensor x, "
