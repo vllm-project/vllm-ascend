@@ -814,17 +814,15 @@ def test_one_token_prefill_selection_respects_recurrent_state(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "expected_spec_decodes", "expected_prefills"),
+    "seq_len",
     [
-        pytest.param(4, 0, 1, id="first_chunk_stays_prefill"),
-        pytest.param(8, 1, 0, id="stateful_chunk_folds_into_spec"),
+        pytest.param(4, id="first_chunk_stays_prefill"),
+        pytest.param(8, id="stateful_chunk_stays_prefill"),
     ],
 )
-def test_spec_sized_prefill_fold_requires_recurrent_state(
+def test_spec_sized_prefill_stays_on_live_prefill_path(
     monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
-    expected_spec_decodes: int,
-    expected_prefills: int,
 ):
     _patch_missing_runtime_cdiv(monkeypatch)
     common_attn_metadata = create_common_attn_metadata(
@@ -845,14 +843,10 @@ def test_spec_sized_prefill_fold_requires_recurrent_state(
         num_decode_draft_tokens_cpu=torch.full((1,), -1, dtype=torch.int32),
     )
 
-    assert attn_metadata.num_spec_decodes == expected_spec_decodes
-    assert attn_metadata.num_prefills == expected_prefills
-    if expected_spec_decodes:
-        assert attn_metadata.spec_sequence_masks.tolist() == [True]
-        assert attn_metadata.num_accepted_tokens.tolist() == [4]
-    else:
-        assert attn_metadata.spec_sequence_masks is None
-        assert attn_metadata.num_accepted_tokens is None
+    assert attn_metadata.num_spec_decodes == 0
+    assert attn_metadata.num_prefills == 1
+    assert attn_metadata.spec_sequence_masks is None
+    assert attn_metadata.num_accepted_tokens is None
 
 
 def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
