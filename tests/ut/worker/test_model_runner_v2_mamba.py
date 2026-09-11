@@ -98,6 +98,56 @@ def test_mrv2_advertises_standardized_shared_kv_backing():
     assert NPUModelRunner.supports_standardized_shared_kv_backing is True
 
 
+def test_update_requests_copies_nested_shared_kv_cache_views_once():
+    num_blocks = 3
+    backing = torch.zeros(27, dtype=torch.uint8)
+    conv_state = backing[:6].view(num_blocks, 2)
+    ssm_state = backing[6:15].view(num_blocks, 3)
+    key_cache = backing[6:15].view(num_blocks, 3)
+    value_cache = backing[15:27].view(num_blocks, 4)
+
+    for block_id in range(num_blocks):
+        conv_state[block_id].fill_(10 + block_id)
+        ssm_state[block_id].fill_(20 + block_id)
+        value_cache[block_id].fill_(30 + block_id)
+    original = {
+        "conv": conv_state.clone(),
+        "ssm": ssm_state.clone(),
+        "value": value_cache.clone(),
+    }
+
+    runner = object.__new__(NPUModelRunner)
+    nested_kv_caches = [(key_cache, value_cache), [conv_state, ssm_state]]
+    runner.kv_caches = nested_kv_caches
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens_np=np.empty(0, dtype=np.int32),
+        prefill_len=SimpleNamespace(np=np.empty(0, dtype=np.int32)),
+        num_computed_prefill_tokens=np.empty(0, dtype=np.int32),
+    )
+    runner.block_tables = MagicMock()
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            num_computed_tokens=[],
+            new_block_ids=[],
+        ),
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=[(0, 1), (1, 2)],
+    )
+
+    NPUModelRunner.update_requests(runner, scheduler_output)
+
+    assert runner.kv_caches is nested_kv_caches
+    assert scheduler_output.kv_cache_block_copies == [(0, 1), (1, 2)]
+    torch.testing.assert_close(conv_state[1], original["conv"][0])
+    torch.testing.assert_close(conv_state[2], original["conv"][1])
+    torch.testing.assert_close(ssm_state[1], original["ssm"][0])
+    torch.testing.assert_close(ssm_state[2], original["ssm"][1])
+    torch.testing.assert_close(value_cache[1], original["value"][0])
+    torch.testing.assert_close(value_cache[2], original["value"][1])
+
+
 def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
