@@ -23,6 +23,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_vnorm import qkv_rmsnorm_rope_vnorm_fits_ub
 
 _original_attention_init = Gemma4Attention.__init__
+_original_attention_forward = Gemma4Attention.forward
 
 # The fused kernel keeps its intermediates in bfloat16, which is the dtype
 # Gemma4 checkpoints are served with.
@@ -102,48 +103,24 @@ def _patched_attention_forward(
     hidden_states: torch.Tensor,
     **kwargs,
 ) -> torch.Tensor:
-    if self.is_kv_shared_layer:
-        q, _ = self.q_proj(hidden_states)
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-        q, _ = self.rotary_emb(positions, q, None)
-        attn_output = self.attn(q, None, None)
-    else:
-        qkv, _ = self.qkv_proj(hidden_states)
+    if not self.use_fused_preattention:
+        return _original_attention_forward(self, positions, hidden_states, **kwargs)
 
-        if self.use_fused_preattention:
-            q, k, v = DeviceOperator.split_qkv_rmsnorm_rope_vnorm(
-                input=qkv,
-                q_weight=self.q_norm.weight,
-                k_weight=self.k_norm.weight,
-                q_hidden_size=self.q_size,
-                kv_hidden_size=self.kv_size,
-                head_dim=self.head_dim,
-                eps=self.q_norm.variance_epsilon,
-                q_bias=None,
-                k_bias=None,
-                cos_sin_cache=self.rotary_emb.cos_sin_cache,
-                positions=positions,
-            )
-        else:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-            q = q.unflatten(-1, (self.num_heads, self.head_dim))
-            q = self.q_norm(q)
-            q = q.flatten(-2, -1)
-
-            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            k = self.k_norm(k)
-            k = k.flatten(-2, -1)
-            q, k = self.rotary_emb(positions, q, k)
-
-            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            v = self.v_norm(v)
-            v = v.flatten(-2, -1)
-
-        attn_output = self.attn(q, k, v)
-
+    qkv, _ = self.qkv_proj(hidden_states)
+    q, k, v = DeviceOperator.split_qkv_rmsnorm_rope_vnorm(
+        input=qkv,
+        q_weight=self.q_norm.weight,
+        k_weight=self.k_norm.weight,
+        q_hidden_size=self.q_size,
+        kv_hidden_size=self.kv_size,
+        head_dim=self.head_dim,
+        eps=self.q_norm.variance_epsilon,
+        q_bias=None,
+        k_bias=None,
+        cos_sin_cache=self.rotary_emb.cos_sin_cache,
+        positions=positions,
+    )
+    attn_output = self.attn(q, k, v)
     output, _ = self.o_proj(attn_output)
 
     return output
