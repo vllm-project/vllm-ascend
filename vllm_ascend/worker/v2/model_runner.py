@@ -66,6 +66,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
+    is_legacy_spec_pp_lane,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
 )
@@ -135,7 +136,10 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
+        # Release lanes build an unsharded draft on every rank that owns one;
+        # upstream main places the draft on the last PP rank only.
+        draft_lives_here = self.is_last_pp_rank or (is_legacy_spec_pp_lane() and not self.use_spec_pp)
+        if self.speculative_config is not None and draft_lives_here:
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.

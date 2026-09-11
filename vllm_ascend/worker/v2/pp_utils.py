@@ -13,6 +13,23 @@ import torch
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import vllm_version_is
+
+# The release lane rejects spec + PP and needs Ascend's own PP transport.
+# Release lanes that predate upstream spec + PP support (vLLM #50514, which is
+# not in v0.29.0 either: the release branch forked from main before it landed).
+# Those vLLMs reject the combination before the runner is built, keep the
+# auxiliary states out of the pipeline and let the draft inherit the target PP,
+# so Ascend keeps its own path there. Upstream main builds the PP state itself,
+# broadcasts the draft block and relays the auxiliary states.
+_LEGACY_SPEC_PP_VERSIONS = ("0.28.0", "0.29.0")
+
+
+def is_legacy_spec_pp_lane() -> bool:
+    """Whether this vLLM still needs Ascend's spec + PP workarounds."""
+    return any(vllm_version_is(version) for version in _LEGACY_SPEC_PP_VERSIONS)
+
+
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -82,8 +99,14 @@ def bypass_upstream_spec_pp_guard(
     vllm_config: VllmConfig,
     support: SpecPPSupport | None,
 ) -> Iterator[bool]:
-    """Initialize the upstream runner as PP=1 to bypass its Spec+PP guard."""
-    bypass_guard = support.bypass_upstream_pp_guard if support is not None else False
+    """Initialize the upstream runner as PP=1 to bypass its Spec+PP guard.
+
+    Only the release lane rejects spec + PP before the runner is built and needs
+    Ascend to rebuild the skipped PP state. Upstream main owns PP itself, so
+    masking it there would hide state the runner expects to build.
+    """
+    support_bypasses = support.bypass_upstream_pp_guard if support is not None else False
+    bypass_guard = support_bypasses and is_legacy_spec_pp_lane()
     if not bypass_guard:
         yield False
         return

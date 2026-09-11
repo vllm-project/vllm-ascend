@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mla import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
     DeepseekV2Model,
@@ -29,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     _get_llama_4_scaling,
     yarn_get_mscale,
 )
+from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
@@ -298,6 +300,57 @@ def _deepseek_v2_mla_attention_init(
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
+def _install_aux_hidden_state_relay() -> None:
+    """Adopt upstream's auxiliary-state relay bookkeeping.
+
+    Upstream validates PP with a target-driven drafter through
+    ``supports_aux_hidden_states_over_pp`` and relays the states itself
+    (``PPHandler.relay_aux_hidden_states``), keying them through the
+    ``EagleModelMixin`` slot layout. This decoder keeps its own capture points
+    and its tensor-parallel all-gather, so it only takes the bookkeeping.
+    """
+    for member in (
+        "AUX_HIDDEN_STATE_KEY",
+        "_aux_slot_base_cached",
+        "_aux_upstream_total_cached",
+        "_set_aux_hidden_state_layers",
+        "_cache_aux_pp_layout",
+        "pack_local_aux_hidden_states",
+        "collect_remote_aux_hidden_states",
+    ):
+        setattr(DeepseekV2Model, member, getattr(EagleModelMixin, member))
+    DeepseekV2Model.supports_aux_hidden_states_over_pp = True
+
+
+_install_aux_hidden_state_relay()
+
+
+def _patched_set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+    # Go through the mixin so the per-stage slot base is cached for the relay.
+    self.model._set_aux_hidden_state_layers(layers)
+
+
+DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _patched_set_aux_hidden_state_layers
+
+
+def _capture_aux_hidden_state(
+    self,
+    aux_hidden_states: list[torch.Tensor],
+    layer_id: int,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    positions: torch.Tensor,
+) -> None:
+    """Append one auxiliary state under upstream's layer-id convention."""
+    if layer_id not in self.aux_hidden_state_layers:
+        return
+    aux_hidden_state = hidden_states if residual is None else hidden_states + residual
+    if aux_hidden_state.shape[0] != positions.shape[0]:
+        aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
+        aux_hidden_state = aux_hidden_state[: positions.shape[0]]
+    aux_hidden_states.append(aux_hidden_state)
+
+
 def _patched_forward(
     self,
     input_ids: torch.Tensor | None,
@@ -305,7 +358,8 @@ def _patched_forward(
     intermediate_tensors: IntermediateTensors | None,
     inputs_embeds: torch.Tensor | None = None,
 ) -> torch.Tensor | IntermediateTensors:
-    if get_pp_group().is_first_rank:
+    pp_group = get_pp_group()
+    if pp_group.is_first_rank:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
@@ -313,10 +367,12 @@ def _patched_forward(
                 raise ValueError("Either input_ids or inputs_embeds must be provided to DeepseekV2Model.forward")
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
+        remote_aux_hidden_states: list[torch.Tensor] = []
     else:
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
+        remote_aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
@@ -329,21 +385,37 @@ def _patched_forward(
     else:
         llama_4_scaling = None
 
-    aux_hidden_states = []
+    # A stage captures the state entering its first layer (the previous stage
+    # owns it otherwise) and the output of every layer it owns, so the stage
+    # that owns a layer also owns that layer's auxiliary state. That is the
+    # convention upstream's relay bookkeeping assumes.
+    local_aux_hidden_states: list[torch.Tensor] = []
+    if pp_group.is_first_rank:
+        _capture_aux_hidden_state(
+            self,
+            local_aux_hidden_states,
+            self.start_layer,
+            hidden_states,
+            residual,
+            positions,
+        )
     for idx, layer in enumerate(
         islice(self.layers, self.start_layer, self.end_layer),
         start=self.start_layer,
     ):
-        if idx in self.aux_hidden_state_layers:
-            aux_hidden_state = hidden_states + residual
-            if aux_hidden_state.shape[0] != positions.shape[0]:
-                aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
-                aux_hidden_state = aux_hidden_state[: positions.shape[0]]
-            aux_hidden_states.append(aux_hidden_state)
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+        _capture_aux_hidden_state(self, local_aux_hidden_states, idx + 1, hidden_states, residual, positions)
 
-    if not get_pp_group().is_last_rank:
-        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+    if not pp_group.is_last_rank:
+        return IntermediateTensors(
+            {
+                "hidden_states": hidden_states,
+                "residual": residual,
+                # This stage's captures take the slots after the upstream ones,
+                # so the relay can keep the received slots in place.
+                **self.pack_local_aux_hidden_states(local_aux_hidden_states),
+            }
+        )
 
     if hidden_states.shape[0] != positions.shape[0]:
         combined_states = torch.cat([hidden_states, residual], dim=-1)
@@ -353,9 +425,8 @@ def _patched_forward(
         hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
         residual = residual.contiguous()
 
-    if self.end_layer in self.aux_hidden_state_layers:
-        aux_hidden_states.append(hidden_states + residual)
-
+    # Earlier stages' states come first: they hold the lower layer indices.
+    aux_hidden_states = remote_aux_hidden_states + local_aux_hidden_states
     hidden_states, _ = self.norm(hidden_states, residual)
     if len(aux_hidden_states) > 0:
         return hidden_states, aux_hidden_states
