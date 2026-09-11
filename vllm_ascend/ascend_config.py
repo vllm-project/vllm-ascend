@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.dynamic_spec import resolve_physical_k
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -995,15 +996,23 @@ class DynamicSpecConfig:
     # Dynamic speculative-length methods. "dspark" relies on the DSpark
     # confidence head; models without such a head need another method.
     SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
+    SUPPORTED_POLICIES: ClassVar[tuple[str, ...]] = (
+        "confidence_budget",
+        "hardware_aware",
+    )
 
     # None disables the dynamic speculative-length path.
     method: str | None = None
-    # Custom parameters of the selected dynamic method; the expected keys
-    # depend on `method` (e.g. dspark accepts
-    # initial_verify_budget_per_req, budget_update_interval and
-    # budget_threshold). Empty by default, in which case each method
-    # falls back to its own built-in defaults.
+    # Parameters consumed by the selected upstream dynamic method.
     method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
+    # An object opts into physical K, automatic V2 support and hybrid. Example:
+    # {"min_k": 3, "capture_k": [3, 5]}. Advanced knobs are slack, percentile,
+    # and hybrid.{enabled,min_batch_size,acceptance_threshold,low_steps,
+    # high_steps,probe_interval}. None retains the legacy configuration path.
+    physical_k: dict[str, Any] | None = None
+    # ``hardware_aware`` adds Ascend physical K control over upstream
+    # confidence-based adaptive verification.
+    policy: str = "confidence_budget"
 
     @model_validator(mode="after")
     def _validate(self):
@@ -1011,6 +1020,23 @@ class DynamicSpecConfig:
             raise ValueError(
                 f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
             )
+        if self.policy not in self.SUPPORTED_POLICIES:
+            raise ValueError(
+                f"dynamic_spec_config.policy must be one of {self.SUPPORTED_POLICIES}, got {self.policy!r}"
+            )
+        if not isinstance(self.method_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.method_params must be a dict, "
+                f"got {type(self.method_params).__name__}: "
+                f"{self.method_params}"
+            )
+        resolve_physical_k(
+            {
+                "method": self.method,
+                "policy": self.policy,
+                "physical_k": self.physical_k,
+            }
+        )
         return self
 
 

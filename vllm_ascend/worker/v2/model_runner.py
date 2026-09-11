@@ -72,6 +72,7 @@ from vllm_ascend.worker.v2.pp_utils import (
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import adaptive_verification_gate_wrapper
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -123,7 +124,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self.update_stream = torch.npu.Stream()
 
         # because we will override these attribute, delete these attribute to
@@ -166,6 +167,10 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        # The upstream manager may predate the Ascend state replacements.
+        if getattr(self, "adaptive_verification", None) is not None:
+            self.adaptive_verification.req_states = self.req_states
+            self.adaptive_verification.query_start_loc = self.input_buffers.query_start_loc
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -241,7 +246,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self), adaptive_verification_gate_wrapper(
+            vllm_model_runner,
+            self.compilation_config.cudagraph_mode,
+        ):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -411,13 +419,6 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = build_attn_state(
-            self.vllm_config,
-            self.input_buffers.seq_lens_np,
-            num_reqs,
-            num_scheduled_tokens_np,
-            num_valid_tokens,
-        )
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -526,6 +527,14 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
+
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
+            num_reqs,
+            num_scheduled_tokens_np,
+            num_valid_tokens,
+        )
 
         # Get prefill tokens if any.
         if batch_req_state.has_prefill:
@@ -668,6 +677,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 padded_num_tokens=batch_desc.num_tokens,
             )
+        input_batch._vllm_ascend_physical_draft_k = int(scheduler_output.num_spec_tokens_to_schedule)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
