@@ -195,8 +195,11 @@ def test_draft_prefill_attn_groups_follow_draft_topology(
     assert speculator.draft_prefill_attn_groups is expected
 
 
-def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
+@pytest.mark.parametrize("cudagraph_runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cudagraph_runtime_mode) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.attn_architecture = attn_architecture
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
     speculator._build_draft_attn_metadata = MagicMock(return_value={"draft.layer": object()})
@@ -220,6 +223,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
             original_slot_mappings,
             input_batch.num_reqs_after_padding,
             input_batch.num_tokens_after_padding,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
     assert attn_metadata == speculator._build_draft_attn_metadata.return_value
@@ -248,7 +252,8 @@ def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
     )
 
 
-def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
+@pytest.mark.parametrize("cudagraph_runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering(cudagraph_runtime_mode) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.input_batch = _make_padded_input_batch()
@@ -279,6 +284,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
             attn_metadata=local_attn_metadata,
             slot_mappings=local_slot_mappings,
             num_tokens_across_dp=None,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
     speculator._prepare_replicated_prefill_attn.assert_called_once_with(
@@ -286,6 +292,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
         local_slot_mappings,
         2,
         8,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
     )
     parent_prefill.assert_called_once()
     parent_args = parent_prefill.call_args.args
@@ -410,7 +417,9 @@ def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
     metadata = None if guard == "no_metadata" else {"draft.layer": object()}
     slots = {"draft.layer": object()}
 
-    actual_metadata, actual_slots = speculator._prepare_replicated_prefill_attn(metadata, slots, 2, 8)
+    actual_metadata, actual_slots = speculator._prepare_replicated_prefill_attn(
+        metadata, slots, 2, 8, cudagraph_runtime_mode=CUDAGraphMode.FULL
+    )
 
     assert actual_metadata is metadata
     assert actual_slots is slots
