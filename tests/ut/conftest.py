@@ -204,6 +204,11 @@ build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info",
 setattr(build_info, "__device_type__", "A2")  # noqa: B010
 sys.modules.setdefault("vllm_ascend._build_info", build_info)
 
+# Complete torch init before loading vllm_ascend. Importing the package used to
+# pull logger -> vllm -> torch and re-enter a partial torch import, which raises
+# "function '_has_torch_function' already has a docstring".
+import torch  # noqa: E402
+
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,
     clear_enable_sp,
