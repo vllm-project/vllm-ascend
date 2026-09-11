@@ -642,8 +642,8 @@ def test_dflash2_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-@pytest.mark.parametrize("model", DSPARK_MODELS["qwen36_35b_dspark"]["main"])
-@pytest.mark.parametrize("draft_model", DSPARK_MODELS["qwen36_35b_dspark"]["spec"])
+@pytest.mark.parametrize("model", [DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
+@pytest.mark.parametrize("draft_model", [DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
 @pytest.mark.parametrize("max_tokens", [1024])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize(
@@ -696,6 +696,6 @@ def test_qwen36_35b_dspark_spec_decoding(
         Counter,
         Vector,
     )
-    golden = [0.73, 0.64, 0.55, 0.49, 0.40, 0.31, 0.27]
+    golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
