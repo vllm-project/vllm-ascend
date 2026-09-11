@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -69,6 +69,100 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 sizing and state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Preserve per-layer attention layouts and the caller's worker config.
+    return replace(kv_cache_config, kv_cache_groups=groups)
+
+
+def validate_kv_cache_tensor_layouts(kv_cache_config: KVCacheConfig) -> None:
+    """Validate the byte layout consumed by upstream MRV2 allocation.
+
+    ``KVCacheTensor`` describes raw byte storage, while attention backends bind
+    typed and possibly strided views later.  Reject inconsistent descriptions
+    before allocation so an invalid offset or stride cannot surface as a cache
+    alias or an out-of-bounds graph replay.
+    """
+    if kv_cache_config.num_blocks <= 0:
+        raise ValueError("KV cache num_blocks must be positive")
+
+    specs_by_layer: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name in group.layer_names:
+                specs_by_layer[layer_name] = group_spec.kv_cache_specs[layer_name]
+        else:
+            specs_by_layer.update(dict.fromkeys(group.layer_names, group_spec))
+
+    owners: set[str] = set()
+    backing_size: int | None = None
+    for tensor_idx, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+        label = f"KV cache tensor {tensor_idx}"
+        if kv_tensor.size <= 0:
+            raise ValueError(f"{label} size must be positive")
+        layer_names = get_kv_cache_tensor_layers(kv_tensor)
+        if not layer_names:
+            raise ValueError(f"{label} must own at least one layer")
+
+        duplicate_owners = owners.intersection(layer_names)
+        if len(layer_names) != len(set(layer_names)):
+            raise ValueError(f"{label} repeats a layer")
+        if duplicate_owners:
+            raise ValueError(f"KV cache layers have multiple storage owners: {sorted(duplicate_owners)}")
+        owners.update(layer_names)
+
+        try:
+            page_sizes = {specs_by_layer[layer_name].page_size_bytes for layer_name in layer_names}
+        except KeyError as exc:
+            raise ValueError(f"{label} references unknown layer {exc.args[0]!r}") from exc
+        if len(page_sizes) != 1:
+            raise ValueError(f"{label} shares layers with different page sizes: {sorted(page_sizes)}")
+        page_size = page_sizes.pop()
+
+        if vllm_version_is("0.28.0"):
+            # Release descriptors alias complete per-layer allocations.
+            expected_size = kv_cache_config.num_blocks * page_size
+            if kv_tensor.size != expected_size:
+                raise ValueError(f"{label} size {kv_tensor.size} does not match dense layout size {expected_size}")
+            continue
+
+        # Main descriptors are views into one common allocation. Different
+        # cache groups intentionally overlap: the scheduler assigns each block
+        # ID to only one group. Validate the bounds of each view, not separation
+        # between groups or equality of their block strides.
+        if backing_size is None:
+            backing_size = kv_tensor.size
+        elif backing_size != kv_tensor.size:
+            raise ValueError(f"{label} does not match the shared backing size {backing_size}")
+        if kv_tensor.block_stride < page_size:
+            raise ValueError(f"{label} block stride {kv_tensor.block_stride} is smaller than page size {page_size}")
+        if kv_tensor.offset < 0 or kv_tensor.layer_stride < 0:
+            raise ValueError(f"{label} offset and layer stride must be nonnegative")
+        if len(layer_names) > 1 and kv_tensor.layer_stride < page_size:
+            raise ValueError(f"{label} layer stride is smaller than page size {page_size}")
+        view_end = (
+            kv_tensor.offset
+            + (len(layer_names) - 1) * kv_tensor.layer_stride
+            + (kv_cache_config.num_blocks - 1) * kv_tensor.block_stride
+            + page_size
+        )
+        if view_end > kv_tensor.size:
+            raise ValueError(f"{label} view end {view_end} exceeds backing size {kv_tensor.size}")
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -1178,23 +1272,37 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+def build_draft_attn_metadata_factory(
+    positions: torch.Tensor,
+    pad: int | None,
+    is_prefilling: torch.Tensor | Callable[[int], torch.Tensor],
+    *,
+    module: Any | None = None,
+):
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
-    ``build_attn_metadata_wrapper()``.
+    speculator path does not forward them or the Ascend attention state. The
+    latter must be ``SpecDecoding`` so MLA uses the token-major speculative
+    path instead of treating draft tokens as independent requests. ``module``
+    defaults to the upstream speculator module used by eager execution. DFlash
+    graph capture builds metadata in its cudagraph module instead, so capture
+    callers pass that module and use ``pad=None`` to take the token count from
+    each graph descriptor.
     """
-    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+    target_module = module or _BUILD_ATTN_METADATA_MODULE
+    raw = target_module.build_attn_metadata
 
     def build_attn_metadata(*args, **kwargs):
-        kwargs["positions"] = positions[:pad]
-        kwargs["is_prefilling"] = is_prefilling
+        num_tokens = kwargs["num_tokens"] if pad is None else pad
+        kwargs["positions"] = positions[:num_tokens]
+        kwargs["is_prefilling"] = is_prefilling(kwargs["num_reqs"]) if callable(is_prefilling) else is_prefilling
+        kwargs["attn_state"] = AscendAttentionState.SpecDecoding
         return raw(*args, **kwargs)
 
     try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        target_module.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore
+        target_module.build_attn_metadata = raw

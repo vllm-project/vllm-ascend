@@ -15,18 +15,21 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from copy import copy
 from typing import Any, cast
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.models.dspark_aux import DSparkAuxHiddenContract
 from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -37,7 +40,60 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
+
+
+def _derive_draft_capture_sizes(
+    vllm_config: VllmConfig,
+    target_query_len: int,
+    draft_query_len: int,
+) -> list[int]:
+    """Translate target token capture sizes into draft token capture sizes.
+
+    vLLM stores graph sizes in tokens, but target verification and DSpark draft
+    queries have different uniform query lengths. Preserve the request buckets
+    selected for the target and materialize independent ``Bg * Qd`` sizes for
+    the draft graph manager.
+    """
+    if target_query_len <= 0 or draft_query_len <= 0:
+        raise ValueError("Target and draft query lengths must both be positive.")
+
+    compilation_config = vllm_config.compilation_config
+    capture_sizes = compilation_config.cudagraph_capture_sizes
+    if not capture_sizes:
+        return []
+
+    max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+    max_capture_size = compilation_config.max_cudagraph_capture_size
+    request_buckets: set[int] = set()
+    for capture_size in capture_sizes:
+        target_num_tokens = ((capture_size + target_query_len - 1) // target_query_len) * target_query_len
+        num_reqs = target_num_tokens // target_query_len
+        if num_reqs > max_num_reqs or target_num_tokens > max_capture_size:
+            continue
+        request_buckets.add(num_reqs)
+
+    return sorted(num_reqs * draft_query_len for num_reqs in request_buckets)
+
+
+def _copy_config_with_draft_capture_sizes(
+    vllm_config: VllmConfig,
+    draft_capture_sizes: list[int],
+) -> VllmConfig:
+    if not draft_capture_sizes:
+        raise ValueError("Draft capture sizes must not be empty.")
+
+    # Keep runtime-only fields such as static_forward_context. vLLM's config
+    # replace() reconstructs dataclasses and intentionally drops init=False
+    # fields, which would detach the captured draft model from its already-bound
+    # attention layers.
+    draft_compilation_config = copy(vllm_config.compilation_config)
+    draft_compilation_config.cudagraph_capture_sizes = draft_capture_sizes
+    draft_compilation_config.max_cudagraph_capture_size = draft_capture_sizes[-1]
+    draft_graph_config = copy(vllm_config)
+    draft_graph_config.compilation_config = draft_compilation_config
+    return draft_graph_config
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -47,6 +103,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        self.aux_hidden_contract: DSparkAuxHiddenContract | None = None
 
     def load_draft_model(
         self,
@@ -66,16 +123,72 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             fc = model.model.fc
             with torch.no_grad():
                 fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+
+        get_contract = getattr(
+            model,
+            "get_required_dspark_aux_hidden_state_contract",
+            None,
+        )
+        if get_contract is not None:
+            contract = get_contract()
+            configure_target = getattr(
+                target_model,
+                "configure_dspark_aux_hidden_state_contract",
+                None,
+            )
+            if configure_target is None:
+                raise ValueError(
+                    f"DSpark draft {type(model).__name__} requires auxiliary hidden "
+                    f"format {contract.format.value}, but target {type(target_model).__name__} "
+                    "does not expose the DSpark auxiliary-hidden-state contract capability"
+                )
+            configure_target(contract)
+            self.aux_hidden_contract = contract
         return model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
-        super().init_cudagraph_manager(cudagraph_mode)
-        # The Ascend graph manager is patched onto the upstream module and
-        # created by super().init_cudagraph_manager without a speculator ref.
-        # It needs this speculator to update full-graph params, so set it here.
-        self.query_cudagraph_manager.speculator = self
+        wants_full = cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        supports_full = self.attn_cg_support.min_cg_support.value >= AttentionCGSupport.UNIFORM_BATCH.value
+        if wants_full and not supports_full:
+            logger.warning(
+                "%s draft attention (%s) does not support full ACLGraphs; running the draft eagerly.",
+                self._speculator_name,
+                self.attn_cg_support.min_cg_attn_backend,
+            )
+        if wants_full and supports_full:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
+        num_new_sampled_tokens = self.model_state.num_new_sampled_tokens_per_step
+        target_query_len = self.num_speculative_steps + num_new_sampled_tokens
+        draft_capture_sizes = _derive_draft_capture_sizes(
+            self.vllm_config,
+            target_query_len,
+            self.num_query_per_req,
+        )
+        if cudagraph_mode != CUDAGraphMode.NONE and not draft_capture_sizes:
+            logger.warning(
+                "No DSpark draft ACLGraph request bucket can be derived from "
+                "the target capture sizes; running the draft eagerly."
+            )
+            cudagraph_mode = CUDAGraphMode.NONE
+        if draft_capture_sizes:
+            draft_graph_config = _copy_config_with_draft_capture_sizes(
+                self.vllm_config,
+                draft_capture_sizes,
+            )
+        else:
+            draft_graph_config = self.vllm_config
+        self.query_cudagraph_manager = DFlashAclGraphManager(
+            draft_graph_config,
+            self.device,
+            cudagraph_mode,
+            decode_query_len=self.num_query_per_req,
+            speculator=self,
+        )
         self.query_cudagraph_manager.update_stream = self.update_stream
 
     def set_attn(
@@ -102,7 +215,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
@@ -110,7 +223,26 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 for layer_name in layer_names:
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
-            self.attn_backends = attn_backends
+        if active_layer_names is not None:
+            missing_layers = active_layer_names.difference(attn_backends)
+            if missing_layers:
+                raise RuntimeError(f"DSpark attention layers have no KV-cache backend: {sorted(missing_layers)}")
+        unique_backends = set(attn_backends.values())
+        if len(unique_backends) != 1:
+            backend_names = sorted(backend.__name__ for backend in unique_backends)
+            raise RuntimeError(
+                "DSpark ACLGraph currently requires one homogeneous draft "
+                f"attention backend, but found {backend_names or ['none']}."
+            )
+        self.attn_backends = attn_backends
+        self.attn_backend = next(iter(unique_backends))
+
+    def _build_draft_is_prefilling(self, num_reqs_padded: int) -> torch.Tensor:
+        assert self.input_batch is not None
+        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        num_reqs = self.input_batch.num_reqs
+        is_prefilling[:num_reqs] = torch.from_numpy(self.input_batch.is_prefilling_np[:num_reqs])
+        return is_prefilling
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
@@ -123,7 +255,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                self._build_draft_is_prefilling(num_reqs_padded),
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -152,8 +284,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         ``queryT != last element of actualSequenceLengthQ``.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+        for layer_name, metadata in attn_metadata.items():
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None and hasattr(decode_metadata, "actual_seq_lengths_q"):
+                decode_metadata.actual_seq_lengths_q = query_lens_list
+            elif hasattr(metadata, "actual_seq_lengths_q"):
+                # Keep the existing GQA schema working; MLA must take the
+                # nested branch above because that is what its backend reads.
+                metadata.actual_seq_lengths_q = query_lens_list
+            else:
+                raise TypeError(f"DSpark attention metadata for {layer_name} does not expose actual_seq_lengths_q.")
         return attn_metadata
 
     def propose(
@@ -180,10 +320,24 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # The upstream memory-profile path forwards this state directly to
+            # the draft, whose query count differs from the target's. Let
+            # set_forward_context synchronize the draft count independently;
+            # do not mutate the target state or add a sync to normal decoding.
+            sync_state = None
+        if self.aux_hidden_contract is not None:
+            self.aux_hidden_contract.validate_runtime(
+                aux_hidden_states,
+                num_target_tokens=input_batch.num_tokens,
+                target_device=last_hidden_states.device,
+            )
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                self._build_draft_is_prefilling(self.max_num_reqs),
             ),
         ):
             return super().propose(

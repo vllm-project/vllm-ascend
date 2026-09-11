@@ -1,17 +1,22 @@
 import ast
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -21,6 +26,8 @@ from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
+    normalize_mamba_kv_cache_config,
+    validate_kv_cache_tensor_layouts,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -88,10 +95,213 @@ def _group(spec: MambaSpec):
     )
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="Standardized backing is a main API")
+@pytest.mark.parametrize("block_outermost", [False, True])
+def test_validate_overlaid_kv_cache_tensor_layouts(block_outermost):
+    attention_spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    mamba_spec = MambaSpec(block_size=4, shapes=((4,),), dtypes=(torch.float32,))
+    assert attention_spec.page_size_bytes == mamba_spec.page_size_bytes == 16
+
+    dense = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(48, ["attn"], 16),
+            _make_kv_cache_tensor(48, ["mamba"], 16),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attention_spec),
+            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+        ],
+    )
+    validate_kv_cache_tensor_layouts(dense)
+
+    # Two layers within one group occupy separate regions; other groups may
+    # overlay those regions, even when their stride or page size differs.
+    packed = replace(
+        dense,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(96, ["attn"], 32 if block_outermost else 16, offset=0),
+            _make_kv_cache_tensor(96, ["mamba"], 32 if block_outermost else 16, offset=16 if block_outermost else 48),
+        ],
+    )
+    validate_kv_cache_tensor_layouts(packed)
+
+
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="Standardized backing is a main API")
+def test_validate_standardized_layers_and_different_group_strides():
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(96, ["a", "b"], 16, layer_stride=48),
+            _make_kv_cache_tensor(96, ["c"], 32),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["a", "b"], kv_cache_spec=spec),
+            KVCacheGroupSpec(layer_names=["c"], kv_cache_spec=spec),
+        ],
+    )
+    validate_kv_cache_tensor_layouts(config)
+    invalid = replace(config, kv_cache_tensors=[replace(config.kv_cache_tensors[0], layer_stride=64)])
+    with pytest.raises(ValueError, match="exceeds backing"):
+        validate_kv_cache_tensor_layouts(invalid)
+
+
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="Standardized backing is a main API")
+@pytest.mark.parametrize(
+    ("tensors", "error"),
+    [
+        ([_make_kv_cache_tensor(47, ["attn"], 16)], "exceeds backing"),
+        ([_make_kv_cache_tensor(48, ["attn"], 16, offset=-1)], "nonnegative"),
+        ([_make_kv_cache_tensor(48, ["missing"], 16)], "unknown layer"),
+        (
+            [
+                _make_kv_cache_tensor(48, ["attn"], 16),
+                _make_kv_cache_tensor(48, ["attn"], 16),
+            ],
+            "multiple storage owners",
+        ),
+        ([_make_kv_cache_tensor(48, ["attn"], 8)], "smaller than page size"),
+        ([_make_kv_cache_tensor(96, ["attn"], 32, offset=20)], "exceeds backing"),
+        (
+            [
+                _make_kv_cache_tensor(48, ["attn", "attn"], 16),
+            ],
+            "repeats a layer",
+        ),
+        (
+            [
+                _make_kv_cache_tensor(96, ["attn"], 32),
+                _make_kv_cache_tensor(144, ["mamba"], 48),
+            ],
+            "shared backing size",
+        ),
+    ],
+)
+def test_validate_kv_cache_tensor_layouts_rejects_invalid_descriptions(tensors, error):
+    attention_spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    mamba_spec = MambaSpec(block_size=4, shapes=((4,),), dtypes=(torch.float32,))
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attention_spec),
+            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
+        ],
+    )
+    with pytest.raises(ValueError, match=error):
+        validate_kv_cache_tensor_layouts(config)
+
+
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+    assert AscendMambaHybridModelState._get_mamba_group_info is MambaHybridModelState._get_mamba_group_info
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_mamba_worker_groups_reserve_speculative_block_table_entries(wrapped, prefix_caching):
+    # Other suites may register only custom Ascend specs first, which makes
+    # upstream's non-empty-registry shortcut skip its built-in registration.
+    register_all_kvcache_specs(None)
+    spec = MambaSpec(
+        block_size=384,
+        shapes=((10, 6), (2, 2)),
+        dtypes=(torch.float16, torch.float32),
+        num_speculative_blocks=7,
+        mamba_cache_mode="align",
+    )
+    attention_specs = {
+        name: FullAttentionSpec(block_size=384, num_kv_heads=1, head_size=head_size, dtype=torch.float16)
+        for name, head_size in (("target", 8), ("draft", 16))
+    }
+    attention_spec = UniformTypeKVCacheSpecs.from_specs(attention_specs)
+    assert attention_spec is not None
+    groups = [KVCacheGroupSpec(layer_names=list(attention_specs), kv_cache_spec=attention_spec)]
+    for group_id in range(2):
+        layer_names = [f"mamba.{group_id}.{layer_id}" for layer_id in range(2)]
+        group_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(layer_names, spec)) if wrapped else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=group_spec))
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+    runner = object.__new__(NPUModelRunner)
+    runner.max_model_len = 4096
+    runner.is_encoder_decoder = False
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 512
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(
+        enable_prefix_caching=prefix_caching,
+        mamba_cache_mode="align",
+    )
+    # Newer MRV2 delegates per-group block-table sizing to the cache spec,
+    # which reads cache and DCP settings from the full vLLM config.
+    runner.vllm_config = SimpleNamespace(
+        cache_config=runner.cache_config,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    runner.model_state = MagicMock()
+    runner.model_state.get_additional_cg_support.return_value = []
+    # Newer upstream initialize_kv_cache() reads the optional speculator while
+    # constructing adaptive-verification metadata. These placeholders cover
+    # only the arguments evaluated before the mocked BlockTables constructor;
+    # this minimal runner has no drafter and never uses their contents.
+    runner.speculator = None
+    runner.req_states = MagicMock()
+    runner.input_buffers = MagicMock()
+    runner.vocab_size = 128
+
+    class BlockTablesReached(Exception):
+        pass
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+        patch("vllm.v1.worker.gpu.model_runner.init_attn_backend", return_value=([], MagicMock(), [128, 384, 384])),
+        patch("vllm.v1.worker.gpu.model_runner.BlockTables", side_effect=BlockTablesReached) as block_tables,
+        pytest.raises(BlockTablesReached),
+    ):
+        runner.initialize_kv_cache(config)
+
+    # Keep upstream in control of the exact align-mode width. Across supported
+    # vLLM revisions it may reserve either the active state slot or the full
+    # position-indexed row when prefix caching is disabled. Both must retain
+    # every speculative state slot, and all Mamba groups must agree.
+    widths = block_tables.call_args.kwargs["max_num_blocks_per_group"]
+    minimum_mamba_width = (11 if prefix_caching else 1) + spec.num_speculative_blocks
+    assert widths[0] == 11
+    assert widths[1] == widths[2]
+    assert widths[1] >= minimum_mamba_width
+    worker_groups = runner.kv_cache_config.kv_cache_groups
+    assert worker_groups[0].kv_cache_spec == attention_spec
+    assert worker_groups[1].kv_cache_spec == worker_groups[2].kv_cache_spec == spec
+    # No mutation of the config shared with the scheduler/other workers.
+    assert isinstance(config.kv_cache_groups[1].kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped
+    state = object.__new__(AscendMambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+
+
+def test_mamba_normalization_preserves_distinct_per_layer_state_layouts():
+    specs = {
+        "first": _mamba_spec(),
+        "second": MambaSpec(block_size=16, shapes=((4, 3), (2, 2)), dtypes=(torch.float16, torch.float32)),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec)],
+    )
+    normalized = normalize_mamba_kv_cache_config(config)
+    assert normalized.kv_cache_groups[0].kv_cache_spec is group_spec
 
 
 def test_mrv2_advertises_standardized_shared_kv_backing():

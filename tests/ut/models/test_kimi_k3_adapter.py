@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -15,7 +17,41 @@ from vllm_ascend.models.kimi_k3 import (
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    _get_target_rotation_path,
 )
+
+
+@pytest.mark.parametrize("rank", range(16))
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_dense_mlp_gathers_tokens_before_tp_and_shards_reduced_output(rank, sequence_parallel, monkeypatch):
+    mlp = kimi_k3.AscendKimiMLP.__new__(kimi_k3.AscendKimiMLP)
+    nn.Module.__init__(mlp)
+    mlp.use_sequence_parallel = sequence_parallel
+    tokens = torch.arange(64, dtype=torch.float32).reshape(32, 2)
+    local = tokens.chunk(16)[rank]
+    calls = []
+
+    def gather(value):
+        torch.testing.assert_close(value, local)
+        calls.append("gather")
+        return tokens
+
+    def reduced_mlp(self, value):
+        torch.testing.assert_close(value, tokens)
+        calls.append("tp_mlp")
+        return value.square() + 2
+
+    def shard(value):
+        calls.append("shard")
+        return value.chunk(16)[rank]
+
+    monkeypatch.setattr(kimi_k3, "sp_all_gather", gather)
+    monkeypatch.setattr(kimi_k3, "sp_shard", shard)
+    monkeypatch.setattr(kimi_k3.KimiMLP, "forward", reduced_mlp)
+    result = mlp(local if sequence_parallel else tokens)
+    expected = (tokens.square() + 2).chunk(16)[rank] if sequence_parallel else tokens.square() + 2
+    torch.testing.assert_close(result, expected)
+    assert calls == (["gather", "tp_mlp", "shard"] if sequence_parallel else ["tp_mlp"])
 
 
 def test_kimi_moe_leaves_routed_input_transform_to_runner():
@@ -80,6 +116,34 @@ def test_k3_dspark_reports_draft_attention_causality():
 
     model.config = SimpleNamespace()
     assert model.get_draft_attn_causal() == [False, False, False]
+
+
+def test_k3_dspark_recovers_target_quarot_rotation_path(tmp_path):
+    rotation_filename = "global_rotation.safetensors"
+    description = {
+        "optional": {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": rotation_filename,
+                }
+            }
+        }
+    }
+    (tmp_path / "quant_model_description.json").write_text(
+        json.dumps(description),
+        encoding="utf-8",
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model=str(tmp_path)),
+    )
+
+    with patch(
+        "vllm_ascend.models.kimi_k3_dspark.get_rotation_path",
+        return_value=None,
+    ):
+        rotation_path = _get_target_rotation_path(vllm_config)
+
+    assert rotation_path == tmp_path / rotation_filename
 
 
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
@@ -313,6 +377,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
+    assert raw_aux[0].ndim == 2
     torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
 
 

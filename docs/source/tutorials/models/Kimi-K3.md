@@ -8,8 +8,9 @@ SiTU activations, and latent MoE layers.
 
 This tutorial covers model preparation, installation, online serving, and
 accuracy and performance evaluation for the full W4A8 checkpoint on Atlas A3.
-This tutorial is based on **vLLM-Ascend main with vLLM 0.27.1**. Use a
-main-branch build with Kimi-K3 support and its matching vLLM revision.
+This tutorial targets **vLLM-Ascend main** and the vLLM revision recorded in
+`.github/vllm-main-verified.commit`. Pin both source commits when preparing
+the runtime; a floating nightly tag alone does not identify the tested code.
 
 ## 2 Supported Features
 
@@ -123,6 +124,93 @@ For an installation outside Docker, follow the
 [source installation guide](../../getting_started/installation.md#installation-existing-cann-install), using
 the selected main checkout and its verified vLLM commit instead of the older
 release versions in the generic examples.
+
+### 4.3 Model Runner V2 Target-Only Validation
+
+The Model Runner V2 gates use the main-to-main pairing recorded by the
+checked-out Ascend source. Verify the vLLM checkout before building the runtime:
+
+```shell
+test "$(git -C /vllm-workspace/vllm rev-parse HEAD)" = \
+  "$(cat /vllm-workspace/vllm-ascend/.github/vllm-main-verified.commit)"
+```
+
+Set the following environment variable before starting a target-only MRV2
+functional test:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+Omit `--speculative-config` from the launch command. The bounded functional
+configuration uses `--max-model-len 2048`, `--max-num-seqs 4`,
+`--max-num-batched-tokens 512`, `--mamba-cache-mode align`, and prefix caching.
+Use `--enforce-eager` for the eager baseline, or
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` for ACL Graph.
+
+The target-only regression starts separate eager and ACL Graph engines with the
+same seed and requires identical token IDs for block-boundary, exact-prefix and
+partial-prefix requests. The automated ACL Graph test installs a worker-local
+counter around `ModelAclGraphManager.run_fullgraph` and requires every worker
+to replay at least once; merely configuring or capturing `FULL_DECODE_ONLY` is
+not accepted as graph evidence.
+
+Run the metadata, NPU zeroing, and target functional gates from the repository
+root:
+
+```shell
+pytest -sv tests/ut/worker/test_model_runner_v2_mamba.py
+pytest -sv tests/ut/worker/test_kv_block_zeroer.py
+pytest -sv tests/e2e/pull_request/one_card/model_runner_v2/test_kv_block_zeroer_npu.py
+pytest -sv tests/e2e/pull_request/four_card/test_kimi_k3.py::test_k3_mrv2_without_draft
+python benchmarks/k3_mrv2_kv_zeroer.py --layers 24 --blocks-per-step 4
+```
+
+The functional test uses a reduced dummy target to exercise the runtime shape
+and cache lifecycle. It does not establish checkpoint loading or model
+accuracy. Before declaring the target gate complete, repeat eager and ACL Graph
+parity with the full real checkpoint, record the vLLM/vLLM Ascend commits,
+image digest, CANN and torch-npu versions, and retain the graph replay log and
+worker replay count together with the zeroer benchmark result.
+
+This target-only scope does not establish long-context capacity, P/D support,
+or MRV2 DSpARK correctness. Keep using MRV1 for production DSpARK until the
+separate draft gates are completed.
+
+### 4.4 Model Runner V2 MLA DSpARK Eager Validation
+
+The MLA eager gate keeps both the target and draft in eager mode. The MLA draft
+declares a raw-prefix-sum auxiliary-hidden-state contract when it is loaded;
+the K3 target validates the requested layer boundaries and hidden width before
+selecting that stream. The speculator then validates the aggregate runtime
+shape, dtype, and device without reading NPU tensor values, and delegates
+context/query preparation, Markov sampling, and state commit/rollback to the
+upstream MRV2 `DSparkSpeculator`.
+
+Run the contract tests and the four-card dummy functional comparison:
+
+```shell
+pytest -sv tests/ut/models/test_dspark_aux.py
+pytest -sv tests/ut/spec_decode/test_dspark_speculator.py
+pytest -sv tests/e2e/pull_request/four_card/test_kimi_k3.py::test_k3_mrv2_mla_dspark_eager
+```
+
+The functional test starts independent target-only and MLA DSpARK eager
+engines with the same seed. It compares exact token IDs across block boundaries
+and cold/repeated/reset requests with prefix caching enabled, and requires the
+draft-token metric to be non-zero so speculative decoding cannot be bypassed
+silently. The target-only oracle must report a real prefix-cache hit. The draft
+run validates deterministic output; draft + prefix-cache state reuse requires
+separate hit-metric and state-reuse evidence on the pinned runtime.
+
+This reduced dummy test does not validate checkpoint loading, QuaRot, draft
+acceptance patterns, or model accuracy. Before accepting the MLA eager gate,
+repeat it with the full target and MLA draft checkpoints and retain evidence
+for zero, partial, and full acceptance, block crossing, abort/request reuse,
+and deterministic parity with target-only eager. Prefix-cache state reuse while
+DSpARK is enabled also remains a separate follow-up gate. GQA DSpARK and draft
+ACL Graph remain separate follow-up scopes. Multimodal draft inputs are also
+outside the scope of this text-only bring-up.
 
 ## 5 Online Service Deployment
 
@@ -264,14 +352,18 @@ Add the same speculative configuration to the Node 0 and headless worker command
   "num_speculative_tokens": 7,
   "draft_tensor_parallel_size": 16,
   "max_model_len": 4096,
-  "draft_sample_method": "greedy",
-  "enforce_eager": true
+  "draft_sample_method": "greedy"
 }'
 ```
 
 The example proposes seven draft tokens in one query block, followed by
 target-model verification.
 Set `draft_tensor_parallel_size` to the topology used to shard the draft model.
+With the v2 model runner, the MLA DSpark backbone and sequential Markov sampling
+are captured by the draft `FULL_DECODE_ONLY` ACL Graph. Add
+`"enforce_eager": true` only when isolating a graph-related failure. MLA DSpark
+ACL Graph support is independent of the target-model graph and does not imply
+GQA draft graph support.
 
 ## 6 Functional Verification
 
