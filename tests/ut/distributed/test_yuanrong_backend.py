@@ -26,6 +26,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_b
 )
 
 
+def test_yuanrong_put_does_not_require_exists_check():
+    assert YuanrongBackend.requires_exists_before_put is False
+
+
 def _make_backend():
     backend = YuanrongBackend.__new__(YuanrongBackend)
     backend._ds_set_param = object()
@@ -220,6 +224,13 @@ def _make_full_backend(tmp_path, monkeypatch, **overrides):
     backend_module = sys.modules[YuanrongBackend.__module__]
     monkeypatch.setattr(backend_module, "split_host_port", lambda _: ("127.0.0.1", 31501))
     return YuanrongBackend(MagicMock())
+
+
+def test_backend_uses_nx_existence_for_put(tmp_path, monkeypatch):
+    backend = _make_full_backend(tmp_path, monkeypatch)
+
+    existence_opt = sys.modules["yr.datasystem.kv_client"].ExistenceOpt
+    assert backend._ds_set_param.existence is existence_opt.NX
 
 
 def test_dev_mem_pregister_disabled_by_default(tmp_path, monkeypatch):

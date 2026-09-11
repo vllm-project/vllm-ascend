@@ -92,6 +92,11 @@ else()
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
 endif()
 
+# Sparse KV cache offloading is currently supported on Atlas A3 only.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  find_package(OpenMP REQUIRED)
+endif()
+
 include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
@@ -109,6 +114,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
+  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered

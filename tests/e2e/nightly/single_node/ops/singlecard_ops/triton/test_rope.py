@@ -3,7 +3,10 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_siso
+from vllm_ascend.ops.triton.rope import (
+    rope_forward_triton,
+    rope_forward_triton_siso,
+)
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.bfloat16, torch.float16]
@@ -11,9 +14,28 @@ MAX_POSITION_EMBEDDINGS = [262144]
 
 # parameters for test_rotary_embedding_triton_kernel only
 # (head_size, rotary_dim)
+# Coverage rationale:
+#   (64, 64)   - full RoPE, small head, power-of-two (baseline)
+#   (64, 32)   - partial RoPE, rope_dim < head_dim (LLaMA-2 style)
+#   (128, 128) - full RoPE, large head, power-of-two (common case)
+#   (128, 96)  - non-power-of-two rotary_dim; triggers sin-offset bug
+#                where old code used pad_rope_dim//2=64 instead of
+#                rope_dim//2=48
+#   (128, 64)  - partial RoPE with non-power-of-two head_dim/rope_dim
+#                ratio; exercises rope_dim resolution path
+#   (256, 192) - large head_dim that triggers UB-based dynamic tile
+#                sizing (head_dim=192 exceeds old hardcoded threshold);
+#                also non-power-of-two rotary_dim
+#   (256, 256) - full RoPE, very large head, power-of-two; verifies
+#                dynamic tile sizing caps correctly at default_max
 HEAD_ROTARY_DIMS = [
+    (64, 64),
     (64, 32),
     (128, 128),
+    (128, 96),
+    (128, 64),
+    (256, 192),
+    (256, 256),
 ]
 # (num_q_heads, num_k_heads)
 NUM_QK_HEADS = [
@@ -22,8 +44,18 @@ NUM_QK_HEADS = [
 ]
 
 # parameters for test_rotary_embedding_triton_kernel_siso only
-SISO_HEAD_SIZES = [64, 128]
-SISO_ROTARY_DIMS = [32, 64]
+# Coverage rationale:
+#   32  - small power-of-two (baseline)
+#   64  - medium power-of-two
+#   96  - non-power-of-two; triggers sin-offset bug in siso kernel
+#         (old code: pad_rope_dim//2=64 vs correct rope_dim//2=48)
+#   128 - large power-of-two; verifies dynamic tile sizing scales down
+#         for larger half_dim within siso's 6-tensor memory model
+#   192 - large non-power-of-two; combined with head_size=256 exercises
+#         full-RoPE with non-power-of-two rotary_dim. Invalid combos
+#         (rotary_dim > head_size) are skipped at runtime.
+SISO_HEAD_SIZES = [64, 128, 256]
+SISO_ROTARY_DIMS = [32, 64, 96, 128, 192]
 SISO_NUM_HEADS = [64]
 
 NUM_TOKENS = [1, 4, 8, 16, 1024]
@@ -31,6 +63,19 @@ SEEDS = [0]
 DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
+FP8_E4M3_MAX = 448.0
+FP8_ROPE_CASES = [
+    pytest.param(1, 2, 1, 128, 128, id="single-token-full-rope"),
+    pytest.param(17, 8, 1, 128, 64, id="partial-rope"),
+    pytest.param(1024, 8, 1, 128, 128, id="multi-row-grid"),
+    # Non-power-of-two rotary_dim: triggers sin-offset fix in fp8 kernel
+    # path; old code used pad_rope_dim//2=64 instead of rope_dim//2=48
+    # for rotary_dim=96 (pad_rope_dim=128).
+    pytest.param(17, 8, 1, 128, 96, id="non-pow2-rope"),
+    # Large head_dim with non-power-of-two rotary_dim: exercises both the
+    # sin-offset fix and UB-based dynamic tile sizing in fp8 path.
+    pytest.param(17, 8, 1, 256, 192, id="large-head-non-pow2-rope"),
+]
 
 
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -101,6 +146,34 @@ def _rope_siso_pytorch_native(query, cos, sin, rope_dim, is_neox_style) -> tuple
     else:
         query = query_rot.to(orig_dtype)
     return query
+
+
+def _rope_fp8_pytorch_native(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    rope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """PyTorch reference for NeoX RoPE with a direct E4M3 store."""
+    half = rope_dim // 2
+    cos_sin = cos_sin_cache.index_select(0, positions).to(torch.float32)
+    cos = cos_sin[:, :half].unsqueeze(-2)
+    sin = cos_sin[:, half:rope_dim].unsqueeze(-2)
+
+    def apply_rope(tensor: torch.Tensor) -> torch.Tensor:
+        tensor = tensor.to(torch.float32)
+        first = tensor[..., :half]
+        second = tensor[..., half:rope_dim]
+        rotated = torch.cat(
+            (first * cos - second * sin, second * cos + first * sin),
+            dim=-1,
+        )
+        if rope_dim < tensor.shape[-1]:
+            rotated = torch.cat((rotated, tensor[..., rope_dim:]), dim=-1)
+        return rotated.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+    return apply_rope(query), apply_rope(key)
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -186,6 +259,78 @@ def test_rotary_embedding_triton_kernel_with_cos_sin_cache(
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize(
+    "num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim",
+    FP8_ROPE_CASES,
+)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_rotary_embedding_triton_kernel_fp8(
+    num_tokens: int,
+    num_q_heads: int,
+    num_k_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    device: str,
+) -> None:
+    torch.manual_seed(0)
+    torch.set_default_device(device)
+
+    max_positions = max(num_tokens, 32)
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim))
+    freqs = torch.outer(
+        torch.arange(max_positions, dtype=torch.float32, device=device),
+        inv_freq,
+    )
+    cos_sin_cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1).to(torch.bfloat16)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    query = torch.randn(num_tokens, num_q_heads, head_size, dtype=torch.bfloat16, device=device)
+    key = torch.randn(num_tokens, num_k_heads, head_size, dtype=torch.bfloat16, device=device)
+    # Position zero has cos=1 and sin=0, so these values exercise the
+    # fixed-scale E4M3 clipping path without changing the expected sign.
+    query[0, 0, 0] = FP8_E4M3_MAX * 2
+    key[0, 0, 0] = -FP8_E4M3_MAX * 2
+
+    expected_query, expected_key = _rope_fp8_pytorch_native(
+        query,
+        key,
+        cos_sin_cache,
+        positions,
+        rotary_dim,
+    )
+    actual_query, actual_key = rope_forward_triton(
+        query,
+        key,
+        cos_sin_cache=cos_sin_cache,
+        positions=positions,
+        rope_dim=rotary_dim,
+        out_dtype=torch.float8_e4m3fn,
+    )
+
+    assert actual_query.dtype == torch.float8_e4m3fn
+    assert actual_key.dtype == torch.float8_e4m3fn
+    assert actual_query.shape == query.shape
+    assert actual_key.shape == key.shape
+    assert actual_query[0, 0, 0].to(torch.float32) == FP8_E4M3_MAX
+    assert actual_key[0, 0, 0].to(torch.float32) == -FP8_E4M3_MAX
+    torch.testing.assert_close(
+        actual_query.to(torch.float32),
+        expected_query.to(torch.float32),
+        atol=0.125,
+        rtol=0.125,
+    )
+    torch.testing.assert_close(
+        actual_key.to(torch.float32),
+        expected_key.to(torch.float32),
+        atol=0.125,
+        rtol=0.125,
+    )
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_q_heads", SISO_NUM_HEADS)
@@ -210,6 +355,10 @@ def test_rotary_embedding_triton_kernel_siso(
 
     if rotary_dim == -1:
         rotary_dim = head_size
+    # Skip invalid combinations where rotary_dim > head_size (RoPE cannot
+    # rotate more dimensions than the head has).
+    if rotary_dim > head_size:
+        pytest.skip(f"rotary_dim {rotary_dim} > head_size {head_size}")
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)

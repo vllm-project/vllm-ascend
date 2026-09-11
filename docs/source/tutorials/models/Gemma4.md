@@ -31,7 +31,7 @@ The examples below assume a single node with visible NPUs. The commands use 4 vi
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 

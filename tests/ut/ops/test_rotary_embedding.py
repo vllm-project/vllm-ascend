@@ -21,7 +21,11 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import (
+    AscendRotaryEmbedding,
+    AscendYaRNRotaryEmbedding,
+    rope_forward_oot,
+)
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -57,6 +61,44 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
         f"{parent_func.__name__} removed parameter(s): {removed}. "
         f"Check whether {child_func.__name__} needs to forward them."
     )
+
+
+class TestRopeForwardOOT:
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton", create=True)
+    def test_fp8_dispatch_preserves_index_head_inference(self, mock_rope_triton):
+        positions = torch.arange(SEQ_LEN, dtype=torch.long)
+        query = torch.empty(SEQ_LEN, 2 * 96, dtype=torch.bfloat16)
+        key = torch.empty(SEQ_LEN, 96, dtype=torch.bfloat16)
+        cos_sin_cache = torch.empty(MAX_POS, ROTARY_DIM, dtype=torch.bfloat16)
+        query_fp8 = torch.empty(SEQ_LEN, 2, 96, dtype=torch.float8_e4m3fn)
+        key_fp8 = torch.empty(SEQ_LEN, 1, 96, dtype=torch.float8_e4m3fn)
+        mock_rope_triton.return_value = query_fp8, key_fp8
+
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", True):
+            query_out, key_out = rope_forward_oot(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                HEAD_SIZE,
+                ROTARY_DIM,
+                True,
+                out_dtype=torch.float8_e4m3fn,
+            )
+
+        query_arg, key_arg = mock_rope_triton.call_args.args
+        assert query_arg.shape == (SEQ_LEN, 2, 96)
+        assert key_arg.shape == (SEQ_LEN, 1, 96)
+        kwargs = mock_rope_triton.call_args.kwargs
+        assert kwargs["cos_sin_cache"] is cos_sin_cache
+        assert kwargs["positions"] is positions
+        assert kwargs["rope_dim"] == ROTARY_DIM
+        assert kwargs["is_neox_style"] is True
+        assert kwargs["out_dtype"] == torch.float8_e4m3fn
+        assert query_out.shape == query.shape
+        assert key_out.shape == key.shape
+        assert query_out.dtype == torch.float8_e4m3fn
+        assert key_out.dtype == torch.float8_e4m3fn
 
 
 @pytest.fixture(autouse=True)
@@ -161,6 +203,32 @@ class TestAscendEmbeddingForwardOOT:
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_fp8_output_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):
+        """The public OOT custom op owns FP8 backend dispatch."""
+        mock_get_forward_context.return_value = MagicMock()
+        mock_get_forward_context.return_value.is_draft_model = False
+        expected_output = (torch.empty(SEQ_LEN, NUM_HEADS * HEAD_SIZE, dtype=torch.float8_e4m3fn),) * 2
+        mock_npu_op.return_value = expected_output
+
+        emb = make_embedding()
+        positions, query, key = _make_tensors()
+
+        result = emb.forward_oot(positions, query, key, out_dtype=torch.float8_e4m3fn)
+
+        mock_npu_op.assert_called_once_with(
+            positions,
+            query,
+            key,
+            emb.cos_sin_cache,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            emb.is_neox_style,
+            out_dtype=torch.float8_e4m3fn,
+        )
+        assert result is expected_output
+
+    @patch("torch.ops.vllm.npu_rotary_embedding")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_neox_style_override_true(self, mock_get_forward_context, mock_npu_op, make_embedding):
         """is_neox_style_override=True wins over self.is_neox_style=False."""
         mock_get_forward_context.return_value = MagicMock()
@@ -227,7 +295,7 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
 
         result = emb.forward_oot(positions, query, key)
 
-        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None)
+        mock_delegate.assert_called_once_with(emb, positions, query, key, None, None, None)
         assert result is expected
 
     @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
@@ -268,7 +336,7 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
 
         emb.forward_oot(positions, query, key, offsets=offsets, is_neox_style_override=False)
 
-        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False)
+        mock_delegate.assert_called_once_with(emb, positions, query, key, offsets, False, None)
 
     def test_parent_init_signature_has_not_changed(self):
         """

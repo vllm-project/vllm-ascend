@@ -23,6 +23,7 @@ The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   |    Mooncake  |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|--------------|
+| v0.26.0rc1  | v0.26.0           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 / 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |
 | v0.23.0     | v0.23.0           | >= 3.10, < 3.13 | 9.1.0       | 2.10.0 / 2.10.0.post4           | 3.2.2             | v0.3.11.post1 |
 | v0.23.0rc1  | v0.23.0           | >= 3.10, < 3.13 | 9.0.1       | 2.10.0 / 2.10.0.post2           | 3.2.1             | v0.3.11.post1 |
 | v0.22.1rc1  | v0.22.1           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9       |
@@ -68,7 +69,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | Triton Ascend |
 |-------------|--------------|------------------|-------------|--------------------|---------------|
-|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
+|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_version}} / {{main_torch_npu_version}} | {{main_triton_ascend_version}} |
 
 The release rows and the main row are different installation targets. For a
 release installation, use the vLLM and vLLM Ascend versions from the same
@@ -88,6 +89,7 @@ Using `--no-build-isolation` can bypass build-environment resolution, so run
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.09.03 | Release candidates, v0.26.0rc1            |
 | 2026.08.16 | v0.23.0 Final release, v0.23.0            |
 | 2026.07.20 | Release candidates, v0.23.0rc1            |
 | 2026.06.30 | Release candidates, v0.22.1rc1            |

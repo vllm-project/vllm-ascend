@@ -68,13 +68,13 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
 
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 

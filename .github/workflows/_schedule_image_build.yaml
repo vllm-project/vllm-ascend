@@ -2,26 +2,21 @@ name: Image_oncall
 on:
   workflow_call:
     inputs:
-      quay_repo:
-        description: 'Quay repository for final images'
+      swr_repo:
+        description: 'SWR repository for final multi-arch images (same name as the quay.io repo, sync tool mirrors it to quay.io)'
         required: false
         type: string
-        default: 'quay.io/ascend/vllm-ascend'
-      quay_temp_repo:
-        description: 'Quay repository for temp images'
-        required: false
-        type: string
-        default: 'quay.io/atlas-ci/vllm-atlas-temp'
+        default: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend'
       swr_registry:
-        description: 'swr repository for temp images'
+        description: 'SWR registry domain'
         required: false
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
       swr_temp_repo:
-        description: 'swr repository for temp images'
+        description: 'SWR repository for single-arch temp images (mirrors quay.io/atlas-ci/vllm-atlas-temp)'
         required: false
         type: string
-        default: 'swr.cn-north-12.myhuaweicloud.com/modelfoundry/buildkit-test'    
+        default: 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp'
       suffix:
         description: 'The tag subfix to use'
         required: true
@@ -33,14 +28,6 @@ on:
         default: False
       dockerfile:
         description: 'The Dockerfile to use'
-        required: false
-        type: string
-      quay_username:
-        description: 'Quay username for pushing images'
-        required: false
-        type: string
-      quay_temp_username:
-        description: 'Quay username for pushing temp tag digests'
         required: false
         type: string
       workflow_dispatch_tag:
@@ -73,7 +60,7 @@ on:
         type: string
         default: ''
       temp_only:
-        description: 'If true, push only to QUAY_TEMP_REPO and skip the merge-image job (no push to QUAY_REPO).'
+        description: 'If true, push only to SWR temp repo and skip the merge-image job (no push to SWR_REPO).'
         required: false
         type: boolean
         default: false
@@ -91,7 +78,7 @@ on:
         description: 'Memcache date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260811.14'
       memfabric_version:
         description: 'Memfabric version'
         required: false
@@ -101,7 +88,7 @@ on:
         description: 'Memfabric date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260811.7'
       torch_npu_version:
         description: 'Torch NPU version'
         required: false
@@ -111,17 +98,32 @@ on:
         description: 'Torch NPU date'
         required: false
         type: string
-        default: '20260715.4'
-      cann_quay_url:
-        description: 'CANN Quay URL'
+        default: '20260725.3'
+      cann_swr_url:
+        description: 'CANN base image URL (SWR registry)'
         required: false
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
       cann_version:
-        description: 'CANN version'
+        description: 'CANN version for daily tag naming (e.g. 2026.08.03)'
         required: false
         type: string
-        default: '2026.08.03'
+        default: '9.1.0_20260731131545'
+      cann_image_version:
+        description: 'CANN version for the build container image tag (default matches Dockerfile FROM: 9.1.0)'
+        required: false
+        type: string
+        default: '9.1.0'
+      soc:
+        description: 'Ascend SoC type for the CANN base image (e.g. 910b, a3, 310p, 950)'
+        required: false
+        type: string
+        default: '910b'
+      base_os:
+        description: 'Base OS for the CANN base image (e.g. ubuntu22.04, openeuler24.03)'
+        required: false
+        type: string
+        default: 'ubuntu22.04'
       triton_ascend_version:
         description: 'Triton Ascend version'
         required: false
@@ -137,34 +139,35 @@ on:
         required: false
         type: string
         default: ''
+      aptmirror:
+        description: 'APT mirror URL for Ubuntu (replaces archive.ubuntu.com / ports.ubuntu.com)'
+        required: false
+        type: string
+        default: 'http://cache-service.nginx-pypi-cache.svc.cluster.local:8081'
     secrets:
-        QUAY_PASSWORD:
-            description: 'Quay password for pushing images'
-            required: false
-        QUAY_TEMP_PASSWORD:
-            description: 'Quay password for pushing temp tag digests'
-            required: false
-        SWR_USERNAME:
-            description: 'SWR username for pulling and pushing CANN base images'
-            required: false
-        SWR_PASSWORD:
-            description: 'SWR password for pulling and pushing CANN base images'
-            required: false
+      SWR_USERNAME:
+        description: 'SWR username for pushing images'
+        required: false
+      SWR_PASSWORD:
+        description: 'SWR password for pushing images'
+        required: false
 
 defaults:
   run:
     shell: bash -el {0}
 
 env:
-  QUAY_REPO: ${{ inputs.quay_repo }}
-  QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
+  SWR_REPO: ${{ inputs.swr_repo }}
+  APTMIRROR: ${{ inputs.aptmirror }}
 
 jobs:
   build-push-digest:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
+      env:
+        SOC: ${{ inputs.soc }}
     permissions:
       packages: write
       contents: read
@@ -177,6 +180,14 @@ jobs:
           - {runner: linux-amd64-cpu-4, tag: amd64}
 
     steps:
+
+    - name: Install zstd
+      run: |
+        if [ -n "$APTMIRROR" ]; then
+          sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
+        fi
+        apt-get update -y
+        apt-get install -y zstd
 
     - name: Validate inputs (workflow_dispatch only)
       if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -262,7 +273,9 @@ jobs:
       id: get_base_image_tag
       run: |
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}' \
+          | sed -e "s|\${CANN_VERSION}|${{ inputs.cann_image_version }}|g" \
+                -e "s|\${BASE_OS}|${{ inputs.base_os }}|g")
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Get csrc hash
@@ -293,11 +306,6 @@ jobs:
           *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
         esac
 
-    - name: Install csrc cache dependencies
-      run: |
-        apt-get update -y
-        apt-get install -y zstd
-
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
       uses: runs-on/cache/restore@v5
@@ -310,11 +318,26 @@ jobs:
         key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
     - name: Login to SWR
+      if: ${{ inputs.should_push }}
       uses: docker/login-action@v4
       with:
         registry: ${{ inputs.swr_registry }}
         username: ${{ secrets.SWR_USERNAME }}
         password: ${{ secrets.SWR_PASSWORD }}
+
+    - name: Prepare tag pattern
+      id: tag_pattern
+      run: |
+        PATTERN="${{ inputs.schedule_tag_pattern }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+            PATTERN="${{ inputs.workflow_dispatch_tag }}"
+          elif [ -n "${{ inputs.branch_ref }}" ]; then
+            PATTERN="${{ inputs.branch_ref }}"
+            PATTERN="${PATTERN//\//-}"
+          fi
+        fi
+        echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
 
     - name: Build and push
       uses: docker/build-push-action@v7
@@ -325,12 +348,16 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }},oci-mediatypes=false
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
-          CANN_QUAY_URL=${{ inputs.cann_quay_url }}
+          CANN_QUAY_URL=${{ inputs.cann_swr_url }}
+          CANN_VERSION=${{ inputs.cann_image_version }}
           APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+          YUM_MIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
+          RUSTUP_DIST_SERVER=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup
+          RUSTUP_UPDATE_ROOT=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup
           PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
           PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
@@ -340,11 +367,11 @@ jobs:
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-          MEMCACHE_DATE=${{ inputs.memcache_date || '20260725.3' }}
+          MEMCACHE_DATE=${{ inputs.memcache_date || '20260811.14' }}
           MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
+          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260811.7' }}
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
+          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
           TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
           TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
           ${{ inputs.build_args }}
@@ -369,24 +396,20 @@ jobs:
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
         else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+          TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
+            TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
           fi
         fi
-        echo "Creating temp tag: ${{ env.swr_temp_repo }}:$TAG"
+        echo "Creating temp tag: ${{ inputs.swr_temp_repo }}:$TAG"
 
-        # Install skopeo if not present (image is Ubuntu-based).
-        if ! command -v skopeo >/dev/null 2>&1; then
-          apt-get update -qq && apt-get install -y -qq skopeo
-        fi
-        CREDS="${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}"
-        skopeo copy \
-          --src-creds "$CREDS" \
-          --dest-creds "$CREDS" \
-          "docker://${{ inputs.swr_temp_repo }}@${{ steps.build.outputs.digest }}" \
-          "docker://${{ inputs.swr_temp_repo }}:$TAG"
+        # Copy the digest to a temp tag to prevent GC. The build uses
+        # oci-mediatypes=false so the image is Docker v2s2, and this produces
+        # a Docker manifest list which SWR accepts (no skopeo/sudo needed).
+        docker buildx imagetools create \
+          -t "${{ inputs.swr_temp_repo }}:$TAG" \
+          "${{ inputs.swr_temp_repo }}@${{ steps.build.outputs.digest }}"
 
     - name: Export digest
       run: |
@@ -404,24 +427,10 @@ jobs:
         retention-days: 1
 
   merge-image:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4
     needs: build-push-digest
     if: ${{ inputs.should_push && !inputs.temp_only }}
     steps:
-      - name: Checkout branch
-        uses: actions/checkout@v7
-        if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '') }}
-        with:
-          submodules: recursive
-          ref: ${{ inputs.branch_ref }}
-
-      - name: Checkout tag
-        uses: actions/checkout@v7
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
-        with:
-          submodules: recursive
-          ref: ${{ inputs.workflow_dispatch_tag }}
-
       - name: Download arm64 digests
         uses: actions/download-artifact@v8
         with:
@@ -449,6 +458,20 @@ jobs:
             echo "SUFFIX=" >> $GITHUB_ENV
           fi
 
+      - name: Prepare tag pattern
+        id: tag_pattern
+        run: |
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+              PATTERN="${{ inputs.workflow_dispatch_tag }}"
+            elif [ -n "${{ inputs.branch_ref }}" ]; then
+              PATTERN="${{ inputs.branch_ref }}"
+              PATTERN="${PATTERN//\//-}"
+            fi
+          fi
+          echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
+
       # ===== New: Generate custom tags for daily scenario =====
       - name: Generate daily tags
         id: daily_tags
@@ -459,7 +482,7 @@ jobs:
           # Get CANN version and convert to lowercase (e.g., 2026.08.03 -> 2026.08.03)
           CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
           # Get the base tag pattern (e.g., main)
-          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          PATTERN="${{ steps.tag_pattern.outputs.pattern }}"
           # Get the suffix
           SUFFIX="${{ inputs.suffix }}"
           
@@ -481,7 +504,7 @@ jobs:
         with:
           # TODO(yikun): add more hub image and a note on release policy for container image
           images: |
-            ${{ env.QUAY_REPO }}
+            ${{ env.SWR_REPO }}
           # Three trigger scenarios and resulting image tags:
           # https://github.com/marketplace/actions/docker-metadata-action#typeref
           #
@@ -504,9 +527,9 @@ jobs:
             # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
             # for daily builds only.
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
-            type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
+            type=schedule,pattern=${{ steps.tag_pattern.outputs.pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' && inputs.build_type != 'daily' }},suffix=${{ env.SUFFIX }}
-            type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ steps.tag_pattern.outputs.pattern }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             
             # ===== New: Daily scenario specific tags =====
             type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
@@ -515,35 +538,30 @@ jobs:
             latest=false
 
       - name: Login to SWR
-        uses: docker/login-action@v3
+        if: ${{ inputs.should_push }}
+        uses: docker/login-action@v4
         with:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
-      - name: Login to Quay
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_username }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Merge and push multi-arch image
         env:
           # Source digests live in SWR (where build-push-digest pushed them);
-          # destination tags come from $TAGS (metadata-action → QUAY_REPO).
+          # destination tags come from $TAGS (metadata-action → SWR_REPO, same name as
+          # the quay.io repo; the sync tool then mirrors swr.cn-north-12 → quay.io).
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
           TAGS: ${{ steps.meta.outputs.tags }}
           BUILD_TYPE: ${{ inputs.build_type }}
-          SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
+          SCHEDULE_TAG_PATTERN: ${{ steps.tag_pattern.outputs.pattern }}
           SUFFIX: ${{ env.SUFFIX }}
         run: |
-          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          set -euo pipefail
 
-          echo "Digests: $DIGESTS"
+          DIGEST_DIR="${{ runner.temp }}/digests"
+
+          echo "Digests:"
+          ls -la "$DIGEST_DIR"
           echo "Current tags:"
           echo "$TAGS"
 
@@ -552,11 +570,23 @@ jobs:
           UNWANTED_TAG="nightly-${SCHEDULE_TAG_PATTERN}${SUFFIX}"
 
           for tag in $TAGS; do
-            if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.QUAY_REPO }}:${UNWANTED_TAG}" ]; then
+            if [ "$BUILD_TYPE" = "daily" ] && [ "$tag" = "${{ env.SWR_REPO }}:${UNWANTED_TAG}" ]; then
               echo "Skipping unwanted schedule tag: $tag"
               continue
             fi
             echo "Creating tag $tag"
+
+            # The build step outputs Docker v2 schema2 images (oci-mediatypes=false),
+            # so "docker buildx imagetools create" produces a Docker manifest list
+            # (application/vnd.docker.distribution.manifest.list.v2+json) which SWR
+            # accepts, instead of an OCI image index (application/vnd.oci.image.index.v1+json).
+            DIGESTS=""
+            for digest_file in "$DIGEST_DIR"/*; do
+              digest=$(basename "$digest_file")
+              DIGESTS="$DIGESTS $SOURCE_IMAGE@sha256:$digest"
+            done
+
+            # shellcheck disable=SC2086
             docker buildx imagetools create \
               -t "$tag" \
               $DIGESTS
@@ -565,22 +595,27 @@ jobs:
       - name: Clean up temp tags
         if: ${{ inputs.build_type == 'daily' }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
           fi
           DATE=$(date +'%Y%m%d')
           # Temp tags were created in SWR by build-push-digest, so clean them up there.
-          for arch in amd64 arm64; do
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
-            skopeo delete --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
-              "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
-          done
+          # Skip cleanup if skopeo is not available (no sudo/root on this runner).
+          if command -v skopeo >/dev/null 2>&1; then
+            for arch in amd64 arm64; do
+              TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${arch}-${DATE}-temp"
+              skopeo delete \
+                --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
+                "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
+            done
+          else
+            echo "skopeo not available, skip temp tag cleanup"
+          fi
 
   merge-image-temp:
     name: merge-image-temp
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4
     needs: build-push-digest
     if: ${{ inputs.should_push && inputs.temp_only }}
     steps:
@@ -599,30 +634,38 @@ jobs:
           merge-multiple: true
 
       - name: Login to SWR
+        if: ${{ inputs.should_push }}
         uses: docker/login-action@v4
         with:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
-      - name: Login to Quay Temp
-        uses: docker/login-action@v4
-        with:
-          registry: quay.io
-          username: ${{ inputs.quay_temp_username }}
-          password: ${{ secrets.QUAY_TEMP_PASSWORD }}
+      - name: Prepare tag pattern
+        id: tag_pattern
+        run: |
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+              PATTERN="${{ inputs.workflow_dispatch_tag }}"
+            elif [ -n "${{ inputs.branch_ref }}" ]; then
+              PATTERN="${{ inputs.branch_ref }}"
+              PATTERN="${PATTERN//\//-}"
+            fi
+          fi
+          echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
+      - name: Merge and push multi-arch manifest to SWR temp
         env:
-          # IMAGE is the destination (Quay temp); SOURCE_IMAGE is where the
+          # IMAGE is the destination (SWR temp); SOURCE_IMAGE is where the
           # single-arch digests actually live (SWR, pushed by build-push-digest).
-          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          IMAGE: ${{ inputs.swr_temp_repo }}
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
         run: |
           set -euo pipefail
+
+          DIGEST_DIR="${{ runner.temp }}/digests"
+
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
@@ -630,33 +673,48 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
-          echo "Digests: $DIGESTS"
+
+          echo "Digests:"
+          ls -la "$DIGEST_DIR"
           echo "Creating multi-arch manifest tag: $TAG"
-          docker buildx imagetools create \
-            -t "$TAG" \
-            $DIGESTS
+
+          # The build step outputs Docker v2 schema2 images (oci-mediatypes=false),
+          # so "docker buildx imagetools create" produces a Docker manifest list
+          # (application/vnd.docker.distribution.manifest.list.v2+json) which SWR
+          # accepts, instead of an OCI image index (application/vnd.oci.image.index.v1+json).
+          merge_and_push() {
+            local dest_tag="$1"
+            local digests=""
+            for digest_file in "$DIGEST_DIR"/*; do
+              digest=$(basename "$digest_file")
+              digests="$digests $SOURCE_IMAGE@sha256:$digest"
+            done
+
+            # shellcheck disable=SC2086
+            docker buildx imagetools create \
+              -t "$dest_tag" \
+              $digests
+          }
+
+          merge_and_push "$TAG"
 
           # ===== Daily scenario: also push daily tag =====
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
             CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-            PATTERN="${{ inputs.schedule_tag_pattern }}"
+            PATTERN="${{ steps.tag_pattern.outputs.pattern }}"
             if [ -n "${{ inputs.suffix }}" ]; then
               DAILY_TAG="${IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
             else
               DAILY_TAG="${IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
             fi
             echo "Creating daily tag: $DAILY_TAG"
-            docker buildx imagetools create \
-              -t "$DAILY_TAG" \
-              $DIGESTS
+            merge_and_push "$DAILY_TAG"
           fi
 
       - name: Clean up temp tags
         if: ${{ inputs.build_type == 'daily' }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
@@ -664,8 +722,14 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           # Temp tags were created in SWR by build-push-digest, so clean them up there.
-          for arch in amd64 arm64; do
-            TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
-            skopeo delete --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
-              "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
-          done
+          # Skip cleanup if skopeo is not available (no sudo/root on this runner).
+          if command -v skopeo >/dev/null 2>&1; then
+            for arch in amd64 arm64; do
+              TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
+              skopeo delete \
+                --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
+                "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
+            done
+          else
+            echo "skopeo not available, skip temp tag cleanup"
+          fi

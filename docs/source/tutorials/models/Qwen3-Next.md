@@ -24,7 +24,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 **A3 series:**
 
@@ -83,7 +83,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ### 4.2 Source Code Installation
 
@@ -117,7 +117,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 

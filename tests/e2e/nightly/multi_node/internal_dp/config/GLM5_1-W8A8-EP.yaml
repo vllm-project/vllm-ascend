@@ -127,7 +127,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
@@ -149,7 +148,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1,"enable_mlapo":true}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
@@ -176,7 +175,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
@@ -199,7 +197,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1,"enable_mlapo":true}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92

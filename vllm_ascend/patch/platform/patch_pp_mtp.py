@@ -306,20 +306,22 @@ def _patch_model_config_validation() -> None:
     def _patched_verify_with_parallel_config(self, parallel_config):
         hf_config = getattr(self, "hf_config", None)
         model_type = getattr(hf_config, "model_type", None)
+        architectures = getattr(self, "architectures", ())
         is_eagle_drafter = (model_type == "eagle" or model_type == "speculators") and any(
-            arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in getattr(self, "architectures", ())
+            arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
         is_mtp_drafter = model_type in mtp_model_types
+        is_dspark_drafter = "DSparkDraftModel" in architectures
         if (
             getattr(self, "runner", None) == "draft"
-            and (is_eagle_drafter or is_mtp_drafter)
+            and (is_eagle_drafter or is_mtp_drafter or is_dspark_drafter)
             and getattr(parallel_config, "pipeline_parallel_size", 1) > 1
         ):
-            # Local Eagle/MTP drafters are loaded on the last PP stage rather
-            # than partitioned across all PP stages. Keep normal target-model
+            # Local speculative drafters are loaded on the last PP stage
+            # rather than partitioned across all PP stages. Keep normal target
             # validation intact, but validate these draft models as PP=1.
             logger.warning(
-                "Validating local Eagle/MTP drafter with pipeline_parallel_size=1 "
+                "Validating local speculative drafter with pipeline_parallel_size=1 "
                 "because it is loaded locally on the last pipeline stage."
             )
             patched_config = copy.copy(parallel_config)

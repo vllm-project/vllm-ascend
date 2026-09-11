@@ -174,7 +174,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -417,6 +417,8 @@ vllm bench serve \
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vLLM Features](https://docs.vllm.ai/en/stable/features) and [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) for key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -439,7 +441,7 @@ vllm bench serve \
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
 | Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | -            |
 
-> For detailed parameter descriptions, please refer to the deployment examples in Section 5.
+> For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 **Low Latency Configuration:**
 
@@ -551,15 +553,15 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers model-specific issues.
 
-### Q: How do I enable long context (beyond 256K)?
+### Q: How do I enable long context (beyond 256k)?
 
-Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
+Qwen3-Coder-30B-A3B natively supports 256k token context length. For contexts beyond 256k, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
 
 ```bash
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":262144}}'
 ```
 
-For contexts within the native 256K range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
+For contexts within the native 256k range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
 
 ### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?
 

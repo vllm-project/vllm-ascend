@@ -23,7 +23,11 @@ The fastest way to set up a test environment is to use the main branch's contain
         -v $(pwd):/vllm-project \
         -v ~/.cache:/root/.cache \
         -ti $IMAGE bash
+    ```
 
+    Run the remaining commands inside the container:
+
+    ```bash
     # (Optional) Configure mirror to speed up download
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
@@ -40,7 +44,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
     git clone -b {{ vllm_ascend_version }} --depth 1 https://github.com/vllm-project/vllm-ascend.git
-    git clone --depth 1 https://github.com/vllm-project/vllm.git
+    git clone -b {{ vllm_version }} --depth 1 https://github.com/vllm-project/vllm.git
 
     # vllm
     cd $SRC_WORKSPACE/vllm
@@ -63,8 +67,8 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     # Update DEVICE according to your device (/dev/davinci[0-7])
     export DEVICE=/dev/davinci0
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -98,8 +102,8 @@ The fastest way to set up a test environment is to use the main branch's contain
 === "Multi-cards"
 
     ```bash
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -254,6 +258,36 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 - Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
 
+### PR selective testing (CI)
+
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
+
+How tests are selected:
+
+1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
+2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
+
+Adding a new test requires no configuration change: place the UT file under the
+matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
+`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
+the test tree. Routing metadata (runner mapping, partitions, estimated times)
+lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+
+You can preview locally which runners a set of tests would be routed to:
+
+```bash
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+
+# Full suite routing (mirrors the ready-all mode)
+python3 .github/workflows/scripts/select_tests.py --all-tests
+```
+
+For debugging a specific test on CI hardware before requesting a label, see
+[E2E CI Test](./e2e_ci_test.md).
+
+#### E2E test model resource reduction
+
 The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
 
 1. Fork the original model repo in modelscope. All the files in the repo except for weights are required.
@@ -278,15 +312,24 @@ The CI resource is limited, and you might need to reduce the number of layers of
 
 ### Run doctest
 
-vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.
-The doctest is a good way to make sure docs stay current and examples remain executable, which can be run locally as follows:
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+
+Run one of these commands from the repository root in a prepared NPU environment:
 
 ```bash
-# Run doctest
-/vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart a2
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart 310p
+
+./tests/e2e/doctests/scripts/run_doctests.sh installation pip
+./tests/e2e/doctests/scripts/run_doctests.sh installation uv
+./tests/e2e/doctests/scripts/run_doctests.sh installation source
 ```
 
-This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
+
+In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. You can also run it manually with `quickstart_device` and/or `installation_method`; `none` skips that case. Each selected case runs on both operating systems. There is no scheduled trigger.
+
+For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
 
 ### Run docs link check
 

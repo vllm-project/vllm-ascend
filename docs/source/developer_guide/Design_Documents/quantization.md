@@ -61,7 +61,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     ...
 ```
 
-- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8.py`, and implement the method class and logic.
+- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8/w4a8.py`, and implement the method class and logic.
 - **Step 4: Testing**. Use your algorithm to generate quantization configurations and verify correctness and performance on target models and hardware.
 
 ### Quantized Model Adaptation
@@ -69,26 +69,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 Adapting a new quantized model requires ensuring the following three points:
 
 - The original model has been successfully adapted in `vLLM Ascend`.
-- **Fused Module Mapping**: Add the model's `model_type` to `packed_modules_model_mapping` in `vllm_ascend/quantization/modelslim_config.py` (e.g., `qkv_proj`, `gate_up_proj`, `experts`) to ensure sharding consistency and correct loading.
-
-```python
-packed_modules_model_mapping = {
-    "qwen3_moe": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    },
-}
-```
-
+- **Fused Module Mapping**: If the upstream vLLM model's `packed_modules_mapping` does not cover the required fused modules, add the model's `model_type` to `UPDATED_PACKED_MODULES_MAPPING` in `vllm_ascend/quantization/configs/modelslim_config.py`. Expert shard mappings are auto-discovered from the quantization description.
 - All quantization algorithms used by the quantized model have been integrated into the `quantization` module.
 
 ## Currently Supported Quantization Algorithms

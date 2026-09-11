@@ -200,9 +200,6 @@ ray_env_vars = {
     "VLLM_BATCH_INVARIANT": "1",
     "HCCL_DETERMINISTIC": "strict",
     "LCCL_DETERMINISTIC": "1",
-    # Disable FRACTAL_NZ mode (also handled by batch invariance override_envs)
-    "VLLM_ASCEND_ENABLE_NZ": "0",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "0",
     # Enable expandable segments for PyTorch NPU allocator
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
 }
@@ -220,6 +217,7 @@ llm_kwargs = dict(
     max_model_len=8192,
     distributed_executor_backend="ray",
     gpu_memory_utilization=0.75,
+    additional_config={"weight_nz_mode": 0},
     weight_transfer_config=WeightTransferConfig(backend="hccl"),
 )
 

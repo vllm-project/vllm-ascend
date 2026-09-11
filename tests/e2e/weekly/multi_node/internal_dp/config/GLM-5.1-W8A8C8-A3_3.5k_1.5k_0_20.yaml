@@ -10,7 +10,6 @@ env_common: &env_common
   HCCL_BUFFSIZE: "400"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
 
@@ -45,7 +44,7 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
@@ -57,7 +56,6 @@ deployment:
       --data-parallel-size 2
       --data-parallel-size-local 1
       --data-parallel-start-rank 1
-      --headless
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12981
@@ -77,12 +75,12 @@ deployment:
       --no-enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": false,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf_TPOT20:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_in3500_bs400
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 32

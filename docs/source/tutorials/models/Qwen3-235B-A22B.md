@@ -65,7 +65,7 @@ python3 quant_qwen_moe_w8a8.py --model_path /path/to/your/Qwen3-235B-A22B \
 
 ### 3.3 Verify Multi-node Communication
 
-If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -178,7 +178,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 To verify the source installation:
 
@@ -699,6 +699,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html) and [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -720,9 +722,9 @@ After several minutes, you will get the performance evaluation result.
 |----------|---------------|-------|----|-------------|--------------------|-----------|-----------|--------------|
 | High Throughput | Single-Node | 16 | 4 | 4 | none | On | On  | On |
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
-| Long Context | Single-Node | 16 | 8 | 1 | none | On | On | Off |
+| Long Context | Single-Node | 16 | 8 | 2 | none | On | On | On |
 
-> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
+> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>Single-node PD Hybrid — High Throughput:</u>
 

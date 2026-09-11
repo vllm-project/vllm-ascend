@@ -3,8 +3,8 @@ import torch
 import torch_npu
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_update as causal_conv1d_update_ref
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as causal_conv1d_update_ref
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 

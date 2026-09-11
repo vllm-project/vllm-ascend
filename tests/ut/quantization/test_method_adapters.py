@@ -3,14 +3,52 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.parameter import BlockQuantScaleParameter
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.method_adapters import (
     AscendFusedMoEMethod,
     AscendKVCacheMethod,
     AscendLinearMethod,
+    _make_mx_scale_weight_loader,
 )
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
+
+
+def test_mx_scale_weight_loader_preserves_group_phase():
+    weight_loader = MagicMock()
+    param = torch.nn.Parameter(torch.empty(2, 17), requires_grad=False)
+    param.input_dim = 1
+    loader = _make_mx_scale_weight_loader(
+        weight_loader,
+        tp_rank=3,
+        input_size_per_partition=528,
+        group_size=32,
+    )
+    loaded_weight = torch.arange(2 * 66, dtype=torch.float32).reshape(2, 66)
+
+    loader(param, loaded_weight)
+
+    weight_loader.assert_not_called()
+    torch.testing.assert_close(param, loaded_weight[:, 49:66])
+
+
+def test_mx_scale_weight_loader_accepts_pre_sharded_scale():
+    weight_loader = MagicMock()
+    param = torch.nn.Parameter(torch.empty(2, 17), requires_grad=False)
+    param.input_dim = 1
+    loader = _make_mx_scale_weight_loader(
+        weight_loader,
+        tp_rank=3,
+        input_size_per_partition=528,
+        group_size=32,
+    )
+    loaded_weight = torch.arange(2 * 17, dtype=torch.float32).reshape(2, 17)
+
+    loader(param, loaded_weight)
+
+    weight_loader.assert_not_called()
+    torch.testing.assert_close(param, loaded_weight)
 
 
 class TestAscendLinearMethod(TestBase):
@@ -74,6 +112,41 @@ class TestAscendLinearMethod(TestBase):
         self.assertFalse(hasattr(layer.weight_scale_pergroup, "input_dim"))
         self.assertEqual(layer.weight_scale_second.input_dim, 1)
         self.assertEqual(layer.weight_offset_second.input_dim, 1)
+
+    def test_block_quant_scale_uses_the_upstream_parameter_type(self):
+        # vLLM's loaders round shard bounds up to whole blocks only for
+        # BlockQuantScaleParameter, and they read the block size off the layer.
+        # A plain parameter takes the bit-packing path instead, which truncates
+        # and so drops the scale row covering a shard whose height is not a
+        # whole number of blocks.
+        self.mock_scheme.get_pergroup_param.return_value = {
+            "weight_scale_inv": torch.empty(21, 48, dtype=torch.float32),
+            "_block_quant_scale": (128, 128),
+        }
+        layer = torch.nn.Module()
+        weight_loader = MagicMock()
+
+        # vLLM's typed parameters read the TP rank while constructing, which is
+        # unavailable without a distributed group.
+        with (
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+        ):
+            self.method.create_weights(
+                layer,
+                input_size_per_partition=6144,
+                output_partition_sizes=[2048, 576],
+                input_size=6144,
+                output_size=2624,
+                params_dtype=torch.bfloat16,
+                weight_loader=weight_loader,
+            )
+
+        self.assertIsInstance(layer.weight_scale_inv, BlockQuantScaleParameter)
+        self.assertEqual(layer.weight_block_size, (128, 128))
+        self.assertEqual(layer.weight_scale_inv.output_dim, 0)
+        self.assertEqual(layer.weight_scale_inv.input_dim, 1)
+        self.assertNotIn("_block_quant_scale", dict(layer.named_parameters()))
 
     def test_process_weights_after_loading_delegates(self):
         layer = torch.nn.Module()

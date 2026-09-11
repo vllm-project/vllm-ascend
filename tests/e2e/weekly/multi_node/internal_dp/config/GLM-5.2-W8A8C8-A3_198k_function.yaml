@@ -1,6 +1,6 @@
 #198k长序列只验证功能
 test_name: "multi-node-GLM-5.2-W8A8C8-MTP-A3_198k_function"
-model: "Eco-Tech/GLM-5.2-w4a8c8"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -11,7 +11,6 @@ env_common: &env_common
   HCCL_BUFFSIZE: "400"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
 
@@ -19,7 +18,7 @@ deployment:
   - envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.2-w4a8c8
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
@@ -44,19 +43,18 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
       <<: *env_common
     server_cmd: >
-      vllm serve Eco-Tech/GLM-5.2-w4a8c8
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 8
       --data-parallel-size-local 4
       --data-parallel-start-rank 4
-      --headless
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12980
@@ -76,7 +74,7 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf:

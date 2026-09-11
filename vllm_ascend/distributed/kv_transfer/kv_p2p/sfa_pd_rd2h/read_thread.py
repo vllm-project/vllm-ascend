@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+DEST_BLOCK_WAIT_TIMEOUT = 2.0
+DEST_BLOCK_WAIT_INTERVAL = 0.001
 
 
 @dataclass
@@ -427,6 +430,36 @@ class MembPullReadThread(threading.Thread):
             "scale": scale,
         }
 
+    def _wait_for_dest_blocks(
+        self,
+        ext_req_id: str,
+        layer_name: str,
+    ) -> tuple[list[int], list[int]]:
+        state = self._state
+        dest = state.dest_blocks_by_req.get(ext_req_id)
+        if dest is not None:
+            return dest
+
+        timeout = DEST_BLOCK_WAIT_TIMEOUT
+        deadline = time.monotonic() + timeout
+        interval = DEST_BLOCK_WAIT_INTERVAL
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError(f"MembPull wait interrupted by stop event: req {ext_req_id}, layer {layer_name}")
+        while time.monotonic() < deadline:
+            if stop_event is not None:
+                stop_event.wait(interval)
+            dest = state.dest_blocks_by_req.get(ext_req_id)
+            if dest is not None:
+                logger.debug(
+                    "MembPull D waited for destination blocks: req=%s, layer=%s",
+                    ext_req_id,
+                    layer_name,
+                )
+                return dest
+
+        raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
+
     def _build_req_descriptors(
         self,
         layer: dict[str, Any],
@@ -442,9 +475,7 @@ class MembPullReadThread(threading.Thread):
         state = self._state
         layer_name = layer["layer_name"]
 
-        dest = state.dest_blocks_by_req.get(ext_req_id)
-        if dest is None:
-            raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
+        dest = self._wait_for_dest_blocks(ext_req_id, layer_name)
         all_d_main_ids, all_d_indexer_ids = dest
         # Only the group's first contributor (group_member_idx == 0) pulls main; the rest
         # skip it entirely. P broadcasts the full p_main_block_ids to every contributor, so

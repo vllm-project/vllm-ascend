@@ -1,0 +1,238 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Schedule All E2E Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm_ascend_branch:
+        description: 'Branch, tag, or SHA to test'
+        required: false
+        default: 'main'
+        type: string
+      update_est_times:
+        description: 'Update estimated times'
+        required: false
+        default: false
+        type: boolean
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select-all-tests:
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_tests: ${{ steps.full-scope.outputs.has_tests }}
+      test_groups: ${{ steps.full-scope.outputs.test_groups }}
+      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+      csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
+      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+      base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
+      base_ref: ${{ steps.resolve-refs.outputs.base_ref }}
+      main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
+      release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
+    steps:
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
+        with:
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
+            }}
+          fetch-depth: 0
+
+      - name: Resolve refs
+        id: resolve-refs
+        env:
+          WD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          TARGET_BRANCH="${WD_BRANCH:-$GITHUB_REF_NAME}"
+          git fetch origin "$TARGET_BRANCH"
+          {
+            echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+            echo "base_sha=$(git rev-parse FETCH_HEAD)"
+            echo "base_ref=${TARGET_BRANCH}"
+          } >> "$GITHUB_OUTPUT"
+          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select all tests
+        id: full-scope
+        run: |
+          pip install regex pyyaml
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          python3 .github/workflows/scripts/select_tests.py --all-tests
+
+  ensure-csrc-cache:
+    needs: select-all-tests
+    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.select-all-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
+
+  run-all-tests:
+    needs: [select-all-tests, ensure-csrc-cache]
+    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.select-all-tests.outputs.main_commit }}
+          - ${{ needs.select-all-tests.outputs.release_tag }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
+      upload_timing: ${{ inputs.update_est_times }}
+
+  update-estimated-times:
+    needs: [run-all-tests]
+    if: ${{ !cancelled() && inputs.update_est_times }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: timing-data-*
+          path: timing-artifacts/
+          merge-multiple: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Update estimated_times from timing data
+        run: |
+          python3 .github/workflows/scripts/update_estimated_times.py \
+            --timing-dir timing-artifacts/ \
+            --config .github/workflows/scripts/test_config.yaml
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git diff --quiet .github/workflows/scripts/test_config.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to test_config.yaml."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "test_config.yaml has been updated:"
+            git diff .github/workflows/scripts/test_config.yaml
+          fi
+
+      - name: Setup git remote
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add fork "https://github.com/vllm-ascend-ci/vllm-ascend.git"
+
+      - name: Commit and push
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          BRANCH="auto/update-estimated-times-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          git add .github/workflows/scripts/test_config.yaml
+          git commit -s -m "[CI] Auto-update estimated test times in test_config.yaml"
+          git push -f fork "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Pushed branch: $BRANCH"
+
+      - name: Create pull request
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: auto/update-estimated-times-${{ github.run_id }}
+          PR_HEAD: vllm-ascend-ci:auto/update-estimated-times-${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            try {
+              const pr = await github.rest.pulls.create({
+                owner: 'vllm-project',
+                repo: 'vllm-ascend',
+                head: process.env.PR_HEAD,
+                base: 'main',
+                title: '[CI] Auto-update estimated test times in test_config.yaml',
+                body: '## Summary\n\n' +
+                  'This PR was auto-generated by the **Update estimated test times** ' +
+                  '[workflow](' + process.env.RUN_URL + ').\n\n' +
+                  'It updates the `estimated_times` values in ' +
+                  '`.github/workflows/scripts/test_config.yaml` based on actual elapsed ' +
+                  'times collected from CI workflow runs.\n\n' +
+                  '### Methodology\n\n' +
+                  '- Each test job uploads its elapsed time as a `timing-data-*` ' +
+                  'artifact upon completion.\n' +
+                  '- The workflow aggregates all collected timing artifacts across jobs.\n' +
+                  '- For each test, the **median** elapsed time is computed to reduce ' +
+                  'outlier impact.\n' +
+                  '- A **10% safety buffer** is applied and the result is rounded to the ' +
+                  'nearest 10 seconds.\n\n' +
+                  '### Review Checklist\n\n' +
+                  '- [ ] Verify that updated `estimated_time` values are within a ' +
+                  'reasonable range.\n' +
+                  '- [ ] Confirm no test entries are missing or unexpectedly removed.\n',
+              });
+              core.info('Created PR #' + pr.data.number);
+            } catch (error) {
+              if (error.message.includes('A pull request already exists')) {
+                core.warning('PR already exists');
+              } else { throw error; }
+            }

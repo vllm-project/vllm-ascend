@@ -23,7 +23,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -106,7 +106,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 

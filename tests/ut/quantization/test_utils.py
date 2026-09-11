@@ -8,15 +8,17 @@ from vllm.config import KVTransferConfig
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import FAKQUANT_CONFIG, W8A8_CONFIG
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.quantization import AscendCompressedTensorsConfig
-from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
+from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     enable_fa_quant,
     get_dynamic_mx_quant_scale_alg,
     maybe_auto_detect_quantization,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
 class TestDynamicMxQuantScaleAlg(TestBase):
@@ -29,21 +31,24 @@ class TestDynamicMxQuantScaleAlg(TestBase):
             )
         )
 
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type")
-    def test_uses_one_only_for_minimax_m3_on_a5(self, mock_device_type):
+    @patch("vllm_ascend.quantization.utils.get_current_hardware_profile")
+    def test_uses_one_only_for_minimax_m3_on_a5(self, mock_profile):
         minimax_config = self._config("MiniMaxM3SparseForCausalLM")
         other_config = self._config("DeepseekV3ForCausalLM")
 
-        mock_device_type.return_value = AscendDeviceType.A5
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A5)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 1)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(other_config), 0)
 
-        mock_device_type.return_value = AscendDeviceType.A3
+        mock_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
         self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 0)
 
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     @patch("vllm.config.get_current_vllm_config")
-    def test_uses_current_vllm_config_when_config_is_omitted(self, mock_current_config, _mock_device_type):
+    def test_uses_current_vllm_config_when_config_is_omitted(self, mock_current_config, _mock_profile):
         minimax_config = self._config(None, model_type="minimax_m3")
         mock_current_config.return_value = minimax_config
 
@@ -51,10 +56,13 @@ class TestDynamicMxQuantScaleAlg(TestBase):
 
     @patch("vllm.forward_context.get_forward_context")
     @patch("vllm.forward_context.is_forward_context_available", return_value=True)
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_uses_forward_vllm_config_when_available(
         self,
-        _mock_device_type,
+        _mock_profile,
         _mock_forward_context_available,
         mock_forward_context,
     ):
@@ -65,10 +73,13 @@ class TestDynamicMxQuantScaleAlg(TestBase):
     @patch("vllm.config.get_current_vllm_config")
     @patch("vllm.forward_context.get_forward_context")
     @patch("vllm.forward_context.is_forward_context_available", return_value=True)
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_falls_back_to_current_config_when_forward_scale_is_missing(
         self,
-        _mock_device_type,
+        _mock_profile,
         _mock_forward_context_available,
         mock_forward_context,
         mock_current_config,
