@@ -57,7 +57,7 @@ DSPARK_EXPECTED_OUTPUT_PREFIXES = {
 }
 
 MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
-# DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
+DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 
@@ -172,7 +172,6 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
     _run_test(
         DSPARK_MODEL,
         # Skip acceptance checks until the DSpark acceptance issue is resolved.
-        # minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
         minimum_rates=None,
         expected_output_prefixes=DSPARK_EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
