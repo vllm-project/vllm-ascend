@@ -8,7 +8,7 @@ When a layer executes, the rank responsible for its cache broadcasts the complet
 
 ## Use Cases
 
-KVPP primarily targets long-context and concurrent serving workloads limited by KV cache capacity. By reducing duplicated caches within a TP group, it stores more KV tokens within the same HBM budget. In the Ascend 950DT (A5) tests reported in the PR, cache capacity reached **6.25×** the disabled configuration on a single node and **5.35×** with dual-node PP.
+KVPP primarily targets long-context and concurrent serving workloads limited by KV cache capacity. By reducing duplicated caches within a TP group, it stores more KV tokens within the same HBM budget. In the tests on 950DT products reported in the PR, cache capacity reached **6.25×** the disabled configuration on a single node and **5.35×** with dual-node PP.
 
 | Workload | Value and selection criteria |
 | --- | --- |
@@ -80,13 +80,13 @@ Feature combinations must also meet the requirements of the model and the indivi
 
 ## Performance
 
-The following Ascend 950DT (A5) measurements from [PR #16094](https://github.com/vllm-project/vllm-ascend/pull/16094) show the impact on cache capacity, time to first token (TTFT), and prefill throughput. The single-node and dual-node deployments use different quantized weights; compare KVPP on and off within each deployment.
+The following measurements on 950DT products from [PR #16094](https://github.com/vllm-project/vllm-ascend/pull/16094) show the impact on cache capacity, time to first token (TTFT), and prefill throughput. The single-node and dual-node deployments use different quantized weights; compare KVPP on and off within each deployment.
 
 ### Test Configuration
 
 | Setting | Single node | Dual-node PP |
 | --- | --- | --- |
-| Hardware | One node with 8 Ascend 950DT NPUs | Two nodes with 8 Ascend 950DT NPUs per node |
+| Hardware | One node with 8 950DT products | Two nodes with 8 950DT products per node |
 | Model | GLM-5.2-W4A8C8 | GLM-5.2-W8A8C8-mxfp8 |
 | Parallelism | TP8 + EP | TP8 + PP2 + EP, 38/40 layer split |
 | Common settings | DSA-CP, chunked prefill, prefix caching, asynchronous scheduling, LI-C8, Model Runner V1, eager mode | Same as single node |
