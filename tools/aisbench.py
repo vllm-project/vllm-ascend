@@ -121,7 +121,9 @@ class AisbenchRunner:
                 self.threshold = aisbench_config.get("threshold", 1)
                 self._accuracy_verify()
             if self.task_type == "performance":
-                self.threshold = aisbench_config.get("threshold", 0.97)
+                self.threshold = aisbench_config.get("threshold", None)
+                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold", None)
+                self.tpot_threshold = aisbench_config.get("tpot_threshold", None)
                 self._performance_verify()
             if self.task_type == "spec_decode":
                 self.threshold = aisbench_config.get("threshold", 0.05)
@@ -258,14 +260,14 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        if self.threshold is not None and self.baseline is not None:
+        if self.threshold is not None:
             output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
             assert float(output_throughput) >= float(self.threshold) * float(self.baseline), (
                 "Performance verification failed. "
                 f"The current Output Token Throughput is {output_throughput} token/s, "
                 f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
             )
-        if self.input_throughput_threshold is not None and self.input_throughput_baseline is not None:
+        if self.input_throughput_threshold is not None:
             input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
             assert float(input_throughput) >= float(self.input_throughput_threshold) * float(self.input_throughput_baseline), (
                 "Input Token verification failed. "
