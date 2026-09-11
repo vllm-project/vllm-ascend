@@ -13,6 +13,8 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.attention.attention_v1 import AscendAttentionDCPBackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -604,7 +606,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
     def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
-        self.attn_groups = []
+        self.attn_groups = [[SimpleNamespace(backend=AscendAttentionDCPBackend, layer_names=["target.attn"])]]
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -628,6 +630,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
+    assert runner.use_fia
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 

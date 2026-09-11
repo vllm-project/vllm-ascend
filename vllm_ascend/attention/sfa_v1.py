@@ -355,6 +355,31 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     return False
 
 
+def _get_sfa_global_classes(use_dcp: bool):
+    if get_ascend_config().sparse_kv_offload_config.enabled:
+        from vllm_ascend.attention.sfa_kv_offload import (
+            AscendSFAKVOffloadImpl,
+            AscendSFAKVOffloadMetadataBuilder,
+        )
+
+        return AscendSFAKVOffloadMetadataBuilder, AscendSFAKVOffloadImpl
+
+    from vllm_ascend.utils import enable_dsa_cp
+
+    if enable_dsa_cp():
+        from vllm_ascend.attention.context_parallel.sfa_cp import (
+            AscendSFADSACPImpl,
+            AscendSFADSACPMetadataBuilder,
+            AscendSFADSADCPImpl,
+            AscendSFADSADCPMetadataBuilder,
+        )
+
+        if use_dcp:
+            return AscendSFADSADCPMetadataBuilder, AscendSFADSADCPImpl
+        return AscendSFADSACPMetadataBuilder, AscendSFADSACPImpl
+    return None
+
+
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -364,13 +389,8 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        if get_ascend_config().sparse_kv_offload_config.enabled:
-            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
-
-            return AscendSFAKVOffloadMetadataBuilder
-        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
-
-        return resolve_sfa_metadata_builder(get_current_vllm_config())
+        classes = _get_sfa_global_classes(use_dcp=False)
+        return AscendSFAMetadataBuilder if classes is None else classes[0]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -384,17 +404,53 @@ class AscendSFABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendSFAImpl"]:
-        if get_ascend_config().sparse_kv_offload_config.enabled:
-            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
-
-            return AscendSFAKVOffloadImpl
-        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
-
-        return resolve_sfa_impl(get_current_vllm_config())
+        classes = _get_sfa_global_classes(use_dcp=False)
+        return AscendSFAImpl if classes is None else classes[1]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendSFAPCPBackend(AscendSFABackend):
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPImpl
+
+        classes = _get_sfa_global_classes(use_dcp=False)
+        return AscendSFAPCPImpl if classes is None else classes[1]
+
+
+class AscendSFADCPBackend(AscendSFABackend):
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+
+        classes = _get_sfa_global_classes(use_dcp=True)
+        return AscendSFADCPImpl if classes is None else classes[1]
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
+
+        classes = _get_sfa_global_classes(use_dcp=True)
+        return AscendSFADCPMetadataBuilder if classes is None else classes[0]
+
+
+class AscendSFAPCPDCPBackend(AscendSFABackend):
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPDCPImpl
+
+        classes = _get_sfa_global_classes(use_dcp=True)
+        return AscendSFAPCPDCPImpl if classes is None else classes[1]
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFAPCPDCPMetadataBuilder
+
+        classes = _get_sfa_global_classes(use_dcp=True)
+        return AscendSFAPCPDCPMetadataBuilder if classes is None else classes[0]
 
 
 @dataclass

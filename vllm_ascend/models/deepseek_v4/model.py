@@ -123,6 +123,15 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
+        from vllm.config import get_current_vllm_config
+
+        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend, select_dsa_backend
+
+        self._attn_backend = select_dsa_backend(
+            AscendDSASWABackend,
+            use_pcp=get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1,
+        )
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
@@ -139,9 +148,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
-
-        return AscendDSASWABackend
+        return self._attn_backend
 
 
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:

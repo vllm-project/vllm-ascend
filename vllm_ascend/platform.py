@@ -264,17 +264,39 @@ class NPUPlatform(Platform):
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
+        use_dcp = attn_selector_config.use_dcp
+
         if attn_selector_config.use_pcp:
             pcp_backend_map = {
-                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
+                (True, False, False): (
+                    "vllm_ascend.attention.mla_v1.AscendMLADCPBackend"
+                    if use_dcp
+                    else "vllm_ascend.attention.mla_v1.AscendMLABackend"
+                ),
+                (False, False, False): (
+                    "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend"
+                    if use_dcp
+                    else "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+                ),
+                (True, True, False): (
+                    "vllm_ascend.attention.sfa_v1.AscendSFAPCPDCPBackend"
+                    if use_dcp
+                    else "vllm_ascend.attention.sfa_v1.AscendSFAPCPBackend"
+                ),
+                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSAPCPBackend",
             }
             pcp_backend = pcp_backend_map.get(backend_key)
             if pcp_backend is None:
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
+
+        if use_dcp:
+            dcp_backend_map = {
+                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLADCPBackend",
+                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend",
+                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFADCPBackend",
+            }
+            return dcp_backend_map.get(backend_key, backend_map[backend_key])
 
         return backend_map[backend_key]
 

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -139,7 +139,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
-        draft_vllm_config = self.speculator.draft_vllm_config
+        draft_vllm_config = self.speculator.attn_vllm_config
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
@@ -157,14 +157,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         # Mirror vLLM's DP graph-replay token-count metadata.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
         attn_metadata = self.speculator.model_state.attn_metadata
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the draft config because set_forward_context()
-        # does not update it.
-        # TODO: Remove this explicit current-config scope once ACL graph replay
-        # passes VllmConfig directly through the graph-update interfaces.
         with (
-            set_current_vllm_config(draft_vllm_config),
             set_forward_context(
                 attn_metadata,
                 draft_vllm_config,
