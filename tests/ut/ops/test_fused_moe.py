@@ -120,6 +120,7 @@ def test_ascend_routed_experts_uses_parent_unquantized_method_during_init(monkey
 @pytest.mark.parametrize("quant_config", [None, object()])
 def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_init(monkeypatch, quant_config):
     moe_config = MagicMock()
+    moe_config.moe_parallel_config.use_ep = False
     parent_method = object()
     ascend_method = object()
     init_methods = []
@@ -145,6 +146,7 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         routed_experts_module,
         "get_ascend_config",
         lambda: SimpleNamespace(
+            eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None),
             ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
             enable_shared_expert_dp=False,
         ),
@@ -158,7 +160,9 @@ def test_ascend_routed_experts_replaces_only_unquantized_method_after_parent_ini
         ),
     )
 
-    routed_experts = AscendRoutedExperts(tid2eid="tid2eid")
+    routed_experts = AscendRoutedExperts(
+        "model.layers.0.mlp", torch.float32, moe_config, None, expert_map_manager=None, tid2eid="tid2eid"
+    )
 
     assert init_methods == [parent_method]
     if quant_config is None:
@@ -189,9 +193,20 @@ def test_ascend_routed_experts_accepts_tid2eid_parameter_before_module_init(monk
     tid2eid = nn.Parameter(torch.zeros(2, 2), requires_grad=False)
     parent_init = MagicMock(side_effect=RuntimeError("stop after parent init"))
     monkeypatch.setattr(routed_experts_module.RoutedExperts, "__init__", parent_init)
+    monkeypatch.setattr(
+        routed_experts_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None)),
+    )
 
     with pytest.raises(RuntimeError, match="stop after parent init"):
-        AscendRoutedExperts(tid2eid=tid2eid)
+        AscendRoutedExperts(
+            "model.layers.0.mlp",
+            torch.float32,
+            moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=False)),
+            expert_map_manager=None,
+            tid2eid=tid2eid,
+        )
 
     parent_init.assert_called_once()
 
@@ -215,6 +230,7 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
         routed_experts_module,
         "get_ascend_config",
         lambda: SimpleNamespace(
+            eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_path=None),
             ascend_compilation_config=SimpleNamespace(enable_static_kernel=False),
             enable_shared_expert_dp=False,
         ),
@@ -228,7 +244,13 @@ def test_ascend_routed_experts_initializes_only_matching_eplb_path(
         ),
     )
 
-    routed_experts = AscendRoutedExperts(n_shared_experts=2)
+    routed_experts = AscendRoutedExperts(
+        "model.layers.0.mlp",
+        torch.float32,
+        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=False)),
+        expert_map_manager=None,
+        n_shared_experts=2,
+    )
 
     assert routed_experts._use_v2_model_runner is use_v2_model_runner
     assert init_eplb.call_count == legacy_init_calls

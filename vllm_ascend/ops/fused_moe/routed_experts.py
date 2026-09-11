@@ -26,6 +26,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
@@ -316,6 +317,27 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
     )
 
 
+def pad_static_expert_capacity(moe_config: FusedMoEConfig, expert_map_manager: ExpertMapManager) -> int:
+    """Reserve non-routing slots so Ascend dispatch has equal capacity on every rank."""
+    parallel = moe_config.moe_parallel_config
+    if (
+        not parallel.use_ep
+        or parallel.enable_eplb
+        or moe_config.num_experts != moe_config.num_logical_experts
+        or expert_map_manager.num_fused_shared_experts
+        or expert_map_manager.placement_strategy != "linear"
+    ):
+        return 0
+    padding = -moe_config.num_experts % parallel.ep_size
+    if padding:
+        moe_config.num_experts += padding
+        # Update checkpoint placement before RoutedExperts allocates weights.
+        # Logical router IDs remain unchanged; the trailing slots are never routed to.
+        expert_map_manager.update(parallel, moe_config.num_experts)
+        moe_config.num_local_experts = expert_map_manager.local_num_experts
+    return padding
+
+
 class EplbExpertTensorList(list[torch.Tensor]):
     """Per-expert tensors exposed through the upstream EPLB weight contract."""
 
@@ -342,13 +364,25 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def __init__(
         self,
+        layer_name: str,
+        params_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         *args,
+        expert_map_manager: ExpertMapManager,
         tid2eid=None,
         n_shared_experts: int = 0,
         **kwargs,
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
-        super().__init__(*args, **kwargs)
+        ascend_config = get_ascend_config()
+        eplb_config = ascend_config.eplb_config
+        padding = 0
+        if not (
+            eplb_config.dynamic_eplb or eplb_config.expert_map_path or getattr(ascend_config, "mix_placement", False)
+        ):
+            padding = pad_static_expert_capacity(moe_config, expert_map_manager)
+        object.__setattr__(self, "num_padding_experts", padding)
+        super().__init__(layer_name, params_dtype, moe_config, *args, expert_map_manager=expert_map_manager, **kwargs)
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.
@@ -426,10 +460,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # Ascend's placement builder operates on logical expert IDs, so give it
         # a shallow config view with the logical count.
         placement_moe_config = copy(self.moe_config)
-        placement_moe_config.num_experts = self.moe_config.num_logical_experts + (
-            n_shared_experts if self.mix_placement else 0
+        placement_moe_config.num_experts = (
+            self.moe_config.num_logical_experts
+            + self.num_padding_experts
+            + (n_shared_experts if self.mix_placement else 0)
         )
-        allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
+        allocated_redundancy = (
+            self.moe_config.num_experts - self.moe_config.num_logical_experts - self.num_padding_experts
+        )
         if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
             raise ValueError(
                 "Conflicting EPLB redundant expert counts: "
