@@ -48,5 +48,7 @@ struct SituMxQuantTilingData {
     float beta;
     float linearBeta;
     int64_t hasLinearBeta;      // 0 or 1
+    int64_t hasGroupList;       // 0 or 1
+    int64_t groupListSize;      // per-expert count tensor length
 };
 #endif // SITU_MX_QUANT_TILING_DATA_H

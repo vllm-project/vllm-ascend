@@ -21,6 +21,7 @@ namespace vllm_ascend {
 
 std::tuple<at::Tensor, at::Tensor> situ_mx_quant(
     const at::Tensor& x,
+    const c10::optional<at::Tensor>& group_list,
     double beta,
     double linear_beta,
     bool activate_left,
@@ -43,6 +44,15 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant(
     TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
                 "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
                 dst_type);
+    if (group_list.has_value()) {
+        TORCH_CHECK(group_list->device() == x.device(),
+                    "situ_mx_quant: group_list must be on the same device as x");
+        TORCH_CHECK(group_list->dim() == 1 && group_list->numel() > 0,
+                    "situ_mx_quant: group_list must be a non-empty 1-D tensor");
+        TORCH_CHECK(group_list->scalar_type() == at::kLong,
+                    "situ_mx_quant: group_list must have int64 dtype, but got ",
+                    group_list->scalar_type());
+    }
 
     std::vector<int64_t> y_shape(x.sizes().begin(), x.sizes().end());
     y_shape.back() /= 2;
@@ -53,10 +63,12 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant(
     auto y_dtype = dst_type == DST_TYPE_E5M2 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
     at::Tensor y = at::empty(y_shape, x.options().dtype(y_dtype));
     at::Tensor mxscale = at::empty(mxscale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
+    const at::Tensor group_list_value = group_list.value_or(at::Tensor());
 
     constexpr int64_t AXIS = -1;
     EXEC_NPU_CMD(aclnnSituMxQuant,
                  x,
+                 group_list_value,
                  beta,
                  linear_beta,
                  activate_left,
