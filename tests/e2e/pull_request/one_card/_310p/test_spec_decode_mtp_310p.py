@@ -15,13 +15,26 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from tests.e2e.conftest import VllmRunner
+"""310P MTP e2e: MRv1 baseline + one MRv2 FULL_DECODE_ONLY smoke test."""
+
+import os
+from unittest.mock import patch
+
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
+# CI uses hub id; local verify can override (e.g. /home/weights/Qwen3.5-4B-W8A8).
+QWEN35_MTP_MODEL = os.environ.get("QWEN35_MTP_MODEL", "Qwen/Qwen3.5-4B")
+QWEN35_MTP_QUANTIZATION = os.environ.get("QWEN35_MTP_QUANTIZATION")  # e.g. "ascend"
+
+
+def _quant_kw():
+    return {"quantization": QWEN35_MTP_QUANTIZATION} if QWEN35_MTP_QUANTIZATION else {}
 
 
 def test_qwen3_5_mtp_tp1_eager():
-    example_prompts = ["Hello, my name is"]
+    """MRv1 baseline (no V2 runner env)."""
     with VllmRunner(
-        "Qwen/Qwen3.5-4B",
+        QWEN35_MTP_MODEL,
         tensor_parallel_size=1,
         enforce_eager=True,
         dtype="float16",
@@ -31,5 +44,34 @@ def test_qwen3_5_mtp_tp1_eager():
             "method": "qwen3_5_mtp",
             "num_speculative_tokens": 1,
         },
+        **_quant_kw(),
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens=8)
+        vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)
+
+
+@wait_until_npu_memory_free()
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_qwen3_5_mtp_mrv2_tp1_full_decode_only():
+    """MRv2 MTP + FULL_DECODE_ONLY K=1 (covers Step-2 draft-prefill FULL path)."""
+    with VllmRunner(
+        QWEN35_MTP_MODEL,
+        tensor_parallel_size=1,
+        enforce_eager=False,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+        dtype="float16",
+        max_model_len=2048,
+        mamba_ssm_cache_dtype="float16",
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 1,
+        },
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            # K=1 → query_len=2; capture sizes must be multiples of 2.
+            "cudagraph_capture_sizes": [2, 4],
+        },
+        **_quant_kw(),
+    ) as vllm_model:
+        assert vllm_model.model.llm_engine.vllm_config.use_v2_model_runner
+        vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)
