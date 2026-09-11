@@ -375,7 +375,7 @@ class TestACLGraphWrapper(TestBase):
                 self.mock_get_ascend_config.return_value.ascend_compilation_config.enable_super_kernel = enabled
 
                 mock_npu_graph = MagicMock()
-                mock_torch.npu.NPUGraph.return_value = mock_npu_graph
+                self.mock_updatable_graph.return_value = mock_npu_graph
                 mock_graph_context = MagicMock()
                 mock_torch.npu.graph.return_value = mock_graph_context
                 mock_graph_context.__enter__ = Mock(return_value=None)
