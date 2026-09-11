@@ -245,7 +245,11 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(
+                draft_sample_method="greedy",
+                draft_model_config=draft_model_config,
+                num_speculative_tokens=_NUM_SPECULATIVE_TOKENS,
+            ),
         )
 
     @classmethod
@@ -566,6 +570,38 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
 
         parent_init.assert_not_called()
 
+    def test_rejects_k3_checkpoint_block_size_mismatch_before_parent_initialization(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FakeK3DSparkConfig(SimpleNamespace):
+            pass
+
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "K3DSparkConfig",
+            FakeK3DSparkConfig,
+        )
+        vllm_config = self._make_vllm_config(
+            FakeK3DSparkConfig(
+                block_size=5,
+            )
+        )
+        vllm_config.speculative_config.num_speculative_tokens = 7
+        parent_init = MagicMock()
+
+        with (
+            pytest.raises(ValueError, match="checkpoint block_size \\(5\\); got 7"),
+            patch.object(
+                AscendDSparkProposer.__base__,
+                "__init__",
+                parent_init,
+            ),
+        ):
+            AscendDSparkProposer(vllm_config, torch.device("cpu"))
+
+        parent_init.assert_not_called()
+
     @pytest.mark.parametrize(
         ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
         [
@@ -748,8 +784,7 @@ class TestDSparkInitValidation:
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     """``set_inputs_first_pass`` returns the anchor-first query budget and
-    rewrites the common attention metadata into the DSpark cross-attention
-    shape (N query tokens per request, non-causal, chunked-prefill state)."""
+    rewrites the common attention metadata into the DSpark query-block shape."""
 
     @pytest.fixture(autouse=True)
     def _mock_kernel(self, monkeypatch):
