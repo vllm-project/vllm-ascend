@@ -416,7 +416,7 @@ def test_determine_batch_execution_and_padding(
     ("num_spec_tokens", "computed", "prompts", "scheduled", "expected_mode"),
     [
         pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, id="stateful_one_token_handoff"),
-        pytest.param(0, [0], [1], [1], CUDAGraphMode.FULL, id="non_spec_first_token"),
+        pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, id="first_token_without_state"),
         pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, id="steady_spec_decode"),
         pytest.param(7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, id="handoff_padded_to_spec_width"),
         pytest.param(7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, id="spec_width_prefill_without_state"),
