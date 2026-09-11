@@ -22,6 +22,7 @@ import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
+from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -60,16 +61,33 @@ class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
 
     Migrated to ``@config`` (pydantic dataclass). Hardware-profile runtime
-    downgrades (disable npugraph_ex / static_kernel) and the
-    static_kernel→npugraph_ex dependency check are applied in an ``after``
-    model_validator.
+    downgrades (disable npugraph_ex / static_kernel / super_kernel) and the
+    super_kernel→static_kernel→npugraph_ex dependency checks are applied in
+    an ``after`` model_validator.
     """
 
     enable_npugraph_ex: bool = True
     enable_static_kernel: bool = False
+    enable_super_kernel: bool = False
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_super_kernel_to_static_kernel(cls, data: Any) -> Any:
+        if isinstance(data, ArgsKwargs):
+            if data.kwargs is None:
+                return data
+            kw = dict(data.kwargs)
+            if "enable_super_kernel" not in kw and "enable_static_kernel" in kw:
+                kw["enable_super_kernel"] = kw["enable_static_kernel"]
+            return ArgsKwargs(data.args, kw)
+        if isinstance(data, dict):
+            if "enable_super_kernel" not in data and "enable_static_kernel" in data:
+                data = dict(data)
+                data["enable_super_kernel"] = data["enable_static_kernel"]
+        return data
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
@@ -83,10 +101,18 @@ class AscendCompilationConfig:
                     "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
                     "Disabling it."
                 )
+            if self.enable_super_kernel:
+                logger.warning(
+                    "super kernel requires static kernel, which is not supported by the current hardware profile. "
+                    "Disabling it."
+                )
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
+            self.enable_super_kernel = False
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
+        if self.enable_super_kernel:
+            assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
         return self
 
 
