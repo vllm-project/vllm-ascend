@@ -2041,7 +2041,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 batch_split_factor=1,
             )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
+            if (
+                isinstance(self.wo_b.quant_method, AscendUnquantizedLinearMethod)
+                and output.dtype == torch.bfloat16
+                and o_proj_input.dtype == torch.bfloat16
+                and self.wo_b.weight.dtype == torch.bfloat16
+            ):
+                torch.ops._C_ascend.npu_matmul_out(
+                    output,
+                    o_proj_input,
+                    self.wo_b.weight,
+                )
+            else:
+                output[...] = self.wo_b(o_proj_input)
         return output
 
     def forward(  # type: ignore[override]
