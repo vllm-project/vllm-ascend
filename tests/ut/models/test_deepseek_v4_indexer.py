@@ -387,6 +387,7 @@ class TestIndexerOps:
             block_table=torch.tensor([[0]], dtype=torch.int32),
             qli_metadata=torch.zeros(1024, dtype=torch.int32),
         )
+        qli = MagicMock(return_value=(topk_indices, torch.empty(0)))
         with (
             patch(
                 "vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type",
@@ -408,9 +409,9 @@ class TestIndexerOps:
                 side_effect=lambda value: value,
             ),
             patch(
-                "cann_ops_transformer.ops.quant_lightning_indexer",
-                return_value=(topk_indices, torch.empty(0)),
-            ) as qli,
+                "vllm_ascend.models.deepseek_v4.indexer.import_module",
+                return_value=SimpleNamespace(quant_lightning_indexer=qli),
+            ),
         ):
             actual = indexer_ops.select_topk(
                 query,

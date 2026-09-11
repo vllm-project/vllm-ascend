@@ -631,15 +631,16 @@ def test_dsa_qli_metadata_calls_cann_operator_directly():
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 7], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
     with (
         patch(
             "vllm_ascend.attention.dsa_v1.get_ascend_device_type",
             return_value=AscendDeviceType.A3,
         ),
         patch(
-            "cann_ops_transformer.ops.quant_lightning_indexer_metadata",
-            return_value=generated_metadata,
-        ) as metadata_op,
+            "vllm_ascend.attention.dsa_v1.import_module",
+            return_value=SimpleNamespace(quant_lightning_indexer_metadata=metadata_op),
+        ),
     ):
         actual = builder._build_qli_metadata(
             {},
@@ -665,15 +666,16 @@ def test_dsa_cp_qli_metadata_calls_cann_operator_directly():
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens = torch.tensor([8, 7], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
     with (
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type",
             return_value=AscendDeviceType.A3,
         ),
         patch(
-            "cann_ops_transformer.ops.quant_lightning_indexer_metadata",
-            return_value=generated_metadata,
-        ) as metadata_op,
+            "vllm_ascend.attention.context_parallel.dsa_cp.import_module",
+            return_value=SimpleNamespace(quant_lightning_indexer_metadata=metadata_op),
+        ),
     ):
         actual = builder._build_qli_metadata(
             query_start_loc,
