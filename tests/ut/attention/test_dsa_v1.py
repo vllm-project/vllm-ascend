@@ -24,6 +24,7 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import override_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport
 
+from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSACPImpl,
     AscendDSACPLayerMetadata,
@@ -1327,6 +1328,60 @@ def test_forward_attention_routes_unified_req_metadata(
         assert "cu_seqlens_ori_kv" not in sparse_call.kwargs
 
 
+@pytest.mark.parametrize("stem", ["", "C4", "C128", "SWA", "C4State", "C128State"])
+@pytest.mark.parametrize("use_pcp,use_dsa_cp", [(False, False), (True, False), (False, True)])
+def test_dsa_cache_backend_keeps_layout_and_mode(stem, use_pcp, use_dsa_cp):
+    base = getattr(dsa_v1, f"AscendDSA{stem}Backend")
+    backend = dsa_v1.select_dsa_backend(base, use_pcp=use_pcp, use_dsa_cp=use_dsa_cp)
+    builder, impl = backend.get_builder_cls(), backend.get_impl_cls()
+    expected = "PCP" if use_pcp else "CP" if use_dsa_cp else ""
+    assert builder.__name__ == f"AscendDSA{expected}MetadataBuilder"
+    assert impl.__name__ == f"AscendDSA{expected}Impl"
+    assert issubclass(backend, base)
+    assert backend.supports_pcp()
+    assert backend.get_name() == base.get_name()
+    assert backend.get_supported_kernel_block_sizes() == base.get_supported_kernel_block_sizes()
+    assert backend.get_kv_cache_shape(2, 128, 1, 64) == base.get_kv_cache_shape(2, 128, 1, 64)
+    with (
+        patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("no config")),
+        patch("vllm_ascend.attention.utils.enable_pcp", side_effect=AssertionError("wrong target PCP")),
+        patch("vllm_ascend.utils.enable_dsa_cp", side_effect=AssertionError("mode changed")),
+    ):
+        assert backend.get_builder_cls() is builder
+        assert backend.get_impl_cls() is impl
+
+
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_dsv4_cache_layers_remember_their_load_config(use_pcp):
+    import torch
+
+    from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorStateCache
+    from vllm_ascend.models.deepseek_v4.indexer import AscendDeepseekV4IndexerCache
+    from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4SWACache
+
+    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if use_pcp else 1))
+    cache_config = SimpleNamespace(block_size=128)
+    cases = [
+        (AscendDeepseekV4SWACache, (512, 128, torch.bfloat16, "swa", cache_config), dsa_v1.AscendDSASWABackend),
+        (AscendDeepseekV4IndexerCache, (128, torch.bfloat16, "c4", cache_config, 4), dsa_v1.AscendDSAC4Backend),
+        (AscendDeepseekV4IndexerCache, (128, torch.bfloat16, "c128", cache_config, 128), dsa_v1.AscendDSAC128Backend),
+        (AscendCompressorStateCache, (512, torch.float32, 4, 128, "state4"), dsa_v1.AscendDSAC4StateBackend),
+        (AscendCompressorStateCache, (512, torch.float32, 128, 128, "state128"), dsa_v1.AscendDSAC128StateBackend),
+    ]
+    for cls, args, base_backend in cases:
+        with (
+            patch.object(cls.__bases__[0], "__init__", return_value=None),
+            patch("vllm.config.get_current_vllm_config", return_value=config),
+            patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
+        ):
+            layer = cls(*args)
+        with patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("load scope ended")):
+            backend = layer.get_attn_backend()
+            assert backend is dsa_v1.select_dsa_backend(base_backend, use_pcp=use_pcp)
+            backend.get_builder_cls()
+            backend.get_impl_cls()
+
+
 class TestAscendDSAComponentMetadata:
     def test_routes_c4_metadata_by_cache_prefix(self):
         impl = _make_impl()
@@ -1641,30 +1696,17 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
 
 
 def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
-    with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
-        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
-    ):
-        assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
-        assert AscendDSABackend.get_impl_cls() is AscendDSAPCPImpl
-        assert (
-            AscendDSAPCPMetadataBuilder.get_cudagraph_support(
-                cast(Any, None),
-                cast(Any, None),
-            )
-            is AttentionCGSupport.UNIFORM_BATCH
-        )
+    from vllm_ascend.attention.dsa_v1 import select_dsa_backend
 
-    with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
-        patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-    ):
-        for get_backend_cls in (
-            AscendDSABackend.get_builder_cls,
-            AscendDSABackend.get_impl_cls,
-        ):
-            with pytest.raises(ValueError, match="cannot be enabled at the same time"):
-                get_backend_cls()
+    backend = select_dsa_backend(AscendDSABackend, use_pcp=True)
+    assert backend.get_builder_cls() is AscendDSAPCPMetadataBuilder
+    assert backend.get_impl_cls() is AscendDSAPCPImpl
+    assert (
+        AscendDSAPCPMetadataBuilder.get_cudagraph_support(cast(Any, None), cast(Any, None))
+        is AttentionCGSupport.UNIFORM_BATCH
+    )
+    with pytest.raises(ValueError, match="cannot be enabled at the same time"):
+        select_dsa_backend(AscendDSABackend, use_pcp=True, use_dsa_cp=True)
 
 
 def test_pcp_metadata_builds_from_manager_global_view():
@@ -1971,8 +2013,10 @@ def test_pcp_graph_metadata_restores_mtp_query_offsets():
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
+@pytest.mark.parametrize("include_replicated_draft", [False, True])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,
+    include_replicated_draft: bool,
 ):
     """Exercise batched cache preparation, local attention, and empty ranks."""
     impl = _make_impl(AscendDSAPCPImpl)
@@ -2029,6 +2073,14 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
         )
         for cache_prefix in cache_prefixes
     }
+    if include_replicated_draft:
+        # Draft metadata can precede target metadata in a shared capture batch.
+        attn_metadata = {
+            "draft.swa_cache": AscendDSAMetadata(
+                num_actual_tokens=4, num_decodes=4, num_decode_tokens=4, num_prefills=0
+            ),
+            **attn_metadata,
+        }
     hidden_states = torch.arange(16, dtype=torch.float32).reshape(4, 4)
     gathered_hidden_states = torch.arange(32, dtype=torch.float32).reshape(8, 4)
     attention_output = torch.arange(

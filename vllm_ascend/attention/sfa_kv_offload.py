@@ -1,7 +1,7 @@
 """Standalone SFA backend for Sparse KV offload.
 
-All Sparse KV offload related attention logic lives in this module and is selected by
-``AscendSFABackend.get_impl_cls()`` / ``get_builder_cls()`` when
+All Sparse KV offload related attention logic lives in this module.
+``AscendSFAKVOffloadBackend`` is selected at model loading when
 ``sparse_kv_offload_config.enabled`` is set, keeping ``sfa_v1.py`` clean.
 
 Data plane (see zsc-sfa-kv-offload-merge-plan.md):

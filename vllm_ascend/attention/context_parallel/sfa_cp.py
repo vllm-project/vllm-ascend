@@ -29,10 +29,8 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
     _round_up,
-    enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
-    enable_sfa_dcp_replicated_indexer,
     vllm_version_is,
 )
 from vllm_ascend.weight_switch import (
@@ -1513,39 +1511,3 @@ class AscendSFADSADCPMetadataBuilder(
 
 class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
     """Composes DCP collectives around the DSA-CP SFA implementation."""
-
-
-def resolve_sfa_metadata_builder(
-    vllm_config: VllmConfig | None = None,
-) -> type[AscendSFAMetadataBuilder]:
-    """Resolve one SFA metadata builder from the independent CP switches."""
-    dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if dsa_cp_enabled and dcp_enabled:
-        return AscendSFADSADCPMetadataBuilder
-    if dsa_cp_enabled:
-        return AscendSFADSACPMetadataBuilder
-    if pcp_enabled and dcp_enabled:
-        return AscendSFAPCPDCPMetadataBuilder
-    if dcp_enabled:
-        return AscendSFADCPMetadataBuilder
-    return AscendSFAMetadataBuilder
-
-
-def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
-    """Resolve one SFA implementation from the independent CP switches."""
-    dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
-    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
-    if dsa_cp_enabled and dcp_enabled:
-        return AscendSFADSADCPImpl
-    if dsa_cp_enabled:
-        return AscendSFADSACPImpl
-    if pcp_enabled and dcp_enabled:
-        return AscendSFAPCPDCPImpl
-    if dcp_enabled:
-        return AscendSFADCPImpl
-    if pcp_enabled:
-        return AscendSFAPCPImpl
-    return AscendSFAImpl

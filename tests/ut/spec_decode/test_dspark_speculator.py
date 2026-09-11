@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Unit tests for ``AscendDSparkSpeculator.load_draft_model`` fc rotation."""
+"""Unit tests for DSpark weight loading and attention setup."""
 
 from __future__ import annotations
 
@@ -98,3 +98,28 @@ class TestLoadDraftModel:
         monkeypatch.setattr(_ROT_MATRIX, _no_call)
         draft = _spec(_bf16_config()).load_draft_model(MagicMock(), set())
         assert torch.equal(draft.model.fc.weight.data, captured["before"])
+
+
+def test_set_attn_reuses_draft_group_backends(monkeypatch):
+    attention_backend, cache_backend = object(), object()
+    groups = [
+        [SimpleNamespace(backend=attention_backend, layer_names=["draft.0", "draft.1"])],
+        [],
+        [SimpleNamespace(backend=cache_backend, layer_names=["draft.cache"])],
+    ]
+
+    def set_attn(self, *args):
+        self.attn_groups = groups
+        self._context_slot_mappings = torch.tensor([0, 1], dtype=torch.int64)
+
+    monkeypatch.setattr(DSparkSpeculator, "set_attn", set_attn)
+    spec = _spec(SimpleNamespace())
+    spec.set_attn(None, None, None, None, None)
+
+    assert spec.attn_backends == {
+        "draft.0": attention_backend,
+        "draft.1": attention_backend,
+        "draft.cache": cache_backend,
+    }
+    assert spec._context_slot_mappings.dtype == torch.int32
+    assert spec._context_slot_mappings.tolist() == [0, 1]
