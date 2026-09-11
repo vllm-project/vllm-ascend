@@ -75,6 +75,10 @@ print(f"[K=1] empirical accept={emp:.4f} vs E[min(p/q,1)]={ref_h.mean().item():.
 # ---- Check 3: _compute_cumulative_log_p_kernel vs torch reference ----
 K, N = 1, 4096
 inputs, t1d, d1d = build(K, N)
+# build() draws fresh logits; recompute p/q here. Reusing Check 2's p/q
+# compares the kernel against a stale distribution and always fails.
+p = torch.softmax(t1d, dim=0)
+q = torch.softmax(d1d, dim=0)
 num_logits = N * (K + 1)
 vocab_num_blocks = triton.cdiv(V, VOCAB_BLOCK_SIZE)
 padded = triton.next_power_of_2(vocab_num_blocks)
