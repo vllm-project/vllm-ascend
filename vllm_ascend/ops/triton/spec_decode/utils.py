@@ -92,8 +92,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
     num_speculative_tokens,  # tl.int32
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
+    request_window_ok_ptr=0,  # [num_reqs], or null when checking is disabled
+    padding_slot_id=-1,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    CHECK_REQUEST_WINDOW: tl.constexpr = False,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
@@ -117,18 +120,37 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid(
 
         seq_len = tl.load(seq_lens_ptr + req_idx)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        if CHECK_REQUEST_WINDOW:
+            request_window_ok = tl.load(request_window_ok_ptr + req_idx).to(tl.int1)
+            valid_ctx = request_window_ok & (valid_ctx_end > 0)
+            safe_last_ctx_idx = tl.where(valid_ctx, valid_ctx_end - 1, 0)
+            last_pos = tl.load(target_positions_ptr + safe_last_ctx_idx, mask=valid_ctx, other=0)
+        else:
+            last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
 
         for q_idx in range(0, num_query_per_req):
             query_pos = last_pos + 1 + q_idx
             query_out_idx = req_idx * num_query_per_req + q_idx
-
+            if CHECK_REQUEST_WINDOW:
+                query_pos = tl.where(request_window_ok, query_pos, 0)
             tl.store(out_query_positions_ptr + query_out_idx, query_pos)
 
             query_cache_pos = effective_seq_len + q_idx
             block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
+            if CHECK_REQUEST_WINDOW:
+                # Select a valid address before pointer arithmetic. A masked
+                # load alone is insufficient once block_num_q crosses rows.
+                safe_block_num_q = tl.where(request_window_ok, block_num_q, 0)
+                block_id_q = tl.load(
+                    block_table_ptr + req_idx * block_table_stride + safe_block_num_q,
+                    mask=request_window_ok,
+                    other=0,
+                ).to(tl.int64)
+            else:
+                block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
             slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+            if CHECK_REQUEST_WINDOW:
+                slot_q = tl.where(request_window_ok, slot_q, padding_slot_id)
             tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
 
             if q_idx == 0:

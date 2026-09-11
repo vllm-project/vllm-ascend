@@ -44,6 +44,7 @@ _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
+_MAX_MODEL_LEN = 2048
 
 
 @pytest.mark.parametrize(
@@ -245,7 +246,8 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config),
+            model_config=SimpleNamespace(max_model_len=_MAX_MODEL_LEN),
         )
 
     @classmethod
@@ -255,6 +257,7 @@ class _DSparkProposerTestBase:
         max_num_tokens: int,
         num_reqs: int,
         block_size: int,
+        max_model_len: int = _MAX_MODEL_LEN,
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
     ):
@@ -268,10 +271,13 @@ class _DSparkProposerTestBase:
             runner: object | None = None,
         ) -> None:
             del runner
+            proposer.runner = SimpleNamespace(num_rejected_tokens_event=None)
             proposer.draft_model_config = vllm_config.speculative_config.draft_model_config
             proposer.num_speculative_tokens = block_size
+            proposer.parallel_drafting = True
             proposer.max_batch_size = num_reqs
             proposer.max_num_tokens = max_num_tokens
+            proposer.max_model_len = max_model_len
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
@@ -350,6 +356,10 @@ class _DSparkProposerTestBase:
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=torch.full((num_reqs,), seq_len, dtype=torch.int32),
+            _seq_lens_cpu=torch.full((num_reqs,), seq_len, dtype=torch.int32),
+            seq_lens_cpu=torch.full((num_reqs,), seq_len, dtype=torch.int32),
+            seq_lens_cpu_upper_bound=None,
+            parallel_draft_seq_lens_cpu=None,
             max_seq_len=seq_len,
         )
         if with_optional_attrs:
@@ -383,6 +393,8 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=torch.zeros(num_reqs + 1, dtype=torch.int32),
             seq_lens=torch.full((num_reqs,), 128, dtype=torch.int32),
+            _seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
+            seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
             max_seq_len=128,
         )
         proposer.set_inputs_first_pass(
@@ -740,6 +752,8 @@ class TestDSparkInitValidation:
         assert proposer.positions.shape == (max_query_tokens,)
         assert proposer.positions.dtype == torch.int32
         assert proposer._slot_mapping_buffer.shape == (max_query_tokens,)
+        assert torch.all(proposer._request_window_ok)
+        assert torch.all(proposer._request_window_ok_cpu)
         # per-group bookkeeping dicts start empty / None.
         assert proposer._per_group_block_tables == {}
         assert proposer._per_group_slot_mappings == {}
@@ -820,6 +834,9 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         kwargs = kernel[1,].call_args.kwargs
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
+        assert kwargs["request_window_ok_ptr"].data_ptr() == proposer._request_window_ok.data_ptr()
+        assert kwargs["padding_slot_id"] == -1
+        assert kwargs["CHECK_REQUEST_WINDOW"] is True
 
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
@@ -879,6 +896,41 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert torch.equal(cad.query_start_loc_cpu, expected_qsl)
         # seq_lens grow by block_size when no tokens were rejected.
         assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 + block_size, dtype=torch.int32))
+
+    def test_over_limit_request_disables_whole_dspark_window(self):
+        num_reqs, block_size, max_num_tokens = 2, 5, 32
+        max_model_len = 130
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            max_model_len=max_model_len,
+        )
+
+        _, _, cad, _ = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            seq_len=128,
+        )[:4]
+
+        assert torch.equal(cad.seq_lens, torch.ones(num_reqs, dtype=torch.int32))
+        assert not torch.any(proposer._request_window_ok[:num_reqs])
+        assert not torch.any(proposer._request_window_ok_cpu[:num_reqs])
+        assert cad.max_seq_len == max_model_len
+
+        proposer._prepare_parallel_draft_seq_lens_cpu(cad, num_reqs, None)
+        assert torch.equal(cad.parallel_draft_seq_lens_cpu, torch.ones(num_reqs, dtype=torch.int32))
+
+    def test_over_limit_draft_outputs_are_padding(self):
+        proposer = self._make_proposer(max_num_tokens=32, num_reqs=2, block_size=5)
+        proposer._request_window_ok[:2] = torch.tensor([True, False])
+        draft_token_ids = torch.arange(10, dtype=torch.int64).view(2, 5)
+
+        output = proposer.mask_invalid_draft_output(draft_token_ids)
+
+        assert torch.equal(output[0], torch.arange(5, dtype=torch.int64))
+        assert torch.equal(output[1], torch.full((5,), -1, dtype=torch.int64))
 
 
 class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
