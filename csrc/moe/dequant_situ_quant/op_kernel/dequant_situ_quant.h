@@ -755,9 +755,12 @@ public:
             if (hasBias_) {
                 biasGm_.SetGlobalBuffer((__gm__ float*)bias, expertNum_ * inputWidth_);
             }
-            if (hasGroupIndex_) {
-                groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
-            }
+        }
+        if (hasGroupIndex_) {
+            groupIndexGm_.SetGlobalBuffer((__gm__ int64_t*)groupIndex, expertNum_);
+            groupIndexGm32_.SetGlobalBuffer((__gm__ int32_t*)groupIndex, expertNum_ * 2);
+            pipe_->InitBuffer(groupIndexQue_, 1,
+                static_cast<uint32_t>(expertNum_ * sizeof(int64_t)));
         }
         yGm_.SetGlobalBuffer((__gm__ int8_t*)y, rowLen_ * outputWidth_);
         scaleGm_.SetGlobalBuffer((__gm__ float*)scale, rowLen_);
@@ -785,7 +788,42 @@ public:
         }
 
         if constexpr (!std::is_same_v<XType, int32_t>) {
-            ProcessGroup(0, rowLen_, 0);
+            if (hasGroupIndex_) {
+                // Bulk read group_index into local memory (1 DataCopy vs N GM reads)
+                LocalTensor<int32_t> groupIndexRaw = groupIndexQue_.AllocTensor<int32_t>();
+                DataCopyExtParams giParams{1,
+                    static_cast<uint32_t>(expertNum_ * sizeof(int64_t)), 0, 0, 0};
+                DataCopyPadExtParams<int32_t> giPadParams{false, 0, 0, 0};
+                DataCopyPad(groupIndexRaw, groupIndexGm32_, giParams, giPadParams);
+                groupIndexQue_.EnQue(groupIndexRaw);
+                groupIndexRaw = groupIndexQue_.DeQue<int32_t>();
+                LocalTensor<int64_t> groupIndexLocal =
+                    groupIndexRaw.ReinterpretCast<int64_t>();
+
+                // Round-robin expert assignment (cut_group pattern):
+                // Block b owns experts {b, b+usedCoreNum_, b+2*usedCoreNum_, ...}.
+                // Each block processes ALL rows of its owned experts (no ceil-division),
+                // spreading N active experts across N distinct blocks instead of
+                // concentrating all work on block 0.
+                int64_t groupOffset = 0;
+                int64_t cuGroupIdx = blockIdx_;
+                for (int64_t expertIdx = 0; expertIdx < expertNum_; ++expertIdx) {
+                    const int64_t requestedRows = groupIndexLocal.GetValue(expertIdx);
+                    if (expertIdx == cuGroupIdx && requestedRows > 0) {
+                        for (int64_t localRow = 0; localRow < requestedRows; ++localRow) {
+                            const int64_t rowIdx = groupOffset + localRow;
+                            CopyInRow(rowIdx);
+                            ComputeRow(rowIdx);
+                            CopyOutRow(rowIdx);
+                        }
+                        cuGroupIdx += usedCoreNum_;
+                    }
+                    groupOffset += requestedRows;
+                }
+                groupIndexQue_.FreeTensor(groupIndexRaw);
+            } else {
+                ProcessGroup(0, rowLen_, 0);
+            }
             return;
         }
 
@@ -1050,10 +1088,12 @@ private:
     TQue<QuePosition::VECIN, 1> weightScaleQueue_;
     TQue<QuePosition::VECIN, 1> biasQueue_;
     TQue<QuePosition::VECOUT, 1> outQueue_;
+    TQue<QuePosition::VECIN, 1> groupIndexQue_;
     TBuf<TPosition::VECCALC> tmpBuf_;
     TBuf<TPosition::VECCALC> dequantBuf_;
     LocalTensor<float> weightScaleLocal_;
     LocalTensor<float> biasLocal_;
+    GlobalTensor<int32_t> groupIndexGm32_;
 };
 
 } // namespace DequantSituQuantOps

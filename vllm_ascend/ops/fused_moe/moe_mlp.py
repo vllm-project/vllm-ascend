@@ -234,6 +234,7 @@ def _w4a8_situ_apply_mlp(
             dst_type=SITU_MX_DST_TYPE_E4M3FN,
         )
     else:
+        # group_index with round-robin block assignment skips padding rows
         hidden_states, situ_out_scale = torch.ops._C_ascend.dequant_situ_quant(
             x=gate_up_out,
             weight_scale=None,
@@ -241,7 +242,7 @@ def _w4a8_situ_apply_mlp(
             bias=None,
             quant_scale=None,
             quant_offset=None,
-            group_index=None,
+            group_index=cumsum_group_list(group_list, group_list_type, 1),
             beta=activation.beta,
             linear_beta=activation.linear_beta,
             activate_left=True,
