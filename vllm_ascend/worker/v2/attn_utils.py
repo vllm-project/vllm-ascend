@@ -44,9 +44,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import get_dcp_local_seq_lens
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    AscendDCPMetadata,
     get_sfa_qsfa_packed_head_dim,
     is_glm5_next_kpool_cache,
 )
@@ -187,6 +189,53 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
+def _build_dcp_metadata(
+    seq_lens_cpu: torch.Tensor,
+    num_computed_tokens_cpu: torch.Tensor | None,
+    query_start_loc_cpu: torch.Tensor,
+    is_prefilling: torch.Tensor | None,
+    num_reqs: int,
+    num_actual_reqs: int,
+) -> AscendDCPMetadata:
+    """Build the host-side DCP lengths consumed by MLA FIA.
+
+    Decode lengths include the tokens scheduled in the current step because
+    they have already been written to the KV cache before attention. Prefill
+    lengths contain only the cached prefix; the current query chunk is handled
+    by the regular prefill path.
+    """
+    parallel_config = get_current_vllm_config().parallel_config
+    dcp_size = parallel_config.decode_context_parallel_size
+    interleave_size = parallel_config.cp_kv_cache_interleave_size
+
+    seq_lens_cpu = seq_lens_cpu[:num_reqs]
+    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+
+    # Graph padding can make these request-level inputs shorter than
+    # ``num_reqs``. Padded requests are decode-shaped with zero lengths.
+    prefill_mask = torch.zeros(num_reqs, dtype=torch.bool)
+    if is_prefilling is not None:
+        count = min(num_reqs, is_prefilling.numel())
+        prefill_mask[:count] = is_prefilling[:count].to(dtype=torch.bool, device="cpu")
+
+    prefill_context_lens = seq_lens_cpu - query_lens_cpu
+    if num_computed_tokens_cpu is not None:
+        count = min(num_reqs, num_computed_tokens_cpu.numel())
+        prefill_context_lens[:count] = num_computed_tokens_cpu[:count]
+
+    context_lens_cpu = torch.where(prefill_mask, prefill_context_lens, seq_lens_cpu)
+    local_context_lens = get_dcp_local_seq_lens(
+        context_lens_cpu,
+        dcp_size,
+        interleave_size,
+    )
+    return AscendDCPMetadata(
+        num_computed_tokens_of_dcp=local_context_lens.numpy(),
+        query_lens_cpu=query_lens_cpu,
+        max_query_len=(int(query_lens_cpu[:num_actual_reqs].max().item()) if num_actual_reqs else 0),
+    )
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -247,6 +296,8 @@ def build_attn_metadata(
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
@@ -262,6 +313,19 @@ def build_attn_metadata(
             "is_prefilling",
             is_prefilling,
         )
+        attn_metadata_builders = [attn_group.get_metadata_builder(0) for attn_group in attn_groups[i]]
+        context_parallel_metadata = None
+        if dcp_local_seq_lens is not None and any(
+            isinstance(builder, AscendMlaDCPMetadataBuilder) for builder in attn_metadata_builders
+        ):
+            context_parallel_metadata = _build_dcp_metadata(
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                query_start_loc_cpu=query_start_loc_cpu,
+                is_prefilling=common_is_prefilling,
+                num_reqs=num_reqs,
+                num_actual_reqs=num_actual_reqs,
+            )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -277,15 +341,16 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
             is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            context_parallel_metadata=context_parallel_metadata,
             **common_attn_metadata_extra_kwargs,
         )
 
-        for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(0)
+        for attn_group, attn_metadata_builder in zip(attn_groups[i], attn_metadata_builders, strict=True):
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(

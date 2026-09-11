@@ -20,6 +20,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAMetadataBuilder,
     AscendMLAPrefillMetadata,
 )
+from vllm_ascend.attention.utils import AscendDCPMetadata
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
@@ -37,7 +38,7 @@ def test_mla_dcp_extends_v1_backend() -> None:
 
 
 @patch.object(AscendMLAMetadataBuilder, "build_decode_metadata")
-def test_mla_dcp_decode_derives_host_lens_from_mrv2_metadata(mock_build_decode) -> None:
+def test_mla_dcp_decode_uses_common_host_metadata(mock_build_decode) -> None:
     decode_metadata = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
     mock_build_decode.return_value = decode_metadata
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
@@ -45,10 +46,10 @@ def test_mla_dcp_decode_derives_host_lens_from_mrv2_metadata(mock_build_decode) 
     builder.dcp_size = 2
     builder.dcp_rank = 1
     builder.cp_local_block_size = 4
-    builder.seq_lens = torch.tensor([9, 14], dtype=torch.int32)
     common_attn_metadata = SimpleNamespace(
-        context_parallel_metadata=None,
-        dcp_local_seq_lens=object(),
+        context_parallel_metadata=AscendDCPMetadata(
+            num_computed_tokens_of_dcp=[[5, 4], [8, 6]],
+        ),
     )
 
     result = builder.build_decode_metadata(

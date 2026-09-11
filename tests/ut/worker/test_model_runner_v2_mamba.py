@@ -160,6 +160,7 @@ def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_m
         seq_lens=None,
         dcp_local_seq_lens=None,
         seq_lens_np=np.ones(4, dtype=np.int32),
+        num_computed_tokens_np=np.zeros(4, dtype=np.int32),
         positions=None,
         attn_state=None,
     )
