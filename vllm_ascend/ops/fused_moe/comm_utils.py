@@ -30,7 +30,9 @@ _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
 _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
-
+_CANN_MEGA_MOE_QUANT_MODE_MX = 4
+_CANN_ACL_FP8_E4M3 = 24
+_CANN_ACL_FP4_E2M1 = 296
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
     if output_split_sizes is None:
@@ -136,8 +138,12 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+    if quant_type == QuantType.W8A8MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_ACL_FP8_E4M3, _CANN_ACL_FP8_E4M3)
+    if quant_type == QuantType.W4A8MXFP:
+        return (_CANN_MEGA_MOE_QUANT_MODE_MX, _CANN_ACL_FP8_E4M3, _CANN_ACL_FP4_E2M1)
     if quant_type == QuantType.NONE:
         return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
     raise RuntimeError(
-        f"MegaMoe integration supports W8A8/W4A8/BF16 on A2/A3 MegaMoe platforms. Unsupported quant type: {quant_type}."
+        f"MegaMoe integration supports W8A8/W4A8/BF16 on A2/A3 platforms and W8A8/W4A8 on A5 platform. Unsupported quant type: {quant_type}."
     )
