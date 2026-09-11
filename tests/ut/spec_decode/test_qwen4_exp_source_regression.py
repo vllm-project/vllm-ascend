@@ -209,6 +209,8 @@ def test_qsa_triton_attention_loads_k_in_source_contiguous_order() -> None:
 def test_qsa_indexer_defaults_to_triton_selector() -> None:
     source = ast.unparse(_method(QSA, "AscendQSAIndexer", "_select"))
     assert "envs.VLLM_ASCEND_FORCE_QSA_REFERENCE" in source
+    assert "is_950()" in source
+    assert "VLLM_ASCEND_SOC_VERSION" not in source
     assert "qsa_select_paged_tokens_reference" in source
     assert "qsa_select_paged_tokens_triton" in source
     assert source.index("qsa_select_paged_tokens_reference") < source.index(
@@ -271,6 +273,29 @@ def test_qsa_expand_e3_is_packaged_for_ascend910_93() -> None:
     a3_start = source.index("matched SOC branch: ascend910_93")
     a5_start = source.index("matched SOC branch: ascend950", a3_start)
     assert '"qsa_expand_e3"' in source[a3_start:a5_start]
+
+
+def test_quant_lightning_indexer_v2_is_only_excluded_from_ascend950() -> None:
+    source = BUILD_ACLNN.read_text()
+    a2_start = source.index("matched SOC branch: ascend910b")
+    a3_start = source.index("matched SOC branch: ascend910_93", a2_start)
+    a5_start = source.index("matched SOC branch: ascend950", a3_start)
+    a5_end = source.index("else\n", a5_start)
+    op_names = (
+        '"quant_lightning_indexer_v2"',
+        '"quant_lightning_indexer_v2_metadata"',
+    )
+    for op_name in op_names:
+        assert op_name in source[a2_start:a3_start]
+        assert op_name in source[a3_start:a5_start]
+        assert op_name not in source[a5_start:a5_end]
+
+
+def test_qsa_sparse_attention_uses_a5_device_detection() -> None:
+    source = ast.unparse(_method(QSA, "AscendQSAImpl", "forward_qsa"))
+    assert "is_950()" in source
+    assert "envs.SOC_VERSION" not in source
+    assert "qsa_sparse_paged_attention_reference" in source
 
 
 def test_qsa_main_fused_norm_rope_is_gated_and_falls_back() -> None:

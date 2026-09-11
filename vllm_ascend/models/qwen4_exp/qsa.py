@@ -21,6 +21,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
 from vllm_ascend import envs
+from vllm_ascend.utils import is_950
 
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_sparse_paged_attention,
@@ -306,8 +307,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        soc_version = (envs.VLLM_ASCEND_SOC_VERSION or "").lower()
-        force_reference = envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or soc_version.startswith("ascend950")
+        force_reference = envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or is_950()
         if force_reference:
             return qsa_select_paged_tokens_reference(
                 query,
@@ -423,7 +423,7 @@ class AscendQSAImpl:
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         sparse_attention = qsa_sparse_paged_attention
-        if (envs.SOC_VERSION or "").lower().startswith("ascend950"):
+        if is_950():
             sparse_attention = qsa_sparse_paged_attention_reference
         return sparse_attention(
             query[:num_tokens],
