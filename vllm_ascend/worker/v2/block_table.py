@@ -99,6 +99,7 @@ class AscendBlockTables(BlockTables):
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
+            self.kernel_block_sizes_tensor,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,

@@ -106,7 +106,12 @@ def _get_graph_update_backend(
     for groups in attn_groups:
         for group in groups:
             backend = group.backend
-            if backend.get_impl_cls() is not None:
+            try:
+                impl_cls = backend.get_impl_cls()
+            except NotImplementedError:
+                # Metadata-only backends such as GDN have no attention impl.
+                continue
+            if impl_cls is not None:
                 return backend
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
