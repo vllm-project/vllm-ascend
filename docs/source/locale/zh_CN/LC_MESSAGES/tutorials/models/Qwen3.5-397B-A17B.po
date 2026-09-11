@@ -27,7 +27,7 @@ msgid ""
 " W8A8 quantized deployment for production serving on Ascend hardware."
 msgstr ""
 "Qwen3.5-397B-A17B 是一个大规模的 Qwen3.5 MoE 模型，它结合了多模态能力、长上下文推理、MTP 推测解码和 W8A8 "
-"量化部署，用于在升腾硬件上进行生产级服务。"
+"量化部署，用于在昇腾硬件上进行生产级服务。"
 
 msgid ""
 "This document describes the main validation steps for the model, including "

@@ -28,7 +28,7 @@ msgid ""
 "long-context online serving on Ascend hardware."
 msgstr ""
 "Qwen3.6-35B-A3B 是 Qwen3.6 系列中的稀疏 MoE 模型，总参数量为 35B，每个 token 激活约 3B 参数。它采用了 "
-"Qwen3.5 风格模型使用的混合注意力架构，适用于在升腾硬件上进行长上下文在线服务。"
+"Qwen3.5 风格模型使用的混合注意力架构，适用于在昇腾硬件上进行长上下文在线服务。"
 
 msgid ""
 "This document describes the main validation steps for the model, including "

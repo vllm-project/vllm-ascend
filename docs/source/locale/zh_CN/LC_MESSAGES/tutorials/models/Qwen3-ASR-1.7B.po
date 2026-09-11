@@ -37,7 +37,7 @@ msgid ""
 "This document describes the supported features, environment preparation, "
 "single-node deployment, functional verification, and evaluation workflow for"
 " Qwen3-ASR-1.7B on Ascend NPUs."
-msgstr "本文档描述了 Qwen3-ASR-1.7B 在升腾 NPU 上支持的特性、环境准备、单节点部署、功能验证及评估流程。"
+msgstr "本文档描述了 Qwen3-ASR-1.7B 在昇腾 NPU 上支持的特性、环境准备、单节点部署、功能验证及评估流程。"
 
 msgid ""
 "Qwen3-ASR-1.7B was introduced with upstream vLLM v0.19.0. Use a vLLM-Ascend "

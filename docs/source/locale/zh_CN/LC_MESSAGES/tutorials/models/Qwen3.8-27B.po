@@ -65,7 +65,7 @@ msgid ""
 " installation, multi-node deployment, functional verification, accuracy and "
 "performance evaluation, performance tuning, and FAQs."
 msgstr ""
-"本文档重点介绍在升腾 NPU "
+"本文档重点介绍在昇腾 NPU "
 "上的文本服务。它描述了该模型的主要验证步骤，包括支持的特性、前提条件、安装、多节点部署、功能验证、精度和性能评估、性能调优以及常见问题解答。"
 
 msgid ""
