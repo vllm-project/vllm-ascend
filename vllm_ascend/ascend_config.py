@@ -1029,6 +1029,14 @@ class FinegrainedTPConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+            # With PCP on, the upstream dispatch recomputes num_tokens from
+            # per-request num_scheduled_tokens, dropping the DP-padded count
+            # gather_batch_req_state reports — eager steps fall back to
+            # per-rank counts and the cross-DP collectives would hang.
+            if vc.parallel_config.prefill_context_parallel_size > 1:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size is not supported with prefill_context_parallel_size > 1."
+                )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:

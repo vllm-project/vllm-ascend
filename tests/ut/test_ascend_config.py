@@ -877,7 +877,9 @@ class TestSubconfigPydanticTypeValidation(TestBase):
 
         def vllm_config(cudagraph_mode):
             return SimpleNamespace(
-                parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=8),
+                parallel_config=SimpleNamespace(
+                    tensor_parallel_size=1, data_parallel_size=8, prefill_context_parallel_size=1
+                ),
                 compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
                 kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
                 model_config=SimpleNamespace(is_moe=True),
@@ -889,6 +891,26 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
             config._validate_preconditions(vllm_config(CUDAGraphMode.NONE))
         config._validate_preconditions(vllm_config(CUDAGraphMode.FULL_DECODE_ONLY))
+
+    def test_oproj_tp_rejects_pcp(self):
+        from vllm.config.compilation import CUDAGraphMode
+
+        def vllm_config(pcp_size):
+            return SimpleNamespace(
+                parallel_config=SimpleNamespace(
+                    tensor_parallel_size=1, data_parallel_size=8, prefill_context_parallel_size=pcp_size
+                ),
+                compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY),
+                kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+                model_config=SimpleNamespace(is_moe=True),
+            )
+
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        # PCP's dispatch recomputes the token count per rank, dropping the
+        # DP-padded count; eager steps would hang the cross-DP collectives.
+        with self.assertRaisesRegex(AssertionError, "not supported with prefill_context_parallel_size"):
+            config._validate_preconditions(vllm_config(2))
+        config._validate_preconditions(vllm_config(1))
 
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
