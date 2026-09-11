@@ -7,11 +7,21 @@ import pytest
 import torch
 from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
+    _apply_patch,
+    _is_pd_prefill_node,
+    _patch_engine_core,
+    _patch_model_config_validation,
+    _patch_model_runner_output,
+    _patch_scheduler_make_cached_request_data,
+    _patch_scheduler_update_after_schedule,
+    _patch_scheduler_update_from_output,
     _update_pp_mtp_spec_token_ids,
     _use_pp_ipc_runtime_patch,
+    _use_pp_mtp_runtime_patch,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -321,3 +331,102 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
     )
 
     assert request.spec_token_ids == [301, 302]
+
+
+def test_pp_mtp_helpers_and_patch_reentry():
+    assert _is_pd_prefill_node(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_role="kv_producer"))) is True
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        speculative_config=object(),
+        use_v2_model_runner=False,
+    )
+    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=True) is True
+    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=False) is False
+    vllm_config.speculative_config = None
+    assert _use_pp_mtp_runtime_patch(vllm_config, use_pp=True) is False
+
+    _apply_patch()
+    _patch_model_runner_output()
+    _patch_engine_core()
+    _patch_scheduler_update_after_schedule()
+    _patch_scheduler_make_cached_request_data()
+    _patch_scheduler_update_from_output()
+    _patch_model_config_validation()
+
+
+def test_pp_mtp_post_step_skips_inflight_batch():
+    engine = SimpleNamespace(
+        scheduler=SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                kv_transfer_config=None,
+                speculative_config=object(),
+                use_v2_model_runner=False,
+            ),
+            use_pp=True,
+        ),
+        batch_queue=object(),
+        async_scheduling=False,
+        use_spec_decode=True,
+    )
+    assert EngineCore.post_step(engine, True) is None
+
+
+def test_pp_mtp_spec_token_id_edge_cases():
+    finished = SimpleNamespace(is_finished=lambda: True, spec_token_ids=["keep"])
+    grammar = SimpleNamespace(validate_tokens=lambda tokens: tokens[:1])
+    advancing = SimpleNamespace(
+        spec_token_ids=[],
+        is_finished=lambda: False,
+        structured_output_request=SimpleNamespace(grammar=grammar),
+    )
+    empty_sampled = SimpleNamespace(
+        spec_token_ids=["keep"],
+        is_finished=lambda: False,
+    )
+    scheduler = SimpleNamespace(
+        requests={"fin": finished, "adv": advancing, "empty": empty_sampled},
+        structured_output_manager=SimpleNamespace(should_advance=lambda req: req is advancing),
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"missing": 1, "fin": 1, "no-index": 1, "empty": 1, "adv": 1},
+    )
+    model_runner_output = SimpleNamespace(
+        spec_token_ids=[[301, 302], [401, 402], [501, 502]],
+        sampled_token_ids=[[], [200], [200]],
+        req_id_to_index={"fin": 0, "empty": 0, "adv": 1},
+    )
+    _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, SimpleNamespace(spec_token_ids=None))
+    _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output)
+    assert finished.spec_token_ids == ["keep"]
+    assert empty_sampled.spec_token_ids == []
+    assert advancing.spec_token_ids == [401]
+
+
+def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.use_pp = True
+    scheduler.use_v2_model_runner = False
+    scheduler.scheduler_config = SimpleNamespace(async_scheduling=True)
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        speculative_config=object(),
+        use_v2_model_runner=False,
+    )
+    scheduler.prev_step_scheduled_req_ids = set()
+    req_empty = SimpleNamespace(
+        request_id="req-0",
+        all_token_ids=[],
+        num_computed_tokens=3,
+        num_output_tokens=0,
+        num_output_placeholders=0,
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
+    cached = Scheduler._make_cached_request_data(
+        scheduler,
+        running_reqs=[req_empty],
+        resumed_reqs=[],
+        num_scheduled_tokens={"req-0": 2},
+        spec_decode_tokens={},
+        req_to_new_blocks={"req-0": blocks},
+    )
+    assert cached.new_token_ids == [[]]
