@@ -26,7 +26,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 The features below are the ones enabled by the verified deployment commands in [Chapter 5](#5-online-service-deployment).
 
-| Feature | Description | `Configuration` |
+| Feature | Description | Configuration |
 | --- | --- | --- |
 | Tensor Parallel (TP) | Splits the model across all 16 NPUs within a node. | `--tensor-parallel-size 16` |
 | Expert Parallel (EP) | Distributes the MoE experts (256 routed + 1 shared per layer) across NPUs. | `--enable-expert-parallel` |
