@@ -36,7 +36,6 @@
 
 import torch
 from torch import nn
-
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -46,7 +45,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.step3p5 import (
@@ -62,13 +61,10 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 
-from vllm_ascend.device.device_op import DeviceOperator
-
 # Apply the DP=1 SP property in worker processes too (platform-side module;
 # loaded in engine-core processes via vllm_ascend.patch.platform).
 import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
-
-logger = init_logger(__name__)
+from vllm_ascend.device.device_op import DeviceOperator
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +148,7 @@ def _patched_fused_moe_block_init(
 
     if self.tp_size > config.moe_num_experts:
         raise ValueError(
-            f"Tensor parallel size {self.tp_size} is greater than "
-            f"the number of experts {config.moe_num_experts}."
+            f"Tensor parallel size {self.tp_size} is greater than the number of experts {config.moe_num_experts}."
         )
 
     self.gate = FP32ReplicatedLinear(
@@ -172,22 +167,14 @@ def _patched_fused_moe_block_init(
         requires_grad=False,
     )
     self.need_fp32_gate = config.need_fp32_gate
-    assert self.need_fp32_gate, (
-        "Router logits must use FP32 precision for numerical stability."
-    )
+    assert self.need_fp32_gate, "Router logits must use FP32 precision for numerical stability."
 
     activation = "silu"
     swiglu_limits = config.swiglu_limits or []
-    swiglu_limit = (
-        swiglu_limits[self.layer_idx]
-        if self.layer_idx < len(swiglu_limits)
-        else None
-    )
+    swiglu_limit = swiglu_limits[self.layer_idx] if self.layer_idx < len(swiglu_limits) else None
     if swiglu_limit not in (None, 0):
         swiglu_limit = float(swiglu_limit)
-        assert swiglu_limit == 7.0, (
-            "Swiglu limit in fused moe block only support 7.0 now."
-        )
+        assert swiglu_limit == 7.0, "Swiglu limit in fused moe block only support 7.0 now."
         activation = "swiglustep"
         logger.debug(
             "step3p5 layer_idx: %s, activation: %s, limit: %s",
@@ -254,26 +241,17 @@ def _patched_decoder_layer_init(
         if (
             getattr(config, "attention_other_setting", None)
             and getattr(config, "layer_types", [])
-            and config.layer_types[layer_idx]
-            == config.attention_other_setting["attention_type"]
+            and config.layer_types[layer_idx] == config.attention_other_setting["attention_type"]
         ):
-            num_attention_heads = config.attention_other_setting[
-                "num_attention_heads"
-            ]
-            num_attention_groups = config.attention_other_setting[
-                "num_attention_groups"
-            ]
+            num_attention_heads = config.attention_other_setting["num_attention_heads"]
+            num_attention_groups = config.attention_other_setting["num_attention_groups"]
             head_dim = config.attention_other_setting["head_dim"]
         partial_rotary_factors = getattr(config, "partial_rotary_factors", [])
         self.self_attn = Step3p5Attention(
             hidden_size=self.hidden_size,
-            num_heads=num_attention_heads
-            if num_attention_heads
-            else config.num_attention_heads,
+            num_heads=num_attention_heads if num_attention_heads else config.num_attention_heads,
             max_position=config.max_position_embeddings,
-            num_kv_heads=num_attention_groups
-            if num_attention_groups
-            else config.num_attention_groups,
+            num_kv_heads=num_attention_groups if num_attention_groups else config.num_attention_groups,
             rope_theta=config.rope_theta,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
@@ -282,27 +260,18 @@ def _patched_decoder_layer_init(
             quant_config=quant_config,
             rope_scaling=getattr(config, "rope_scaling", None),
             sliding_window=getattr(config, "sliding_window", None),
-            use_head_wise_attn_gate=getattr(
-                config, "use_head_wise_attn_gate", False
-            ),
+            use_head_wise_attn_gate=getattr(config, "use_head_wise_attn_gate", False),
             layer_types=getattr(config, "layer_types", []),
             use_rope_layers=getattr(config, "use_rope_layers", []),
             yarn_only_types=getattr(config, "yarn_only_types", []),
-            partial_rotary_factor=partial_rotary_factors[layer_idx]
-            if partial_rotary_factors
-            else 1.0,
+            partial_rotary_factor=partial_rotary_factors[layer_idx] if partial_rotary_factors else 1.0,
             prefix=f"{prefix}.self_attn",
         )
     else:
-        raise ValueError(
-            f"Unsupported attention implementation: {config.att_impl_type}"
-        )
+        raise ValueError(f"Unsupported attention implementation: {config.att_impl_type}")
     self.use_moe = False
     self.tp_group = get_tp_group()
-    self.use_fused_all_reduce = (
-        get_tensor_model_parallel_world_size() > 1
-        and get_dp_group().world_size == 1
-    )
+    self.use_fused_all_reduce = get_tensor_model_parallel_world_size() > 1 and get_dp_group().world_size == 1
     if self.use_fused_all_reduce:
         logger.warning_once("Enable custom fused all reduce...")
     else:
@@ -316,9 +285,7 @@ def _patched_decoder_layer_init(
     is_moe_layer = layer_idx in moe_layers_idx
     # SP-for-MoE (mirrors DeepseekV2DecoderLayer.use_sequence_parallel_moe).
     self.use_sequence_parallel_moe = (
-        parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
-        and is_moe_layer
+        parallel_config.use_sequence_parallel_moe and parallel_config.pipeline_parallel_size == 1 and is_moe_layer
     )
     # On SP layers, keep the attention output as a partial sum (skip the
     # o_proj TP all-reduce) so it can be reduce_scattered to per-rank token
@@ -343,9 +310,7 @@ def _patched_decoder_layer_init(
             prefix=f"{prefix}.mlp",
         )
     self.input_layernorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
-    self.post_attention_layernorm = GemmaRMSNorm(
-        config.hidden_size, config.rms_norm_eps
-    )
+    self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
     self.prefix = prefix
 
 
@@ -357,10 +322,7 @@ def _patched_decoder_layer_forward(
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
     full_num_tokens = positions.shape[0]
-    input_is_sequence_parallel = (
-        self.use_sequence_parallel_moe
-        and hidden_states.shape[0] != full_num_tokens
-    )
+    input_is_sequence_parallel = self.use_sequence_parallel_moe and hidden_states.shape[0] != full_num_tokens
     if hidden_states.shape[0] != full_num_tokens and not self.use_moe:
         # Dense layer receiving an SP-sliced input (previous MoE-SP layer
         # output): restore the full sequence so attention/MLP run on
@@ -422,10 +384,7 @@ def _patched_step3p5_model_forward(
         intermediate_tensors,
         inputs_embeds,
     )
-    if (
-        isinstance(hidden_states, torch.Tensor)
-        and hidden_states.shape[0] != positions.shape[0]
-    ):
+    if isinstance(hidden_states, torch.Tensor) and hidden_states.shape[0] != positions.shape[0]:
         hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         hidden_states = hidden_states[: positions.shape[0]]
     return hidden_states

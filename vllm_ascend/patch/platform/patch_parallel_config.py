@@ -23,6 +23,7 @@ from vllm.config.parallel import ParallelConfig
 # accesses before that (e.g. forward-time reads) return False without caching,
 # so the decision can be re-resolved on a later access.
 
+
 # Replicates vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe
 # (vllm main). Upstream requires a DP group because the
 # allgather_reducescatter EP backend uses it for the expert dispatch
@@ -43,5 +44,6 @@ def _use_sequence_parallel_moe(self) -> bool:
         and self.enable_expert_parallel
         and self.tensor_parallel_size > 1
     )
+
 
 ParallelConfig.use_sequence_parallel_moe = property(_use_sequence_parallel_moe)
