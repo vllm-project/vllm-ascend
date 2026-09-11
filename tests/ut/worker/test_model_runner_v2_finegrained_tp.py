@@ -226,6 +226,7 @@ def _make_dp_padding_runner(enabled=True, aligned_tokens=0):
     runner.dp_size = 8
     runner.dp_rank = 3
     runner.decode_query_len = 2
+    runner.max_num_reqs = 8
     # need_timing=False keeps both profiling helpers pure no-ops (no NPU sync).
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
@@ -313,14 +314,21 @@ def test_dp_padding_dummy_step_forwards_group_max():
 
 def test_dp_padded_dummy_output_keeps_decode_shape():
     """The rewrite must stay uniform-decode shaped (graph match) with an exact total."""
-    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=4, decode_query_len=2)
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=4, decode_query_len=2, max_num_reqs=8)
     assert list(out.num_scheduled_tokens.values()) == [2, 2]
     assert out.total_num_scheduled_tokens == 4
 
-    # A remainder keeps the eager row count exact; the step is non-uniform anyway.
-    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=5, decode_query_len=2)
+    # A remainder keeps the total exact; the batch is non-uniform, so no decode
+    # graph matches regardless of the dummy's shape.
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=5, decode_query_len=2, max_num_reqs=8)
     assert list(out.num_scheduled_tokens.values()) == [2, 2, 1]
     assert out.total_num_scheduled_tokens == 5
+
+    # Past max_num_reqs the decode graphs cannot match either; fall back to
+    # _dummy_run's bounded even split, keeping the total exact.
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=9, decode_query_len=2, max_num_reqs=3)
+    assert list(out.num_scheduled_tokens.values()) == [3, 3, 3]
+    assert out.total_num_scheduled_tokens == 9
 
 
 @pytest.mark.parametrize(
