@@ -86,22 +86,20 @@ def test_selector_walk_kernel_ascend_greedy_walk(sample_probabilistic: bool):
     """Greedy walk: argmax per step, lowest index wins ties, chained via the
     previous step's winner. Row 1 is padding (req_state < 0) and must not
     write. With temperature 0 the probabilistic variant must stay greedy."""
-    device = torch.device("npu")
     num_steps, top_k = 2, 3
     candidates = torch.tensor(
         [[100, 200, 300], [400, 500, 600], [7, 8, 9], [70, 80, 90]],
         dtype=torch.int64,
-        device=device,
     )
-    scores = torch.full((4, top_k, top_k), 7.0, dtype=torch.float32, device=device)
+    scores = torch.full((4, top_k, top_k), 7.0, dtype=torch.float32)
     scores[0, 0] = torch.tensor([0.5, 0.9, 0.9])  # tie between 1 and 2
     scores[1, 1] = torch.tensor([-1.0, -2.0, 3.0])  # continues from candidate 1
-    sample_pos = torch.arange(1, 5, dtype=torch.int64, device=device)
-    req_state = torch.tensor([0, 0, -1, -1], dtype=torch.int32, device=device)
-    temperature = torch.tensor([0.0], dtype=torch.float32, device=device)
-    seeds = torch.tensor([0], dtype=torch.int64, device=device)
-    tokens = torch.full((4,), -123, dtype=torch.int64, device=device)
-    realized = torch.full((4, top_k), -777.0, dtype=torch.float32, device=device)
+    sample_pos = torch.arange(1, 5, dtype=torch.int64)
+    req_state = torch.tensor([0, 0, -1, -1], dtype=torch.int32)
+    temperature = torch.tensor([0.0], dtype=torch.float32)
+    seeds = torch.tensor([0], dtype=torch.int64)
+    tokens = torch.full((4,), -123, dtype=torch.int64)
+    realized = torch.full((4, top_k), -777.0, dtype=torch.float32)
 
     _selector_walk_kernel_ascend[(2,)](
         scores,

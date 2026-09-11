@@ -127,4 +127,13 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
         # (fake-tensor shape mismatch on the NPU meta kernels).
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            raise NotImplementedError(
+                "dflash2 does not currently support graph mode; "
+                "please enable enforce_eager. This is because the "
+                "_selector_walk_kernel_ascend operator must be reimplemented "
+                "due to NPU hardware constraints and cannot reuse the upstream "
+                "vLLM implementation. Graph mode will be supported in a future "
+                "release."
+            )
         super().init_cudagraph_manager(cudagraph_mode)
