@@ -1642,7 +1642,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if self._session_tracker is not None:
                 self._session_tracker.revoke_put_keys(keys)
 
-    def _handle_range_request(self, req_meta: LayerRangeReqMeta) -> None:
+    def _handle_range_request(self, req_meta: LayerRangeReqMeta, final_group_layer: bool | None = None) -> None:
         layer_id = req_meta.layer_id
         if self._active_put_keys is None or layer_id == 0:
             self._active_put_keys = set(req_meta.keys)
@@ -1676,7 +1676,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
 
-        if layer_id != self.final_layer_id:
+        if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
         active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
         if active_keys:
@@ -1698,38 +1698,39 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self._active_put_keys = None
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
-        layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
-        shared: SharedBlockData | None = None
+        layer_id = transfer_tasks[0].layer_id
+        if not hasattr(self, "_group_put_keys"):
+            self._group_put_keys = {}
         try:
-            if len(transfer_tasks) != 1:
-                raise ValueError(f"Expected one Mooncake range task, got {len(transfer_tasks)}")
-            task = transfer_tasks[0]
-            shared = task.shared_block_data
-            if shared is None:
-                raise RuntimeError("Mooncake range save requires shared block metadata")
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
-            if not isinstance(req_meta, LayerRangeReqMeta):
-                raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
-            self._handle_range_request(req_meta)
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-                if self.try_finish_and_delete_stored_request(req_id):
-                    self.set_finished_request(req_id)
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    raise RuntimeError("Mooncake range save requires shared block metadata")
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                if not isinstance(req_meta, LayerRangeReqMeta):
+                    raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
+                req_meta.layer_id = layer_id
+                self._active_put_keys = self._group_put_keys.get(task.group_id)
+                try:
+                    self._handle_range_request(req_meta, task.final_group_layer or layer_id == self.final_layer_id)
+                finally:
+                    self._group_put_keys[task.group_id] = self._active_put_keys
+                for req_id in req_meta.req_ids:
+                    self.dec_stored_request(req_id)
+                    if self.try_finish_and_delete_stored_request(req_id):
+                        self.set_finished_request(req_id)
         except Exception as exc:
             self._fatal_error = exc
-            if self._active_put_keys is not None:
-                keys_to_revoke = sorted(self._active_put_keys)
-            elif shared is not None and shared.block_keys is not None:
-                keys_to_revoke = list(dict.fromkeys(shared.block_keys))
-            else:
-                keys_to_revoke = []
+            # All started objects belong to the failed forward step, including
+            # groups whose first physical layer has not been visited yet.
+            with self._put_started_keys_lock:
+                keys_to_revoke = list(self._put_started_keys)
             self._revoke_range_keys(keys_to_revoke)
-            self._active_put_keys = set()
+            self._group_put_keys.clear()
             raise
         finally:
-            if not self.layer_save_finished_events[layer_id].is_set():
-                self.layer_save_finished_events[layer_id].set()
+            self.layer_save_finished_events[layer_id].set()
             transfer_tasks.clear()
             self.request_queue.task_done()
 
@@ -1972,22 +1973,25 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.sync_save_events[wait_for_save].synchronize()
                 self.layer_save_finished_events[wait_for_save].clear()
 
-            if len(data.transfer_tasks) != 1:
-                raise ValueError(f"Expected one Mooncake range task, got {len(data.transfer_tasks)}")
-            task = data.transfer_tasks[0]
-            shared = task.shared_block_data
-            if shared is None:
-                raise RuntimeError("Mooncake range load requires shared block metadata")
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
-            if not isinstance(req_meta, LayerRangeReqMeta):
-                raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
             if data.attention_start_gate is not None:
                 while not data.attention_start_gate.wait(timeout=10):
                     logger.info("Layerwise %d load waits for attention compute start", layer_id)
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
-            self._handle_range_request(req_meta, shared)
+            if not hasattr(self, "_group_load_indices"):
+                self._group_load_indices = {}
+            for task in data.transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    raise RuntimeError("Mooncake range load requires shared block metadata")
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                if not isinstance(req_meta, LayerRangeReqMeta):
+                    raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
+                req_meta.layer_id = layer_id
+                self._active_load_indices = self._group_load_indices.get(task.group_id)
+                self._handle_range_request(req_meta, shared)
+                self._group_load_indices[task.group_id] = None if task.final_group_layer else self._active_load_indices
         except Exception as exc:
             self._fatal_error = exc
             if self._active_load_indices is not None:

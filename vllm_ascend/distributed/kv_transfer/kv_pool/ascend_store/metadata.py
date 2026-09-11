@@ -1274,6 +1274,8 @@ class LayerTransferTask:
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
     # Mooncake uses one remote object per block/rank with per-layer ranges.
     use_key_major_ranges: bool = False
+    # Group-local completion differs from the physical model layer boundary.
+    final_group_layer: bool = False
 
 
 @dataclass

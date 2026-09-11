@@ -26,22 +26,22 @@ class MooncakeSessionTracker:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._request_load_entries: dict[str, dict[str, int]] = {}
-        self._pending_put_owners: dict[str, dict[str, int]] = {}
+        self._request_load_entries: dict[str, dict[str, tuple[int, int]]] = {}
+        self._pending_put_owners: dict[str, dict[str, tuple[int, int]]] = {}
         self._load_key_owners: dict[str, set[str]] = {}
 
     @staticmethod
-    def _replace_block_entry(entries: dict[str, int], key: str, block_index: int) -> None:
+    def _replace_block_entry(entries: dict[str, tuple[int, int]], key: str, block_index: tuple[int, int]) -> None:
         for previous_key, previous_index in list(entries.items()):
             if previous_index == block_index and previous_key != key:
                 del entries[previous_key]
         entries[key] = block_index
 
-    def register_put_keys(self, req_id: str, entries: Iterable[tuple[str, int]]) -> None:
+    def register_put_keys(self, req_id: str, entries: Iterable[tuple[str, int]], group_id: int = 0) -> None:
         """Remember which requests should consume a key after commit succeeds."""
         with self._lock:
             for key, block_index in entries:
-                self._pending_put_owners.setdefault(key, {})[req_id] = block_index
+                self._pending_put_owners.setdefault(key, {})[req_id] = (group_id, block_index)
 
     def commit_put_keys(self, keys: Iterable[str]) -> None:
         """Promote committed keys into each owner's future load set."""
@@ -61,13 +61,14 @@ class MooncakeSessionTracker:
         self,
         req_id: str,
         current_entries: Iterable[tuple[str, int]],
+        group_id: int = 0,
     ) -> list[tuple[str, int]]:
         """Merge current remote hits with keys committed by earlier chunks."""
         with self._lock:
             entries = self._request_load_entries.setdefault(req_id, {})
             for key, block_index in current_entries:
-                self._replace_block_entry(entries, key, block_index)
-            return list(entries.items())
+                self._replace_block_entry(entries, key, (group_id, block_index))
+            return [(key, index) for key, (group, index) in entries.items() if group == group_id]
 
     def record_get_result(
         self,

@@ -5,6 +5,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Generator, Sequence
+from contextlib import suppress
 from typing import Any
 
 import numpy as np
@@ -86,6 +87,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid import (
+    hybrid_layout_id,
+    prepare_group_sessions,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
     MooncakeSessionTracker,
@@ -209,10 +214,15 @@ class KVPoolWorker:
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.use_layerwise_transfer = use_layerwise and self.layerwise_protocol is not None
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
-        self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
-        if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
-            raise ValueError("Mooncake layerwise does not yet support hybrid or multi-group KV cache layouts")
+        self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
+            self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
+        )
+        self.mooncake_hybrid = self.use_block_key_layerwise and self.use_hybrid
+        self.mooncake_hybrid_layout = hybrid_layout_id(kv_cache_config, self.tp_size) if self.mooncake_hybrid else ""
+        self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
+        if self.mooncake_hybrid and self.use_mamba:
+            raise ValueError("Mooncake hybrid layerwise does not yet support recurrent Mamba state")
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
@@ -1038,6 +1048,7 @@ class KVPoolWorker:
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
             self.layer_load_tasks = [[] for _ in range(self.num_layers)]
             reset_attention_compute_start_gate()
+            self._attention_saved_layers = set()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
@@ -1286,6 +1297,8 @@ class KVPoolWorker:
                     group_id=group_id,
                     layer_idx_in_group=layer_idx_in_group,
                     use_key_major_ranges=(self.use_block_key_layerwise and self.backend_name == "mooncake"),
+                    final_group_layer=layer_idx_in_group
+                    == getattr(self, "group_num_layers", {}).get(group_id, self.num_layers) - 1,
                 )
             )
 
@@ -1396,6 +1409,8 @@ class KVPoolWorker:
                     group_id=group_id,
                     layer_idx_in_group=layer_idx_in_group,
                     use_key_major_ranges=(self.use_block_key_layerwise and self.backend_name == "mooncake"),
+                    final_group_layer=layer_idx_in_group
+                    == getattr(self, "group_num_layers", {}).get(group_id, self.num_layers) - 1,
                 )
             )
 
@@ -2222,6 +2237,10 @@ class KVPoolWorker:
         everything) when the coordinator is unavailable or the save extent
         is not aligned.
         """
+        if getattr(self, "mooncake_hybrid", False) and request.can_save and request.save_end_token > 0:
+            if self.cache_coordinator is None or request.save_end_token % self.cache_transfer_granularity:
+                raise ValueError("Mooncake hybrid saves require a coordinator-aligned full-block boundary")
+            return self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
         if self.cache_coordinator is None:
             return None
         if request.save_end_token <= 0:
@@ -2244,6 +2263,10 @@ class KVPoolWorker:
         managers need for a hit of ``cached_tokens`` are fetched, which is a
         subset of the blocks persisted by the reachable store masks.
         """
+        if getattr(self, "mooncake_hybrid", False) and cached_tokens > 0:
+            if self.cache_coordinator is None:
+                raise ValueError("Mooncake hybrid loads require a reachability coordinator")
+            return self.token_database.load_mask(request.block_hashes, cached_tokens)
         if self.cache_coordinator is None or cached_tokens <= 0:
             return None
         try:
@@ -2273,15 +2296,21 @@ class KVPoolWorker:
             layer_offset = 0
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-        if self.backend_name == "mooncake" and self.use_block_key_layerwise:
-            self._prepare_mooncake_layerwise_sessions(requests)
         for request in requests:
             request.store_masks = self._compute_reachable_store_masks(request)
+        group_requests = {}
+        if self.backend_name == "mooncake" and self.use_block_key_layerwise:
+            if self.mooncake_hybrid:
+                group_requests = prepare_group_sessions(self, requests)
+            else:
+                self._prepare_mooncake_layerwise_sessions(requests)
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_save_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
+                self._process_save_for_layer_batch(
+                    group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
+                )
         # Protect the previous partial before allocating the next snapshot.
         self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
@@ -2290,8 +2319,54 @@ class KVPoolWorker:
             physical_layer = local_layer + layer_offset
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_load_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
+                self._process_load_for_layer_batch(
+                    group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
+                )
         self._build_shared_load_data()
+
+    def _check_hybrid_load_errors(self) -> None:
+        # A hybrid block ID can belong to SWA, compressed KV or compressor
+        # state. Do not feed partially restored state to the attention kernel.
+        with self._invalid_block_ids_lock:
+            if self._invalid_block_ids:
+                self._layer_load_aborted.set()
+                raise RuntimeError("Mooncake hybrid layerwise load failed; refusing incomplete KV/state")
+
+    def _submit_attention_save(self, layer_id: int) -> None:
+        """Start current-layer put only once KV is ready at attention entry."""
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
+            return
+        self._attention_saved_layers.add(layer_id)
+        self.sync_save_events[layer_id].record()
+        tasks = self.layer_save_tasks[layer_id]
+        if not tasks:
+            self.layer_save_finished_events[layer_id].set()
+            return
+        for task in tasks:
+            for block_range in task.block_ranges:
+                self.kv_send_thread.add_stored_request(block_range.request.req_id)
+        self.kv_send_thread.add_request(tasks)
+
+    def _finish_attention_window(self) -> None:
+        try:
+            self._drain_attention_transfers()
+        except Exception:
+            self._layer_load_aborted.set()
+            self._finish_current_mooncake_load_sessions()
+            raise
+
+    def _drain_attention_transfers(self) -> None:
+        """Do not enqueue output-projection/MoE communication before I/O ends."""
+        for thread in (self.kv_recv_thread, self.kv_send_thread):
+            if thread is None:
+                continue
+            queue = thread.request_queue
+            with queue.all_tasks_done:
+                while queue.unfinished_tasks:
+                    thread.raise_if_failed()
+                    queue.all_tasks_done.wait(timeout=0.1)
+            thread.raise_if_failed()
+        self._check_hybrid_load_errors()
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
@@ -2315,6 +2390,8 @@ class KVPoolWorker:
             return True
 
         submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
+        if getattr(self, "mooncake_hybrid", False):
+            submit_count = max(0, self.current_layer + self.num_prefetch_layers + 1 - self.next_layer_to_submit)
         submitted_layers = 0
         while submitted_layers < submit_count and self.next_layer_to_submit < self.num_layers:
             layer_id = self.next_layer_to_submit
@@ -2327,9 +2404,18 @@ class KVPoolWorker:
             return
         assert self.layer_load_finished_events is not None
         assert self.kv_recv_thread is not None
+        gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
-            reset_attention_compute_start_gate()
+            if getattr(self, "mooncake_hybrid", False):
+                layer_id = self.current_layer
+                gate.on_start = lambda: self._submit_attention_save(layer_id)
+                gate.on_finish = self._finish_attention_window
+            if getattr(self, "mooncake_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
+                # An unprefetched demand load must not race earlier collectives.
+                boundary = torch.npu.Event()
+                boundary.record()
+                boundary.synchronize()
             self._submit_ready_layer_loads()
             should_wait = (
                 bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
@@ -2341,13 +2427,25 @@ class KVPoolWorker:
                 self.kv_recv_thread.raise_if_failed()
             elif self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
+            if getattr(self, "mooncake_hybrid", False):
+                self._check_hybrid_load_errors()
         except Exception:
             if hasattr(self, "_layer_load_aborted"):
                 self._layer_load_aborted.set()
+            if getattr(self, "mooncake_hybrid", False):
+                gate.cancel()
+                # Range calls must finish before releasing their get sessions.
+                with suppress(Exception):
+                    self._drain_attention_transfers()
             if getattr(self, "backend_name", None) == "mooncake" and getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_mooncake_load_sessions()
             raise
         self.layer_load_finished_events[self.current_layer].clear()
+        if getattr(self, "mooncake_hybrid", False) and self.current_layer == self.num_layers - 1:
+            # The final model layer can have no reachable load rows. Completion
+            # belongs to the whole request, not whichever group happens to end here.
+            for req_id in self._current_mooncake_last_chunk_req_ids:
+                self.kv_recv_thread.set_finished_request(req_id)
         if (
             getattr(self, "backend_name", None) == "mooncake"
             and getattr(self, "use_block_key_layerwise", False)
@@ -2378,6 +2476,9 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
+        if self.current_layer in getattr(self, "_attention_saved_layers", set()):
+            self.current_layer += 1
+            return
         self.sync_save_events[self.current_layer].record()
         if self.layer_save_tasks[self.current_layer]:
             for task in self.layer_save_tasks[self.current_layer]:
