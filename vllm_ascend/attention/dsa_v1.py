@@ -734,11 +734,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             speculative_config is not None
             and speculative_config.method == "dspark"
             and getattr(
-                speculative_config, "enable_adaptive_verification",
+                speculative_config,
+                "enable_adaptive_verification",
                 False,
             )
         ):
-          return AttentionCGSupport.ALWAYS
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
