@@ -7,6 +7,7 @@
 Target path aligns with MRv1 concurrent uniform SpecDecoding FULL (hybrid
 ``prepare_attn`` actual/pad split). Draft-prefill FULL (K=1) uses
 ``AutoRegressiveAclGraphManager310`` with SpecDecoding capture (splitfuse).
+K>1 draft-decode FULL uses per-step graphs: host slot_mapping between steps.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import os
 from contextlib import contextmanager
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, replace
@@ -26,6 +28,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
@@ -73,6 +76,19 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         )
         return draft_model
 
+    def _as_numpy_host(self, value: torch.Tensor | np.ndarray) -> np.ndarray:
+        if isinstance(value, np.ndarray):
+            return value.astype(np.int64, copy=False)
+        if value.device.type == "cpu":
+            return value.detach().numpy().astype(np.int64, copy=False)
+        # Sync D2H is illegal while an NPU stream is capturing (GLOBAL mode).
+        if torch.npu.is_current_stream_capturing():
+            raise RuntimeError(
+                "310P draft slot_mapping cannot D2H while the NPU stream is capturing; "
+                "prepare host mirrors outside ACLGraph capture."
+            )
+        return value.detach().cpu().numpy().astype(np.int64, copy=False)
+
     def _compute_draft_slot_mappings(
         self,
         idx_mapping: torch.Tensor,
@@ -80,9 +96,9 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         positions: torch.Tensor,
         num_tokens_padded: int,
     ) -> dict[str, torch.Tensor]:
-        idx_mapping_np = idx_mapping.detach().cpu().numpy()
-        query_start_loc_np = query_start_loc.detach().cpu().numpy()
-        positions_np = positions.detach().cpu().numpy()
+        idx_mapping_np = self._as_numpy_host(idx_mapping)
+        query_start_loc_np = self._as_numpy_host(query_start_loc)
+        positions_np = self._as_numpy_host(positions)
         slot_mappings = self.block_tables.compute_slot_mappings(
             idx_mapping_np,  # type: ignore[arg-type]
             query_start_loc_np,  # type: ignore[arg-type]
@@ -100,14 +116,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Capture draft-prefill FULL; skip draft-decode graphs on 310P.
-
-        K>1 decode capture would run ``_multi_step_decode`` → CPU slot_mapping
-        D2H under NPU graph capture (GLOBAL), which fails with aclrtMemcpy
-        107030. Prefill FULL remains; multi-step draft stays eager.
-        """
+        """Capture draft-prefill FULL + per-step draft-decode FULL on 310P."""
         self.last_token_indices.zero_()
-        logger.info("Capturing 310P MTP draft ACLGraph (draft-prefill FULL + SpecDecoding; draft-decode skipped).")
+        logger.info(
+            "Capturing 310P MTP draft ACLGraph (draft-prefill FULL + SpecDecoding; draft-decode per-step FULL)."
+        )
         super().capture()
 
     @torch.inference_mode()
@@ -149,6 +162,39 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
         return super().propose(*args, **kwargs)
 
+    def _generate_draft(
+        self,
+        num_reqs: int,
+        num_tokens_padded: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    ) -> None:
+        """Skip Ascend metadata H2D under ACLGraph capture (pageable memcpy ban)."""
+        # Call GPU AR generate_draft (sample + update_draft_inputs) without the
+        # Ascend post-step ``seq_lens_cpu.copy_`` which is illegal while capturing.
+        from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+            AutoRegressiveSpeculator,
+        )
+
+        AutoRegressiveSpeculator._generate_draft(
+            self,
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+        )
+        if attn_metadata is None or torch.npu.is_current_stream_capturing():
+            return
+        self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    def _set_draft_step(self, step: int) -> None:
+        self.current_draft_step.fill_(step)
+        set_draft_step_host(step)
+
     def _multi_step_decode(
         self,
         num_reqs: int,
@@ -157,7 +203,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
-        """Eager non-fused multi-step with 310P CPU slot mappings."""
+        """K>1 draft decode: per-step FULL replay or eager CPU slot mappings."""
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -168,10 +214,12 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             seq_ub = seq_lens_cpu_upper_bound.clone()
             seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
 
+        use_full = batch_desc.cg_mode == CUDAGraphMode.FULL
         attn_metadata = None
         slot_mappings_by_layer = None
         for step in range(1, self.num_speculative_steps):
             if not skip_attn and (self.advance_draft_positions or step == 1):
+                # Host slot_mapping + attn metadata must run outside capture.
                 slot_mappings_by_layer = self._compute_draft_slot_mappings(
                     idx_mapping,
                     query_start_loc,
@@ -185,13 +233,27 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     seq_lens_cpu_upper_bound=seq_ub,
                     step=step,
                 )
+                if attn_metadata is not None:
+                    for meta in attn_metadata.values():
+                        if meta is None:
+                            continue
+                        seq_lens = getattr(meta, "seq_lens", None)
+                        if seq_lens is not None and seq_lens.device != self.device:
+                            meta.seq_lens = seq_lens.to(device=self.device, non_blocking=False)
 
-            self.current_draft_step.fill_(step)
-            self._generate_draft(
-                num_reqs,
-                batch_desc.num_tokens,
-                attn_metadata,
-                slot_mappings_by_layer,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            )
+            self._set_draft_step(step)
+            if use_full:
+                assert self.decode_cudagraph_manager is not None
+                self._pending_draft_attn_metadata = attn_metadata
+                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+                if attn_metadata is not None:
+                    self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+            else:
+                self._generate_draft(
+                    num_reqs,
+                    batch_desc.num_tokens,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                )

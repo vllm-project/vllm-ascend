@@ -331,6 +331,16 @@ def prepare_decode_inputs_cpu(
     )
 
 
+# Host mirror for draft step. ``current_draft_step.item()`` is a sync D2H and
+# is illegal under NPU GLOBAL ACLGraph capture; callers set this before fill_.
+_DRAFT_STEP_HOST: int = 0
+
+
+def set_draft_step_host(step: int) -> None:
+    global _DRAFT_STEP_HOST
+    _DRAFT_STEP_HOST = int(step)
+
+
 def update_draft_inputs_cpu(
     draft_tokens: torch.Tensor,
     current_draft_step: torch.Tensor,
@@ -344,7 +354,12 @@ def update_draft_inputs_cpu(
     advance_draft_positions: bool = True,
 ) -> None:
     """Update draft buffers for the next step using on-device ops where possible."""
-    step = int(current_draft_step.item())
+    # ``.item()`` is a sync D2H and is illegal under NPU GLOBAL ACLGraph capture.
+    if torch.npu.is_current_stream_capturing():
+        step = _DRAFT_STEP_HOST
+    else:
+        step = int(current_draft_step.item())
+        set_draft_step_host(step)
     tokens = draft_tokens[:num_reqs]
     output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:

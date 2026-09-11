@@ -184,6 +184,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             Any: The result of the attention operation.
         """
         if attn_metadata.seq_lens.device != query.device:
+            # Pageable H2D is illegal under NPU GLOBAL ACLGraph capture.
+            if torch.npu.is_current_stream_capturing():
+                raise RuntimeError(
+                    "310P paged attention: seq_lens must already be on-device before "
+                    "ACLGraph capture; move it outside torch.npu.graph()."
+                )
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
@@ -265,6 +271,8 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         block_table = attn_metadata.block_tables
 
         if attn_metadata.seq_lens.device != query.device:
+            if torch.npu.is_current_stream_capturing():
+                raise RuntimeError("310P splitfuse: seq_lens must already be on-device before ACLGraph capture.")
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
