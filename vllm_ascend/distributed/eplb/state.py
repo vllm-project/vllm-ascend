@@ -16,7 +16,6 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
-
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"

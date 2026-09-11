@@ -255,7 +255,6 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-
     def test_validate_eplb_config_requires_eplb_for_v2_ascend_policy(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
@@ -264,7 +263,6 @@ class TestNPUPlatform(TestBase):
 
         with self.assertRaisesRegex(ValueError, "v2_policy requires --enable-eplb"):
             _validate_eplb_config(vllm_config)
-
 
     def test_validate_eplb_config_rejects_v2_legacy_fields(self):
         vllm_config = self.mock_vllm_config()
