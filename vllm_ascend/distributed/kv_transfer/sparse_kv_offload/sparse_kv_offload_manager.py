@@ -1,6 +1,7 @@
 import contextlib
 import os
 import typing
+from dataclasses import dataclass
 from zlib import adler32
 
 import numpy as np
@@ -41,26 +42,36 @@ OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 
+FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
+FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
+FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
+FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT = 16
+FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT = 8
+FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT = (
+    (FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT + FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT - 1)
+    // FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT
+    * FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT
+)
+FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT = (
+    (
+        FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
+        + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT
+        + FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT
+        - 1
+    )
+    // FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT
+    * FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT
+)
+FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS = (
+    FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT
+)
+
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
 
 
 def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
-
-
-def get_host_device_memory_usage_ratio(kv_cache_specs: dict[str, KVCacheSpec]) -> float:
-    page_size_bytes_host = 0
-    page_size_bytes_device = 0
-    for kv_cache_spec in kv_cache_specs.values():
-        assert isinstance(kv_cache_spec, KVCacheSpec)
-        if getattr(kv_cache_spec, "store_on_host", False):
-            page_size_bytes_host += kv_cache_spec.page_size_bytes
-        else:
-            page_size_bytes_device += kv_cache_spec.page_size_bytes
-
-    assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
-    return page_size_bytes_host / page_size_bytes_device
 
 
 def allocate_kv_offload_topk_buffer_pair(
@@ -119,6 +130,12 @@ def allocate_kv_offload_topk_profile_buffers(
 
 
 _CPU_CACHE_ALIGNMENT = 2 * 1024 * 1024
+# Worst-case 2 MiB-alignment waste per host layer (see empty_aligned_int8_cpu_tensors):
+# 1x for rounding the raw buffer base address up to the alignment boundary, plus 1x tail
+# padding for each of the two aligned tensors (k_cache_cpu, v_cache_cpu) whose sizes are
+# rounded up to whole alignment chunks.
+_CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER = 3 * _CPU_CACHE_ALIGNMENT
+_VLLM_NULL_BLOCK_COUNT = 1
 
 
 def empty_aligned_int8_cpu_tensors(
@@ -148,6 +165,122 @@ def empty_aligned_int8_cpu_tensors(
         allocate_tensors.append(raw_tensor[base_offset : base_offset + size])
         base_offset += chunk_num * alignment
     return allocate_tensors
+
+
+@dataclass(frozen=True)
+class SparseKVOffloadMemoryBudget:
+    npu_limit_blocks: int
+    dram_limit_blocks: int
+    workload_limit_blocks: int
+    final_num_blocks: int
+    final_planner_bytes: int
+    planned_host_bytes: int
+    planned_device_bytes: int
+    host_alignment_reserve_bytes: int
+    limiting_factor: str
+
+
+def _split_host_device_kv_specs(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> tuple[list[KVCacheSpec], list[KVCacheSpec]]:
+    if not kv_cache_spec:
+        raise ValueError("Sparse KV offload requires a non-empty kv_cache_spec")
+    host_specs: list[KVCacheSpec] = []
+    device_specs: list[KVCacheSpec] = []
+    for spec in kv_cache_spec.values():
+        if getattr(spec, "store_on_host", False):
+            host_specs.append(spec)
+        else:
+            device_specs.append(spec)
+    if not host_specs:
+        raise ValueError("Sparse KV offload requires at least one host KV cache spec")
+    if not device_specs:
+        raise ValueError("Sparse KV offload requires at least one device KV cache spec")
+    block_sizes = {spec.block_size for spec in host_specs + device_specs}
+    if len(block_sizes) != 1:
+        raise ValueError(f"Sparse KV offload memory planning requires one shared block size, got {sorted(block_sizes)}")
+    return host_specs, device_specs
+
+
+def plan_sparse_kv_offload_memory(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config: VllmConfig,
+    available_device_memory_bytes: int,
+    dram_limit_bytes: int,
+    keep_device_kv_cache: bool,
+) -> SparseKVOffloadMemoryBudget:
+    """Bound sparse KV offload blocks by NPU, DRAM, and active demand."""
+    host_specs, device_specs = _split_host_device_kv_specs(kv_cache_spec)
+    host_page_size_bytes = sum(spec.page_size_bytes for spec in host_specs)
+    device_page_size_bytes = sum(spec.page_size_bytes for spec in device_specs)
+    total_page_size_bytes = host_page_size_bytes + device_page_size_bytes
+
+    host_alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
+    usable_dram_bytes = max(dram_limit_bytes - host_alignment_reserve_bytes, 0)
+    dram_limit_blocks = usable_dram_bytes // host_page_size_bytes
+
+    npu_page_size_bytes = total_page_size_bytes if keep_device_kv_cache else device_page_size_bytes
+    npu_limit_blocks = max(available_device_memory_bytes, 0) // npu_page_size_bytes
+
+    max_blocks_per_request = max(
+        cdiv(
+            spec.max_memory_usage_bytes(vllm_config),
+            spec.page_size_bytes,
+        )
+        for spec in host_specs + device_specs
+    )
+    workload_limit_blocks = max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
+
+    limits = {
+        "npu": npu_limit_blocks,
+        "dram": dram_limit_blocks,
+        "workload": workload_limit_blocks,
+    }
+    if dram_limit_blocks < npu_limit_blocks:
+        logger.warning_once(
+            "Sparse KV offload: host DRAM budget allows only %d KV blocks while NPU "
+            "memory could hold %d, so batch size / max_model_len capacity is limited "
+            "by host memory. Consider increasing sparse_kv_offload_config."
+            "dram_size_per_dp_GB (current budget %.2f GiB) to use more of the NPU "
+            "capacity.",
+            dram_limit_blocks,
+            npu_limit_blocks,
+            dram_limit_bytes / (1 << 30),
+        )
+    limiting_factor = min(limits, key=lambda name: limits[name])
+    final_num_blocks = limits[limiting_factor]
+    final_planner_bytes = final_num_blocks * total_page_size_bytes
+    planned_host_bytes = final_num_blocks * host_page_size_bytes
+    planned_device_bytes = final_num_blocks * npu_page_size_bytes
+    return SparseKVOffloadMemoryBudget(
+        npu_limit_blocks=npu_limit_blocks,
+        dram_limit_blocks=dram_limit_blocks,
+        workload_limit_blocks=workload_limit_blocks,
+        final_num_blocks=final_num_blocks,
+        final_planner_bytes=final_planner_bytes,
+        planned_host_bytes=planned_host_bytes,
+        planned_device_bytes=planned_device_bytes,
+        host_alignment_reserve_bytes=host_alignment_reserve_bytes,
+        limiting_factor=limiting_factor,
+    )
+
+
+def get_sparse_kv_offload_cpu_pool_size_bytes(
+    kv_cache_config: KVCacheConfig,
+) -> int:
+    """Return a safe upper bound for aligned host KV allocations."""
+    layer_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            layer_specs.update(group.kv_cache_spec.kv_cache_specs)
+        else:
+            layer_specs.update((layer_name, group.kv_cache_spec) for layer_name in group.layer_names)
+    host_specs = [spec for spec in layer_specs.values() if getattr(spec, "store_on_host", False)]
+    if not host_specs:
+        raise ValueError("Sparse KV offload requires host-resident KV cache specs")
+    raw_host_bytes = kv_cache_config.num_blocks * sum(spec.page_size_bytes for spec in host_specs)
+    alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
+    return raw_host_bytes + alignment_reserve_bytes
 
 
 def allocate_kv_cache_tensors_for_sparse_kv_offload(
@@ -327,6 +460,7 @@ class SparseKVOffloadManager:
         self.block_size = self._infer_group_block_sizes(self.kv_cache_config)
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
+        self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -338,6 +472,12 @@ class SparseKVOffloadManager:
             self.max_num_tokens,
             self.max_num_reqs * decode_width,
         )
+        self.fused_overlap_membership_map: torch.Tensor | None = None
+        self.fused_overlap_membership_map_rows = 0
+        self.fused_overlap_plan_owner_layer_id: int | None = None
+        self.fused_overlap_plan_topk: int | None = None
+        self.fused_overlap_plan_num_tokens = 0
+        self.fused_overlap_plan_membership_map: torch.Tensor | None = None
         max_block_num = cdiv(self.max_model_len, self.block_size)
         self.block_table_cpu = torch.zeros(
             [self.max_num_reqs, max_block_num],
@@ -355,15 +495,28 @@ class SparseKVOffloadManager:
 
         self._build_cpp()
 
+        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
+        planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
+        if planned_pool_size_bytes > dram_limit_bytes:
+            raise ValueError(
+                "Sparse KV offload planned CPU pool exceeds DRAM limit after "
+                "alignment: "
+                f"planned={planned_pool_size_bytes / (1 << 30):.2f} GiB, "
+                f"limit={sparse_kv_offload_config.dram_size_per_dp_GB} GiB, "
+                f"num_blocks={kv_cache_config.num_blocks}"
+            )
+        actual_pool_size_bytes = min(planned_pool_size_bytes, dram_limit_bytes)
         logger.info(
-            "SparseKVOffloadManager start init CPU KV pool with %s "
-            "GB dram per dp group, it might be time consuming, please wait.",
+            "SparseKVOffloadManager starts CPU KV pool initialization: "
+            "planned=%.2f GiB, configured_limit=%s GiB, num_blocks=%s.",
+            actual_pool_size_bytes / (1 << 30),
             sparse_kv_offload_config.dram_size_per_dp_GB,
+            kv_cache_config.num_blocks,
         )
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
-        config.reserve_size = sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30)
-        config.alloc_size = sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30) if self.tp_rank == 0 else 0
+        config.reserve_size = actual_pool_size_bytes
+        config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
@@ -407,6 +560,16 @@ class SparseKVOffloadManager:
             ],
             verbose=True,
         )
+
+    def _warmup_external_lru_planner_threads(self) -> int:
+        if not (self.use_fused_overlap and self.tp_rank == 0):
+            return 0
+        warmed_threads = self.sparse_kv_offload_cpp.warmup_lru_resident_threads(self.lru_workspace_threads)
+        logger.info(
+            "Warmed external LRU planner OpenMP team with %s threads",
+            warmed_threads,
+        )
+        return warmed_threads
 
     def _infer_group_block_sizes(
         self,
@@ -457,6 +620,117 @@ class SparseKVOffloadManager:
                 f"layer_name={layer_name}, registered_layers=[{registered_layers}]"
             )
         return layer_id
+
+    def _restore_bfloat16_tensor(self, ptr: int, shape: list[int]) -> torch.Tensor:
+        view = self.sparse_kv_offload_cpp.restore_bfloat16_tensor(ptr, shape)
+        if int(view.data_ptr()) != int(ptr):
+            raise RuntimeError(
+                "restore_bfloat16_tensor returned a tensor with unexpected data_ptr: "
+                f"expected={ptr}, got={view.data_ptr()}"
+            )
+        if list(view.shape) != list(shape):
+            raise RuntimeError(
+                f"restore_bfloat16_tensor returned unexpected shape: expected={shape}, got={list(view.shape)}"
+            )
+        if view.dtype != torch.bfloat16:
+            raise RuntimeError(f"restore_bfloat16_tensor returned unexpected dtype: {view.dtype}")
+        if not view.is_contiguous():
+            raise RuntimeError("restore_bfloat16_tensor requires a contiguous view")
+        return view
+
+    def _restore_int16_tensor(self, ptr: int, shape: list[int]) -> torch.Tensor:
+        view = self.sparse_kv_offload_cpp.restore_int16_tensor(ptr, shape)
+        if int(view.data_ptr()) != int(ptr):
+            raise RuntimeError(
+                "restore_int16_tensor returned a tensor with an unexpected data_ptr: "
+                f"expected={ptr}, got={view.data_ptr()}"
+            )
+        if list(view.shape) != list(shape):
+            raise RuntimeError(
+                f"restore_int16_tensor returned an unexpected shape: expected={shape}, got={list(view.shape)}"
+            )
+        if view.dtype != torch.int16:
+            raise RuntimeError(f"restore_int16_tensor returned an unexpected dtype: {view.dtype}")
+        if not view.is_contiguous():
+            raise RuntimeError("restore_int16_tensor requires a contiguous view")
+        return view
+
+    def allocate_fused_overlap_membership_map(
+        self,
+        row_capacity: int,
+    ) -> torch.Tensor:
+        if not self.use_fused_overlap:
+            raise RuntimeError("mapped membership allocation requires kv_offload_decode_config.use_fused_overlap=true")
+        if row_capacity <= 0:
+            raise ValueError(f"mapped membership row capacity must be positive, got {row_capacity}")
+        if self.topk >= FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT:
+            raise ValueError(
+                "SFA sparse topk exceeds external plan storage: "
+                f"topk={self.topk} "
+                f"control_offset={FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT}"
+            )
+
+        if getattr(self, "fused_overlap_membership_map", None) is not None:
+            if row_capacity > self.fused_overlap_membership_map_rows:
+                raise RuntimeError(
+                    "fused_overlap membership storage was allocated for fewer "
+                    f"rows: allocated={self.fused_overlap_membership_map_rows}, "
+                    f"required={row_capacity}"
+                )
+            return self.fused_overlap_membership_map
+
+        shape = [row_capacity, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT]
+        owner_ptr = torch.zeros(1, dtype=torch.int64, device="npu")
+        membership_map = None
+        if self.tp_rank == 0:
+            membership_map = offload.empty(
+                [row_capacity * FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT],
+                dtype=torch.int16,
+                pin_memory=True,
+            ).view(shape)
+            membership_map.fill_(-1)
+            control = membership_map[
+                :,
+                FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT : FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT
+                + FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
+            ]
+            control[:, 1] = FSA_EXTERNAL_PLAN_READY_MARKER
+            control[:, 2] = self.topk
+            control[:, 3] = FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+            control[:, 7] = FSA_PAIRED_SELECTION_COPY_MARKER
+            owner_ptr[0] = membership_map.data_ptr()
+        self.tp_group.broadcast(owner_ptr, src=0)
+        shared_ptr = int(owner_ptr.item())
+        if self.tp_rank != 0:
+            membership_map = self._restore_int16_tensor(shared_ptr, shape)
+        if membership_map is None:
+            raise RuntimeError("mapped membership storage was not initialized")
+        self.tp_group.barrier()
+        self.fused_overlap_membership_map = membership_map
+        self.fused_overlap_membership_map_rows = row_capacity
+        return membership_map
+
+    def get_fused_overlap_cpu_kv_inputs(
+        self,
+        layer_name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return CPU full KV tensors used by fused_overlap decode.
+
+        On TP0 these are the owned CPU pools; on other ranks they are non-owning
+        GVA views restored after broadcast.
+        """
+        if not self.use_fused_overlap:
+            raise RuntimeError(
+                "get_fused_overlap_cpu_kv_inputs requires kv_offload_decode_config.use_fused_overlap=true"
+            )
+        layer_id = self._get_offload_layer_id(layer_name)
+        if layer_id >= len(self.k_caches_cpu) or layer_id >= len(self.v_caches_cpu):
+            raise RuntimeError(
+                "fused_overlap CPU KV views are not registered: "
+                f"layer_id={layer_id}, k_len={len(self.k_caches_cpu)}, "
+                f"v_len={len(self.v_caches_cpu)}"
+            )
+        return self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
 
     def register_kv_caches(
         self,
@@ -509,6 +783,17 @@ class SparseKVOffloadManager:
         self.d2h_src_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_dst_ptrs_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int64, device=device)
         self.d2h_lengths_npu = torch.empty(d2h_descriptor_rows, dtype=torch.int32, device=device)
+        if self.use_fused_overlap:
+            self.current_kv_save_stream = torch_npu.npu.Stream()
+            self.fused_plan_stream = torch_npu.npu.Stream()
+            self.fused_plan_metadata_npu = torch.zeros(
+                1 + self.max_num_topk_rows,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.fused_plan_status_npu = self.fused_plan_metadata_npu[:1]
+            self.fused_plan_current_linear_slots_npu = self.fused_plan_metadata_npu[1:]
+            self.current_kv_by_layer: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
@@ -540,6 +825,8 @@ class SparseKVOffloadManager:
         gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
         gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
         cpu_block_lens_tensor = torch.zeros([self.num_layers, 2], dtype=torch.int64, device="npu")
+        shape_k_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
+        shape_v_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
         if self.tp_rank == 0:
             for layer_id in range(self.num_layers):
                 k_cpu = self.k_caches_cpu[layer_id]
@@ -552,9 +839,13 @@ class SparseKVOffloadManager:
                 cpu_block_lens_tensor[layer_id, 1] = (
                     v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks
                 )
+            shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
+            shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
         self.tp_group.broadcast(gvas_k_tensor, src=0)
         self.tp_group.broadcast(gvas_v_tensor, src=0)
         self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
+        self.tp_group.broadcast(shape_k_tensor, src=0)
+        self.tp_group.broadcast(shape_v_tensor, src=0)
         for layer_id in range(self.num_layers):
             self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
             self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
@@ -563,6 +854,20 @@ class SparseKVOffloadManager:
                     cpu_block_lens_tensor[layer_id, 0].item(),
                     cpu_block_lens_tensor[layer_id, 1].item(),
                 )
+            )
+
+        if self.use_fused_overlap and self.tp_rank != 0:
+            cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
+            cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
+            self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
+            self.v_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_v_shape) for ptr in self.gvas_v_bases]
+            logger.info(
+                "[fused_overlap_offload][init] restored shared CPU KV views on "
+                "tp_rank=%s layer_count=%s k_shape=%s v_shape=%s",
+                self.tp_rank,
+                self.num_layers,
+                cpu_k_shape,
+                cpu_v_shape,
             )
 
         gvas_buffer_offset = 0
@@ -619,6 +924,7 @@ class SparseKVOffloadManager:
 
         # topk cache reuse related
         self.lru_workspace_threads = 8
+        self._warmup_external_lru_planner_threads()
         self.lru_topk_indices_cpu = torch.empty(
             [self.max_num_topk_rows, self.topk],
             dtype=torch.int32,
@@ -702,6 +1008,13 @@ class SparseKVOffloadManager:
             )
             for _ in range(self.num_layers)
         ]
+        self.lru_visible_seq_lens_cpu = torch.empty(
+            [self.max_num_topk_rows],
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
+
         self.lru_token_mark_workspace = torch.zeros(
             [self.lru_workspace_threads, self.max_model_len],
             dtype=torch.int32,
@@ -733,12 +1046,19 @@ class SparseKVOffloadManager:
             device="cpu",
             pin_memory=True,
         )
+        self.lru_physical_row_workspace = torch.empty(
+            [self.max_num_topk_rows * 3],
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
 
         self.lru_req_ids_ptr = self.lru_req_ids_cpu.data_ptr()
         self.lru_stable_prefix_lens_ptr = self.lru_stable_prefix_lens_cpu.data_ptr()
         self.lru_last_req_ids_ptrs = [
             lru_last_req_ids_cpu.data_ptr() for lru_last_req_ids_cpu in self.lru_last_req_ids_cpu_list
         ]
+        self.lru_visible_seq_lens_ptr = self.lru_visible_seq_lens_cpu.data_ptr()
         self.lru_topk_indices_ptr = self.lru_topk_indices_cpu.data_ptr()
         self.lru_token_to_req_ptr = self.lru_token_to_req_cpu.data_ptr()
         self.lru_slot_to_token_ptrs = [
@@ -760,8 +1080,53 @@ class SparseKVOffloadManager:
         self.lru_slot_workspace_ptr = self.lru_slot_workspace.data_ptr()
         self.lru_miss_position_workspace_ptr = self.lru_miss_position_workspace.data_ptr()
         self.lru_epochs_ptr = self.lru_epochs.data_ptr()
+        self.lru_physical_row_workspace_ptr = self.lru_physical_row_workspace.data_ptr()
 
     def offload_new_kv(
+        self,
+        layer_name: str,
+        slot_mapping: torch.Tensor,
+        k_cache_cpu: torch.Tensor | None,
+        v_cache_cpu: torch.Tensor | None,
+        k_cache_npu: torch.Tensor | None,
+        v_cache_npu: torch.Tensor | None,
+        k: torch.Tensor | None,
+        v: torch.Tensor | None,
+        has_prefill: bool = False,
+        capturing: bool = False,
+    ) -> None:
+        if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
+            layer_id = self._get_offload_layer_id(layer_name)
+            self.current_kv_by_layer[layer_id] = (k, v)
+        use_side_stream = self.tp_rank == 0 and self.use_fused_overlap and capturing and not has_prefill
+        if not use_side_stream:
+            self._offload_new_kv_on_current_stream(
+                slot_mapping,
+                k_cache_cpu,
+                v_cache_cpu,
+                k_cache_npu,
+                v_cache_npu,
+                k,
+                v,
+                has_prefill,
+            )
+            return
+
+        current_kv_ready = torch_npu.npu.current_stream().record_event()
+        with torch_npu.npu.stream(self.current_kv_save_stream):
+            self.current_kv_save_stream.wait_event(current_kv_ready)
+            self._offload_new_kv_on_current_stream(
+                slot_mapping,
+                k_cache_cpu,
+                v_cache_cpu,
+                k_cache_npu,
+                v_cache_npu,
+                k,
+                v,
+                has_prefill,
+            )
+
+    def _offload_new_kv_on_current_stream(
         self,
         slot_mapping: torch.Tensor,
         k_cache_cpu: torch.Tensor | None,
@@ -977,6 +1342,228 @@ class SparseKVOffloadManager:
 
         current_slots_cpu = self.lru_current_slots_cpu[:num_tokens]
         current_slots_npu[:num_tokens].copy_(current_slots_cpu, non_blocking=capturing)
+
+    def prepare_fused_overlap_external_plan(
+        self,
+        layer_name: str,
+        num_tokens: int,
+        topk_indices_npu: torch.Tensor,
+        req_ids_npu: torch.Tensor,
+        stable_prefix_lens_npu: torch.Tensor,
+        visible_seq_lens_npu: torch.Tensor,
+        selection_membership_map: torch.Tensor,
+        capturing: bool = False,
+        skip_topk: bool = False,
+    ) -> bool:
+        self._validate_fused_overlap_external_plan_inputs(
+            num_tokens,
+            topk_indices_npu,
+            req_ids_npu,
+            stable_prefix_lens_npu,
+            visible_seq_lens_npu,
+            selection_membership_map,
+        )
+        layer_id = self._get_offload_layer_id(layer_name)
+        plan_start = FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - self.topk
+        plan_storage = selection_membership_map[
+            :num_tokens,
+            plan_start:FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS,
+        ]
+        encoded_plan_stride = selection_membership_map.stride(0)
+
+        owner_layer_id = self.fused_overlap_plan_owner_layer_id
+        owner_map = self.fused_overlap_plan_membership_map
+        can_reuse_owner_plan = (
+            skip_topk
+            and owner_layer_id is not None
+            and layer_id > owner_layer_id
+            and self.fused_overlap_plan_topk == self.topk
+            and self.fused_overlap_plan_num_tokens == num_tokens
+            and owner_map is not None
+        )
+        if can_reuse_owner_plan:
+            assert owner_map is not None
+            if selection_membership_map.data_ptr() != owner_map.data_ptr():
+                if capturing:
+                    torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
+                plan_storage.copy_(
+                    owner_map[:num_tokens, plan_start:FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS],
+                    non_blocking=capturing,
+                )
+            return True
+
+        def run_planner(enqueue: bool) -> None:
+            planner = (
+                self.sparse_kv_offload_cpp.enqueue_lru_resident_compact_with_plan_stable_rows
+                if enqueue
+                else self.sparse_kv_offload_cpp.lru_resident_compact_with_plan_stable_rows
+            )
+            planner(
+                self.lru_req_ids_ptr,
+                self.lru_last_req_ids_ptrs[layer_id],
+                self.lru_topk_indices_ptr,
+                self.lru_stable_prefix_lens_ptr,
+                self.lru_slot_to_token_ptrs[layer_id],
+                self.lru_slots_ptrs[layer_id],
+                self.lru_current_slots_ptr,
+                self.lru_miss_count_ptrs[layer_id],
+                self.lru_miss_tokens_ptrs[layer_id],
+                self.lru_miss_slots_ptrs[layer_id],
+                self.lru_token_mark_workspace_ptr,
+                self.lru_token_pos_workspace_ptr,
+                self.lru_slot_workspace_ptr,
+                self.lru_miss_position_workspace_ptr,
+                self.lru_epochs_ptr,
+                self.lru_physical_row_workspace_ptr,
+                self.max_num_topk_rows,
+                plan_storage.data_ptr(),
+                encoded_plan_stride,
+                num_tokens,
+                self.topk,
+                self.topk_buffer_size,
+                self.max_model_len,
+                self.lru_workspace_threads,
+                self.lru_workspace_threads,
+                self.lru_visible_seq_lens_ptr,
+            )
+
+        if capturing:
+            plan_inputs_ready = torch_npu.npu.current_stream().record_event()
+            with torch_npu.npu.stream(self.fused_plan_stream):
+                self.fused_plan_stream.wait_event(plan_inputs_ready)
+                if self.tp_rank == 0:
+                    self.lru_topk_indices_cpu[:num_tokens].copy_(topk_indices_npu, non_blocking=True)
+                    self.lru_req_ids_cpu[:num_tokens].copy_(req_ids_npu, non_blocking=True)
+                    self.lru_stable_prefix_lens_cpu[:num_tokens].copy_(stable_prefix_lens_npu, non_blocking=True)
+                    self.lru_visible_seq_lens_cpu[:num_tokens].copy_(visible_seq_lens_npu, non_blocking=True)
+                    run_planner(enqueue=True)
+                    self.fused_plan_current_linear_slots_npu[:num_tokens].copy_(
+                        self.lru_physical_row_workspace[
+                            self.max_num_topk_rows * 2 : self.max_num_topk_rows * 2 + num_tokens
+                        ],
+                        non_blocking=True,
+                    )
+                self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
+            self.fused_overlap_plan_owner_layer_id = layer_id
+            self.fused_overlap_plan_topk = self.topk
+            self.fused_overlap_plan_num_tokens = num_tokens
+            self.fused_overlap_plan_membership_map = selection_membership_map
+            return True
+
+        planner_error = None
+        if self.tp_rank == 0:
+            self.fused_plan_status_npu.zero_()
+            try:
+                self.lru_topk_indices_cpu[:num_tokens].copy_(topk_indices_npu)
+                self.lru_req_ids_cpu[:num_tokens].copy_(req_ids_npu)
+                self.lru_stable_prefix_lens_cpu[:num_tokens].copy_(stable_prefix_lens_npu)
+                self.lru_visible_seq_lens_cpu[:num_tokens].copy_(visible_seq_lens_npu)
+                run_planner(enqueue=False)
+                self.fused_plan_current_linear_slots_npu[:num_tokens].copy_(
+                    self.lru_physical_row_workspace[
+                        self.max_num_topk_rows * 2 : self.max_num_topk_rows * 2 + num_tokens
+                    ]
+                )
+            except Exception as exc:
+                planner_error = exc
+                self.fused_plan_status_npu.fill_(1)
+        self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
+        if int(self.fused_plan_status_npu.item()) != 0:
+            detail = (
+                f"{type(planner_error).__name__}: {planner_error}"
+                if planner_error is not None
+                else "TP0 external planner failed"
+            )
+            raise RuntimeError(
+                f"SFA fused_overlap external planner failed: layer={layer_name}, tp_rank={self.tp_rank}, {detail}"
+            ) from planner_error
+        self.fused_overlap_plan_owner_layer_id = layer_id
+        self.fused_overlap_plan_topk = self.topk
+        self.fused_overlap_plan_num_tokens = num_tokens
+        self.fused_overlap_plan_membership_map = selection_membership_map
+        return True
+
+    def _validate_fused_overlap_external_plan_inputs(
+        self,
+        num_tokens: int,
+        topk_indices_npu: torch.Tensor,
+        req_ids_npu: torch.Tensor,
+        stable_prefix_lens_npu: torch.Tensor,
+        visible_seq_lens_npu: torch.Tensor,
+        selection_membership_map: torch.Tensor,
+    ) -> None:
+        if not self.use_fused_overlap:
+            raise RuntimeError("external FSA plan requires fused_overlap mode")
+        if num_tokens <= 0 or num_tokens > self.max_num_topk_rows:
+            raise ValueError(
+                "external FSA plan rows exceed configured workspace: "
+                f"num_tokens={num_tokens}, max_rows={self.max_num_topk_rows}"
+            )
+        expected_topk_shape = (num_tokens, self.topk)
+        if tuple(topk_indices_npu.shape) != expected_topk_shape:
+            raise ValueError(
+                "external FSA plan requires flattened single-head TopK input: "
+                f"expected={expected_topk_shape}, actual={tuple(topk_indices_npu.shape)}"
+            )
+        if tuple(req_ids_npu.shape) != (num_tokens,):
+            raise ValueError(
+                "external FSA plan requires one request id per logical row: "
+                f"expected=({num_tokens},), actual={tuple(req_ids_npu.shape)}"
+            )
+        if tuple(stable_prefix_lens_npu.shape) != (num_tokens,):
+            raise ValueError(
+                "external FSA plan requires one stable prefix length per logical row: "
+                f"expected=({num_tokens},), "
+                f"actual={tuple(stable_prefix_lens_npu.shape)}"
+            )
+        if tuple(visible_seq_lens_npu.shape) != (num_tokens,):
+            raise ValueError(
+                "external FSA plan requires one visible KV length per logical row: "
+                f"expected=({num_tokens},), "
+                f"actual={tuple(visible_seq_lens_npu.shape)}"
+            )
+        if (
+            selection_membership_map.dim() != 2
+            or selection_membership_map.shape[0] < num_tokens
+            or selection_membership_map.shape[1] < FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS
+            or selection_membership_map.dtype != torch.int16
+            or selection_membership_map.device.type != "cpu"
+        ):
+            raise ValueError(
+                "external FSA plan requires mapped CPU int16 membership storage: "
+                f"min_shape=({num_tokens}, {FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS}), "
+                f"actual_shape={tuple(selection_membership_map.shape)}, "
+                f"dtype={selection_membership_map.dtype}, "
+                f"device={selection_membership_map.device}"
+            )
+
+    def inject_current_kv_into_selection(
+        self,
+        layer_name: str,
+        num_tokens: int,
+        selection_kv_cache: torch.Tensor,
+        selection_k_rope: torch.Tensor,
+        capturing: bool = False,
+    ) -> None:
+        layer_id = self._get_offload_layer_id(layer_name)
+        current_kv = self.current_kv_by_layer.get(layer_id)
+        if current_kv is None:
+            raise RuntimeError(f"current decode K/V is unavailable for fused layer {layer_name}")
+        if capturing:
+            torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
+        current_k, current_rope = current_kv
+        current_k = current_k.reshape(-1, selection_kv_cache.shape[-1])[:num_tokens]
+        current_rope = current_rope.reshape(-1, selection_k_rope.shape[-1])[:num_tokens]
+        linear_slots = self.fused_plan_current_linear_slots_npu[:num_tokens]
+        indices = linear_slots.view(-1, 1)
+        flat_kv = selection_kv_cache.reshape(-1, selection_kv_cache.shape[-1])
+        flat_rope = selection_k_rope.reshape(-1, selection_k_rope.shape[-1])
+        torch_npu.npu_scatter_nd_update_(flat_kv, indices, current_k)
+        torch_npu.npu_scatter_nd_update_(flat_rope, indices, current_rope)
+
+    def wait_for_current_kv_writeback(self, capturing: bool = False) -> None:
+        if self.use_fused_overlap and capturing and self.tp_rank == 0:
+            torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
 
     def _onload_topk_kv_cpu(self, args):
         # code that is incompatible with graph mode, compute here outside graph
