@@ -14,13 +14,17 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import (
+    NPUModelRunner,
+    _find_hybrid_mla_mamba_alias_conflicts,
+)
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
@@ -191,6 +195,135 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    @staticmethod
+    def _hybrid_alias_fixture(*, c8_k_cache: bool):
+        num_blocks = 4
+        block_size = 16
+        conv_bytes_per_block = 16
+        recurrent_bytes_per_block = 128
+        rope_bytes_per_block = 32
+        k_bytes_per_block = 64 if c8_k_cache else recurrent_bytes_per_block
+        raw_page_bytes = (
+            conv_bytes_per_block
+            + recurrent_bytes_per_block
+            + rope_bytes_per_block
+        )
+        raw = torch.zeros(num_blocks * raw_page_bytes, dtype=torch.int8)
+
+        conv_end = num_blocks * conv_bytes_per_block
+        recurrent_end = conv_end + num_blocks * recurrent_bytes_per_block
+        conv_state = raw[:conv_end].view(num_blocks, conv_bytes_per_block)
+        recurrent_state = raw[conv_end:recurrent_end].view(torch.float32).view(
+            num_blocks,
+            recurrent_bytes_per_block
+            // torch.empty((), dtype=torch.float32).element_size(),
+        )
+
+        rope_total_bytes = num_blocks * rope_bytes_per_block
+        k_total_bytes = num_blocks * k_bytes_per_block
+        k_start = raw.numel() - rope_total_bytes - k_total_bytes
+        k_end = k_start + k_total_bytes
+        k_dtype = torch.float8_e4m3fn if c8_k_cache else torch.bfloat16
+        k_element_size = torch.empty((), dtype=k_dtype).element_size()
+        k_cache = raw[k_start:k_end].view(k_dtype).view(
+            num_blocks,
+            block_size,
+            1,
+            k_bytes_per_block // block_size // k_element_size,
+        )
+        rope_element_size = torch.empty((), dtype=torch.bfloat16).element_size()
+        rope_cache = raw[k_end:].view(torch.bfloat16).view(
+            num_blocks,
+            block_size,
+            1,
+            rope_bytes_per_block // block_size // rope_element_size,
+        )
+
+        mla_layer = "model.layers.1.self_attn.attn"
+        mamba_layer = "model.layers.0.self_attn"
+        mla_spec = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=(
+                (k_bytes_per_block + rope_bytes_per_block)
+                // block_size
+                // k_element_size
+            ),
+            dtype=k_dtype,
+            page_size_padded=raw_page_bytes,
+        )
+        mamba_spec = MambaSpec(
+            block_size=block_size,
+            shapes=(
+                (conv_bytes_per_block,),
+                (
+                    recurrent_bytes_per_block
+                    // torch.empty((), dtype=torch.float32).element_size(),
+                ),
+            ),
+            dtypes=(torch.int8, torch.float32),
+            mamba_cache_mode="align",
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=raw.numel(),
+                    shared_by=[mla_layer, mamba_layer],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[mla_layer],
+                    kv_cache_spec=mla_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=[mamba_layer],
+                    kv_cache_spec=mamba_spec,
+                ),
+            ],
+        )
+        return (
+            kv_cache_config,
+            {
+                mla_layer: (k_cache, rope_cache),
+                mamba_layer: (conv_state, recurrent_state),
+            },
+            {
+                mla_layer: mla_spec,
+                mamba_layer: mamba_spec,
+            },
+        )
+
+    def test_bf16_hybrid_mla_mamba_layout_has_no_cross_id_alias(self):
+        config, caches, specs = self._hybrid_alias_fixture(c8_k_cache=False)
+
+        conflicts = _find_hybrid_mla_mamba_alias_conflicts(
+            config,
+            caches,
+            specs,
+        )
+
+        self.assertEqual(conflicts, [])
+
+    def test_c8_hybrid_mla_mamba_layout_reports_cross_id_alias(self):
+        config, caches, specs = self._hybrid_alias_fixture(c8_k_cache=True)
+
+        conflicts = _find_hybrid_mla_mamba_alias_conflicts(
+            config,
+            caches,
+            specs,
+        )
+
+        self.assertTrue(conflicts)
+        conflict = conflicts[0]
+        self.assertNotEqual(conflict.mla_block_id, conflict.mamba_block_id)
+        self.assertGreater(conflict.overlap_bytes, 0)
+        self.assertNotEqual(
+            conflict.mla_k_block_stride_bytes,
+            conflict.mamba_state_block_stride_bytes,
+        )
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
