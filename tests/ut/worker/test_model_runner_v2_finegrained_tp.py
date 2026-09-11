@@ -1,10 +1,10 @@
 """Pure-mock UTs (CPU, no NPU) for lmhead TP in the Ascend V2 model runner.
 
 Lock the runner-side pad/trim contract and dispatch-tail canary, the
-draft-side sample_draft row alignment (V1 parity), and init-time rejection
-of unsupported combinations (probabilistic, DSpark, local argmax,
-prompt_logprobs). LM-head collective behavior itself is validated on real
-hardware.
+draft-side sample_draft row alignment and draft runtime config build (both
+V1 parity), and init-time rejection of unsupported combinations
+(probabilistic, DSpark, local argmax, prompt_logprobs). LM-head collective
+behavior itself is validated on real hardware.
 """
 
 from contextlib import nullcontext
@@ -230,7 +230,7 @@ def test_dummy_execute_model_joins_lmhead_collectives_at_capacity():
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
     hidden_states = torch.randn(10, 6)
 
-    with patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=True):
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=True):
         output = _run_execute_model(runner, hidden_states, dummy_run=True)
 
     assert output == "upstream-output"  # parent return value is untouched
@@ -251,20 +251,20 @@ def test_dummy_execute_model_skips_lmhead_collectives_when_gated_off():
 
     # Real execute_model of a busy rank: the target collectives are joined by
     # sample(), never here.
-    with patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=True):
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=True):
         _run_execute_model(runner, hidden_states, dummy_run=False)
     runner.model.compute_logits.assert_not_called()
 
-    with patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=False):
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=False):
         _run_execute_model(runner, hidden_states, dummy_run=True)
     runner.model.compute_logits.assert_not_called()
 
-    with patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=True):
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=True):
         _run_execute_model(runner, hidden_states, dummy_run=True, is_profile=True)
     runner.model.compute_logits.assert_not_called()
 
     runner.is_last_pp_rank = False
-    with patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=True):
+    with patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=True):
         _run_execute_model(runner, hidden_states, dummy_run=True)
     runner.model.compute_logits.assert_not_called()
 
@@ -304,7 +304,7 @@ def test_sample_draft_pads_to_capacity_then_trims(max_num_reqs, num_rows):
     capacity = spec._lmhead_tp_max_num_logits()
 
     with patch(
-        "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable",
+        "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured",
         return_value=True,
     ):
         draft_tokens = spec.sample_draft(
@@ -328,7 +328,7 @@ def test_sample_draft_passthrough_when_lmhead_disabled():
     hidden_states = torch.randn(3, 5)
 
     with patch(
-        "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable",
+        "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured",
         return_value=False,
     ):
         draft_tokens = spec.sample_draft(
@@ -345,7 +345,7 @@ def test_sample_draft_raises_when_rows_exceed_capacity():
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable",
+            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured",
             return_value=True,
         ),
         pytest.raises(ValueError, match="group-agreed"),
@@ -364,7 +364,7 @@ def test_sample_draft_rejects_probabilistic_draft_sampling():
 
     with (
         patch(
-            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable",
+            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured",
             return_value=True,
         ),
         pytest.raises(NotImplementedError, match="probabilistic"),
@@ -407,7 +407,7 @@ def test_speculator_init_validates_unsupported_draft_sampling(draft_method, bypa
     with (
         nullcontext() if match is None else pytest.raises(NotImplementedError, match=match),
         patch(
-            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_enable",
+            "vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils.lmhead_tp_configured",
             return_value=True,
         ),
     ):
@@ -453,7 +453,7 @@ def test_sample_tokens_prompt_logprobs_with_lmhead(any_prompt_logprobs):
     runner.prompt_logprobs_worker = SimpleNamespace(uses_prompt_logprobs=uses_prompt_logprobs)
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner._lmhead_tp_configured", return_value=True),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_configured", return_value=True),
         patch.object(
             NPUModelRunner.__bases__[0], "sample_tokens", return_value="upstream-result"
         ) as super_sample_tokens,
@@ -502,3 +502,66 @@ def test_draft_capacity_formula_matches_runner():
     runner = _make_runner(max_num_reqs=8, decode_query_len=4)
     assert spec._lmhead_tp_max_num_logits() == 32
     assert runner._lmhead_tp_max_num_logits() == 32
+
+
+def test_draft_vllm_config_does_not_revalidate_draft_model_config():
+    """The draft runtime config must be built the way V1 builds it.
+
+    EAGLE/DFlash draft heads are dense even when the target is MoE. Rebuilding
+    the draft config with ``replace(..., model_config=draft_model_config)``
+    re-runs VllmConfig validation, which checks the draft head against the
+    target-side fine-grained TP layout that ``ascend_config`` allows only for
+    MoE models, so construction dies before any request can run. The draft
+    model config still has to reach the draft config for the draft graph.
+    """
+    from vllm_ascend.worker.v2.spec_decode.autoregressive import speculator as autoreg_module
+
+    spec = object.__new__(_ConcreteSpeculator)
+    spec.vllm_config = MagicMock(name="target_vllm_config")
+    spec.draft_model_config = MagicMock(name="draft_model_config")
+
+    calls = []
+
+    def _fake_replace(config, **kwargs):
+        calls.append((config, kwargs))
+        return SimpleNamespace(**kwargs)
+
+    with patch.object(autoreg_module, "replace", side_effect=_fake_replace):
+        draft_vllm_config = spec._create_draft_vllm_config()
+
+    assert calls[0][0] is spec.vllm_config.parallel_config
+    assert calls[0][1] == {"pipeline_parallel_size": 1}
+    assert len(calls) == 2
+    # Only the target-derived config is validated; the draft model config is
+    # swapped in afterwards.
+    assert "model_config" not in calls[1][1]
+    assert draft_vllm_config.model_config is spec.draft_model_config
+
+
+def test_eagle_draft_vllm_config_disables_expert_parallel():
+    """The EAGLE draft keeps the target-derived config but must not run as an
+    expert model: the dense drafter has no experts, so EP/EPLB stay off."""
+    from vllm_ascend.worker.v2.spec_decode.autoregressive import speculator as autoreg_module
+    from vllm_ascend.worker.v2.spec_decode.eagle import speculator as eagle_module
+    from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+
+    spec = object.__new__(AscendEagleSpeculator)
+    spec.vllm_config = MagicMock(name="target_vllm_config")
+    spec.draft_model_config = MagicMock(name="draft_model_config")
+
+    calls = []
+
+    def _fake_replace(config, **kwargs):
+        calls.append((config, kwargs))
+        return SimpleNamespace(**kwargs)
+
+    with (
+        patch.object(autoreg_module, "replace", side_effect=_fake_replace),
+        patch.object(eagle_module, "replace", side_effect=_fake_replace),
+    ):
+        draft_vllm_config = spec._create_draft_vllm_config()
+
+    assert calls[0][1] == {"pipeline_parallel_size": 1}
+    assert calls[-1][1] == {"enable_expert_parallel": False, "enable_eplb": False}
+    assert "model_config" not in calls[1][1]
+    assert draft_vllm_config.model_config is spec.draft_model_config

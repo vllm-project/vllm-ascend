@@ -848,6 +848,20 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
+def lmhead_tp_configured() -> bool:
+    """``lmhead_tp_enable()`` with an uninitialized engine config read as off.
+
+    Construction- and step-entry hooks also run in lightweight harnesses that
+    never initialize the engine config; with no config the feature is not
+    configured on, so those hooks no-op instead of failing on the read.
+    """
+    try:
+        return lmhead_tp_enable()
+    except RuntimeError:
+        # get_ascend_config() raises before init_ascend_config has run.
+        return False
+
+
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
     """Row capacity every rank of the lmhead-TP group must agree on.
 

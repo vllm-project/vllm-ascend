@@ -113,16 +113,30 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         self.pcp_manager: AscendPCPManager | None = None
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
-        return replace(
+        """Build the runtime config used while executing the draft model.
+
+        Validate the target-derived config first, then swap in the draft model
+        config without re-validating, mirroring the V1 proposer
+        (``AscendSpecDecodeBaseProposer._create_draft_vllm_config``). EAGLE and
+        DFlash draft heads are dense even when the target is MoE, so
+        re-validating the draft config would check that dense head against the
+        target-side fine-grained TP layout (MoE-only in ``ascend_config``) and
+        fail before the speculator can be built.
+
+        The additional config has to stay intact: ``init_ascend_config`` caches
+        the config it builds process-wide, so dropping the fine-grained TP entry
+        here would silently turn lmhead TP off for the draft sampling path.
+        """
+        base = replace(
             self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
+            parallel_config=replace(
+                self.vllm_config.parallel_config,
+                pipeline_parallel_size=1,
+            ),
         )
+        draft_vllm_config = copy(base)
+        draft_vllm_config.model_config = self.draft_model_config
+        return draft_vllm_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
