@@ -270,6 +270,8 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
 
     gc.collect()
     torch.npu.empty_cache()
+
+
 @pytest.mark.parametrize("case", ["one_hot_standard", "one_hot_synthetic", "full_draft_standard"])
 @torch.inference_mode()
 def test_rejection_sample_residual_rng_is_independent_from_acceptance_rng(case):
