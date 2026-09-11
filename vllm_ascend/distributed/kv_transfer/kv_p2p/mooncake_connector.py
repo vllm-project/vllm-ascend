@@ -3014,7 +3014,7 @@ class MooncakeConnectorWorker:
                     kv_head_groups.append(tuple([kv_head_ids_]))
                 return kv_head_groups
 
-        def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
+        def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base, pp_size=1):
             # key is kv_head_group, value is cp_groups and which cp_groups to select
             cp_group_meta: dict = {}
             kv_head_groups = get_kv_head_groups(tp_size)
@@ -3026,26 +3026,35 @@ class MooncakeConnectorWorker:
                     cp_group_meta[kv_head_group]["cp_groups"] = []
                     cp_group_meta[kv_head_group]["select_cp_groups_id"] = 0
                 kv_head_group_offset = tp_size // len(kv_head_groups) * kv_head_group_idx
-                for dcp_repeat_idx in range(dcp_repeat_num):
-                    # len(cp_group) == pcp_size * dcp_size
-                    cp_group = []
-                    dcp_repeat_offset = dcp_size * dcp_repeat_idx
-                    for pcp_rank in range(pcp_size):
-                        pcp_rank_offset = tp_size * pcp_rank
-                        for dcp_rank in range(dcp_size):
-                            cp_group.append(
-                                dcp_rank + port_base + pcp_rank_offset + dcp_repeat_offset + kv_head_group_offset
-                            )
-                    cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
+                for pp_rank in range(pp_size):
+                    pp_rank_offset = pp_rank * pcp_size * tp_size
+                    for dcp_repeat_idx in range(dcp_repeat_num):
+                        # len(cp_group) == pcp_size * dcp_size
+                        cp_group = []
+                        dcp_repeat_offset = dcp_size * dcp_repeat_idx
+                        for pcp_rank in range(pcp_size):
+                            pcp_rank_offset = tp_size * pcp_rank
+                            for dcp_rank in range(dcp_size):
+                                cp_group.append(
+                                    dcp_rank
+                                    + port_base
+                                    + pp_rank_offset
+                                    + pcp_rank_offset
+                                    + dcp_repeat_offset
+                                    + kv_head_group_offset
+                                )
+                        cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
 
             return cp_group_meta
 
         def get_local_remote_block_port_mappings():
             context_parallel_parameters_check()
             p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port
+                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port, self._prefill_pp_size
             )
-            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
+            d_node_cp_group_meta = get_cp_group_meta(
+                self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port, self._decode_pp_size
+            )
             local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
             for d_node_head_key in d_node_cp_group_meta:
                 for p_node_head_key in p_node_cp_group_meta:
@@ -3053,23 +3062,26 @@ class MooncakeConnectorWorker:
                         continue
                     d_node_head_group = d_node_cp_group_meta[d_node_head_key]
                     p_node_head_group = p_node_cp_group_meta[p_node_head_key]
-                    for d_cp_group in d_node_head_group["cp_groups"]:
-                        select_cp_groups_id = p_node_head_group["select_cp_groups_id"]
-                        p_cp_groups = p_node_head_group["cp_groups"]
-                        p_cp_group = p_cp_groups[select_cp_groups_id]
-                        p_node_head_group["select_cp_groups_id"] = (
-                            select_cp_groups_id + 1 if select_cp_groups_id + 1 < len(p_cp_groups) else 0
-                        )
-                        for d_idx, d_port in enumerate(d_cp_group):
-                            if d_port not in local_remote_block_port_mappings:
-                                local_remote_block_port_mappings[d_port] = []
-                            p_port_remote_list = []
-                            for p_idx, p_port in enumerate(p_cp_group):
-                                # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
-                                # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
-                                if (p_idx // r_blk) % len(d_cp_group) == d_idx:
-                                    p_port_remote_list.append(p_port)
-                            local_remote_block_port_mappings[d_port].append(p_port_remote_list)
+                    d_cp_groups = d_node_head_group["cp_groups"]
+                    p_cp_groups = p_node_head_group["cp_groups"]
+                    p_cp_groups_per_pp = len(p_cp_groups) // self._prefill_pp_size
+                    for d_g_idx, d_cp_group in enumerate(d_cp_groups):
+                        # Map each D CP group to one P CP group per PP rank.
+                        # P CP groups are ordered as [pp0_g0, pp0_g1, ..., pp1_g0, pp1_g1, ...].
+                        # For each PP rank, select the matching dcp_repeat group by round-robin.
+                        for pp_rank in range(self._prefill_pp_size):
+                            p_g_idx = (d_g_idx % p_cp_groups_per_pp) + pp_rank * p_cp_groups_per_pp
+                            p_cp_group = p_cp_groups[p_g_idx]
+                            for d_idx, d_port in enumerate(d_cp_group):
+                                if d_port not in local_remote_block_port_mappings:
+                                    local_remote_block_port_mappings[d_port] = []
+                                p_port_remote_list = []
+                                for p_idx, p_port in enumerate(p_cp_group):
+                                    # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
+                                    # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
+                                    if (p_idx // r_blk) % len(d_cp_group) == d_idx:
+                                        p_port_remote_list.append(p_port)
+                                local_remote_block_port_mappings[d_port].append(p_port_remote_list)
 
             logger.info(
                 "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
@@ -3336,7 +3348,7 @@ class MooncakeConnectorWorker:
                 f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
             )
         else:
-            assert tp_num_need_pulls == len(remote_handshake_port_list[0]), (
+            assert len(remote_handshake_port_list[0]) % tp_num_need_pulls == 0, (
                 f"tp_num_need_pulls: {tp_num_need_pulls}, remote_handshake_port_list: {remote_handshake_port_list}"
             )
 
