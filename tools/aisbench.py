@@ -258,13 +258,14 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
-        assert float(output_throughput) >= self.threshold * self.baseline, (
-            "Performance verification failed. "
-            f"The current Output Token Throughput is {output_throughput} token/s, "
-            f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
-        )
-        if self.input_throughput_threshold is not None:
+        if self.threshold is not None and self.baseline is not None:
+            output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
+            assert float(output_throughput) >= float(self.threshold) * float(self.baseline), (
+                "Performance verification failed. "
+                f"The current Output Token Throughput is {output_throughput} token/s, "
+                f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+            )
+        if self.input_throughput_threshold is not None and self.input_throughput_baseline is not None:
             input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
             assert float(input_throughput) >= float(self.input_throughput_threshold) * float(self.input_throughput_baseline), (
                 "Input Token verification failed. "
