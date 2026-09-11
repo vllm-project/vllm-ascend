@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -1488,6 +1489,26 @@ class TestAscendSFACPImpl(TestBase):
 
 
 class TestAscendSFADCPImpl(TestBase):
+    def test_finish_dcp_gather_restore_layout(self):
+        gathered = torch.arange(3 * 2 * 12).reshape(3, 2, 12)
+        for keep_view in (False, True):
+            with self.subTest(keep_view=keep_view):
+                handle = MagicMock()
+                context = SimpleNamespace(
+                    gathered=gathered,
+                    handle=handle,
+                    restore_perm=(1, 0, 2),
+                    split_sizes=(8, 4),
+                )
+                result = AscendSFADCPImpl._finish_dcp_gather(context, keep_view=keep_view)
+                expected = gathered.permute(1, 0, 2).contiguous().split((8, 4), dim=-1)
+                handle.wait.assert_called_once_with()
+                for actual, reference in zip(result, expected):
+                    torch.testing.assert_close(actual, reference)
+                    self.assertEqual(
+                        actual.untyped_storage().data_ptr() == gathered.untyped_storage().data_ptr(), keep_view
+                    )
+
     @staticmethod
     def _make_dsa_cp_context(
         *,
@@ -1663,7 +1684,8 @@ class TestAscendSFADCPImpl(TestBase):
         self.assertEqual(impl._start_dcp_gather.call_args.kwargs["split_sizes"], (16,))
         self.assertIs(attn_metadata.dcp_context.gather_context, gather_context)
 
-    def test_execute_sparse_flash_attention_process_uses_c8_device_operator_lse(self):
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_force_tmajor_restore", return_value=False)
+    def test_execute_sparse_flash_attention_process_uses_c8_device_operator_lse(self, mock_restore):
         impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
         impl.dcp_group = MagicMock()
         impl.dcp_size = 2
@@ -1677,7 +1699,7 @@ class TestAscendSFADCPImpl(TestBase):
 
         ql_nope = torch.randn(2, 2, 8)
         q_pe = torch.randn(2, 2, 4)
-        impl._finish_dcp_gather = MagicMock(side_effect=lambda _ctx: (ql_nope, q_pe))
+        impl._finish_dcp_gather = MagicMock(side_effect=lambda _ctx, **kwargs: (ql_nope, q_pe))
         kv_cache = (torch.empty(4, 1, 1, 16, dtype=torch.int8),)
         topk_indices = torch.zeros(2, 1, dtype=torch.int32)
         actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)

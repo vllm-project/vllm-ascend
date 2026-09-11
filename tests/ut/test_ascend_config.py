@@ -59,6 +59,7 @@ class TestAscendConfig(TestBase):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.sfa_dcp_force_tmajor_restore)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
 
@@ -79,6 +80,7 @@ class TestAscendConfig(TestBase):
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": False,
             },
+            "sfa_dcp_force_tmajor_restore": True,
             "multistream_overlap_shared_expert": True,
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
@@ -86,6 +88,7 @@ class TestAscendConfig(TestBase):
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
+        self.assertTrue(ascend_config.sfa_dcp_force_tmajor_restore)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
