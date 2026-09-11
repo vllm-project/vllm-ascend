@@ -159,11 +159,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
-        if use_updatable_graph(attn_backend, num_tokens, self.vllm_config):
+        if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
-            self.update_stream.wait_stream(torch.npu.current_stream())
-            ret = super().run_fullgraph(desc)
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+
+    def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.

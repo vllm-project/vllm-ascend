@@ -975,7 +975,7 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
@@ -1000,7 +1000,7 @@ def weak_ref_tensors(tensors: Any) -> Any:
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensors(tensor) for tensor in tensors)
     if isinstance(tensors, dict):
-        return {key: (weak_ref_tensors(tensor) if key != "context_lens" else tensor) for key, tensor in tensors.items()}
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
         return IntermediateTensors(weak_ref_tensors(tensors.tensors))
     return tensors
@@ -1651,8 +1651,6 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
 
 def use_updatable_graph(
     attn_backend,
-    num_tokens,
-    vllm_config,
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 

@@ -141,22 +141,25 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
-        attn_metadata = self.speculator.model_state.attn_metadata
         draft_vllm_config = self.speculator.draft_vllm_config
+
+        if use_updatable_graph(attn_backend):
+            return self._updatable_graph_replay(desc)
+        else:
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config)
+
+    def _graph_replay(self, desc, attn_backend, num_tokens, draft_vllm_config):
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        # Mirror vLLM's DP graph-replay token-count metadata.
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
+        attn_metadata = self.speculator.model_state.attn_metadata
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
             self.is_draft_model_prefill,
         )
-
-        if use_updatable_graph(attn_backend, num_tokens, draft_vllm_config):
-            return self._updatable_graph_replay(desc)
-        else:
-            self.update_stream.wait_stream(torch.npu.current_stream())
-            ret = super().run_fullgraph(desc)
-
-        # Mirror vLLM's DP graph-replay token-count metadata.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
         # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
         # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
         # ModelConfig. Publish the draft config because set_forward_context()
@@ -202,6 +205,6 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
         self.update_stream.wait_stream(torch.npu.current_stream())
-        output = super().run_fullgraph(desc)
+        ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
-        return output
+        return ret

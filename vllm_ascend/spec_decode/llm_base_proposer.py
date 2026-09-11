@@ -619,22 +619,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def set_update_stream(self, update_stream):
-        update_stream_setter = getattr(self._runnable, "set_update_stream", None)
-        if callable(update_stream_setter):
-            update_stream_setter(update_stream)
+        if hasattr(self._runnable, "set_update_stream"):
+            self._runnable.set_update_stream(update_stream)
+        self.update_stream = update_stream
 
-    def _build_draft_attn_metadata_updates(self, multi_steps_attn_metadata):
-        update_params = []
-        for per_layer_metadata in multi_steps_attn_metadata:
-            metadata = next(iter(per_layer_metadata.values()))
-            update_params.append(
-                {
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
-                }
-            )
-        return update_params
+    def _maybe_update_metadata(self, att_backend, aclgraph_runtime_mode, multi_steps_attn_metadata):
+        if use_updatable_graph(att_backend):
+            update_params = []
+            for per_layer_metadata in multi_steps_attn_metadata:
+                metadata = next(iter(per_layer_metadata.values()))
+                update_params.append(
+                    {
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+            self._runnable.update_draft_model_metadata(update_params)  # type: ignore
+            self._runnable.set_attn_backend(att_backend)  # type: ignore
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -820,12 +822,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.token_indices_to_sample.fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
-            self.draft_attn_groups[0].backend, num_tokens, self.vllm_config
-        ):
-            update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
-            self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
-            self._runnable.set_attn_backend(self.draft_attn_groups[0].backend)  # type: ignore
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                aclgraph_runtime_mode,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -1159,12 +1161,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
-            self.draft_attn_groups[0].backend, num_tokens, self.vllm_config
-        ):
-            update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
-            self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
-            self._runnable.set_attn_backend(self.draft_attn_groups[0].backend)  # type: ignore
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                aclgraph_runtime_mode,
+                multi_steps_attn_metadata,
+            )
 
         active_device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None

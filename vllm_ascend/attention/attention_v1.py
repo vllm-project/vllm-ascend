@@ -50,11 +50,6 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     using_paged_attention,
 )
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_draft_graph_prefill_params,
-    get_graph_params,
-)
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
@@ -559,9 +554,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # for that path.
         self._layer_name: str | None = None
 
-    def get_update_condition(self):
-        return (self.sinks, self.head_size)
-
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
         # KV-sharing layers replay with the target layer's metadata instead of
@@ -577,96 +569,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        if using_paged_attention(num_tokens, vllm_config):
-            # Paged Attention update logic
-            if _EXTRA_CTX.is_draft_model:
-                if _EXTRA_CTX.is_draft_model_prefill:
-                    graph_params = get_draft_graph_prefill_params()
-                else:
-                    graph_params = get_draft_graph_params()
-            else:
-                graph_params = get_graph_params()
-            with torch.npu.stream(update_stream):
-                # The workspace size depends only on shapes and seq_lens, which
-                # are shared by all layers within one graph-param update pass,
-                # so one get_workspace call per pass is sufficient. Reuse the
-                # workspace across layers and re-query only when any
-                # size-relevant input changes. This mirrors the FIA path, which already
-                # reuses graph_params.workspaces[num_tokens], and removes the
-                # redundant per-layer get_workspace calls (each backed by a
-                # ~36-54MB buffer allocation) per decode step.
-                step_ws_key = None
-                workspace = None
-                for key, param, handle, event in zip(
-                    forward_context.attn_metadata,
-                    graph_params.attn_params[num_tokens],
-                    graph_params.handles[num_tokens],
-                    graph_params.events[num_tokens],
-                ):
-                    (
-                        query,
-                        key_cache,
-                        value_cache,
-                        num_kv_heads,
-                        num_heads,
-                        scale,
-                        block_table,
-                        seq_lens,
-                        output,
-                    ) = param
-                    seq_lens = forward_context.attn_metadata[key].seq_lens
-
-                    # The key covers every size-relevant input, so models
-                    # with heterogeneous layer configs simply trigger a
-                    # re-query instead of reusing a wrong-sized workspace.
-                    ws_key = (
-                        seq_lens.data_ptr(),
-                        tuple(seq_lens.shape),
-                        query.shape,
-                        query.dtype,
-                        key_cache.shape,
-                        key_cache.dtype,
-                        value_cache.shape,
-                        value_cache.dtype,
-                        block_table.shape if block_table is not None else None,
-                        block_table.dtype if block_table is not None else None,
-                        output.shape,
-                        output.dtype,
-                        num_kv_heads,
-                        num_heads,
-                        scale,
-                    )
-                    if step_ws_key != ws_key:
-                        workspace = torch_npu._npu_paged_attention_get_workspace(
-                            query=query,
-                            key_cache=key_cache,
-                            value_cache=value_cache,
-                            num_kv_heads=num_kv_heads,
-                            num_heads=num_heads,
-                            scale_value=scale,
-                            block_table=block_table,
-                            context_lens=seq_lens,
-                            out=output,
-                        )
-                        step_ws_key = ws_key
-                    torch.npu.graph_task_update_begin(update_stream, handle)
-                    torch_npu._npu_paged_attention(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
-                        workspace=workspace,
-                    )
-                    torch.npu.graph_task_update_end(update_stream)
-                    event.record(update_stream)
-        else:
-            # FIA use updatable graph
-            return
+        raise NotImplementedError("FIA and PA should be use UpdatableGraph.")
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
