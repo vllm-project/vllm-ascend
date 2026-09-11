@@ -361,6 +361,10 @@ jobs:
           YUM_MIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8083
           RUSTUP_DIST_SERVER=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup
           RUSTUP_UPDATE_ROOT=http://cache-service.nginx-pypi-cache.svc.cluster.local:8082/rustup/rustup
+          # crates.io sparse index mirror (port 8085 must be added to the
+          # nginx-pypi-cache Deployment, see cratescache.conf). Without it,
+          # cargo falls back to public crates.io and times out.
+          CRATES_IO_INDEX=http://cache-service.nginx-pypi-cache.svc.cluster.local:8085/index/
           PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
           PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
