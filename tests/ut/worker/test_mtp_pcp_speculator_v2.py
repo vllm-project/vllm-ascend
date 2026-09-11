@@ -14,7 +14,6 @@ from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
-from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
@@ -239,9 +238,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
         global_slot_mapping,
         speculator.kv_cache_config,
     )
-    build_kwargs = speculator._build_draft_attn_metadata.call_args.kwargs.copy()
-    np.testing.assert_array_equal(build_kwargs.pop("seq_lens_np"), [0, 1, 0, 0])
-    assert build_kwargs == dict(
+    speculator._build_draft_attn_metadata.assert_called_once_with(
         num_reqs=input_batch.num_reqs,
         num_reqs_padded=input_batch.num_reqs_after_padding,
         num_tokens_padded=input_batch.num_tokens_after_padding,
@@ -539,51 +536,3 @@ def test_propose_preserves_v028_dp_token_counts() -> None:
     ):
         speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
     assert parent.call_args.args[11] is token_counts
-
-
-@pytest.mark.parametrize("lengths", [[19], [19, 10]])
-@pytest.mark.parametrize("padding", [0, 2])
-def test_replicated_prefill_preserves_per_request_kv_lengths(lengths, padding):
-    speculator = object.__new__(AscendMTPSpeculator)
-    speculator.replicated_pcp = True
-    batch = _make_padded_input_batch()
-    batch.is_dummy = False
-    batch.num_reqs = len(lengths)
-    padded = batch.num_reqs + padding
-    # Extra backing entries can contain stale data and must not become requests.
-    cpu_lengths = torch.tensor(lengths + [123, 123], dtype=torch.int32)
-    batch.seq_lens_np = cpu_lengths.numpy()
-    batch.is_prefilling_np = np.ones(batch.num_reqs, dtype=bool)
-    batch.query_start_loc_np = np.arange(batch.num_reqs + 1, dtype=np.int32) * 4
-    batch.seq_lens_cpu_upper_bound = cpu_lengths[: batch.num_reqs]
-    speculator.input_batch = batch
-    speculator.max_model_len = 128
-    speculator.draft_max_seq_len = 22
-    speculator.input_buffers = SimpleNamespace(
-        positions=torch.arange(padded * 4),
-        query_start_loc=torch.arange(padded + 1, dtype=torch.int32) * 4,
-        seq_lens=torch.tensor(lengths + [0] * padding, dtype=torch.int32),
-    )
-    speculator.block_tables = MagicMock()
-    speculator.block_tables.input_block_tables = [torch.zeros((padded, 2), dtype=torch.int32)]
-    speculator.block_tables.slot_mappings = torch.zeros((1, padded * 4), dtype=torch.int64)
-    speculator.block_tables.compute_slot_mappings.return_value = speculator.block_tables.slot_mappings
-    speculator.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
-    # Exercise the real preparation, parent builder, factory and common metadata.
-    # Stop at the backend boundary; no NPU operators are needed for this contract.
-    builder = SimpleNamespace(build=lambda **kwargs: kwargs["common_attn_metadata"])
-    group = SimpleNamespace(layer_names=["draft.layer"], get_metadata_builder=lambda _: builder)
-    speculator.attn_groups = [[group]]
-    original_lengths = cpu_lengths.clone()
-    with (
-        attn_utils.build_attn_metadata_wrapper(),
-        patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}),
-    ):
-        result, _ = speculator._prepare_replicated_prefill_attn({}, {}, padded, padded * 4)
-    metadata = result["draft.layer"]
-    assert metadata.seq_lens_cpu.tolist() == lengths + [0] * padding
-    assert metadata.seq_lens.tolist() == lengths + [0] * padding
-    assert metadata.max_seq_len == 22
-    assert torch.equal(cpu_lengths, original_lengths)
-    if not padding:
-        assert metadata.seq_lens_cpu.data_ptr() == cpu_lengths.data_ptr()

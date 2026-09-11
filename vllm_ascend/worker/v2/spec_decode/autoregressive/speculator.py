@@ -201,10 +201,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             slot_mappings_tensor,
             self.kv_cache_config,
         )
-        # Draft prefill retains target KV lengths, not the future draft length bound.
-        seq_lens_np = input_batch.seq_lens_np[: input_batch.num_reqs]
-        if num_reqs_padded > input_batch.num_reqs:
-            seq_lens_np = np.pad(seq_lens_np, (0, num_reqs_padded - input_batch.num_reqs))
         attn_metadata = self._build_draft_attn_metadata(
             num_reqs=input_batch.num_reqs,
             num_reqs_padded=num_reqs_padded,
@@ -212,7 +208,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             step=0,
             query_start_loc_np=input_batch.query_start_loc_np,
-            seq_lens_np=seq_lens_np,
         )
         return attn_metadata, slot_mappings
 
@@ -480,14 +475,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
         query_start_loc_np: np.ndarray | None = None,
-        seq_lens_np: np.ndarray | None = None,
     ) -> dict[str, Any] | None:
         assert self.input_batch is not None
         with build_draft_attn_metadata_factory(
             self.input_buffers.positions,
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
-            seq_lens_np=seq_lens_np,
         ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,
