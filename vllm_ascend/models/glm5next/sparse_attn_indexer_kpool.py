@@ -40,7 +40,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self,
         k_cache,
         quant_block_size: int,
-        scale_fmt: str,
+        scale_fmt: str | None,
         topk_tokens: int,
         head_dim: int,
         max_model_len: int,

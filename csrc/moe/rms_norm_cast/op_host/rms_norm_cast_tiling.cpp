@@ -55,12 +55,7 @@ ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
     const auto dtype = context->GetInputDesc(0)->GetDataType();
     OP_CHECK_IF(dtype != ge::DT_FLOAT16 && dtype != ge::DT_BF16,
                 OP_LOGE(context, "x only supports float16 and bfloat16"), return ge::GRAPH_FAILED);
-    const auto soc_version = platform.GetSocVersion();
-    const uint32_t tiling_key =
-        soc_version == platform_ascendc::SocVersion::ASCEND950
-            ? 0
-            : (dtype == ge::DT_FLOAT16 ? FP16_KEY : BF16_KEY);
-    context->SetTilingKey(tiling_key);
+    context->SetTilingKey(dtype == ge::DT_FLOAT16 ? FP16_KEY : BF16_KEY);
     context->SetBlockDim(used_core_num);
 
     RmsNormCastTilingData tiling;

@@ -612,6 +612,28 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
+#   2. `vllm.v1.structured_output.backend_outlines.OutlinesGrammar.accept_tokens`
+#    Why:
+#       After the outlines FSM finishes (e.g. the JSON is complete), the
+#       scheduler emits one more mask that allows EOS/stop tokens so the
+#       request can terminate normally. Those tokens are not part of the FSM
+#       alphabet built from the JSON regex, so `guide.accepts_tokens()` rejects
+#       them and the scheduler terminates the request with FINISHED_ERROR,
+#       logging "Unexpected: grammar rejected tokens". The xgrammar backend
+#       already short-circuits in this case (`if self._is_terminated:
+#       return True`); outlines is missing the same guard.
+#    How:
+#       Wrap `OutlinesGrammar.accept_tokens` with a terminal short-circuit
+#       that returns True once `guide.is_finished()` is set, mirroring the
+#       xgrammar behavior. Applies to both model runner v1 and v2 since the
+#       fix targets the scheduler-side grammar class.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/49227 (fixed the analogous
+#       stop-token handling for xgrammar only; outlines was left out)
+#    Future Plan:
+#       Remove this patch once upstream vLLM adds the terminal short-circuit
+#       to the outlines backend.
+#
 # ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
@@ -702,7 +724,11 @@
 #    How:
 #       Skip `Indexer` construction only when the layer both skips top-k and is
 #       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       a complete `Indexer`. The runtime `skip_topk` handed to the MLA wrapper
+#       is additionally masked with `not is_mtp_layer` (same as upstream
+#       deepseek_v2.py): MTP layers must never start in skip mode, because they
+#       compute their own indices at draft step 0 and toggle at runtime via
+#       `set_skip_topk` (index_share_for_mtp_iteration).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:

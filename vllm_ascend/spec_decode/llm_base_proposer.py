@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -58,6 +59,7 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
+from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
@@ -182,9 +184,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-        self.use_sequence_parallel_moe = enable_sp(vllm_config)
 
         self.dcp_size = self.runner.dcp_size
+        self.dcp_rank = self.runner.dcp_rank
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -277,7 +279,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.block_table_tensor_clone: torch.Tensor | None = None
 
         self._runnable = self._run_merged_draft
-        self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
         if self.uses_mrope:
             self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -917,7 +918,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
 
@@ -1091,7 +1092,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -1267,7 +1268,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
-                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
                 model_kwargs["hidden_states"] = model_hidden_states
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
@@ -1284,11 +1284,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model = getattr(self.model, "model", None)
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
-
-        if self.method != "dflash":
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states, model_positions, hidden_states
-            )
+            if hasattr(draft_model, "compact_topk_indices"):
+                compact_mtp_topk_indices(
+                    draft_model,
+                    token_indices_to_sample,
+                    num_input_tokens,
+                    tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
+                )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
@@ -1530,8 +1532,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
 
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
@@ -1553,10 +1553,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             ret_hidden_states = self.model(**model_kwargs)
             last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
-
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states, model_positions, hidden_states
-            )
 
             num_indices = token_indices_to_sample.shape[0]
             if lmhead_tp_enable():
@@ -2331,34 +2327,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             tensor = tensor[:desired_size]
         return tensor
-
-    def maybe_pad_and_reduce(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return hidden_states, positions
-
-    def maybe_all_gather_and_unpad(
-        self,
-        last_hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if self.method == "mtp":
-            if self.use_sequence_parallel_moe:
-                tp_group = get_tp_group()
-                last_hidden_states = torch.ops.vllm.all_gather(
-                    last_hidden_states.contiguous(), 0, tp_group.world_size, tp_group.unique_name
-                )
-                # in mm model, positions not need allgather, because it not reduced before(see maybe_pad_and_reduce())
-                if not self.is_multimodal_model:
-                    positions = torch.ops.vllm.all_gather(
-                        positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name
-                    )
-                if hidden_states is not None:
-                    hidden_states = last_hidden_states
-        return last_hidden_states, positions, hidden_states
 
     # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
     # enabling the LM head feature causes token_indices_to_sample to switch from padding to trimming.

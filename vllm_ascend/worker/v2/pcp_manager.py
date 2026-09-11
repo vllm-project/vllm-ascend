@@ -125,14 +125,21 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "eagle3"):
-                raise NotImplementedError("Ascend MRV2 PCP supports speculative decoding only with MTP and Eagle3.")
+            if speculative_config.method not in ("mtp", "eagle3", "dspark"):
+                raise NotImplementedError(
+                    "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
+                )
             if speculative_config.draft_sample_method != "greedy":
                 raise NotImplementedError(
                     "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."
                 )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if parallel_config.data_parallel_size > 1 and cudagraph_mode not in {
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        }:
+            raise NotImplementedError("MRV2 PCP+DP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
         if is_sparse_mla and cudagraph_mode not in {
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL_DECODE_ONLY,
@@ -354,6 +361,26 @@ class AscendPCPManager(PCPManager):
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
 
+    # TODO(wzx0726): Once the paired vLLM includes https://github.com/vllm-project/vllm/pull/53867,
+    # adapt its PCP prepare_inputs_to_capture path to create AscendInputBatch
+    # directly in persistent PCP buffers, then remove this method and the
+    # NPUModelRunner.prepare_dummy_attn override after capture/idle replay validation.
+    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        # Runtime dummy inputs use the runner buffers, whereas FULL graphs
+        # capture PCP-local storage. Refresh that storage after a real batch.
+        input_buffers = self.input_buffers
+        num_tokens = input_batch.num_tokens_after_padding
+        num_reqs = input_batch.num_reqs_after_padding
+        for name in ("input_ids", "positions", "is_padding"):
+            getattr(input_buffers, name)[:num_tokens].copy_(getattr(input_batch, name))
+        input_buffers.query_start_loc[: num_reqs + 1].copy_(input_batch.query_start_loc)
+        input_buffers.seq_lens[:num_reqs].copy_(input_batch.seq_lens)
+        input_buffers.seq_lens_np[:num_reqs] = input_batch.seq_lens_np[:num_reqs]
+        return (
+            self.get_dummy_block_tables(num_reqs),
+            self.get_dummy_slot_mappings(num_tokens),
+        )
+
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         """Return capture views backed by the persistent PCP-local tables.
 
@@ -415,34 +442,33 @@ class AscendPCPManager(PCPManager):
 
     def build_attention_context(
         self,
-        capture_batch: AscendInputBatch | None = None,
+        input_batch: AscendInputBatch | None = None,
+        block_tables: tuple[torch.Tensor, ...] | None = None,
+        slot_mappings: torch.Tensor | None = None,
     ) -> AscendPCPAttentionContext:
-        """Build the PCP context consumed by attention metadata builders.
-
-        At runtime the global batch partitioned by ``partition_batch`` is the
-        authoritative view. Graph capture (vLLM #53869) never partitions a
-        batch, so callers pass the capture-only dummy batch laid out on the
-        same persistent input buffers.
-        """
-        global_batch = self._global_batch
-        if global_batch is None:
-            global_batch = capture_batch
-        assert global_batch is not None
-        # Only duck-typed attributes are consumed downstream, so callers may
-        # pass batch stand-ins (e.g. UT SimpleNamespace or the capture dummy).
-        hidden_restore_idx = self._hidden_restore_idx
-        if hidden_restore_idx is None:
-            # Graph capture (vLLM #53515/#53869) never partitions a batch, so
-            # _build_batch_layout did not fill _hidden_restore_idx. Runtime
-            # prepare_attn rebuilds this metadata every step, so an identity
-            # placeholder is sufficient for the capture-only context.
-            hidden_restore_idx = torch.arange(
-                global_batch.num_tokens_after_padding,
-                dtype=torch.int64,
-                device=self.device,
+        """Build PCP context for the current real, capture, or idle DP batch."""
+        if input_batch is not None and input_batch.is_dummy:
+            # Both capture and runtime dummy batches bypass partition_batch().
+            # Saved layout state may be absent or belong to a previous request.
+            assert block_tables is not None
+            assert slot_mappings is not None
+            num_tokens = input_batch.num_tokens_after_padding
+            restore_start = self.pcp_rank * num_tokens
+            return AscendPCPAttentionContext(
+                global_batch=input_batch,
+                global_block_tables=block_tables,
+                global_slot_mappings=slot_mappings.view(slot_mappings.shape[0], self.pcp_world_size, num_tokens)[
+                    :, self.pcp_rank
+                ],
+                hidden_restore_idx=torch.arange(restore_start, restore_start + num_tokens, device=self.device),
             )
+
+        global_batch = self._global_batch
+        hidden_restore_idx = self._hidden_restore_idx
+        assert global_batch is not None
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
+        assert hidden_restore_idx is not None
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(

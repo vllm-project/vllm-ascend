@@ -49,7 +49,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
-    is_glm5_next_kpool_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -64,6 +63,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    is_hidden_state_cache_spec,
     vllm_version_is,
 )
 
@@ -133,10 +133,6 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
-            # GLM-5.3-Flash kpool indexer/tail caches keep their own spec.
-            if is_glm5_next_kpool_cache(attn_module):
-                kv_cache_spec[layer_name] = spec
-                continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -691,6 +687,28 @@ def _allocate_kv_cache(
         example_layer_name = shared_names[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
 
+        # extract_hidden_states dumps are live at the same time as the target
+        # model's Attention/Mamba caches. Keep HiddenStateCacheSpec off the
+        # #51718 hybrid backing so float32 SSM writes cannot overlay bfloat16
+        # hidden states, and size each dump from its own page.
+        if any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
+            for layer_idx, layer_name in enumerate(shared_names):
+                layer_spec = layer_kv_cache_spec[layer_name]
+                if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * layer_spec.page_size_bytes,
+                        alignment,
+                        device,
+                    )
+                    continue
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                end = start + layer_size
+                if end > hybrid_backing.numel():
+                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
+                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+            continue
+
         if hybrid_backing is not None:
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
@@ -1007,6 +1025,44 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
+            if is_hidden_state_cache_spec(kv_cache_spec):
+                # Single tensor for extract_hidden_states (no K/V split).
+                # HiddenStateCacheSpec subclasses MLAAttentionSpec, so this
+                # must run before the generic MLA reshape path.
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Hidden-state cache for {layer_name} must use one raw tensor.")
+                if raw_cache.numel() % kv_cache_spec.page_size_bytes:
+                    raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
+                num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
+                if num_blocks < kv_cache_config.num_blocks:
+                    raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
+                # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
+                # Spec properties already give the [B, H, N, C] layout that
+                # basic_cache writes as kv_cache[block, :, offset].
+                kv_cache_shape = (
+                    num_blocks,
+                    kv_cache_spec.num_heads,
+                    kv_cache_spec.num_states,
+                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                )
+                typed_cache = raw_cache.view(kv_cache_spec.dtype)
+                page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
+                if page_size_padded is not None:
+                    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                    page_stride = page_size_padded // dtype_size
+                    strides = [1] * len(kv_cache_shape)
+                    for dim_idx in range(len(kv_cache_shape) - 2, -1, -1):
+                        strides[dim_idx] = strides[dim_idx + 1] * kv_cache_shape[dim_idx + 1]
+                    strides[0] = page_stride
+                    kv_caches[layer_name] = torch.as_strided(
+                        typed_cache,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                    )
+                else:
+                    kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
+                continue
+
             if is_dsv4_model and isinstance(
                 kv_cache_spec,
                 (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),

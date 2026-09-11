@@ -6,7 +6,13 @@
 
     #### Install CANN manually {: #installation-base-environment-install-cann }
 
-    Please refer to [CANN Installation Resources](https://www.hiascend.com/cann/download) or the following code to complete the installation.
+    The official [CANN Installation Resources](https://www.hiascend.com/cann/download) are the authoritative installation reference.
+
+    ???+ important "The example commands are for A2 only"
+
+        The commands below are for reference and install 910B Ops, which applies
+        only to A2. For other hardware, including Ascend 950DT, use the matching
+        Ops package according to the official guide.
 
     The commands below use the default CANN and NNAL installation paths. If you install either component in a non-default directory, source the corresponding `set_env.sh` from the actual installation directory.
 

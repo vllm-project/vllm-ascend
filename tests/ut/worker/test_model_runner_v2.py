@@ -9,7 +9,9 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _make_runner(need_timing: bool = True):
@@ -214,3 +216,43 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
     assert padded_num_tokens.value.id == "batch_desc"
+
+
+@pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
+def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
+    runner = _make_runner()
+    runner.input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
+    manager = AscendPCPManager(2, 1, torch.device("cpu"), max_num_reqs=4, max_num_tokens=8)
+    runner.pcp_manager = manager
+    manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
+    manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
+    captured = {
+        name: getattr(manager.input_buffers, name)
+        for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens")
+    }
+    for name, value in captured.items():
+        value.fill_(False if name == "is_padding" else 99)
+    manager.input_buffers.seq_lens_np.fill(99)
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
+
+    block_tables, slots = runner.prepare_dummy_attn(dummy)
+
+    for name, value in captured.items():
+        expected = getattr(dummy, name)
+        torch.testing.assert_close(value[: len(expected)], expected)
+    np.testing.assert_array_equal(manager.input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
+    assert torch.count_nonzero(block_tables[0]) == 0
+    assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
+    assert slots.shape == (1, 2 * num_tokens)
+    assert torch.all(slots == -1)
+
+
+def test_prepare_dummy_attn_without_pcp_uses_upstream():
+    runner = _make_runner()
+    runner.pcp_manager = None
+    dummy = object()
+    with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
+        assert runner.prepare_dummy_attn(dummy) == ((), None)
+    parent.assert_called_once_with(dummy)
