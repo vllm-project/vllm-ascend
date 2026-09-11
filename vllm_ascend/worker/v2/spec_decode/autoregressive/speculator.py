@@ -464,6 +464,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.input_buffers.positions,
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
+            getattr(self.input_batch, "req_ids_tensor", None),
+            getattr(self.input_batch, "token_to_req", None),
         ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,

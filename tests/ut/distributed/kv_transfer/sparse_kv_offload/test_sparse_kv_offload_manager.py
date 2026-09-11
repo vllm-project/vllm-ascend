@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zlib import adler32
 
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
@@ -11,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
+    update_sparse_kv_offload_metadata_v2,
 )
 from vllm_ascend.utils import AscendDeviceType
 
@@ -31,6 +33,17 @@ class _FakeKVCacheSpec:
 
     def max_memory_usage_bytes(self, _vllm_config):
         return self.max_blocks_per_request * self.page_size_bytes
+
+
+class _FakeCpuGpuBuffer:
+    def __init__(self, size, dtype):
+        import numpy as np
+
+        self.np = np.zeros(size, dtype=dtype)
+        self.copied = []
+
+    def copy_to_gpu(self, size):
+        self.copied.append(size)
 
 
 def _make_memory_plan_inputs(max_num_seqs=2):
@@ -57,6 +70,66 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
+    def test_registration_selects_only_six_tensor_offload_caches(self):
+        manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+        manager.num_target_layers = 1
+        manager.tp_rank = 0
+
+        manager._register_offload_layers(
+            {
+                "model.layers.0.self_attn.attn": (None, None, 1, 2, 3, 4),
+                "model.layers.0.self_attn.indexer": (object(),),
+                "model.layers.0.dense_attn": object(),
+            }
+        )
+
+        self.assertEqual(
+            manager.offload_layer_names,
+            ["model.layers.0.self_attn.attn"],
+        )
+        self.assertEqual(manager.layer_name_to_offload_id, {"model.layers.0.self_attn.attn": 0})
+
+    def test_mrv2_request_metadata_matches_scheduled_token_layout(self):
+        import numpy as np
+
+        req_ids = _FakeCpuGpuBuffer(4, np.int64)
+        token_to_req = _FakeCpuGpuBuffer(8, np.int32)
+        update_sparse_kv_offload_metadata_v2(
+            num_tokens=5,
+            num_reqs=2,
+            num_tokens_padded=8,
+            num_reqs_padded=4,
+            req_ids=["request-a", "request-b"],
+            query_start_loc_np=np.asarray([0, 2, 5, 5, 5], dtype=np.int32),
+            offload_req_ids_tensor=req_ids,
+            offload_token_to_req=token_to_req,
+        )
+
+        self.assertEqual(
+            req_ids.np.tolist(),
+            [adler32(b"request-a"), adler32(b"request-b"), 0, 0],
+        )
+        self.assertEqual(token_to_req.np.tolist(), [0, 0, 1, 1, 1, 0, 0, 0])
+        self.assertEqual(req_ids.copied, [4])
+        self.assertEqual(token_to_req.copied, [8])
+
+    def test_mrv2_request_metadata_rejects_invalid_layout(self):
+        import numpy as np
+
+        req_ids = _FakeCpuGpuBuffer(2, np.int64)
+        token_to_req = _FakeCpuGpuBuffer(2, np.int32)
+        with self.assertRaisesRegex(ValueError, "non-decreasing"):
+            update_sparse_kv_offload_metadata_v2(
+                num_tokens=2,
+                num_reqs=2,
+                num_tokens_padded=2,
+                num_reqs_padded=2,
+                req_ids=["a", "b"],
+                query_start_loc_np=np.asarray([0, 2, 1], dtype=np.int32),
+                offload_req_ids_tensor=req_ids,
+                offload_token_to_req=token_to_req,
+            )
+
     def test_non_a3_is_rejected(self):
         with (
             patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),

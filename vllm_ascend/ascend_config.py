@@ -1371,9 +1371,6 @@ class SparseKVOffloadConfig:
                     "and can only be used in D node. For debugging in PD colocate scenario, "
                     "you can enable keep_device_kv_cache."
                 )
-        if vllm_config.use_v2_model_runner:
-            raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
-
         self.topk = vllm_config.model_config.hf_text_config.index_topk
         if self.topk_buffer_size < self.topk:
             raise ValueError(

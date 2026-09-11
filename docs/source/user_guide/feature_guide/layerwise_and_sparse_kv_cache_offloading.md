@@ -214,7 +214,7 @@ Requirements:
 
 - use disaggregated Prefill/Decode deployment;
 - enable the feature only on Decode; and
-- use Model Runner V1.
+- use Model Runner V1 or Model Runner V2.
 
 Add the following options to the Decode launch command:
 
@@ -249,6 +249,11 @@ On A5 nodes, add `"memfabric_transfer_protocol": "device_urma"` to
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
 | `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
+
+Model Runner V2 reuses the same Host Main-KV pool, NPU Top-K buffers,
+MemFabric transport, and SFA execution path as Model Runner V1. Enable MRV2
+with the normal vLLM model-runner setting; no additional sparse-offload option
+is required.
 
 ## 4. Start the P/D Proxy
 

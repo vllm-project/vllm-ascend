@@ -79,6 +79,49 @@ def _spec_compress_ratio(spec) -> int:
     return spec.compress_ratio if vllm_version_is("0.28.0") else spec.tokens_per_state
 
 
+def test_get_kv_cache_spec_marks_sparse_main_cache_host_resident(monkeypatch):
+    class _FakeMLAAttention:
+        def __init__(self, spec):
+            self.spec = spec
+            self.impl = SimpleNamespace(
+                fa_quant_layer=False,
+                enable_sparse_sfa_c8=False,
+            )
+            self.kv_sharing_target_layer_name = None
+
+        def get_kv_cache_spec(self, _config):
+            return self.spec
+
+    layer_name = "model.layers.0.self_attn.attn"
+    source_spec = _make_dsv4_mla_spec(block_size=128, compress_ratio=1)
+    layer = _FakeMLAAttention(source_spec)
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+    monkeypatch.setattr(attn_utils, "MLAAttention", _FakeMLAAttention)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: layer},
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=True),
+            is_sparse_li_c8_layer=lambda _name: False,
+        ),
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.store_on_host is True
+
+
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only changed the main allocation entry point")
 def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
@@ -881,3 +924,45 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
         "pcp_context": pcp_context,
         "pcp_cache_group_idx": 0,
     }
+
+
+def test_build_attn_metadata_propagates_sparse_offload_identity(monkeypatch):
+    captured = {}
+
+    class _IdentityBuilder:
+        def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+            captured["req_ids"] = common_attn_metadata.req_ids_tensor
+            captured["token_to_req"] = common_attn_metadata.token_to_req
+            return common_attn_metadata
+
+    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", _IdentityBuilder)
+    builder = _IdentityBuilder()
+    req_ids = torch.tensor([11, 22], dtype=torch.int64)
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32)
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[
+            [
+                SimpleNamespace(
+                    layer_names=["layer.0"],
+                    get_metadata_builder=lambda _: builder,
+                )
+            ]
+        ],
+        num_reqs=2,
+        num_tokens=2,
+        query_start_loc_gpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1, 1], dtype=torch.int32),
+        max_seq_len=2,
+        block_tables=(torch.zeros((2, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(2, dtype=torch.int64),),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+        seq_lens_np=np.asarray([1, 1], dtype=np.int32),
+        req_ids_tensor=req_ids,
+        token_to_req=token_to_req,
+    )
+
+    assert metadata["layer.0"].req_ids_tensor is req_ids
+    assert captured["req_ids"] is req_ids
+    assert captured["token_to_req"] is token_to_req

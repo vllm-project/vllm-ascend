@@ -20,6 +20,7 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -34,6 +35,7 @@ class AscendInputBuffers(InputBuffers):
         max_num_reqs: int,
         max_num_tokens: int,
         device: torch.device,
+        enable_sparse_kv_offload: bool = False,
     ):
         super().__init__(
             max_num_reqs,
@@ -61,6 +63,23 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        # Stable device addresses are required by ACL graph replay. Keep the
+        # Sparse KV offload request identity buffers with the other runner
+        # inputs instead of allocating them while building attention metadata.
+        self.offload_req_ids: CpuGpuBuffer | None = None
+        self.offload_token_to_req: CpuGpuBuffer | None = None
+        if enable_sparse_kv_offload:
+            self.offload_req_ids = CpuGpuBuffer(
+                max_num_reqs,
+                dtype=torch.int64,
+                device=device,
+            )
+            self.offload_token_to_req = CpuGpuBuffer(
+                max_num_tokens,
+                dtype=torch.int32,
+                device=device,
+            )
+
 
 @dataclass
 class AscendInputBatch(InputBatch):
@@ -74,6 +93,9 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    # Request identity consumed by the per-layer sparse-resident LRU.
+    req_ids_tensor: torch.Tensor | None = None
+    token_to_req: torch.Tensor | None = None
 
     @classmethod
     def make_dummy(
@@ -98,9 +120,28 @@ class AscendInputBatch(InputBatch):
         seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
         update_cos_sin(input_batch.positions)
         base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
+        req_ids_tensor = None
+        token_to_req = None
+        if input_buffers.offload_req_ids is not None:
+            assert input_buffers.offload_token_to_req is not None
+            # Dummy request rows are stable for the lifetime of a graph. The
+            # token layout mirrors InputBatch.make_dummy's balanced partition.
+            input_buffers.offload_req_ids.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
+            input_buffers.offload_req_ids.copy_to_gpu(num_reqs)
+            query_lens: np.ndarray = np.full(num_reqs, base_tokens, dtype=np.int32)
+            if num_extra:
+                query_lens[num_reqs - num_extra :] += 1
+            input_buffers.offload_token_to_req.np[:num_tokens] = np.repeat(
+                np.arange(num_reqs, dtype=np.int32), query_lens
+            )
+            input_buffers.offload_token_to_req.copy_to_gpu(num_tokens)
+            req_ids_tensor = input_buffers.offload_req_ids.gpu[:num_reqs]
+            token_to_req = input_buffers.offload_token_to_req.gpu[:num_tokens]
         return cls(
             **base_fields,
             seq_lens_np=seq_lens_np,
             attn_state=AscendAttentionState.DecodeOnly,
             is_dummy=True,
+            req_ids_tensor=req_ids_tensor,
+            token_to_req=token_to_req,
         )
