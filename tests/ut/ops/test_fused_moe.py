@@ -1690,6 +1690,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(
         multistream_overlap=False,
+        start_input_all_gather=MagicMock(return_value=(hidden_states, None)),
         forward=MagicMock(return_value=shared_out),
     )
     routed_events = FusedMoEEvents(
@@ -1724,6 +1725,7 @@ def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_ex
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
+        ascend_shared_experts.start_input_all_gather.assert_called_once_with(hidden_states)
         ascend_shared_experts.forward.assert_called_once()
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
@@ -1796,5 +1798,61 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         "input_is_gathered": True,
         "defer_output_wait": True,
     }
+    assert result[0] is shared_out
+    assert result[1] is routed_out
+
+
+def test_forward_impl_waits_for_non_transform_sp_gather_before_routed_dispatch(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4)
+    gathered_states = torch.randn(4, 4)
+    router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    shared_out = torch.randn(2, 4)
+    gather_done = object()
+    operation_order = []
+    routed_events = FusedMoEEvents(
+        before_routed_experts=None,
+        after_routed_experts=None,
+        before_dispatch=None,
+        before_gmm2=None,
+        before_combine=None,
+    )
+
+    def start_input_all_gather(states):
+        operation_order.append("start_gather")
+        assert states is hidden_states
+        return gathered_states, gather_done
+
+    def routed_forward(**kwargs):
+        operation_order.append("routed_dispatch")
+        return routed_out, routed_events
+
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(side_effect=routed_forward))
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        start_input_all_gather=MagicMock(side_effect=start_input_all_gather),
+        forward=MagicMock(return_value=shared_out),
+    )
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    current_stream = MagicMock()
+    current_stream.wait_event.side_effect = lambda event: operation_order.append("wait_gather")
+
+    monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
+
+    result = runner._forward_impl(hidden_states, router_logits, shared_experts_input=None)
+
+    assert operation_order == ["start_gather", "wait_gather", "routed_dispatch"]
+    runner.ascend_shared_experts.forward.assert_called_once_with(
+        gathered_states,
+        routed_events,
+        input_is_gathered=True,
+        defer_output_wait=False,
+    )
     assert result[0] is shared_out
     assert result[1] is routed_out

@@ -317,13 +317,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            # The runner input transform provides a padded gathered tensor in
-            # SP multistream mode. Trim the shared-MLP view before use.
+            # The routed-transform overlap path provides a padded gathered
+            # tensor before entering this custom op. Other SP-only models must
+            # retain the original gather -> wait -> routed-dispatch ordering.
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
-            shared_expert_input = (
-                shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
-            )
+            shared_input_all_gather_done = None
+            if shared_input_is_gathered:
+                shared_expert_input = shared_hidden_states[: _EXTRA_CTX.num_tokens]
+            else:
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.start_input_all_gather(shared_hidden_states)
+                )
+                shared_input_is_gathered = shared_input_all_gather_done is not None
             if self.is_internal_router:
                 gate = self.gate
                 assert gate is not None
@@ -344,6 +350,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None
 
+            if shared_input_all_gather_done is not None:
+                torch.npu.current_stream().wait_event(shared_input_all_gather_done)
             routed_out, fused_moe_events = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
