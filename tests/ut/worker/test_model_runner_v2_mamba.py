@@ -1,9 +1,11 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
@@ -12,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -21,12 +24,18 @@ from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
+    normalize_mamba_kv_cache_config,
+    validate_kv_cache_tensor_layouts,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+
+def _uses_legacy_kv_tensor_api() -> bool:
+    return vllm_version_is("0.28.0")
 
 
 def _make_kv_cache_tensor(
@@ -38,7 +47,7 @@ def _make_kv_cache_tensor(
     offset: int = 0,
 ) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
-    if vllm_version_is("0.28.0"):
+    if _uses_legacy_kv_tensor_api():
         return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(
         size=size,
@@ -88,10 +97,154 @@ def _group(spec: MambaSpec):
     )
 
 
+def _layout_config(tensors, *, same_group=False):
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    groups = (
+        [KVCacheGroupSpec(layer_names=["attn", "other"], kv_cache_spec=spec)]
+        if same_group
+        else [KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name in ("attn", "other")]
+    )
+    return KVCacheConfig(num_blocks=3, kv_cache_tensors=tensors, kv_cache_groups=groups)
+
+
+@pytest.mark.skipif(_uses_legacy_kv_tensor_api(), reason="per-layer KV tensor descriptors were added after v0.28.0")
+def test_validate_main_layer_views_and_cross_group_aliases():
+    # Main permits hybrid groups to overlay the same backing.
+    aliases = [_make_kv_cache_tensor(48, [name], 16, layer_stride=48) for name in ("attn", "other")]
+    validate_kv_cache_tensor_layouts(_layout_config(aliases))
+    # Layers in one group use separate contiguous regions in the backing.
+    packed = [_make_kv_cache_tensor(96, ["attn", "other"], 16, layer_stride=48)]
+    validate_kv_cache_tensor_layouts(_layout_config(packed, same_group=True))
+
+
+@pytest.mark.parametrize(
+    ("tensors", "error"),
+    [
+        ([_make_kv_cache_tensor(47, ["attn"], 16)], "exceeds the backing"),
+        ([_make_kv_cache_tensor(48, ["attn"], 16, offset=-1)], "nonnegative"),
+        ([_make_kv_cache_tensor(48, ["missing"], 16)], "unknown layer"),
+        ([_make_kv_cache_tensor(48, ["attn", "attn"], 16)], "multiple storage owners"),
+        ([_make_kv_cache_tensor(48, ["attn"], 8)], "block stride"),
+        ([_make_kv_cache_tensor(48, ["attn", "other"], 16, layer_stride=0)], "overlaps"),
+    ],
+)
+@pytest.mark.skipif(_uses_legacy_kv_tensor_api(), reason="per-layer KV tensor descriptors were added after v0.28.0")
+def test_validate_kv_cache_tensor_layouts_rejects_invalid_descriptions(tensors, error):
+    with pytest.raises(ValueError, match=error):
+        validate_kv_cache_tensor_layouts(_layout_config(tensors, same_group=True))
+
+
+@pytest.mark.skipif(not _uses_legacy_kv_tensor_api(), reason="legacy shared_by descriptor is used by v0.28.0")
+def test_validate_v028_shared_kv_tensor_descriptor():
+    validate_kv_cache_tensor_layouts(_layout_config([_make_kv_cache_tensor(48, ["attn"], 16)]))
+
+
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+    assert AscendMambaHybridModelState._get_mamba_group_info is MambaHybridModelState._get_mamba_group_info
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_mamba_worker_groups_reserve_speculative_block_table_entries(wrapped, prefix_caching):
+    spec = MambaSpec(
+        block_size=384,
+        shapes=((10, 6), (2, 2)),
+        dtypes=(torch.float16, torch.float32),
+        num_speculative_blocks=7,
+        mamba_cache_mode="align",
+    )
+    attention_specs = {
+        name: FullAttentionSpec(block_size=384, num_kv_heads=1, head_size=head_size, dtype=torch.float16)
+        for name, head_size in (("target", 8), ("draft", 16))
+    }
+    attention_spec = UniformTypeKVCacheSpecs.from_specs(attention_specs)
+    assert attention_spec is not None
+    groups = [KVCacheGroupSpec(layer_names=list(attention_specs), kv_cache_spec=attention_spec)]
+    for group_id in range(2):
+        layer_names = [f"mamba.{group_id}.{layer_id}" for layer_id in range(2)]
+        group_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(layer_names, spec)) if wrapped else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=group_spec))
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+    runner = object.__new__(NPUModelRunner)
+    runner.max_model_len = 4096
+    runner.is_encoder_decoder = False
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 512
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(
+        enable_prefix_caching=prefix_caching,
+        mamba_cache_mode="align",
+    )
+    # Newer MRV2 delegates per-group block-table sizing to the cache spec,
+    # which reads cache and DCP settings from the full vLLM config.
+    runner.vllm_config = SimpleNamespace(
+        cache_config=runner.cache_config,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    runner.model_state = MagicMock()
+    runner.model_state.get_additional_cg_support.return_value = []
+    # Newer upstream initialize_kv_cache() reads the optional speculator while
+    # constructing adaptive-verification metadata. These placeholders cover
+    # only the arguments evaluated before the mocked BlockTables constructor;
+    # this minimal runner has no drafter and never uses their contents.
+    runner.speculator = None
+    runner.req_states = MagicMock()
+    runner.input_buffers = MagicMock()
+    runner.vocab_size = 128
+
+    class BlockTablesReached(Exception):
+        pass
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+        patch("vllm.v1.worker.gpu.model_runner.init_attn_backend", return_value=([], MagicMock(), [128, 384, 384])),
+        patch("vllm.v1.worker.gpu.model_runner.BlockTables", side_effect=BlockTablesReached) as block_tables,
+        pytest.raises(BlockTablesReached),
+    ):
+        runner.initialize_kv_cache(config)
+
+    # Keep upstream in control of the exact align-mode width. Across supported
+    # vLLM revisions it may reserve either the active state slot or the full
+    # position-indexed row when prefix caching is disabled. Both must retain
+    # every speculative state slot, and all Mamba groups must agree.
+    widths = block_tables.call_args.kwargs["max_num_blocks_per_group"]
+    minimum_mamba_width = (11 if prefix_caching else 1) + spec.num_speculative_blocks
+    assert widths[0] == 11
+    assert widths[1] == widths[2]
+    assert widths[1] >= minimum_mamba_width
+    worker_groups = runner.kv_cache_config.kv_cache_groups
+    assert worker_groups[0].kv_cache_spec == attention_spec
+    assert worker_groups[1].kv_cache_spec == worker_groups[2].kv_cache_spec == spec
+    # No mutation of the config shared with the scheduler/other workers.
+    assert isinstance(config.kv_cache_groups[1].kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped
+    state = object.__new__(AscendMambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+
+
+def test_mamba_normalization_preserves_distinct_per_layer_state_layouts():
+    specs = {
+        "first": _mamba_spec(),
+        "second": MambaSpec(block_size=16, shapes=((4, 3), (2, 2)), dtypes=(torch.float16, torch.float32)),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec)],
+    )
+    normalized = normalize_mamba_kv_cache_config(config)
+    assert normalized.kv_cache_groups[0].kv_cache_spec is group_spec
 
 
 def test_mrv2_advertises_standardized_shared_kv_backing():
@@ -242,7 +395,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert attention_spec.page_size_bytes == 20
     assert mamba_spec.page_size_bytes == 20
 
-    if vllm_version_is("0.28.0"):
+    if _uses_legacy_kv_tensor_api():
         kv_cache_tensors = [
             _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
             _make_kv_cache_tensor(40, ["mtp_attn"], 20),
@@ -290,7 +443,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     mtp_attn_raw = raw_caches["mtp_attn"]
     assert isinstance(full_attn_raw, torch.Tensor)
     assert isinstance(mtp_attn_raw, torch.Tensor)
-    if vllm_version_is("0.28.0"):
+    if _uses_legacy_kv_tensor_api():
         assert full_attn_raw is raw_cache
     else:
         assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
@@ -338,7 +491,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
-    if not vllm_version_is("0.28.0"):
+    if not _uses_legacy_kv_tensor_api():
         assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
         assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
 
@@ -462,7 +615,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
     assert specs["full_attn"].page_size_bytes == 20
     # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
     # page_size_padded carries the padded/block-stride-indexed page there.
-    if vllm_version_is("0.28.0"):
+    if _uses_legacy_kv_tensor_api():
         assert specs["full_attn"].indexes_kv_by_block_stride is True
     else:
         assert specs["full_attn"].page_size_padded == 20
@@ -519,7 +672,7 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
     # The marker is gone, so the main-lane assertions verify the observable
     # alignment effect instead: the under-sized spec is padded to the common
     # page, and the already-aligned spec reports the common page size.
-    if vllm_version_is("0.28.0"):
+    if _uses_legacy_kv_tensor_api():
         assert specs["small_attn"].indexes_kv_by_block_stride is True
         assert specs["large_attn"].indexes_kv_by_block_stride is True
     else:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +16,7 @@ from vllm_ascend.models.kimi_k3 import (
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    _get_target_rotation_path,
 )
 
 
@@ -82,6 +84,34 @@ def test_k3_dspark_reports_draft_attention_causality():
     assert model.get_draft_attn_causal() == [False, False, False]
 
 
+def test_k3_dspark_recovers_target_quarot_rotation_path(tmp_path):
+    rotation_filename = "global_rotation.safetensors"
+    description = {
+        "optional": {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": rotation_filename,
+                }
+            }
+        }
+    }
+    (tmp_path / "quant_model_description.json").write_text(
+        json.dumps(description),
+        encoding="utf-8",
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model=str(tmp_path)),
+    )
+
+    with patch(
+        "vllm_ascend.models.kimi_k3_dspark.get_rotation_path",
+        return_value=None,
+    ):
+        rotation_path = _get_target_rotation_path(vllm_config)
+
+    assert rotation_path == tmp_path / rotation_filename
+
+
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
@@ -142,6 +172,29 @@ def test_kimi_model_declares_fused_bfg_checkpoint_mapping():
         "f_a_proj",
         "g_proj",
     ]
+
+
+def test_kimi_loader_preserves_all_experts_and_full_router(monkeypatch):
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    router = torch.randn(896, 4)
+    correction_bias = torch.randn(896)
+    sources = [
+        ("layers.0.block_sparse_moe.experts.895.down_proj.weight", torch.randn(4, 4)),
+        ("layers.0.block_sparse_moe.gate.weight", router),
+        ("layers.0.block_sparse_moe.gate.e_score_correction_bias", correction_bias),
+    ]
+    received = []
+
+    def load(_self, weights):
+        received.extend(weights)
+        return {name for name, _ in received}
+
+    monkeypatch.setattr(kimi_k3.UpstreamKimiLinearModel, "load_weights", load)
+    assert model.load_weights(iter(sources)) == {name for name, _ in sources}
+    for (actual_name, actual_weight), (name, weight) in zip(received, sources):
+        assert actual_name == name
+        assert actual_weight is weight
 
 
 def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
@@ -313,6 +366,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
+    assert raw_aux[0].ndim == 2
     torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
 
 

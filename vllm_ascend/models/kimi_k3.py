@@ -78,6 +78,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.models.dspark_aux import (
+    DSparkAuxHiddenContract,
+    DSparkAuxHiddenFormat,
+)
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
 
@@ -123,6 +127,24 @@ def _apply_ascend_attn_res(
     scores = (normalized_without_gamma * score_weight).sum(-1)
     probabilities = scores.softmax(-1).unsqueeze(1)
     return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+
+
+class AscendKimiMLP(KimiMLP):
+    """Keep dense TP projections on replicated token rows under model SP."""
+
+    def __init__(self, *args, use_sequence_parallel: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_sequence_parallel = use_sequence_parallel
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)
+        # KimiMLP.down_proj already all-reduces TP partial sums. Shard that
+        # completed result; reduce-scatter here would reduce it a second time.
+        hidden_states = super().forward(hidden_states)
+        if self.use_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
+        return hidden_states
 
 
 class AscendKimiMoE(nn.Module):
@@ -333,6 +355,10 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     def kv_cache(self):
         return self._attention_layer.kv_cache
 
+    @kv_cache.setter
+    def kv_cache(self, value) -> None:
+        self._attention_layer.kv_cache = value
+
     @property
     def kv_cache_dtype(self):
         return self._attention_layer.kv_cache_dtype
@@ -416,7 +442,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             )
             self.mlp = self.block_sparse_moe
         else:
-            self.mlp = KimiMLP(
+            self.mlp = AscendKimiMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -424,6 +450,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prefix=f"{prefix}.mlp",
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
+                use_sequence_parallel=use_sequence_parallel,
             )
         self.input_layernorm = RMSNorm(
             config.hidden_size,
@@ -537,12 +564,57 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
     dspark_aux_capture_materialized = False
 
+    def _capture_raw_dspark_aux_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Capture the K3 AttnRes auxiliary stream.
+
+        Ascend decoder layers return the running prefix with the pending MLP
+        output already folded into ``hidden_states``.  Their ``residual`` is a
+        three-dimensional bank of committed AttnRes blocks, unlike the
+        two-dimensional residual expected by ``EagleModelMixin``.  Reusing
+        ``_maybe_add_hidden_state`` would therefore broadcast the block bank
+        into the auxiliary tensor instead of producing the 2-D stream consumed
+        by the K3 MLA drafter.
+        """
+        if layer_idx in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
+        return aux_hidden_states
+
+    def configure_dspark_aux_hidden_state_contract(
+        self,
+        contract: DSparkAuxHiddenContract,
+    ) -> None:
+        """Apply a draft-declared auxiliary-hidden-state representation."""
+        contract.validate_definition()
+        num_hidden_layers = int(self.config.num_hidden_layers)
+        if any(layer_id > num_hidden_layers for layer_id in contract.layer_ids):
+            raise ValueError(
+                f"DSpark auxiliary hidden layer IDs {contract.layer_ids} exceed "
+                f"the target's {num_hidden_layers} layer boundaries"
+            )
+        configured_layers = tuple(self.aux_hidden_state_layers)
+        if configured_layers != contract.layer_ids:
+            raise ValueError(
+                f"Target auxiliary layers {configured_layers} do not match "
+                f"the DSpark draft contract {contract.layer_ids}"
+            )
+        if self.config.hidden_size != contract.target_hidden_size:
+            raise ValueError(
+                f"Target hidden size {self.config.hidden_size} does not match "
+                f"the DSpark draft contract {contract.target_hidden_size}"
+            )
+        self.dspark_aux_capture_materialized = contract.format == DSparkAuxHiddenFormat.MATERIALIZED
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
+        parallel_config = vllm_config.parallel_config
         self.config = config
         self.vocab_size = config.vocab_size
-        parallel_config = vllm_config.parallel_config
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
@@ -664,11 +736,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         if self.dspark_aux_capture_materialized:
             aux_hidden_states: list[torch.Tensor] = []
         else:
-            aux_hidden_states = self._maybe_add_hidden_state(
+            aux_hidden_states = self._capture_raw_dspark_aux_hidden_state(
                 [],
                 self.start_layer,
                 hidden_states,
-                residual,
             )
         attn_res_block_num = cdiv(
             self.end_layer,
@@ -703,11 +774,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 residual=residual,
             )
             if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
-                self._maybe_add_hidden_state(
+                self._capture_raw_dspark_aux_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
                     hidden_states,
-                    residual,
                 )
 
         if not get_pp_group().is_last_rank:
@@ -778,6 +848,15 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
+
+    def configure_dspark_aux_hidden_state_contract(
+        self,
+        contract: DSparkAuxHiddenContract,
+    ) -> None:
+        self.model.configure_dspark_aux_hidden_state_contract(contract)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
@@ -877,3 +956,12 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)
+
+    def configure_dspark_aux_hidden_state_contract(
+        self,
+        contract: DSparkAuxHiddenContract,
+    ) -> None:
+        self.language_model.configure_dspark_aux_hidden_state_contract(contract)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)

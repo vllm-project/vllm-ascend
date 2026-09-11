@@ -228,6 +228,51 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     assert hit_blocks == manager.req_to_blocks[request.request_id]
 
 
+@pytest.mark.parametrize("mutation_position", [0, 15, 16, 31, 32, 47, None])
+def test_uncompressed_mla_prefix_hit_stops_at_first_changed_block(mutation_position):
+    # Uncompressed MLA contract used by Kimi: three token pages, including
+    # mutations immediately before/after a page boundary. Later unchanged
+    # pages must not hit after an earlier hash-chain mismatch.
+    spec, pool, manager = _make_full_manager(physical_block_size=16, compress_ratio=1)
+    tokens = list(range(48))
+    request = _make_request("cached", tokens, 16)
+    manager.allocate_new_blocks(request.request_id, num_tokens=48, num_tokens_main_model=48)
+    manager.cache_blocks(request, num_tokens=48)
+    changed = tokens.copy()
+    if mutation_position is not None:
+        changed[mutation_position] += 10000
+    probe = _make_request("probe", changed, 16)
+    hit = FullAttentionManager.find_longest_cache_hit(
+        block_hashes=probe.block_hashes,
+        max_length=48,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+    )[0][0]
+    expected_count = 3 if mutation_position is None else mutation_position // 16
+    assert hit == manager.req_to_blocks[request.request_id][:expected_count]
+
+
+@pytest.mark.parametrize("max_length", [15, 16, 17, 31, 32, 47, 48])
+def test_uncompressed_mla_prefix_hit_never_reuses_partial_block(max_length):
+    spec, pool, manager = _make_full_manager(physical_block_size=16, compress_ratio=1)
+    request = _make_request("cached", list(range(48)), 16)
+    manager.allocate_new_blocks(request.request_id, num_tokens=48, num_tokens_main_model=48)
+    manager.cache_blocks(request, num_tokens=48)
+    hit = FullAttentionManager.find_longest_cache_hit(
+        block_hashes=request.block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[0],
+        block_pool=pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+    )[0][0]
+    assert hit == manager.req_to_blocks[request.request_id][: max_length // 16]
+
+
 def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
     physical_block_size = 128
     logical_block_size = physical_block_size * 4

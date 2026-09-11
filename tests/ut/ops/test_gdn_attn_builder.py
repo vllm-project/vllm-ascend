@@ -68,6 +68,59 @@ class BatchSpec:
         return len(self.seq_lens)
 
 
+@pytest.mark.parametrize("live_requests", [1, 2])
+def test_spec_graph_fia_padding_refreshes_captured_buffers(live_requests):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    capture = create_common_attn_metadata(BatchSpec([8, 8], [8, 8]), 16, torch.device("cpu"))
+    capture.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 10
+    captured = builder.build(0, capture, torch.ones(2, dtype=torch.int32), torch.tensor([7, 7]))
+    stable = captured.spec_decode_metadata.spec_causal_conv1d
+    pointers = [
+        stable.query_start_loc.data_ptr(),
+        stable.cache_indices.data_ptr(),
+        stable.num_accepted_tokens.data_ptr(),
+    ]
+    # Reproduce the real FIA layout: padding has eight query rows but zero KV.
+    lengths = [71, 34] if live_requests == 2 else [71, 0]
+    replay = create_common_attn_metadata(BatchSpec(lengths, [8, 8]), 16, torch.device("cpu"))
+    replay.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 30
+    drafts = torch.tensor([7, 7 if live_requests == 2 else -1])
+    runtime = builder.build(0, replay, torch.tensor([1, 1], dtype=torch.int32), drafts)
+    assert runtime.num_prefills == 0
+    assert runtime.num_spec_decodes == live_requests
+    actual = runtime.spec_decode_metadata.spec_causal_conv1d
+    assert pointers == [
+        actual.query_start_loc.data_ptr(),
+        actual.cache_indices.data_ptr(),
+        actual.num_accepted_tokens.data_ptr(),
+    ]
+    assert stable.query_start_loc.tolist() == [0, 8, 8 * live_requests]
+    assert stable.cache_indices[0].tolist() == list(range(30, 38))
+    if live_requests == 1:
+        assert torch.all(stable.cache_indices[1] == NULL_BLOCK_ID)
+    assert replay.query_start_loc_cpu.tolist() == [0, 8, 16]
+    assert replay.num_actual_tokens == 16  # Shared MLA metadata was not changed.
+
+
+def test_spec_graph_real_prefill_is_not_treated_as_padding():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    common = create_common_attn_metadata(BatchSpec([71, 8], [8, 8]), 16, torch.device("cpu"))
+    common.block_table_tensor = torch.arange(16, dtype=torch.int32).view(2, 8) + 10
+    runtime = builder.build(0, common, torch.ones(2, dtype=torch.int32), torch.tensor([7, -1]))
+    assert runtime.num_spec_decodes == 1
+    assert runtime.num_prefills == 1
+
+
 def create_common_attn_metadata(
     batch_spec: BatchSpec,
     block_size: int,
@@ -1012,4 +1065,43 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
     assert torch.equal(
         decode_metadata.actual_seq_lengths,
         torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+    )
+
+
+def test_full_graph_gdn_uses_actual_tokens_when_fia_query_locs_are_padded():
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[64, 0, 0, 0],
+            query_lens=[1, 1, 1, 1],
+            name="full_graph_fia_padded_query_locs",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    # FIA requires cumulative qlen [1, 2, 3, 4], while only the first row is
+    # a real target decode. This is the runtime shape seen by Kimi K3 FULL.
+    common_attn_metadata.num_actual_tokens = 1
+    common_attn_metadata.block_table_tensor[:, 0] = torch.tensor([10, 0, 0, 0])
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.non_spec_state_indices_tensor.fill_(77)
+    builder.non_spec_query_start_loc.fill_(77)
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    # Python control-flow fields retain the captured graph width, but the
+    # stable tensors consumed by recurrent/conv kernels expose one live row.
+    assert attn_metadata.num_decodes == 4
+    assert attn_metadata.num_decode_tokens == 1
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 1, 1, 1], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([10, NULL_BLOCK_ID, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
     )
