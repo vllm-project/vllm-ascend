@@ -110,8 +110,9 @@ class NPUModelRunner(GPUModelRunner):
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
 
-        # Fine-grained TP features with cross-DP collectives (o_proj TP, mlp TP) need every DP rank to
-        # forward the same token count per step; eager steps are aligned by `eager_dp_padding`.
+        # o_proj TP's cross-DP collectives need every DP rank to forward the same
+        # token count per step; eager steps are aligned by `eager_dp_padding`.
+        # (mlp/embedding TP share the constraint and are out of scope here.)
         finegrained_tp_config = self.ascend_config.finegrained_tp_config
         self._dp_padding_enabled = finegrained_tp_config.oproj_tensor_parallel_size > 0 and self.dp_size > 1
         self._dp_padding_aligned_tokens = 0
