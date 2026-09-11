@@ -60,7 +60,10 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_state,
+    normalize_mamba_kv_cache_config,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -240,6 +243,9 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        # vLLM 0.28 model-state code recognizes bare MambaSpec groups, while
+        # Ascend's hybrid cache planner retains per-layer uniform wrappers.
+        kv_cache_config = normalize_mamba_kv_cache_config(kv_cache_config)
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
