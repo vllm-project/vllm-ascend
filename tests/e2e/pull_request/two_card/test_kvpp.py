@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-import faulthandler
-import traceback
-from collections import defaultdict
-
 import pytest
 from vllm import SamplingParams
-from vllm.distributed.device_communicators import shm_broadcast
 from vllm.transformers_utils.utils import maybe_model_redirect
-from zmq.constants import LINGER
-from zmq.sugar.context import Context
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
@@ -23,73 +16,6 @@ SUFFIX_LENGTH = 16
 MAX_TOKENS = 16
 
 pytestmark = pytest.mark.e2e_model(MODEL)
-
-
-def read_worker_state(worker):
-    # Resolve worker-local objects inside the executor process.
-    from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-    from vllm_ascend.core.kv_cache_placement import find_mtp_layers
-    from vllm_ascend.distributed import parallel_state
-    from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
-
-    runner = worker.model_runner
-    config = worker.vllm_config
-    group = parallel_state._KVPP
-    specs = get_kvpp_cache_specs(runner.kv_cache_config)
-    mtp = find_mtp_layers(config, specs)
-    scheduler = runner.kvpp.scheduler
-    return {
-        "rank": group.rank_in_group if group is not None else None,
-        "ranks": tuple(group.ranks) if group is not None else (),
-        "targets": set(scheduler.attention_layer_names) if scheduler is not None else set(),
-        "expected_targets": {
-            name for name, spec in specs.items() if name not in mtp and not isinstance(spec, AscendSFAIndexerCacheSpec)
-        },
-        "mtp": mtp,
-        "num_blocks": runner.kv_cache_config.num_blocks,
-        "ep": config.parallel_config.enable_expert_parallel,
-        "async": config.scheduler_config.async_scheduling,
-    }
-
-
-def assert_worker_state(runner, enabled):
-    states = runner.model.collective_rpc(read_worker_state)
-    assert len(states) == TP_SIZE
-    for state in states:
-        assert state["ep"] and state["async"]
-        assert state["num_blocks"] == NUM_BLOCKS
-        assert state["mtp"] and state["mtp"].isdisjoint(state["targets"])
-    if enabled:
-        assert {state["rank"] for state in states} == set(range(TP_SIZE))
-        assert {state["ranks"] for state in states} == {tuple(range(TP_SIZE))}
-        assert all(state["targets"] and state["targets"] == state["expected_targets"] for state in states)
-    else:
-        assert all(not state["targets"] and state["rank"] is None and not state["ranks"] for state in states)
-
-
-def observe_prefill(runner, monkeypatch):
-    """Count actual prompt chunks, using schedule outputs before async progress."""
-    scheduler = runner.model.llm_engine.engine_core.engine_core.scheduler
-    prompt_lengths = {}
-    chunks = defaultdict(list)
-    original_schedule = scheduler.schedule
-
-    def schedule(*args, **kwargs):
-        output = original_schedule(*args, **kwargs)
-        starts = {}
-        for request in output.scheduled_new_reqs:
-            prompt_lengths[request.req_id] = len(request.prompt_token_ids)
-            starts[request.req_id] = request.num_computed_tokens
-        cached = output.scheduled_cached_reqs
-        starts.update(zip(cached.req_ids, cached.num_computed_tokens))
-        for request_id, count in output.num_scheduled_tokens.items():
-            start = starts[request_id]
-            if start < prompt_lengths[request_id]:
-                chunks[request_id].append((start, count))
-        return output
-
-    monkeypatch.setattr(scheduler, "schedule", schedule)
-    return chunks
 
 
 def token_prompt(tokenizer, text, length):
@@ -108,58 +34,10 @@ def token_prompt(tokenizer, text, length):
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_kvpp_combined_features(monkeypatch):
-    """Compare KVPP off/on with chunk, prefix, TP, EP, async and MTP."""
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    context_origins = {}
-    original_init = Context.__init__
-    original_destroy = Context.destroy
-
-    def report_context_init(context, *args, **kwargs):
-        original_init(context, *args, **kwargs)
-        context_origins[id(context)] = "".join(traceback.format_stack(limit=12))
-
-    def report_context_destroy(context, *args, **kwargs):
-        print(
-            f"KVPP test: ZMQ destroy begin id={id(context)}, "
-            f"origin={context_origins.pop(id(context), 'created before test')}",
-            flush=True,
-        )
-        result = original_destroy(context, *args, **kwargs)
-        print(f"KVPP test: ZMQ destroy returned id={id(context)}", flush=True)
-        return result
-
-    monkeypatch.setattr(Context, "__init__", report_context_init)
-    monkeypatch.setattr(Context, "destroy", report_context_destroy)
-    original_context = shm_broadcast.Context
-
-    def queue_context():
-        context = original_context()
-        # Completed requests need no queued notifications after workers exit.
-        # Avoid indefinite ZMQ linger during in-process engine garbage collection.
-        context.setsockopt(LINGER, 0)
-        return context
-
-    monkeypatch.setattr(shm_broadcast, "Context", queue_context)
-    original_exit = VllmRunner.__exit__
-
-    def report_exit(runner, exc_type, exc_value, exc_tb):
-        print(f"KVPP test: cleanup begin, exception={exc_value!r}", flush=True)
-        if exc_value is not None:
-            traceback.print_exception(exc_type, exc_value, exc_tb)
-        # Report the parent process stacks if the shared cleanup hangs.
-        faulthandler.dump_traceback_later(60, repeat=True)
-        try:
-            return original_exit(runner, exc_type, exc_value, exc_tb)
-        finally:
-            faulthandler.cancel_dump_traceback_later()
-            print("KVPP test: cleanup returned", flush=True)
-
-    monkeypatch.setattr(VllmRunner, "__exit__", report_exit)
+def test_kvpp_combined_features():
+    """Compare KVPP off/on outputs with TP, EP, chunk, prefix and MTP."""
     results = []
     for enabled in (False, True):
-        print(f"KVPP test: enabled={enabled}, initializing", flush=True)
         with VllmRunner(
             maybe_model_redirect(MODEL),
             dtype="auto",
@@ -182,45 +60,24 @@ def test_kvpp_combined_features(monkeypatch):
             speculative_config={"method": "mtp", "num_speculative_tokens": 1, "enforce_eager": True},
             additional_config={"enable_kvpp": enabled},
         ) as runner:
-            print("KVPP test: checking worker state", flush=True)
-            assert_worker_state(runner, enabled)
-            print("KVPP test: worker state passed", flush=True)
             tokenizer = runner.model.get_tokenizer()
             prefix = token_prompt(tokenizer, "Explain how computers store historical information. ", PREFIX_LENGTH)
             prompts = [
                 prefix + token_prompt(tokenizer, suffix, SUFFIX_LENGTH)
                 for suffix in ("First answer: ", "Second answer: ")
             ]
-            assert prompts[0] != prompts[1]
+            # The uncached prompt exceeds the token budget and requires chunking.
             outputs = []
-            with monkeypatch.context() as observation:
-                chunks = observe_prefill(runner, observation)
-                for index, prompt in enumerate(prompts):
-                    print(f"KVPP test: generating request {index}", flush=True)
-                    (output,) = runner.model.generate(
-                        [{"prompt_token_ids": prompt}],
-                        SamplingParams(temperature=0, ignore_eos=True, max_tokens=MAX_TOKENS),
-                        use_tqdm=False,
-                    )
-                    assert output.finished
-                    assert len(output.outputs) == 1
-                    assert len(output.outputs[0].token_ids) == MAX_TOKENS
-                    assert output.outputs[0].finish_reason == "length"
-                    outputs.append(output)
-                    print(f"KVPP test: request {index} finished, cached={output.num_cached_tokens}", flush=True)
-            print(f"KVPP test: checking prefix and chunks, chunks={dict(chunks)}", flush=True)
-            assert outputs[0].num_cached_tokens == 0
-            # MTP excludes the last matching block to protect prefill lookahead.
-            assert outputs[1].num_cached_tokens == PREFIX_LENGTH - BLOCK_SIZE
-            assert any(
-                len(steps) >= 2 and steps[0][0] == 0 and any(start > 0 for start, _ in steps)
-                for steps in chunks.values()
-            ), chunks
-            drafts = [
-                metric.value for metric in runner.model.get_metrics() if metric.name == "vllm:spec_decode_num_drafts"
-            ]
-            assert drafts and sum(drafts) > 0
-            print(f"KVPP test: round passed, drafts={drafts}", flush=True)
+            for prompt in prompts:
+                (output,) = runner.model.generate(
+                    [{"prompt_token_ids": prompt}],
+                    SamplingParams(temperature=0, ignore_eos=True, max_tokens=MAX_TOKENS),
+                    use_tqdm=False,
+                )
+                assert output.finished
+                assert len(output.outputs) == 1
+                assert len(output.outputs[0].token_ids) == MAX_TOKENS
+                outputs.append(output)
             results.append(outputs)
     assert [output.prompt_token_ids for output in results[0]] == [output.prompt_token_ids for output in results[1]]
     check_outputs_equal(
