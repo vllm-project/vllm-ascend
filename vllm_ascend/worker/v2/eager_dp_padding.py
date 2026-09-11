@@ -51,8 +51,8 @@ def make_dp_padded_dummy_output(
     Rewrite a dummy scheduler output to forward exactly `group_max` tokens. The output
     is synthetic, so rewriting it is safe.
     """
-    # decode_query_len-sized requests stay decode-graph matchable when a capture size covers G;
-    # a remainder or a max_num_reqs overflow breaks that match, so the total must stay exact.
+    # Requests of decode_query_len tokens keep the uniform-decode graph match when a capture size covers G;
+    # a remainder or an overflow fallback loses that match — eager via the cg_mode min only under FULL_DECODE_ONLY.
     num_full, remainder = divmod(group_max, decode_query_len)
     per_request = [decode_query_len] * num_full
     if remainder:

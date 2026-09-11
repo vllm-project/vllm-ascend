@@ -1013,8 +1013,8 @@ class FinegrainedTPConfig:
                     "tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # Address-stable DSA buffers are sized at decode scale (get_potential_max_tokens); eager prefill overflows.
-            # Checking NONE also covers enforce_eager, which VllmConfig normalizes to NONE.
+            # The DSA exchange's address-stable buffers are sized to get_potential_max_tokens (decode scale);
+            # larger eager steps fail fast there. NONE also covers enforce_eager (normalized in VllmConfig).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
