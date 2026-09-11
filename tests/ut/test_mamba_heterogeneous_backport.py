@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker import mamba_utils
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
+    AscendHybridKVCacheCoordinator,
     _num_blocks_for_reconciled_hit,
 )
 from vllm_ascend.patch.platform.patch_kv_delivery_preemption import (
@@ -70,6 +72,35 @@ def test_composite_qsa_group_keeps_three_768_token_physical_blocks():
     assert _num_blocks_for_reconciled_hit(blocks, 2304, 768) == 1
     assert _num_blocks_for_reconciled_hit(blocks, 2304, 2303) == 2
     assert _num_blocks_for_reconciled_hit(blocks, 2304, 767) == 0
+
+
+def test_full_attention_reconcile_keeps_physical_blocks_for_mla_representative():
+    # Qwen3.8's QSA/compressed group is represented at lookup time by an
+    # MLAAttentionSpec-like object with a 4x logical compression ratio. It does
+    # not retain the composite ``kv_cache_specs`` attribute, while ``blocks``
+    # still contains scheduler physical block IDs at 768-token granularity.
+    representative = SimpleNamespace(block_size=768 * 4, compress_ratio=4)
+    assert not hasattr(representative, "kv_cache_specs")
+    assert representative.compress_ratio == 4
+    physical_blocks = [object(), object(), object()]
+    assert _num_blocks_for_reconciled_hit(physical_blocks, 2304, 2304) == 3
+    assert _num_blocks_for_reconciled_hit(physical_blocks, 2304, 1536) == 2
+
+    # Lock the production call site as well as the helper arithmetic: do not
+    # allow a future branch to classify the representative by kv_cache_specs or
+    # reinterpret its physical IDs with the 3072-token logical block size.
+    source = inspect.getsource(
+        AscendHybridKVCacheCoordinator.find_longest_cache_hit
+    )
+    reconcile = source.split(
+        "# Truncate every full-attention group to the reconciled hit length.", 1
+    )[1].split("cache_hit_blocks =", 1)[0]
+    compact_reconcile = "".join(reconcile.split())
+    assert "_num_blocks_for_reconciled_hit" in compact_reconcile
+    assert 'getattr(spec,"kv_cache_specs",None)' in compact_reconcile
+    assert 'hasattr(spec,"compress_ratio")' in compact_reconcile
+    assert "_get_effective_block_size" in reconcile
+    assert "cdiv" in reconcile
 
 
 def test_composite_constituents_share_physical_table_and_restored_tokens():

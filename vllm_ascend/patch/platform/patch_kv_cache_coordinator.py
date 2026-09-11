@@ -413,21 +413,22 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 continue
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
-                    if getattr(spec, "kv_cache_specs", None) is not None:
-                        # A composite group can expose a logical constituent
-                        # size that differs from its scheduler physical page.
+                    if getattr(spec, "kv_cache_specs", None) is not None or hasattr(
+                        spec, "compress_ratio"
+                    ):
+                        # Composite/compressed managers return scheduler physical
+                        # block IDs. The runtime representative may be an
+                        # MLAAttentionSpec without ``kv_cache_specs`` and expose a
+                        # 3072-token logical size despite 768-token physical pages.
                         num_blocks = _num_blocks_for_reconciled_hit(
                             blks,
                             hit_length_by_group[group_id],
                             hit_length,
                         )
                     else:
-                        # Ordinary full-attention managers retain the block
-                        # containing a partial common-prefix tail.
-                        num_blocks = cdiv(
-                            hit_length,
-                            self._get_effective_block_size(spec),
-                        )
+                        # Ordinary full attention retains its partially covered
+                        # tail block, matching the upstream manager contract.
+                        num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
 
