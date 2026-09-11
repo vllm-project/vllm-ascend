@@ -11,10 +11,17 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from tests.e2e.pull_request.one_card.sampling_utils import require_categorical_sampling_operator
+from vllm_ascend.worker.v2.sample import gumbel as gumbel_module
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_categorical_sampling_operator():
+    require_categorical_sampling_operator()
 
 
 def _ref_apply_temperature(
@@ -34,6 +41,23 @@ def _ref_apply_temperature(
 
 
 class TestGumbelSampling:
+    def test_fallback_when_operator_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(gumbel_module, "enable_categorical_sample_op", lambda: False)
+        logits = torch.arange(32, dtype=torch.float32, device=DEVICE).view(1, -1)
+        cache = torch.zeros(1, 1, 32, device=DEVICE)
+        mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+        sampled = gumbel_sample(
+            logits,
+            mapping,
+            torch.zeros(1, device=DEVICE),
+            mapping.to(torch.int64),
+            mapping,
+            True,
+            logits_cache=cache,
+        )
+        assert sampled.item() == 31
+        torch.testing.assert_close(cache[0, 0], logits[0])
+
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
         [
@@ -266,7 +290,8 @@ class TestGumbelSampling:
                 f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, expected {greedy[tok].item()}"
             )
 
-    def test_gumbel_sample_expanded_idx_mapping(self):
+    @pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+    def test_gumbel_sample_expanded_idx_mapping(self, mapping_dtype):
         """Multiple tokens mapping to the same request must work correctly."""
         torch.manual_seed(99)
         num_tokens = 6
@@ -275,7 +300,7 @@ class TestGumbelSampling:
 
         logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
         # tokens 0,1,2 -> req 0; tokens 3,4,5 -> req 1
-        expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=DEVICE)
+        expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=mapping_dtype, device=DEVICE)
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
@@ -522,8 +547,9 @@ class TestGumbelSampling:
             )
 
     @pytest.mark.parametrize("per_token_col", [False, True])
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-    def test_gumbel_sample_strided_logits_cache(self, per_token_col, dtype):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_gumbel_sample_strided_logits_cache(self, per_token_col, dtype, cache_dtype):
         """Cache raw logits at mapped request/step slots, preserving padding."""
         torch.manual_seed(202)
         vocab_size = 1031
@@ -539,7 +565,7 @@ class TestGumbelSampling:
         cols = torch.tensor([0, 0, 2, 0, 1, 0, 2, 0], dtype=torch.int32, device=DEVICE)[::2]
         if not per_token_col:
             cols = torch.tensor(1, dtype=torch.int32, device=DEVICE)
-        storage = torch.full((3, 6, vocab_size + 17), 42, dtype=dtype, device=DEVICE)
+        storage = torch.full((3, 6, vocab_size + 17), 42, dtype=cache_dtype, device=DEVICE)
         cache = storage[:, ::2, :]
         expected = storage.clone()
         for token, req in enumerate(mapping.cpu().tolist()):
@@ -577,12 +603,12 @@ class TestGumbelSampling:
     def test_gumbel_sample_rejects_narrow_cache(self):
         logits = torch.zeros(1, 32, device=DEVICE)
         mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-        with pytest.raises(AssertionError, match="is narrower"):
+        with pytest.raises(RuntimeError, match="is narrower"):
             gumbel_sample(
                 logits,
                 mapping,
                 torch.ones(1, device=DEVICE),
-                mapping,
+                mapping.to(torch.int64),
                 mapping,
                 True,
                 logits_cache=torch.empty(1, 1, 31, device=DEVICE),

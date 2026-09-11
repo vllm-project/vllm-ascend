@@ -20,6 +20,8 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.utils import enable_categorical_sample_op
+
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
@@ -172,7 +174,7 @@ def _gumbel_sample_kernel(
         tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
-def gumbel_sample(
+def _fallback_gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
@@ -237,3 +239,53 @@ def gumbel_sample(
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
+
+
+def gumbel_sample(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool = False,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    if not enable_categorical_sample_op():
+        return _fallback_gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature,
+            is_drafting,
+            logits_cache,
+            logits_cache_col,
+            use_fp64,
+        )
+
+    expanded_idx_mapping = expanded_idx_mapping.to(torch.int32).contiguous()
+    pos = pos.to(torch.int64).contiguous()
+    if is_drafting:
+        # Use the same draft/target random-stream separation as upstream.
+        draft_noise_salt = 1 << 30
+        pos = pos + draft_noise_salt
+    if logits_cache_col is not None:
+        logits_cache_col = logits_cache_col.contiguous()
+
+    sampled_token_ids, _ = torch.ops._C_ascend.npu_categorical_sample(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
+        False,
+        apply_temperature,
+        logits_cache,
+        logits_cache_col,
+        use_fp64,
+    )
+    return sampled_token_ids

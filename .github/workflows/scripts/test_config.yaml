@@ -226,6 +226,9 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 60
   tests/e2e/pull_request/one_card/test_linear_quantization.py: 60
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 110
+  tests/e2e/pull_request/one_card/test_categorical_sampling.py: 180
+  tests/e2e/pull_request/one_card/test_gumbel_sampling_heavy_tail.py: 180
+  tests/e2e/pull_request/one_card/model_runner_v2/test_categorical_sampling.py: 180
   tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
 
 # === Runner Mapping ===
