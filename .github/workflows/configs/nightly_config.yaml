@@ -211,6 +211,9 @@ a3:
       - name: glm-5.2-w4a8c8-sfa-dcp
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.2-W4A8C8-SFA-DCP.yaml
+      - name: glm-5.2-w8a8-sfa-dcp-sharded-indexer-perf
+        os: linux-aarch64-nightly-a3-16
+        tests: tests/e2e/nightly/single_node/models/test_sfa_dcp_sharded_indexer_perf.py
       - name: glm-5.1-w8a8-prefill-mc2
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
