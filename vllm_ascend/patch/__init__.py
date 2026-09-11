@@ -1299,6 +1299,6 @@
 #       `forward`, so every Ascend MoE layer picks up the patched method
 #       through inheritance.
 #    Future Plan:
-#       The aclnnAdd_AddAiCore_Add operator supports the version after the sk is integrated. 
+#       The aclnnAdd_AddAiCore_Add operator supports the version after the sk is integrated.
 #       Therefore, this patch can be removed.
 #
