@@ -284,12 +284,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         """Align the draft hidden-state projection with a QuaRot target."""
         if self.method not in ("dflash", "dspark"):
             return
-        # Qwen3 DSpark aligns fc.* in its model-specific weight loader and owns
-        # separate embedding/lm_head weights, so no generic alignment is needed.
-        if isinstance(self.model, Qwen3DSparkForCausalLM):
-            return
-        target_model_path = self.vllm_config.model_config.model
-        rotation = self._load_quarot_rotation(target_model_path)
+        rotation = self._load_quarot_rotation(self.vllm_config)
         if rotation is None:
             return
 
@@ -298,6 +293,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # modules must not directly consume rotated target tensors.
         rotation = rotation.to(self.device, dtype=torch.float32)
         self._quarot_rotation = rotation
+        # Qwen3 / GQA DSpark anti-rotates fc.* in its model-specific weight
+        # loader. Verify that work completed before using the same rotation to
+        # align the shared embedding and lm_head boundaries below.
+        if isinstance(self.model, Qwen3DSparkForCausalLM):
+            fc_weights_rotated = getattr(self.model, "_quarot_fc_weights_rotated", 0)
+            if not getattr(self.model, "_quarot_fc_rotated", False) or fc_weights_rotated <= 0:
+                raise RuntimeError(
+                    "QuaRot rotation was loaded for Qwen3 DSpark shared weights, but no fc.* weight "
+                    "was confirmed as rotated."
+                )
+            return
         draft_model = getattr(self.model, "model", None)
         projection_name = "fc"
         projection = getattr(draft_model, projection_name, None) if draft_model is not None else None
@@ -400,54 +406,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return draft_layer
 
     @staticmethod
-    def _load_quarot_rotation(target_model_path: str) -> torch.Tensor | None:
+    def _load_quarot_rotation(target_vllm_config: VllmConfig) -> torch.Tensor | None:
         """Load the global rotation when the target has a QuaRot descriptor."""
-        import json
-        from pathlib import Path
+        # Import lazily to avoid a worker-patch/spec-decode import cycle on 310P.
+        from vllm_ascend.patch.worker.patch_draft_quarot import get_rotataion_matrix, get_rotation_path
 
-        from safetensors.torch import load_file
-
-        descriptor_path = Path(target_model_path) / "quant_model_description.json"
-        if not descriptor_path.exists():
+        target_model_path = target_vllm_config.model_config.model
+        rotation_path = get_rotation_path(target_vllm_config)
+        if rotation_path is None:
             logger.info(
-                "[spec_decode/quarot] No descriptor found at %s; treating the target as non-QuaRot.",
-                descriptor_path,
-            )
-            return None
-        try:
-            with open(descriptor_path) as descriptor_file:
-                descriptor = json.load(descriptor_file)
-            relative_path = (
-                descriptor.get("optional", {})
-                .get("quarot", {})
-                .get("rotation_map", {})
-                .get("global_rotation", "optional/quarot.safetensors")
-            )
-        except (ValueError, OSError) as error:
-            logger.warning(
-                "[spec_decode/quarot] Failed to read %s (%s); skipping draft alignment.",
-                descriptor_path,
-                error,
-            )
-            return None
-
-        rotation_path = Path(target_model_path) / relative_path
-        if not rotation_path.exists():
-            logger.warning(
-                "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
-                rotation_path,
+                "[spec_decode/quarot] No rotation found for %s; treating the target as non-QuaRot.",
+                target_model_path,
             )
             return None
         logger.info("[spec_decode/quarot] Loading global rotation from %s.", rotation_path)
-        try:
-            return load_file(rotation_path)["global_rotation"]
-        except Exception as error:
-            logger.warning(
-                "[spec_decode/quarot] Failed to load rotation %s: %s",
-                rotation_path,
-                error,
-            )
-            return None
+        # Once a QuaRot path is resolved, loading it is mandatory. Silently
+        # falling back here could leave FC rotated while shared boundaries are
+        # not, producing valid-looking startup with unusable draft logits.
+        return get_rotataion_matrix(rotation_path)
 
     def _get_model(self) -> nn.Module:
         """

@@ -230,6 +230,85 @@ class TestQuaRotDraftBoundaries:
         torch.testing.assert_close(context_proj.weight, expected)
         torch.testing.assert_close(proposer._quarot_rotation, rotation)
 
+    def test_qwen3_dspark_keeps_rotated_fc_and_loads_shared_rotation(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]], dtype=torch.float32)
+        fc = nn.Linear(10, 2, bias=False)
+        initial_weight = torch.arange(1.0, 21.0).reshape(2, 10)
+        fc.weight.data.copy_(initial_weight)
+
+        class FakeQwen3DSpark:
+            pass
+
+        fake_model = FakeQwen3DSpark()
+        fake_model.model = SimpleNamespace(fc=fc)
+        fake_model._quarot_fc_rotated = True
+        fake_model._quarot_fc_weights_rotated = 1
+        proposer.model = fake_model
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.Qwen3DSparkForCausalLM",
+            FakeQwen3DSpark,
+        )
+
+        proposer._maybe_anti_rotate_fc()
+
+        torch.testing.assert_close(fc.weight, initial_weight)
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
+    def test_qwen3_dspark_rejects_unconfirmed_fc_rotation(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.eye(2)
+
+        class FakeQwen3DSpark:
+            pass
+
+        fake_model = FakeQwen3DSpark()
+        fake_model._quarot_fc_rotated = False
+        fake_model._quarot_fc_weights_rotated = 0
+        proposer.model = fake_model
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.Qwen3DSparkForCausalLM",
+            FakeQwen3DSpark,
+        )
+
+        with pytest.raises(RuntimeError, match=r"no fc\.\* weight was confirmed"):
+            proposer._maybe_anti_rotate_fc()
+
+    def test_qwen3_dspark_without_quarot_does_not_require_fc_flag(self, monkeypatch):
+        proposer = self._make_proposer()
+
+        class FakeQwen3DSpark:
+            pass
+
+        proposer.model = FakeQwen3DSpark()
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: None)
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.Qwen3DSparkForCausalLM",
+            FakeQwen3DSpark,
+        )
+
+        proposer._maybe_anti_rotate_fc()
+
+    def test_quarot_rotation_load_failure_is_not_silently_ignored(self, monkeypatch):
+        config = SimpleNamespace(model_config=SimpleNamespace(model="target"))
+        monkeypatch.setattr(
+            "vllm_ascend.patch.worker.patch_draft_quarot.get_rotation_path",
+            lambda _: "quarot.safetensors",
+        )
+
+        def fail_to_load_rotation(_):
+            raise RuntimeError("invalid rotation")
+
+        monkeypatch.setattr(
+            "vllm_ascend.patch.worker.patch_draft_quarot.get_rotataion_matrix",
+            fail_to_load_rotation,
+        )
+
+        with pytest.raises(RuntimeError, match="invalid rotation"):
+            AscendSpecDecodeBaseProposer._load_quarot_rotation(config)
+
     def test_copies_unrotated_shared_weight_without_mutating_target(self):
         proposer = self._make_proposer()
         proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])

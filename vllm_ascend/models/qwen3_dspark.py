@@ -2,6 +2,7 @@ from collections.abc import Iterable
 
 import torch
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
 from vllm_ascend.patch.worker.patch_draft_quarot import get_rotataion_matrix, get_rotation_path
@@ -29,16 +30,30 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+        self.rotation_path = get_rotation_path(vllm_config)
+        self._quarot_fc_rotated = False
+        self._quarot_fc_weights_rotated = 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
-            rotation_weight = get_rotataion_matrix(self.rotation_path)
+            rotation_weight: torch.Tensor | None = None
+            fc_weights_rotated = 0
             for name, loaded_weight in weights:
                 if "fc." in name:
+                    if rotation_weight is None:
+                        rotation_weight = get_rotataion_matrix(self.rotation_path)
                     loaded_weight = process_weight(loaded_weight, rotation_weight)
+                    fc_weights_rotated += 1
                 processed_weights.append((name, loaded_weight))
-            super().load_weights(processed_weights)
-        else:
-            super().load_weights(weights)
+            result = super().load_weights(processed_weights)
+            if fc_weights_rotated > 0:
+                self._quarot_fc_rotated = True
+                self._quarot_fc_weights_rotated += fc_weights_rotated
+                logger.info(
+                    "[spec_decode/quarot] Rotated %d Qwen3 DSpark FC weight(s) using %s.",
+                    fc_weights_rotated,
+                    self.rotation_path,
+                )
+            return result
+        return super().load_weights(weights)
