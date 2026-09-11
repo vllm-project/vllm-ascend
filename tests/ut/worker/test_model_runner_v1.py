@@ -50,6 +50,8 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.uniform_decode_query_len = 6
         runner.speculative_config = object() if speculative else None
+        # ``use_dcp`` is derived from this field in production initialization.
+        runner.dcp_size = 1
         runner._pad_for_sequence_parallelism = lambda num_tokens: num_tokens
         runner.input_batch = SimpleNamespace(
             num_computed_tokens_cpu=np.array([9, 10], dtype=np.int32),
