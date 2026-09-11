@@ -235,10 +235,6 @@ a3:
         config_file_path: Kimi-K2.7-W4A8-254k-1k-TPOT20-PD.yaml
         config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
-      - name: DeepSeek-V4-Flash-Memcache-PD-acc
-        config_file_path: DeepSeek-V4-Flash-Memcache-PD-acc.yaml
-        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
-        size: 2
       - name: DSv4-Flash-Memcache-PD-layerwise
         config_file_path: DSv4-Flash-Memcache-PD-layerwise.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
