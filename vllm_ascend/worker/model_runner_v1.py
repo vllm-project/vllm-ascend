@@ -4145,7 +4145,11 @@ class NPUModelRunner(GPUModelRunner):
             self.update_stream = torch.npu.Stream()
 
             if self.drafter is not None:
-                self.drafter.set_update_stream(self.update_stream)
+                update_stream_setter = getattr(self.drafter, "set_update_stream", None)
+                if callable(update_stream_setter):
+                    update_stream_setter(self.update_stream)
+                else:
+                    self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
             if (

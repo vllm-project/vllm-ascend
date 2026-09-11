@@ -44,7 +44,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    PagedAttentionGraphParam,
     enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
@@ -55,7 +54,6 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
-    update_graph_params_workspaces,
 )
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
@@ -64,7 +62,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -75,6 +73,7 @@ else:
 SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
+_PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -495,6 +494,18 @@ class FIAV2ParamProvider:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PAParamProvider:
+    layer_name: str | None
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        return {
+            "context_lens": metadata.seq_lens,
+            "block_table": metadata.block_tables,
+        }
+
+
 class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
         self,
@@ -816,51 +827,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        graph_params = get_graph_params()
-        num_tokens = query.shape[0]
-        if _EXTRA_CTX.capturing:
-            # Get workspace from cache or calculate it if not present.
-            workspace = graph_params.workspaces.get(num_tokens)
-            if workspace is None:
-                workspace = torch_npu._npu_paged_attention_get_workspace(
-                    query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    num_kv_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale_value=self.scale,
-                    block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
-                    out=output,
-                )
-                update_graph_params_workspaces(num_tokens, workspace)
-
-            # Handle graph capturing mode
-            stream = torch_npu.npu.current_stream()
-
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-            graph_params.attn_params[num_tokens].append(
-                PagedAttentionGraphParam(
-                    (
-                        weak_ref_tensors(query),
-                        weak_ref_tensors(self.key_cache),
-                        weak_ref_tensors(self.value_cache),
-                        self.num_kv_heads,
-                        self.num_heads,
-                        self.scale,
-                        attn_metadata.block_tables,
-                        attn_metadata.seq_lens,
-                        weak_ref_tensors(output),
-                    ),
-                    self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
-                )
-            )
-
-            torch.npu.graph_task_group_begin(stream)
-            torch_npu._npu_paged_attention(
+        workspace = get_capture_resource(
+            _PA_WORKSPACE_KEY,
+            lambda: torch_npu._npu_paged_attention_get_workspace(
                 query=query,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
@@ -870,11 +839,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 context_lens=attn_metadata.seq_lens,
                 out=output,
-                workspace=workspace,
-            )
-            handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
-            return output
+            ),
+        )
+        register_task(
+            torch_npu._npu_paged_attention,
+            {
+                "query": query,
+                "key_cache": self.key_cache,
+                "value_cache": self.value_cache,
+                "num_kv_heads": self.num_kv_heads,
+                "num_heads": self.num_heads,
+                "scale_value": self.scale,
+                "block_table": attn_metadata.block_tables,
+                "context_lens": attn_metadata.seq_lens,
+                "out": output,
+                "workspace": workspace,
+            },
+            PAParamProvider(self._layer_name),
+        )
+        return output
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
