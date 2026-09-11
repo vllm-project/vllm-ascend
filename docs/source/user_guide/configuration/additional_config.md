@@ -66,6 +66,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
+| `ascend_gdn_prefill_backend`        | str  | `None` | Selects the external Ascend GDN prefill implementation. The only supported value is `"fla_npu"`. See [GDN prefill backend](#gdn-prefill-backend) for the exact behavior and requirements. |
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
@@ -85,6 +86,27 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+### GDN prefill backend
+
+`ascend_gdn_prefill_backend` is an optional override for the Ascend GDN prefill
+implementation. It is intentionally separate from vLLM's upstream
+`gdn_prefill_backend` option. When it is not set, vLLM Ascend keeps its default
+behavior: it uses the built-in CANN fused operator when available and supported,
+and otherwise falls back to the Triton Ascend implementation.
+
+The only supported value is `"fla_npu"`. Setting any other value, including
+`"auto"` or `"triton"`, is a configuration error. When `"fla_npu"` is set,
+vLLM Ascend dynamically loads the fused GDN operator from the external
+`flash-linear-attention-npu` package. This backend is supported on Ascend A5,
+currently requires PCP world size 1, and requires a compatible package that
+exports `fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd`.
+
+For example, to explicitly select the external FLA NPU backend:
+
+```bash
+vllm serve MODEL --additional-config='{"ascend_gdn_prefill_backend":"fla_npu"}'
+```
 
 > [!WARNING]
 > With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict. See [issue #15896](https://github.com/vllm-project/vllm-ascend/issues/15896) for details.

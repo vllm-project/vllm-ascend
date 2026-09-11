@@ -68,6 +68,10 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
     with (
         inductor_config.patch(compile_threads=1),
         override_forward_context(forward_context),
+        patch(
+            "vllm_ascend.ops.gdn.get_ascend_config",
+            return_value=SimpleNamespace(ascend_gdn_prefill_backend=None),
+        ),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),

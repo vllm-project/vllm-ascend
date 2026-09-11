@@ -16,6 +16,7 @@
 #
 
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from torch import nn
@@ -28,10 +29,102 @@ from vllm.model_executor.model_loader.reload import (
 
 from vllm_ascend.ops.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
+    _chunk_gated_delta_rule_fla_npu,
     _get_base_conv1d,
     _get_packed_conv_weights,
     initialize_packed_conv_weight,
 )
+
+
+def test_fla_npu_gdn_prefill_accepts_extended_operator_results():
+    q = torch.randn(1, 3, 2, 4)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    g = torch.randn(1, 3, 2)
+    beta = torch.randn(1, 3, 2)
+    initial_state = torch.randn(1, 2, 4, 4)
+    expected_output = torch.randn_like(v)
+    expected_final_state = torch.randn_like(initial_state)
+    captured: dict[str, Any] = {}
+
+    def fake_fused_fwd(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected_output, expected_final_state, *(None for _ in range(8))
+
+    prebuilt_meta = SimpleNamespace(
+        cu_seqlens_host=(0, 3),
+        cu_seqlens_kern=None,
+        chunk_indices_chunk64_host=(0,),
+        keep_meta=None,
+    )
+
+    output, final_state = _chunk_gated_delta_rule_fla_npu(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        scale=0.5,
+        prebuilt_meta=prebuilt_meta,
+        fused_fwd=fake_fused_fwd,
+    )
+
+    assert output is expected_output
+    assert final_state is expected_final_state
+    assert captured["kwargs"].pop("initial_state") is initial_state
+    assert captured["kwargs"] == {
+        "output_final_state": True,
+        "chunk_size": 64,
+        "cu_seqlens": (0, 3),
+        "chunk_indices": (0,),
+        "scale": 0.5,
+        "layout": "BSND",
+        "use_exp2": True,
+        "use_qk_l2norm_in_kernel": True,
+        "allow_neg_eigval": False,
+        "disable_recompute": True,
+        "state_v_first": True,
+    }
+
+
+def test_fla_npu_gdn_prefill_scatter_states_for_kept_sequences():
+    initial_state = torch.zeros(3, 1, 2, 2)
+    keep_meta = torch.tensor([0, 2])
+    kept_final_state = torch.stack([torch.full((1, 2, 2), 1.0), torch.full((1, 2, 2), 2.0)])
+    captured = {}
+
+    def fake_fused_fwd(*args, **kwargs):
+        captured["initial_state"] = kwargs["initial_state"]
+        captured["cu_seqlens"] = kwargs["cu_seqlens"]
+        return args[2], kept_final_state, *(None for _ in range(8))
+
+    prebuilt_meta = SimpleNamespace(
+        cu_seqlens_host=(0, 2, 2, 4),
+        cu_seqlens_kern=(0, 2, 4),
+        chunk_indices_chunk64_host=(0, 1),
+        keep_meta=keep_meta,
+    )
+    q = torch.randn(1, 4, 1, 2)
+
+    _, final_state = _chunk_gated_delta_rule_fla_npu(
+        q=q,
+        k=q,
+        v=q,
+        g=torch.randn(1, 4, 1),
+        beta=torch.randn(1, 4, 1),
+        initial_state=initial_state,
+        scale=1.0,
+        prebuilt_meta=prebuilt_meta,
+        fused_fwd=fake_fused_fwd,
+    )
+
+    torch.testing.assert_close(captured["initial_state"], initial_state[keep_meta])
+    assert captured["cu_seqlens"] == (0, 2, 4)
+    torch.testing.assert_close(final_state[0], kept_final_state[0])
+    torch.testing.assert_close(final_state[1], initial_state[1])
+    torch.testing.assert_close(final_state[2], kept_final_state[1])
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):

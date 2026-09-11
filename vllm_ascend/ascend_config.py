@@ -419,6 +419,7 @@ class AscendConfig:
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
             "enable_prefill_mc2": false,
+            "ascend_gdn_prefill_backend": null,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
@@ -561,6 +562,7 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
+    ascend_gdn_prefill_backend: Literal["fla_npu"] | None = None
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
@@ -638,9 +640,20 @@ class AscendConfig:
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
     _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _gdn_prefill_op: Any = dataclasses.field(default=None, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.ascend_gdn_prefill_backend == "fla_npu":
+            try:
+                from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise RuntimeError(
+                    "ascend_gdn_prefill_backend='fla_npu' requires a current "
+                    "flash-linear-attention-npu wheel providing "
+                    "fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd."
+                ) from exc
+            self._gdn_prefill_op = chunk_gated_delta_rule_fwd
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
@@ -1790,6 +1803,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "_sparse_li_c8_layer_ids",
         "_sparse_li_c8_layer_names",
         "_sparse_li_c8_layer_filter_enabled",
+        "_gdn_prefill_op",
         # SchedulerConfig-internal top-level legacy keys (resolved internally,
         # then replaced by the typed scheduler_config passed above).
         "enable_balance_scheduling",

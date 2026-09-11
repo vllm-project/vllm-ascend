@@ -21,7 +21,7 @@ import subprocess
 import sys
 from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -189,11 +189,62 @@ class TestAscendConfig(TestBase):
     def test_vllm_independent_subconfigs_are_not_required(self):
         config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
 
+        self.assertIsNone(config.ascend_gdn_prefill_backend)
+        self.assertIsNone(config._gdn_prefill_op)
         self.assertEqual(config.kvpp_config.size, 1)
         self.assertFalse(config.xlite_graph_config.enabled)
         self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
         self.assertFalse(config.rl_config.enabled)
+
+    def test_ascend_gdn_prefill_backend_rejects_non_fla_npu_values(self):
+        for value in ("auto", "triton", "native"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                AscendConfig(
+                    sparse_kv_offload_config=SimpleNamespace(enabled=False),
+                    ascend_gdn_prefill_backend=value,  # type: ignore[arg-type]
+                )
+
+    def test_fla_npu_backend_loads_external_fused_operator(self):
+        fla_npu = ModuleType("fla_npu")
+        fla_npu.__path__ = []  # type: ignore[attr-defined]
+        ops = ModuleType("fla_npu.ops")
+        ops.__path__ = []  # type: ignore[attr-defined]
+        ascendc = ModuleType("fla_npu.ops.ascendc")
+
+        def fake_fused_fwd(*args, **kwargs):
+            return args, kwargs
+
+        ascendc.chunk_gated_delta_rule_fwd = fake_fused_fwd  # type: ignore[attr-defined]
+        fla_npu.ops = ops  # type: ignore[attr-defined]
+        ops.ascendc = ascendc  # type: ignore[attr-defined]
+        modules = {
+            "fla_npu": fla_npu,
+            "fla_npu.ops": ops,
+            "fla_npu.ops.ascendc": ascendc,
+        }
+        with patch.dict(sys.modules, modules):
+            config = AscendConfig(
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
+                ascend_gdn_prefill_backend="fla_npu",
+            )
+
+        self.assertIs(config._gdn_prefill_op, fake_fused_fwd)
+
+    def test_fla_npu_backend_reports_missing_external_dependency(self):
+        missing_modules = {
+            "fla_npu": None,
+            "fla_npu.ops": None,
+            "fla_npu.ops.ascendc": None,
+        }
+        with (
+            patch.dict(sys.modules, missing_modules),
+            self.assertRaisesRegex(RuntimeError, "flash-linear-attention-npu"),
+        ):
+            AscendConfig(
+                sparse_kv_offload_config=SimpleNamespace(enabled=False),
+                ascend_gdn_prefill_backend="fla_npu",
+            )
 
     def test_eplb_load_collection_phase_defaults_to_all(self):
         self.assertEqual(EplbConfig().load_collection_phase, "all")
