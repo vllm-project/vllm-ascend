@@ -70,9 +70,20 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None and x.dtype in _SUPPORTED_DTYPES:
-        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # CPU tensors and unsupported dtypes/dimensions use the saved native torch.sum.
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. Normalize negative dims and only take the batch-invariant
+    # path for a genuine last-dim reduction; everything else (non-last-dim, tuple
+    # dim, full reduction when dim is None, CPU tensors, unsupported dtypes) falls
+    # back to the saved native torch.sum.
+    norm_dim = dim + x.dim() if isinstance(dim, int) and dim < 0 else dim
+    if (
+        x.device.type == "npu"
+        and isinstance(norm_dim, int)
+        and norm_dim == x.dim() - 1
+        and x.dtype in _SUPPORTED_DTYPES
+    ):
+        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, norm_dim, keepdim)
     return torch_sum(x, dim, keepdim)
 
 
