@@ -113,7 +113,6 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
     # These fields are constructor arguments only in newer vLLM releases.
     # Assigning them after construction also supports the older metadata class
     # while exercising the same production GDN prefill path.
-    metadata.prefill_query_start_loc = torch.tensor([0, 2], dtype=torch.int32, device=device)
     metadata.prefill_state_indices = torch.tensor([0], dtype=torch.int64, device=device)
     metadata.prefill_has_initial_state = torch.tensor([True], device=device)
     metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
@@ -122,7 +121,8 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
             cache_indices=torch.tensor([0], dtype=torch.int32, device=device),
             initial_state_mode=torch.tensor([1], dtype=torch.int32, device=device),
         ),
-        chunk=Mock(),
+        actual_seq_lengths=torch.tensor([2], dtype=torch.int32, device=device),
+        non_empty_indices=None,
     )
     return metadata
 
@@ -157,9 +157,8 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         output_tensor.copy_(mixed_qkv)
         model.kv_cache[0].add_(1)
 
-    def chunk_attention(**kwargs):
-        initial_state = kwargs["initial_state"]
-        value = kwargs["v"]
+    def chunk_attention(query, key, value, beta, initial_state, actual_seq_lengths, g, scale):
+        del query, key, beta, actual_seq_lengths, g, scale
         return value + 1, initial_state + 1
 
     gating = (
@@ -173,7 +172,12 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_chunk_gated_delta_rule",
+            side_effect=chunk_attention,
+            create=True,
+        ),
         patch.object(
             torch.ops._C_ascend,
             "npu_causal_conv1d_custom",
@@ -199,3 +203,69 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     for execution, (conv_state, ssm_state) in enumerate(observed_states, start=1):
         torch.testing.assert_close(conv_state, torch.full_like(conv_state, execution))
         torch.testing.assert_close(ssm_state, torch.full_like(ssm_state, execution))
+
+
+def test_gdn_prefill_preserves_empty_sequence_states():
+    model = _GDNForwardWrapper()
+    model.ssm_state = torch.zeros(2, 1, 2, 2)
+    metadata = _make_prefill_metadata()
+    metadata.non_spec_state_indices_tensor = torch.tensor([0, 1], dtype=torch.int32)
+    metadata.prefill_state_indices = torch.tensor([0, 1], dtype=torch.int64)
+    metadata.prefill_has_initial_state = torch.tensor([True, True])
+    metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
+        causal_conv1d=GDNCausalConv1dMetadata(
+            query_start_loc=torch.tensor([0, 2, 2], dtype=torch.int32),
+            cache_indices=torch.tensor([0, 1], dtype=torch.int32),
+            initial_state_mode=torch.tensor([1, 1], dtype=torch.int32),
+        ),
+        actual_seq_lengths=torch.tensor([2, 0], dtype=torch.int32),
+        non_empty_indices=torch.tensor([0], dtype=torch.int64),
+    )
+    forward_context = ForwardContext(
+        no_compile_layers={model.prefix: model},
+        attn_metadata={model.prefix: metadata},
+        slot_mapping={},
+    )
+
+    def causal_conv1d(output_tensor, mixed_qkv, conv_weights, **kwargs):
+        del conv_weights, kwargs
+        output_tensor.copy_(mixed_qkv)
+
+    def chunk_attention(query, key, value, beta, initial_state, actual_seq_lengths, g, scale):
+        del query, key, beta, g, scale
+        assert torch.equal(actual_seq_lengths, torch.tensor([2], dtype=torch.int32))
+        assert initial_state.shape[0] == 1
+        return value + 1, torch.full_like(initial_state, 7)
+
+    with (
+        override_forward_context(forward_context),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 2, 1), torch.zeros(1, 2, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda tensor: tensor),
+        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_causal_conv1d_custom",
+            side_effect=causal_conv1d,
+            create=True,
+        ),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_chunk_gated_delta_rule",
+            side_effect=chunk_attention,
+            create=True,
+        ),
+    ):
+        model._forward_core(
+            torch.ones(2, 2),
+            torch.zeros(2, 1),
+            torch.zeros(2, 1),
+            torch.empty(2, 1, 2),
+        )
+
+    torch.testing.assert_close(model.ssm_state[0], torch.full_like(model.ssm_state[0], 7))
+    torch.testing.assert_close(model.ssm_state[1], torch.zeros_like(model.ssm_state[1]))
