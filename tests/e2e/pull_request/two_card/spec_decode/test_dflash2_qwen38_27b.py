@@ -29,7 +29,7 @@ from vllm.config import CompilationConfig
 
 from tests.e2e.pull_request.utils import _run_speculative_decoding
 
-MODELS = ["UploadWeight/Qwen3.8-27B"]
+MODELS = ["Qwen/Qwen3.8-27B"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -70,7 +70,7 @@ def test_qwen38_27b_dflash_acceptance_tp2(
         model_name=model_name,
         speculative_config={
             "method": "dflash",
-            "model": "UploadWeight/Qwen3.8-27B-DFlash2",
+            "model": "z-lab/Qwen3.8-27B-DFlash2",
             "num_speculative_tokens": num_speculative_tokens,
             "enforce_eager": True,
         },
