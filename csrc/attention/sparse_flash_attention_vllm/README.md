@@ -1,4 +1,4 @@
-# SparseFlashAttention
+# SparseFlashAttentionVllm
 
 ## 产品支持情况
 
@@ -13,7 +13,7 @@
 
 ## 功能说明
 
-- API功能：sparse_flash_attention（SFA）是针对大序列长度推理场景的高效注意力计算模块，该模块通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
+- API功能：sparse_flash_attention_vllm（SFA）是针对大序列长度推理场景的高效注意力计算模块，该模块通过“只计算关键部分”大幅减少计算量，然而会引入大量的离散访存，造成数据搬运时间增加，进而影响整体性能。
 
 - 计算公式：
 
@@ -22,7 +22,7 @@
     $$
 
     其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为$Q,\tilde{K}$每一个头的维度。
-    本次公布的`sparse_flash_attention`是面向Sparse Attention的全新算子，针对离散访存进行了指令缩减及搬运聚合的细致优化。
+    本次公布的`sparse_flash_attention_vllm`是面向Sparse Attention的全新算子，针对离散访存进行了指令缩减及搬运聚合的细致优化。
 
 ## 参数说明
 
@@ -219,12 +219,12 @@
   <tr>
     <td class="tg-9wq8" rowspan="6">aclnn接口</td>
     <td class="tg-0pky">
-    <a href="./examples//test_aclnn_sparse_flash_attention.cpp">test_aclnn_sparse_flash_attention
+    <a href="./examples/test_aclnn_sparse_flash_attention_vllm.cpp">test_aclnn_sparse_flash_attention_vllm
     </a>
     </td>
     <td class="tg-lboi" rowspan="6">
     通过
-    <a href="./docs/aclnnSparseFlashAttention.md">aclnnSparseFlashAttention
+    <a href="./docs/aclnnSparseFlashAttentionVllm.md">aclnnSparseFlashAttentionVllm
     </a>
     接口方式调用算子
     </td>
