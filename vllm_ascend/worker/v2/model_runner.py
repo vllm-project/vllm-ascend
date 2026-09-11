@@ -563,7 +563,10 @@ class NPUModelRunner(GPUModelRunner):
         # _pad_query_start_loc_for_fia() may append one graph-only request for a mixed/AV FULL batch
         # give that dummy row the corresponding query length as well.
         if self.adaptive_verification is not None and num_reqs_padded > num_reqs:
-            dummy_seq_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(np.int32, copy=False)
+            dummy_seq_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(
+                np.int32,
+                copy=False,
+            )
             self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = dummy_seq_lens_np
             self.input_buffers.seq_lens[num_reqs:num_reqs_padded].copy_(
                 torch.from_numpy(dummy_seq_lens_np), non_blocking=False
@@ -571,7 +574,8 @@ class NPUModelRunner(GPUModelRunner):
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
         # ascend also consumes the CPU seq_lens metadata.
-        # scheduler-side values are only upper bounds for AV, copy the exact final real-request seq_lens back from the device
+        # Scheduler-side values are only upper bounds for AV. Copy the exact
+        # final real-request seq_lens back from the device.
         if adaptive_verification is not None:
             self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
         # Pad for full CUDA graph mode.
@@ -865,9 +869,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs: int,
         query_start_loc_np: np.ndarray,
     ) -> tuple[np.ndarray, int]:
-        """
-        slippers
-        """
+        """Pad AV query boundaries to the graph's request shape."""
         assert num_reqs <= num_reqs_padded <= self.max_num_reqs
         num_padding_reqs = num_reqs_padded - num_reqs
 
@@ -876,12 +878,13 @@ class NPUModelRunner(GPUModelRunner):
             return query_start_loc_np, num_reqs_padded
         last_loc = int(query_start_loc_np[num_reqs])
         num_padding_tokens = num_tokens_padded - last_loc
-        assert num_padding_tokens > 0
+        # The exact AV allocation may already consume the whole padded token
+        # budget. In that case, keep zero-length graph-only requests instead
+        # of rejecting an otherwise valid layout.
+        assert num_padding_tokens >= 0
 
-        cummulative_padding = (
-            np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
-        )
-        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cummulative_padding
+        cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
 
     def _pad_query_start_loc_for_fia(
