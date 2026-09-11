@@ -20,6 +20,7 @@ target hardware before production use.
 | ACLGraph | Unverified | Start with graph mode; use eager mode only for isolation |
 | FlashComm1 | Unverified | Deprecated in current vLLM Ascend; do not use for the initial gate |
 | MTP | Experimental | Register `Qwen4ExpMTP` through the Ascend adapter |
+| Prefix caching | Experimental | Enable with aligned Mamba state checkpoints; see the deployment notes below |
 | PLE CPU offload | Unsupported | Upstream implementation uses CUDA IPC stream semaphores |
 
 Refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) and [Feature Guide](../../user_guide/feature_guide/index.md) for general platform options.
@@ -117,7 +118,7 @@ Dummy weights do not validate the PLE embedding shards, QSA cache updates, quant
 The real-weight MTP and graph-mode verification configuration is:
 
 ```bash
-mkdir -p /home/w00804037/Qwen3.8-flash/Logs
+mkdir -p ./logs
 
 vllm serve /models/Qwen3.8-Flash-Next \
   --host 0.0.0.0 \
@@ -131,17 +132,27 @@ vllm serve /models/Qwen3.8-Flash-Next \
   --max-num-seqs 1 \
   --max-num-batched-tokens 4096 \
   --async-scheduling \
-  --no-enable-prefix-caching \
+  --enable-prefix-caching \
+  --mamba-cache-mode align \
   --speculative-config '{"method":"qwen4_exp_mtp","num_speculative_tokens":3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"ascend_compilation_config":{"fuse_norm_quant":false}}' \
-  > /home/w00804037/Qwen3.8-flash/Logs/serve-mtp-full-decode.log 2>&1
+  > ./logs/serve-mtp-full-decode.log 2>&1
 ```
 
 Do not specify `cudagraph_capture_sizes`; this configuration deliberately uses
 the platform defaults. `fuse_norm_quant` is disabled because CANN versions that
 do not provide `aclnnAddRmsNormBias` cannot compile that fusion. This does not
 disable `FULL_DECODE_ONLY` graph capture.
+
+Prefix caching stores aligned GDN and PLE state checkpoints in addition to the
+reusable attention cache. It therefore consumes extra NPU memory; the exact
+overhead depends on the maximum context length, concurrency, and cache layout.
+If memory is tight, reduce `--gpu-memory-utilization`, `--max-model-len`, or
+`--max-num-seqs` and re-run the real-weight capacity gate. In one A3 TP8
+correctness validation, `--gpu-memory-utilization 0.95` left too little QSA
+workspace headroom and caused an out-of-memory error, while `0.93` passed. This
+is a workload-specific observation, not a universal recommended value.
 
 If graph capture fails, add `--enforce-eager` to isolate the failure. Do not enable `VLLM_PLE_CPU_OFFLOAD`; the upstream offload transport is CUDA-only.
 
@@ -215,8 +226,11 @@ used to identify and fix these integration failures:
   `hidden_size * hc_count` and treat the local last-stage drafter as its first
   logical stage.
 
-The graph-mode service and GPQA accuracy gates have not passed yet. The current
-logs under `/home/w00804037/Qwen3.8-flash/Logs` end during engine initialization,
-so no GPQA score is reported by this PR. Rerun both gates after deploying the
-integrated patch; do not interpret the eager smoke test as graph-mode or
-accuracy validation.
+Prefix-cache correctness was validated separately in eager mode on A3 TP8 with
+MTP both disabled and set to three speculative tokens. A repeated 2,400-token
+prompt restored at least two 768-token aligned state pages, produced identical
+greedy output tokens and log probabilities, and completed without preemption.
+
+The graph-mode service and GPQA accuracy gates have not passed yet, so no GPQA
+score is reported here. Rerun both gates after deploying the integrated patch;
+do not interpret the eager smoke test as graph-mode or accuracy validation.

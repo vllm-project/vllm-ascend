@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 from typing_extensions import Self
@@ -17,7 +18,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
 from vllm_ascend.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     CompressAttentionManager,
@@ -28,16 +28,16 @@ from vllm_ascend.core.single_type_kv_cache_manager import (
 class AscendCircularBufferSpec(AttentionSpec):
     """One fixed-capacity raw-key ring block for each active request."""
 
+    # The ring contains request-local rolling state. It must be freshly
+    # allocated and rebuilt after a prefix hit; publishing or looking it up by
+    # token-prefix hash would incorrectly reuse another request's ring state.
+    participates_in_prefix_caching: ClassVar[bool] = False
+
     @property
     def real_page_size_bytes(self) -> int:
         # This cache stores keys only. vLLM 0.26's AttentionSpec assumes a
         # conventional K/V pair, so override its factor-of-two page sizing.
-        return (
-            self.block_size
-            * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
-        )
+        return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         del vllm_config

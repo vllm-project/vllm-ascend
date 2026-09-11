@@ -21,13 +21,13 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
+from vllm_ascend.core.prefix_cache import (
+    kv_cache_group_participates_in_prefix_caching,
+)
 from vllm_ascend.core.six_region_kv_cache_layout import (
     HIDDEN,
     build_six_region_kv_cache_layout,
 )
-
-_orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
@@ -38,15 +38,12 @@ def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
 ) -> tuple[int, int]:
-    """Ascend-compatible resolve_kv_cache_block_sizes.
+    """Resolve scheduling and prefix-hash granularities independently.
 
-    vLLM PR #40860 added a restriction that hybrid KV cache groups with
-    multiple block sizes do not support DCP.
-    This restriction is correct for CUDA but not for Ascend, which implements
-    context parallelism for MLA and SWA-MLA layers independently.
-
-    For multiple KV cache groups with CP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment.
+    Every group participates in scheduling and capacity planning. Only groups
+    that explicitly participate in prefix caching constrain hash granularity.
+    This lets request-local state caches (for example QSA's raw-key circular
+    ring) keep their physical lifetime without vetoing reusable prefix state.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -56,18 +53,38 @@ def _ascend_resolve_kv_cache_block_sizes(
         bs = cache_config.block_size * dcp
         return bs, bs
 
-    if dcp != 1:
-        # Ascend supports CP with multiple KV cache groups; compute
-        # scheduler_block_size using the LCM of all group block sizes
-        # multiplied by the CP factors for proper alignment.
-        group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp
-        if not cache_config.enable_prefix_caching:
-            return scheduler_block_size, scheduler_block_size
-        hash_block_size = math.gcd(*group_block_sizes)
-        return scheduler_block_size, hash_block_size
+    group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
+    # Preserve Ascend's existing DCP rule: every cache group participates in
+    # scheduler alignment, while request hashes remain in unsharded token units.
+    scheduler_block_size = math.lcm(*group_block_sizes) * dcp
+    connector_enabled = getattr(vllm_config, "kv_transfer_config", None) is not None
+    if not (cache_config.enable_prefix_caching or connector_enabled):
+        return scheduler_block_size, scheduler_block_size
 
-    return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    prefix_group_sizes = [
+        block_size
+        for group, block_size in zip(groups, group_block_sizes, strict=True)
+        if kv_cache_group_participates_in_prefix_caching(group)
+    ]
+    if not prefix_group_sizes:
+        return scheduler_block_size, scheduler_block_size
+
+    if dcp == 1 and any(
+        isinstance(group.kv_cache_spec, MambaSpec) and group.kv_cache_spec.block_size != cache_config.block_size
+        for group in groups
+        if kv_cache_group_participates_in_prefix_caching(group)
+    ):
+        return scheduler_block_size, scheduler_block_size
+
+    requested = getattr(cache_config, "prefix_match_unit", None)
+    hash_block_size = requested if requested is not None else math.gcd(*prefix_group_sizes)
+    if any(block_size % hash_block_size != 0 for block_size in prefix_group_sizes):
+        raise ValueError(
+            f"Invalid prefix_match_unit={hash_block_size}; all participating "
+            "KV cache group block sizes must be divisible by prefix_match_unit. "
+            f"Got participating group block sizes={prefix_group_sizes}."
+        )
+    return scheduler_block_size, hash_block_size
 
 
 def _try_get_full_allocation_fallback_groups(

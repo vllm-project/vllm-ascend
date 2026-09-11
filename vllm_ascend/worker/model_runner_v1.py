@@ -358,6 +358,45 @@ def _pad_qwen4_exp_ple_graph_inputs(
 
 
 class NPUModelRunner(GPUModelRunner):
+    def _get_mamba_state_copy_funcs(self):
+        """Return state copy functions keyed by per-layer Mamba type."""
+        cached = getattr(self, "_mamba_state_copy_funcs_by_type", None)
+        if cached is not None:
+            return cached
+
+        mamba_groups = mamba_utils.get_mamba_groups(self.kv_cache_config)
+        mamba_types = {spec.mamba_type for spec in mamba_groups}
+        getter = getattr(self.model, "get_mamba_state_copy_funcs", None)
+        if getter is None:
+            legacy_funcs = self.model.get_mamba_state_copy_func()
+            copy_funcs = {
+                mamba_type: legacy_funcs for mamba_type in mamba_types
+            }
+        else:
+            copy_funcs = getter(mamba_types)
+
+        mamba_utils.validate_mamba_state_copy_funcs(
+            mamba_groups, copy_funcs
+        )
+        self._mamba_state_copy_funcs_by_type = copy_funcs
+        return copy_funcs
+
+    def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
+        assert self.cache_config.mamba_cache_mode == "align"
+        if self._mamba_bufs is None:
+            self._mamba_bufs = mamba_utils.MambaBuffers.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=self.kv_cache_config,
+                copy_funcs=self._get_mamba_state_copy_funcs(),
+                make_buffer=self._make_buffer,
+                device=self.device,
+                with_postprocess_align=(
+                    self.speculative_config is not None
+                    and self.model_config.is_hybrid
+                ),
+            )
+        return self._mamba_bufs
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
@@ -2084,7 +2123,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.input_batch,
                         self.requests,
                         self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
+                        self._get_mamba_state_copy_funcs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
