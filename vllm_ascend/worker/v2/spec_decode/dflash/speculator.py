@@ -18,13 +18,25 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
+    PhysicalKDFlashMixin,
+    initialize_physical_k_buffers,
+    physical_k_scope,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+class AscendDFlashSpeculator(PhysicalKDFlashMixin, DFlashSpeculator):
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded,
+        seq_lens_cpu_upper_bound,
+        num_tokens_padded=None,
+    ):
+        num_tokens_padded = num_tokens_padded or (
+            num_reqs_padded * self.num_query_per_req
+        )
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
@@ -57,6 +69,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        initialize_physical_k_buffers(self)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -123,12 +137,12 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        # Preserve the PR #15098 calling convention for the upstream DP state.
         dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
-        with build_attn_metadata_wrapper():
+        with physical_k_scope(self, input_batch), build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,
