@@ -1235,7 +1235,10 @@ def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # via refresh_block_size. The strict `is True` comparison also keeps
     # MagicMock-based unit tests (quant_config is a bare Mock, so the
     # attribute resolves to a truthy Mock) off the C8 path.
-    return vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_mxfp_c8_quant", False) is True
+    return (
+        vllm_config.quant_config is not None
+        and getattr(vllm_config.quant_config, "enable_mxfp_c8_quant", False) is True
+    )
 
 
 def refresh_block_size(vllm_config):
