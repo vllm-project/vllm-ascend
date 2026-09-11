@@ -56,7 +56,7 @@ if not _npu_available:
     torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
     torch_npu.profiler = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
-    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
+    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt, **kwargs: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
     torch_npu._C._NPUTaskGroupHandle = MagicMock
     sys.modules["torch_npu"] = torch_npu
