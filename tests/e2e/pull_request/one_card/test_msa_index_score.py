@@ -35,7 +35,7 @@ FILL_THRESHOLD = -1.0e30
 
 
 def _load_golden_module():
-    repo_root = Path(__file__).resolve().parents[6]
+    repo_root = Path(__file__).resolve().parents[4]
     golden_path = (
         repo_root / "csrc" / "attention" / "msa_index_score" / "tests" / "golden" / "msa_index_score_golden.py"
     )
