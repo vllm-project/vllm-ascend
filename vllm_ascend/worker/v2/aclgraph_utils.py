@@ -23,7 +23,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -155,8 +155,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
-        with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         if use_updatable_graph(attn_backend):
@@ -172,14 +171,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the target config because set_forward_context()
-        # does not update it.
-        # TODO: Remove this explicit current-config scope once ACL graph replay
-        # passes VllmConfig directly through the graph-update interfaces.
         with (
-            set_current_vllm_config(self.vllm_config),
             set_forward_context(
                 attn_metadata,
                 self.vllm_config,

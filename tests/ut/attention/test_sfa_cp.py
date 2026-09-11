@@ -21,8 +21,6 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFAPCPDCPImpl,
     AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
-    resolve_sfa_impl,
-    resolve_sfa_metadata_builder,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -111,39 +109,6 @@ def test_sfa_dcp_extends_v1_backend() -> None:
     builder_mro = AscendSFADSADCPMetadataBuilder.__mro__
     assert impl_mro.index(AscendSFADCPImpl) < impl_mro.index(AscendSFADSACPImpl)
     assert builder_mro.index(AscendSFADCPMetadataBuilder) < builder_mro.index(AscendSFADSACPMetadataBuilder)
-
-
-def test_sfa_cp_four_mode_resolution() -> None:
-    expected = {
-        (False, False): (AscendSFAMetadataBuilder, AscendSFAImpl),
-        (True, False): (AscendSFADSACPMetadataBuilder, AscendSFADSACPImpl),
-        (False, True): (AscendSFADCPMetadataBuilder, AscendSFADCPImpl),
-        (True, True): (AscendSFADSADCPMetadataBuilder, AscendSFADSADCPImpl),
-    }
-    for flags, classes in expected.items():
-        with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=flags[0]),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
-                return_value=flags[1],
-            ),
-        ):
-            assert resolve_sfa_metadata_builder() is classes[0]
-            assert resolve_sfa_impl() is classes[1]
-
-
-def test_sfa_pcp_resolution_for_mrv2_config() -> None:
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=2),
-    )
-    with (
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
-            return_value=False,
-        ),
-    ):
-        assert resolve_sfa_impl(vllm_config) is AscendSFAPCPImpl
 
 
 def test_sfa_pcp_dcp_builds_pcp_ordered_indexer_slots_with_receiver_local_blocks() -> None:

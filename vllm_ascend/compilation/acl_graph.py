@@ -352,21 +352,15 @@ def update_full_graph_params(
     if use_updatable_graph(attn_backend):
         return
 
-    # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
-    # AssertionError outside set_current_vllm_config(); the SFA backend
-    # resolution in get_impl_cls() needs the config.
-    from vllm.config import set_current_vllm_config
-
-    with set_current_vllm_config(vllm_config):
-        impl_cls = attn_backend.get_impl_cls()
-        impl_cls.update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
+    impl_cls = attn_backend.get_impl_cls()
+    impl_cls.update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config,
+        draft_attn_metadatas=draft_attn_metadatas,
+    )
 
 
 @dataclass

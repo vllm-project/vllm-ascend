@@ -8,6 +8,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
+    AscendAttentionDCPBackend,
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
@@ -65,16 +66,13 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
     def test_get_impl_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
+        self.assertEqual(AscendAttentionBackend.get_impl_cls(), AscendAttentionBackendImpl)
 
     def test_get_builder_cls(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
-            self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+        self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_supports_pcp_only_for_main_implementation(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False):
-            self.assertTrue(AscendAttentionBackend.supports_pcp())
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
 
         class OtherAttentionBackend(AscendAttentionBackend):
             @staticmethod
@@ -84,18 +82,16 @@ class TestAscendAttentionBackend(TestBase):
         self.assertFalse(OtherAttentionBackend.supports_pcp())
 
     def test_get_impl_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_impl_cls(),
-                AscendAttentionDCPImpl,
-            )
+        self.assertIs(
+            AscendAttentionDCPBackend.get_impl_cls(),
+            AscendAttentionDCPImpl,
+        )
 
     def test_get_builder_cls_with_dcp(self):
-        with patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=True):
-            self.assertIs(
-                AscendAttentionBackend.get_builder_cls(),
-                AscendAttentionDCPMetadataBuilder,
-            )
+        self.assertIs(
+            AscendAttentionDCPBackend.get_builder_cls(),
+            AscendAttentionDCPMetadataBuilder,
+        )
 
     def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
