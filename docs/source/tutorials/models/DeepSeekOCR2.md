@@ -156,7 +156,7 @@ Single-node deployment is recommended.
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We don't need to Prefill-Decode disaggregation
+Prefill-Decode disaggregation is not required.
 
 ## 6 Functional Verification
 

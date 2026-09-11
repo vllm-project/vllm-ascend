@@ -247,7 +247,7 @@ pkill -9 -f VLLM::Worker
 
 After confirming that the old process has exited and port 8000 is released, start another form to avoid residual processes occupying NPU memory.
 
-> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2816M KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3072M will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
+> **Concurrency suggestion**: text-only / audio use `--max-num-seqs 4`; image can use `--max-num-seqs 16`. The 2816MB KV for the image form is the upper limit allowed by the FusedMC2 computation peak under 16 concurrency (about 3.64 GiB per card); increasing KV to ≥3072M will cause OOM. If a larger KV capacity is needed, reduce the concurrency to 8.
 
 ### 5.2 text-only Online Deployment
 
@@ -400,8 +400,8 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | Form | KV cache | Reason |
 |---|---|---|
 | text-only | `--gpu-memory-utilization 0.92` | Automatic profiling, validated |
-| image | `--kv-cache-memory-bytes 2816M` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3328M) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
-| audio | `--kv-cache-memory-bytes 4G` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1G provides only 2,220 tokens, insufficient, while 4G provides 8,956 tokens (2.19x) |
+| image | `--kv-cache-memory-bytes 2816M` | FusedMC2 peak needs about 3.64 GiB per card; too large a KV (3328MB) causes OOM; combined with `--max-num-batched-tokens 1024` to chunk large-image prefill |
+| audio | `--kv-cache-memory-bytes 4G` | Single-request budget is about 1,131 tokens (text 360 + audio 259 + output 512); 1GB provides only 2,220 tokens, insufficient, while 4G provides 8,956 tokens (2.19x) |
 
 > **Why image/audio use explicit `--kv-cache-memory-bytes` (measured)**: automatic profiling under v0.22.1 can allocate a large KV (audio gets 21,565 tokens at 0.92 and 25,686 tokens at 0.95), but the actual peak memory during graph capture exceeds the limit and causes the worker to exit, with logs showing `Worker proc VllmWorker-* died unexpectedly`. Explicit KV is more conservative than automatic profiling and reserves headroom for the about 3.76 GiB peak of graph capture, so it is the currently validated stable approach.
 >
