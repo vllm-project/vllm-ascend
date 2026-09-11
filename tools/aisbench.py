@@ -271,7 +271,7 @@ class AisbenchRunner:
             input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
             assert (
                 float(input_throughput) 
-                >= float(self.input_throughput_threshold) * float(self.input_throughput_baseline), 
+                >= float(self.input_throughput_threshold) * float(self.input_throughput_baseline)
             ),(
                 "Input Token verification failed. "
                 f"The current Input Token Throughput is {input_throughput} token/s, "
