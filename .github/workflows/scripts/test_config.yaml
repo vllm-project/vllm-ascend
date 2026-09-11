@@ -129,6 +129,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 270
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 580
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 740
+  tests/e2e/pull_request/one_card/spec_decode/test_c8_spec_decode_npu.py: 30
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 510
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 410
   tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 420
