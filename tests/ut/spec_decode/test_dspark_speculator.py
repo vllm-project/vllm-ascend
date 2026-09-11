@@ -294,3 +294,28 @@ def test_process_weight_preserves_the_unrotated_projection():
     actual = torch.nn.functional.linear((inputs @ rotation).reshape(3, -1), process_weight(weight, rotation))
 
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=3e-6)
+
+
+def test_set_attn_reuses_draft_group_backends(monkeypatch):
+    attention_backend, cache_backend = object(), object()
+    groups = [
+        [SimpleNamespace(backend=attention_backend, layer_names=["draft.0", "draft.1"])],
+        [],
+        [SimpleNamespace(backend=cache_backend, layer_names=["draft.cache"])],
+    ]
+
+    def set_attn(self, *args):
+        self.attn_groups = groups
+        self._context_slot_mappings = torch.tensor([0, 1], dtype=torch.int64)
+
+    monkeypatch.setattr(DSparkSpeculator, "set_attn", set_attn)
+    spec = _spec(SimpleNamespace(), SimpleNamespace())
+    spec.set_attn(None, None, None, None, None)
+
+    assert spec.attn_backends == {
+        "draft.0": attention_backend,
+        "draft.1": attention_backend,
+        "draft.cache": cache_backend,
+    }
+    assert spec._context_slot_mappings.dtype == torch.int32
+    assert spec._context_slot_mappings.tolist() == [0, 1]

@@ -46,11 +46,13 @@ def _make_padded_input_batch() -> MagicMock:
     return input_batch
 
 
+@pytest.mark.parametrize("speculator_cls", [AscendMTPSpeculator, AscendEagleSpeculator])
 @pytest.mark.parametrize(
     ("target_pcp_size", "expected_execution_pcp_size", "dcp_size"),
     [(2, 1, 4), (2, 1, 8), (1, 1, 4)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
+    speculator_cls,
     target_pcp_size: int,
     expected_execution_pcp_size: int,
     dcp_size: int,
@@ -112,11 +114,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
-        patch.object(
-            speculator_module,
-            "replace",
-            side_effect=fake_replace,
-        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
             side_effect=fake_replace,
@@ -132,7 +129,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             return_value=object(),
         ),
     ):
-        speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
+        speculator = speculator_cls(target_config, torch.device("cpu"))
 
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
@@ -154,17 +151,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
 
-    draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
     assert draft_parallel_config.cp_kv_cache_interleave_size == 64
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
-    assert draft_config.model_config is draft_model_config
-    assert draft_model_config.hf_overrides == {}
-    assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
-    assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+    # Attention backends are bound while the models load, so the speculator
+    # does not reconstruct and revalidate a second VllmConfig for the draft.
+    assert not hasattr(speculator, "draft_vllm_config")
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])
@@ -389,9 +382,11 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     speculator.draft_attn_layer_names = {"draft.layer"}
     local_draft_metadata = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     global_draft_metadata = object()
-    speculator.model_state = SimpleNamespace(
-        attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
-    )
+    # Replicated draft layers are excluded from the target's attention groups.
+    target_metadata = {"target.layer": object()}
+    if not replicated_pcp:
+        target_metadata["draft.layer"] = local_draft_metadata
+    speculator.model_state = SimpleNamespace(attn_metadata=target_metadata)
     speculator._build_draft_attn_metadata = MagicMock(
         return_value={"draft.layer": global_draft_metadata},
     )
@@ -403,7 +398,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
             is_draft_model_prefill=True,
         )
 
-    rebuild_metadata = replicated_pcp and attn_architecture in ("DSA", "SFA")
+    rebuild_metadata = replicated_pcp
     expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
     assert actual == [{"draft.layer": expected_metadata}]
     assert actual[0]["draft.layer"] is expected_metadata
@@ -620,56 +615,3 @@ def test_propose_preserves_v028_dp_token_counts() -> None:
     ):
         speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
     assert parent.call_args.args[11] is token_counts
-
-
-def _fake_replace(config, **changes):
-    values = vars(config).copy()
-    values.update(changes)
-    return SimpleNamespace(**values)
-
-
-@pytest.mark.parametrize(
-    ("hf_overrides", "expected"),
-    [
-        (None, {}),
-        ({"architectures": ["DeepSeekV4MTPModel"]}, {"architectures": ["DeepSeekV4MTPModel"]}),
-    ],
-)
-def test_ensure_draft_hf_overrides(hf_overrides, expected) -> None:
-    draft_model_config = SimpleNamespace(hf_overrides=hf_overrides)
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == expected
-
-
-def test_ensure_draft_hf_overrides_missing_attr() -> None:
-    draft_model_config = SimpleNamespace()
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == {}
-
-
-def test_eagle_create_draft_vllm_config_fills_hf_overrides() -> None:
-    speculator = object.__new__(AscendEagleSpeculator)
-    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
-    speculator.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=8,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-    )
-
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator.replace",
-        side_effect=_fake_replace,
-    ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert speculator.draft_model_config.hf_overrides == {}
-    assert draft_config.model_config is speculator.draft_model_config
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert not draft_config.parallel_config.enable_expert_parallel
-    assert not draft_config.parallel_config.enable_eplb

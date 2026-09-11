@@ -55,6 +55,19 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.compress_ratio = compress_ratio
         self.block_size = block_size
 
+        from vllm.config import get_current_vllm_config
+
+        from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend, AscendDSAC128StateBackend, select_dsa_backend
+        from vllm_ascend.utils import enable_dsa_cp
+
+        if compress_ratio not in (4, 128):
+            raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {compress_ratio}")
+        self._attn_backend = select_dsa_backend(
+            AscendDSAC4StateBackend if compress_ratio == 4 else AscendDSAC128StateBackend,
+            use_pcp=get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1,
+            use_dsa_cp=enable_dsa_cp(),
+        )
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         from vllm_ascend.models.layer.attention.layer import dsv4_block_sizes
 
@@ -74,16 +87,7 @@ class AscendCompressorStateCache(CompressorStateCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        # Keep these imports lazy to avoid a model-inspection circular import.
-        if self.compress_ratio == 4:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend
-
-            return AscendDSAC4StateBackend
-        if self.compress_ratio == 128:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC128StateBackend
-
-            return AscendDSAC128StateBackend
-        raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {self.compress_ratio}")
+        return self._attn_backend
 
 
 @dataclass(frozen=True)

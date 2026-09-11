@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -59,19 +59,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def ensure_draft_hf_overrides(draft_model_config: Any) -> Any:
-    """Fill ``hf_overrides`` so ``VllmConfig.replace`` accepts the draft copy.
-
-    ModelSlim ``get_quant_config`` requires ``hf_overrides`` to be a dict.
-    Draft ``ModelConfig`` often leaves it ``None`` while the target uses ``{}``.
-    Normalize in place before ``replace`` so pydantic does not reject the
-    draft worker config (DSv4 MTP nightly on default MRv2).
-    """
-    if not isinstance(getattr(draft_model_config, "hf_overrides", None), dict):
-        draft_model_config.hf_overrides = {}
-    return draft_model_config
-
-
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
@@ -99,7 +86,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
-        self.draft_vllm_config = self._create_draft_vllm_config()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -122,29 +108,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
-        ensure_draft_hf_overrides(self.draft_model_config)
-        source_parallel_config = self.vllm_config.parallel_config
-        dcp_size = source_parallel_config.decode_context_parallel_size
-        parallel_config = replace(
-            source_parallel_config,
-            pipeline_parallel_size=1,
-            decode_context_parallel_size=1 if self.replicated_pcp else dcp_size,
-        )
-        draft_config = replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-            cache_config=replace(self.vllm_config.cache_config),
-        )
-        if self.replicated_pcp:
-            # TODO: Separate draft execution settings from worker topology.
-            # Restore DCP only after the complete draft config reconstruction;
-            # this does not rerun validation or recompute DCP-dependent settings.
-            draft_config.parallel_config.decode_context_parallel_size = dcp_size
-        return draft_config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -209,7 +172,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # TODO: Remove this early return once FIA supports padded Query tensors
         # whose token count exceeds the cumulative query length. Keep the
         # mapping refresh above when unifying metadata construction.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA"):
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL and self.attn_architecture in ("MLA", "GQA") and attn_metadata:
             return attn_metadata, slot_mappings
 
         slot_mappings = build_slot_mappings_by_layer(
@@ -313,19 +276,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
 
-            # Use the first executable draft attention layer as the architecture
-            # discriminator and cache it for ACL graph parameter updates.
-            self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        # Use the first executable draft attention layer as the architecture
+        # discriminator and cache it for ACL graph parameter updates.
+        self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
