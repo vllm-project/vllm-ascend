@@ -44,13 +44,24 @@ def sync_dp_group_max_tokens(num_tokens: int, dp_size: int, dp_rank: int) -> int
     return int(counts.max().item())
 
 
-def make_dp_padded_dummy_output(scheduler_output: SchedulerOutput, group_max: int) -> SchedulerOutput:
+def make_dp_padded_dummy_output(
+    scheduler_output: SchedulerOutput, group_max: int, decode_query_len: int
+) -> SchedulerOutput:
     """
     Rewrite a dummy scheduler output to forward exactly `group_max` tokens. The output
     is synthetic, so rewriting it is safe.
     """
+    # decode_query_len-sized requests keep the dummy uniform-decode shaped, so it
+    # still matches the captured decode graphs; one group_max-token request would
+    # drag the whole DP group to eager via the cg_mode min. A trailing remainder
+    # keeps the total exact; then the group-max rank is itself non-uniform and
+    # the step runs eager regardless.
+    num_full, remainder = divmod(group_max, decode_query_len)
+    per_request = [decode_query_len] * num_full
+    if remainder:
+        per_request.append(remainder)
     return replace(
         scheduler_output,
-        num_scheduled_tokens={"_dummy_dp_padding": group_max},
+        num_scheduled_tokens={f"_dummy_dp_padding_{i}": n for i, n in enumerate(per_request)},
         total_num_scheduled_tokens=group_max,
     )
