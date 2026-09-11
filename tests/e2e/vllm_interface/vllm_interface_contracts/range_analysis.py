@@ -28,13 +28,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 from .analysis_plans import resolve_analysis_plan
 from .call_contracts import (
@@ -75,7 +77,8 @@ from .models import (
 )
 
 RANGE_SCHEMA_VERSION = 11
-RANGE_ANALYZER_VERSION = "2.1.0"
+RANGE_ANALYZER_VERSION = "2.1.1"
+_GIT_BATCH_CLOSE_TIMEOUT_SECONDS = 5
 CLASSIFICATIONS = (
     "introduced_break",
     "compatibility_warning",
@@ -548,6 +551,10 @@ class GitSnapshot:
     def __init__(self, root: Path, revision: str):
         self.root = root
         self.revision = revision
+        self._batch_process: subprocess.Popen[bytes] | None = None
+        self._batch_stderr: BinaryIO | None = None
+        self._batch_resources = ExitStack()
+        self._closed = False
         self._files: set[str] | None = None
         self._source: dict[str, str | None] = {}
         self._trees: dict[str, ast.Module | None] = {}
@@ -559,7 +566,8 @@ class GitSnapshot:
         self._owners: dict[tuple[ast.Module, str], ast.ClassDef | None] = {}
         self._endpoints: dict[tuple[str, str | None, str], SourceEndpoint] = {}
         self._call_endpoints: dict[tuple[str, str, str | None, str | None, str], SourceEndpoint] = {}
-        self._import_presence: dict[tuple[str, str], bool] = {}
+        self._import_presence: dict[tuple[str, str], bool | None] = {}
+        self._dynamic_import_exports: dict[ast.Module, bool] = {}
         self._keyword_call_candidates: dict[
             tuple[tuple[str, ...], str],
             list[tuple[str, ast.Call, str | None, str]],
@@ -582,13 +590,85 @@ class GitSnapshot:
             if normalized not in self.files:
                 self._source[normalized] = None
             else:
-                raw = subprocess.run(
-                    ["git", "-C", str(self.root), "show", f"{self.revision}:{normalized}"],
-                    check=True,
-                    capture_output=True,
-                ).stdout
+                raw = self._read_blob(normalized)
                 self._source[normalized] = raw.decode("utf-8", errors="replace")
         return self._source[normalized]
+
+    def _read_blob(self, file_name: str) -> bytes:
+        """Read on demand through one binary Git pipe per analysis snapshot."""
+        if self._closed:
+            raise ValueError("cannot read from a closed Git snapshot")
+        # The batch protocol is line-delimited. Keep the original Git path
+        # handling for unusual names rather than splitting a request in two.
+        if "\n" in file_name or "\r" in file_name:
+            return subprocess.run(
+                ["git", "-C", str(self.root), "show", f"{self.revision}:{file_name}"],
+                check=True,
+                capture_output=True,
+            ).stdout
+        try:
+            if self._batch_process is None:
+                # A file avoids a full stderr pipe blocking Git while Python
+                # reads stdout, including partial-clone lazy-fetch diagnostics.
+                self._batch_stderr = cast(
+                    BinaryIO,
+                    self._batch_resources.enter_context(
+                        tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115 - owned by the snapshot's ExitStack
+                    ),
+                )
+                self._batch_process = subprocess.Popen(
+                    ["git", "-C", str(self.root), "cat-file", "--batch"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self._batch_stderr,
+                )
+            process = self._batch_process
+            assert process.stdin is not None and process.stdout is not None
+            if process.poll() is not None:
+                raise ValueError(f"Git batch process exited with code {process.returncode}")
+            process.stdin.write(f"{self.revision}:{file_name}\n".encode())
+            process.stdin.flush()
+            header = process.stdout.readline().split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise ValueError(f"unexpected Git batch header: {header!r}")
+            size = int(header[2])
+            if size < 0:
+                raise ValueError(f"invalid Git blob size: {size}")
+            content = process.stdout.read(size)
+            if len(content) != size or process.stdout.read(1) != b"\n":
+                raise ValueError("incomplete Git batch blob response")
+            return content
+        except (OSError, ValueError) as error:
+            diagnostic = ""
+            if self._batch_stderr is not None:
+                self._batch_stderr.seek(0)
+                diagnostic = self._batch_stderr.read().decode("utf-8", errors="replace").strip()
+            self.close()
+            raise ValueError(
+                f"Git batch read failed for {self.revision}:{file_name}: {error}"
+                + (f"\n{diagnostic}" if diagnostic else "")
+            ) from error
+
+    def close(self) -> None:
+        """Release the lazy Git process on both successful and failed runs."""
+        self._closed = True
+        process = self._batch_process
+        try:
+            if process is not None:
+                if process.stdin is not None:
+                    with suppress(BrokenPipeError):
+                        process.stdin.close()
+                try:
+                    process.wait(timeout=_GIT_BATCH_CLOSE_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                if process.stdout is not None:
+                    process.stdout.close()
+        finally:
+            self._batch_resources.close()
+            self._batch_stderr = None
+            self._batch_process = None
 
     def tree(self, file_name: str) -> ast.Module | None:
         normalized = file_name.replace("\\", "/")
@@ -628,25 +708,36 @@ class GitSnapshot:
             return _NamedBinding(None, "missing")
         return self._scope_named_binding(class_node, name)
 
-    def has_import_symbol(self, file_name: str, name: str) -> bool:
-        """Use the import detector's presence rules without building a contract.
+    def has_import_symbol(self, file_name: str, name: str) -> bool | None:
+        """Resolve final namespace presence; None means path-dependent/unknown.
 
-        Full endpoints (including fingerprints and return contracts) are still
-        built for findings, so their evidence is unchanged.
+        An earlier assignment or import does not survive a later deletion.
+        An annotation without a value does not create a runtime binding.
         """
         key = (file_name, name)
         if key not in self._import_presence:
             tree = self.tree(file_name)
-            present = False
+            present: bool | None = False if file_name not in self.files else None
             if tree is not None:
                 alternatives = self._scope_bindings(tree).get(name, ())
-                present = (
-                    len(alternatives) == 1
-                    and alternatives[0].kind in {"function", "class"}
-                    and getattr(alternatives[0].node, "lineno", None) is not None
-                ) or _top_level_import_binding(tree, name) is not None
+                kinds = {binding.kind for binding in alternatives}
+                if kinds and kinds <= {"function", "class", "value", "alias"}:
+                    present = True
+                elif not kinds or kinds == {"unbound"}:
+                    present = None if self._has_dynamic_import_exports(tree) else False
+                else:
+                    present = None
             self._import_presence[key] = present
         return self._import_presence[key]
+
+    def _has_dynamic_import_exports(self, tree: ast.Module) -> bool:
+        if tree not in self._dynamic_import_exports:
+            getter = self._scope_bindings(tree).get("__getattr__", ())
+            self._dynamic_import_exports[tree] = any(binding.kind != "unbound" for binding in getter) or any(
+                isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
+                for node in ast.walk(tree)
+            )
+        return self._dynamic_import_exports[tree]
 
     def _module_bindings(self, file_name: str) -> dict[str, str]:
         normalized = file_name.replace("\\", "/")
@@ -2279,28 +2370,19 @@ def discover_imports(
     return [unique[key] for key in ordered]
 
 
-def _top_level_import_binding(tree: ast.Module | None, name: str) -> int | None:
-    if tree is not None:
-        for node in tree.body:
-            names: list[str] = []
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                names = [item.id for target in targets for item in ast.walk(target) if isinstance(item, ast.Name)]
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                names = [alias.asname or alias.name.rsplit(".", 1)[-1] for alias in node.names]
-            if name in names:
-                return node.lineno
-    return None
-
-
 def _top_level_symbol(snapshot: GitSnapshot, file_name: str, name: str) -> SourceEndpoint:
+    if snapshot.has_import_symbol(file_name, name) is not True:
+        return SourceEndpoint(file=None, owner=None, name=name)
     endpoint = snapshot.endpoint(file_name, None, name)
     if endpoint.line is not None:
         return endpoint
-    line = _top_level_import_binding(snapshot.tree(file_name), name)
-    if line is not None:
-        return SourceEndpoint(file=file_name, owner=None, name=name, line=line)
-    return SourceEndpoint(file=None, owner=None, name=name)
+    tree = snapshot.tree(file_name)
+    assert tree is not None
+    # Constants and re-exports are importable even without a callable contract.
+    # Keep evidence on a surviving binding, not a deleted earlier assignment.
+    bindings = snapshot._scope_bindings(tree)[name]
+    line = min(binding.line for binding in bindings)
+    return SourceEndpoint(file=file_name, owner=None, name=name, line=line)
 
 
 def _import_findings(
@@ -2338,10 +2420,14 @@ def _import_findings(
             old_endpoint = SourceEndpoint(file=old_file, owner=None, name=None)
             new_endpoint = SourceEndpoint(file=new_file, owner=None, name=None)
         elif symbol and "." not in symbol:
-            if not old_snapshot.has_import_symbol(old_file, symbol):
+            if old_snapshot.has_import_symbol(old_file, symbol) is not True:
                 continue
-            if new_file is not None and new_snapshot.has_import_symbol(new_file, symbol):
-                continue
+            if new_file is not None:
+                # A missing package attribute can still resolve as a submodule.
+                if new_file.endswith("/__init__.py") and new_snapshot.resolve_module(f"{reference.module}.{symbol}"):
+                    continue
+                if new_snapshot.has_import_symbol(new_file, symbol) is not False:
+                    continue
             old_endpoint = _top_level_symbol(old_snapshot, old_file, symbol)
             new_endpoint = (
                 _top_level_symbol(new_snapshot, new_file, symbol)
@@ -2721,6 +2807,30 @@ def analyze_range(
     index_workers: int = 1,
 ) -> dict[str, Any]:
     """Run the vLLM PR interface analysis for an exact range."""
+    with ExitStack() as resources:
+        return _analyze_range(
+            vllm_root=vllm_root,
+            ascend_root=ascend_root,
+            old=old,
+            new=new,
+            expect_ascend_sha=expect_ascend_sha,
+            analysis_workers=analysis_workers,
+            index_workers=index_workers,
+            resources=resources,
+        )
+
+
+def _analyze_range(
+    *,
+    vllm_root: Path,
+    ascend_root: Path,
+    old: str,
+    new: str,
+    expect_ascend_sha: str,
+    analysis_workers: int,
+    index_workers: int,
+    resources: ExitStack,
+) -> dict[str, Any]:
     analysis_started = time.perf_counter()
     phase_started = time.perf_counter()
     timings: dict[str, float | None] = {}
@@ -2746,8 +2856,10 @@ def analyze_range(
     relations = generator.generate(plan)
     timings.update({f"relation_generation.{name}": duration for name, duration in generator.phase_timings.items()})
     phase_started = time.perf_counter()
-    old_snapshot = GitSnapshot(vllm_root, old_sha)
-    new_snapshot = GitSnapshot(vllm_root, new_sha)
+    snapshots = [GitSnapshot(vllm_root, sha) for sha in (old_sha, new_sha) * 3]
+    for snapshot in snapshots:
+        resources.callback(snapshot.close)
+    old_snapshot, new_snapshot, import_old, import_new, call_old, call_new = snapshots
     old_to_new, new_to_old = _rename_maps(vllm_root, old_sha, new_sha)
     changed_upstream_files = _changed_python_files(vllm_root, old_sha, new_sha)
     registered_overrides = _registered_oot_overrides(generator)
@@ -2783,8 +2895,8 @@ def analyze_range(
         started = time.perf_counter()
         branch_findings = _import_findings(
             ascend_root,
-            GitSnapshot(vllm_root, old_sha),
-            GitSnapshot(vllm_root, new_sha),
+            import_old,
+            import_new,
             old_to_new,
             trees={module.file: module.tree for module in generator.downstream.modules.values()},
         )
@@ -2796,8 +2908,8 @@ def analyze_range(
         float,
         float,
     ]:
-        branch_old_snapshot = GitSnapshot(vllm_root, old_sha)
-        branch_new_snapshot = GitSnapshot(vllm_root, new_sha)
+        branch_old_snapshot = call_old
+        branch_new_snapshot = call_new
         discovery_started = time.perf_counter()
         direct_call_detector = DirectCallDetector(generator)
         discovered_direct_calls = direct_call_detector.discover()

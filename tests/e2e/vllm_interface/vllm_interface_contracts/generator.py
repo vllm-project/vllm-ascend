@@ -28,7 +28,7 @@ import builtins
 import inspect
 import json
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -246,7 +246,9 @@ _HANDLER_ALWAYS = "always"
 def _clone_scope_binding_state(
     state: dict[str, tuple[_ScopeBinding, ...]],
 ) -> dict[str, tuple[_ScopeBinding, ...]]:
-    return {name: tuple(values) for name, values in state.items()}
+    # Alternatives are immutable tuples; only the name-to-binding map is owned
+    # by each execution path.
+    return dict(state)
 
 
 def _scope_state_key(
@@ -840,10 +842,40 @@ def _scope_final_bindings(
     return _scope_final_binding_state(statements, tag_guard_names) or {}
 
 
+class _ScopePrefixCache:
+    """Bounded namespace memo for one immutable module's analysis.
+
+    Keys retain the actual AST statements, not process-local numeric IDs.
+    Equal prefixes share a state even when queries use different line numbers.
+    Returned dictionaries are independent; binding alternatives are immutable.
+    """
+
+    def __init__(self, max_entries: int = 256):
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
+        self.max_entries = max_entries
+        self._states: OrderedDict[
+            tuple[tuple[ast.stmt, ...], frozenset[str]],
+            dict[str, tuple[_ScopeBinding, ...]],
+        ] = OrderedDict()
+
+    def resolve(self, prefix: tuple[ast.stmt, ...], tag_guard_names: set[str]) -> dict[str, tuple[_ScopeBinding, ...]]:
+        key = (prefix, frozenset(tag_guard_names))
+        if key not in self._states:
+            state = _scope_final_binding_state(prefix, tag_guard_names) or {}
+            self._states[key] = state
+            if len(self._states) > self.max_entries:
+                self._states.popitem(last=False)
+        self._states.move_to_end(key)
+        return dict(self._states[key])
+
+
 def _scope_state_before(
     statements: Sequence[ast.stmt],
     line: int,
     tag_guard_names: set[str],
+    *,
+    prefix_cache: _ScopePrefixCache | None = None,
 ) -> dict[str, tuple[_ScopeBinding, ...]]:
     """Return bindings after statements that finish before ``line``.
 
@@ -854,11 +886,13 @@ def _scope_state_before(
     those rules, so descriptor resolution reuses its state.
     """
 
-    prefix = [
+    prefix = tuple(
         statement
         for statement in statements
         if getattr(statement, "end_lineno", getattr(statement, "lineno", 0)) < line
-    ]
+    )
+    if prefix_cache is not None:
+        return prefix_cache.resolve(prefix, tag_guard_names)
     return _scope_final_binding_state(prefix, tag_guard_names) or {}
 
 
@@ -900,6 +934,7 @@ def _scope_reference_variants(
     is_package: bool,
     fallback: Callable[[ast.AST], set[str | None]] | None = None,
     seen: frozenset[tuple[str, int]] = frozenset(),
+    prefix_cache: _ScopePrefixCache | None = None,
 ) -> set[str | None]:
     """Resolve one expression on every normal path reaching ``line``.
 
@@ -914,7 +949,7 @@ def _scope_reference_variants(
     if expression is None:
         return {None}
     root, separator, remainder = expression.partition(".")
-    state = _scope_state_before(statements, line, tag_guard_names)
+    state = _scope_state_before(statements, line, tag_guard_names, prefix_cache=prefix_cache)
     bindings = state.get(root, ())
 
     def fallback_references() -> set[str | None]:
@@ -956,6 +991,7 @@ def _scope_reference_variants(
                     is_package=is_package,
                     fallback=fallback,
                     seen=frozenset((*seen, recursion_key)),
+                    prefix_cache=prefix_cache,
                 )
                 references.update(
                     (f"{item}.{remainder}" if item is not None and separator else item) for item in nested
@@ -990,6 +1026,7 @@ def _scope_decorator_reference_tuple(
     tag_guard_names: set[str],
     module: str,
     is_package: bool,
+    prefix_cache: _ScopePrefixCache | None = None,
 ) -> tuple[str | None, ...]:
     """Resolve function decorators against their enclosing module scope."""
 
@@ -1007,6 +1044,7 @@ def _scope_decorator_reference_tuple(
                 tag_guard_names=tag_guard_names,
                 module=module,
                 is_package=is_package,
+                prefix_cache=prefix_cache,
             ),
         )
     )
@@ -1555,30 +1593,6 @@ def _definition_descriptor_kind(
         reference_resolver=reference_resolver,
     )
     return kinds[0] if len(kinds) == 1 else "unknown"
-
-
-def _scope_must_bound_names(
-    statements: Sequence[ast.stmt],
-    tag_guard_names: set[str],
-    incoming: set[str] | None = None,
-) -> set[str]:
-    """Return names present after every normally completing active-main path."""
-
-    initial: dict[str, tuple[_ScopeBinding, ...]] = {
-        name: (_scope_binding("value", ast.Pass()),) for name in incoming or ()
-    }
-    final = _scope_final_binding_state(
-        statements,
-        tag_guard_names,
-        initial,
-    )
-    if final is None:
-        return set()
-    return {
-        name
-        for name, alternatives in final.items()
-        if alternatives and all(alternative.kind != "unbound" for alternative in alternatives)
-    }
 
 
 def _main_module_statement_records(
@@ -2286,6 +2300,7 @@ class RepositoryIndex:
             star_imports: list[str] = []
             annotated_exports: list[tuple[str, str]] = []
             tag_guard_names = _tag_guard_names(tree.body)
+            prefix_cache = _ScopePrefixCache()
             module_final_bindings = _scope_final_bindings(
                 tree.body,
                 tag_guard_names,
@@ -2293,10 +2308,11 @@ class RepositoryIndex:
             self.final_bindings.update(
                 {f"{module}.{name}": alternatives for name, alternatives in module_final_bindings.items()}
             )
-            module_must_names = _scope_must_bound_names(
-                tree.body,
-                tag_guard_names,
-            )
+            module_must_names = {
+                name
+                for name, alternatives in module_final_bindings.items()
+                if alternatives and all(alternative.kind != "unbound" for alternative in alternatives)
+            }
             module_statements = list(
                 _main_module_statements(
                     tree.body,
@@ -2405,6 +2421,7 @@ class RepositoryIndex:
                         active_tag_guards: set[str] = tag_guard_names,
                         current_module: str = module,
                         current_is_package: bool = is_package,
+                        prefix_cache: _ScopePrefixCache = prefix_cache,
                     ) -> set[str | None]:
                         return _scope_reference_variants(
                             expression,
@@ -2413,6 +2430,7 @@ class RepositoryIndex:
                             tag_guard_names=active_tag_guards,
                             module=current_module,
                             is_package=current_is_package,
+                            prefix_cache=prefix_cache,
                         )
 
                     def class_reference_resolver(
@@ -2422,6 +2440,7 @@ class RepositoryIndex:
                         active_tag_guards: set[str] = tag_guard_names,
                         current_class: str = qualified_name,
                         module_fallback: Callable[[ast.AST], set[str | None]] = module_reference_resolver,
+                        prefix_cache: _ScopePrefixCache = prefix_cache,
                     ) -> set[str | None]:
                         return _scope_reference_variants(
                             expression,
@@ -2431,6 +2450,7 @@ class RepositoryIndex:
                             module=current_class,
                             is_package=False,
                             fallback=module_fallback,
+                            prefix_cache=prefix_cache,
                         )
 
                     class_functions = sorted(
@@ -2460,6 +2480,7 @@ class RepositoryIndex:
                         current_imports: dict[str, str] = imports,
                         local_classes: dict[str, ClassInfo] = classes,
                         local_functions: dict[str, CallableInfo] = functions,
+                        prefix_cache: _ScopePrefixCache = prefix_cache,
                     ) -> ast.AST | None:
                         expression = _expression_name(expression_node)
                         if expression is None:
@@ -2469,6 +2490,7 @@ class RepositoryIndex:
                                 class_node.body,
                                 line,
                                 active_tag_guards,
+                                prefix_cache=prefix_cache,
                             )
                             local_nodes = {
                                 alternative.node
@@ -2531,6 +2553,7 @@ class RepositoryIndex:
                             node.body,
                             function_line,
                             tag_guard_names,
+                            prefix_cache=prefix_cache,
                         )
                         for alternatives in class_state.values():
                             for alternative in alternatives:
@@ -2741,6 +2764,7 @@ class RepositoryIndex:
                         tag_guard_names=tag_guard_names,
                         module=module,
                         is_package=is_package,
+                        prefix_cache=prefix_cache,
                     )
                     self._decorator_references_by_node[id(node)] = decorator_references
                     function_info = CallableInfo(
@@ -2798,6 +2822,7 @@ class RepositoryIndex:
                         tag_guard_names=tag_guard_names,
                         module=module,
                         is_package=is_package,
+                        prefix_cache=prefix_cache,
                     )
                     self._decorator_references_by_node[id(candidate)] = decorator_references
                     variants_list.append(
@@ -2839,6 +2864,7 @@ class RepositoryIndex:
                     tag_guard_names=tag_guard_names,
                     module=module,
                     is_package=is_package,
+                    prefix_cache=prefix_cache,
                 )
                 self._decorator_references_by_node.setdefault(
                     id(walked_node),
@@ -3454,19 +3480,22 @@ class RepositoryIndex:
         visited_aliases: set[str] = set()
         while result not in visited:
             visited.add(result)
-            replacement = None
-            for alias in sorted(self.aliases, key=len, reverse=True):
-                if result == alias or result.startswith(f"{alias}."):
-                    if alias in visited_aliases:
-                        # An alias can only match again when another alias maps
-                        # back to it or when it expands into its own namespace.
-                        # Neither chain has one statically provable canonical
-                        # target, so fail closed instead of growing forever.
-                        return qualified_name
-                    visited_aliases.add(alias)
-                    replacement = f"{self.aliases[alias]}{result[len(alias) :]}"
+            # Only dot-delimited prefixes can match. Check the longest first
+            # instead of sorting and scanning every alias in the repository.
+            # Read the live table: aliases can change during index finalization.
+            alias = result
+            while alias not in self.aliases:
+                if "." not in alias:
                     break
-            if replacement is None or replacement == result:
+                alias = alias.rsplit(".", 1)[0]
+            if alias not in self.aliases:
+                break
+            if alias in visited_aliases:
+                # Preserve cycle and self-expansion handling from alias lookup.
+                return qualified_name
+            visited_aliases.add(alias)
+            replacement = f"{self.aliases[alias]}{result[len(alias) :]}"
+            if replacement == result:
                 break
             result = replacement
         return result
