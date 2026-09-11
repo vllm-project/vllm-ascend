@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
+import time
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -31,6 +33,41 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
+
+
+# GLM53 graph-mode step decomposition probe: on FULL-graph replay steps,
+# `sync` host wall time equals the device drain of the previous replay (the
+# current stream only holds the previous replay), `update_host` is the host
+# cost of re-issuing the per-layer FIA task updates, `replay_host` is the
+# enqueue cost. Log a running average every 200 replays. Env-gated, zero
+# overhead when off.
+_GRAPH_TIMING = os.environ.get("GLM53_GRAPH_TIMING", "0") == "1"
+_graph_timing_acc: dict[str, float] = {"sync": 0.0, "update_host": 0.0, "replay_host": 0.0, "n": 0.0}
+_GRAPH_TIMING_LOG_EVERY = 200
+
+
+def acc_graph_timing(key: str, dt: float) -> None:
+    """Accumulate one timed section; called from model_runner for update_host."""
+    if not _GRAPH_TIMING:
+        return
+    _graph_timing_acc[key] += dt
+
+
+def graph_timing_enabled() -> bool:
+    return _GRAPH_TIMING
+
+
+def _graph_timing_tick() -> None:
+    _graph_timing_acc["n"] += 1
+    n = _graph_timing_acc["n"]
+    if n % _GRAPH_TIMING_LOG_EVERY == 0:
+        logger.info(
+            "[graph-timing] n=%d sync=%.1fms update_host=%.1fms replay_host=%.1fms (avg/step)",
+            n,
+            _graph_timing_acc["sync"] / n * 1e3,
+            _graph_timing_acc["update_host"] / n * 1e3,
+            _graph_timing_acc["replay_host"] / n * 1e3,
+        )
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -262,8 +299,17 @@ class ACLGraphWrapper:
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
+            if _GRAPH_TIMING:
+                _t_sync = time.perf_counter()
             torch.npu.current_stream().synchronize()
+            if _GRAPH_TIMING:
+                acc_graph_timing("sync", time.perf_counter() - _t_sync)
+        if _GRAPH_TIMING:
+            _t_replay = time.perf_counter()
         entry.aclgraph.replay()
+        if _GRAPH_TIMING:
+            acc_graph_timing("replay_host", time.perf_counter() - _t_replay)
+            _graph_timing_tick()
         return entry.output
 
 
