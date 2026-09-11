@@ -187,7 +187,7 @@ Chunked prefill, prefix caching, and request preemption (eviction and recomputat
 
 These scheduling features are not disabled automatically. You must explicitly disable chunked prefill and prefix caching in your configuration, and pair the chunked prefill disabling with a KV cache block size of 128 — pass `--block-size 128` together with `--no-enable-chunked-prefill` when starting the server, or `block_size=128` together with `enable_chunked_prefill=False` for offline inference — as shown in the examples above.
 
-Request preemption is triggered when the KV cache runs out: running requests are evicted and their KV cache is recomputed later, which breaks batch invariance and degrades performance. To reduce the chance of preemption, increase the available KV cache or lower the per-request and concurrent pressure:
+Request preemption is triggered when the KV cache runs out: the preempted request is evicted and recomputed later. The recomputed prefill includes the tokens generated before the preemption, so attention processes them through the prefill (P) path instead of the original decode (D) path — the P and D computations cannot be aligned, which breaks batch invariance. To reduce the chance of preemption, increase the available KV cache or lower the per-request and concurrent pressure:
 
 - Decrease `--max-num-seqs` so fewer requests share the KV cache.
 - Set `--max-model-len` to the smallest value your workload needs, and cap the per-request output length (`max_tokens`).
