@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import cast
-
 import torch
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
