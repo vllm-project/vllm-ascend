@@ -87,7 +87,9 @@ def _categorical_prepare_mass_kernel(
 
         offsets = block_idx * COARSE_BLOCK_SIZE + lanes
         mask = offsets < vocab_size
-        logits = tl.load(logits_ptr + token_idx * logits_stride + offsets, mask=mask, other=float("-inf")).to(tl.float32)
+        logits = tl.load(logits_ptr + token_idx * logits_stride + offsets, mask=mask, other=float("-inf")).to(
+            tl.float32
+        )
 
         if logits_cache_ptr is not None:
             if logits_cache_col_ptr is not None:
@@ -98,10 +100,7 @@ def _categorical_prepare_mass_kernel(
             else:
                 col = 0
             tl.store(
-                logits_cache_ptr
-                + req_state_idx * logits_cache_stride_0
-                + col * logits_cache_stride_1
-                + offsets,
+                logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + offsets,
                 logits,
                 mask=mask & is_valid_req,
             )
@@ -125,10 +124,7 @@ def _categorical_prepare_mass_kernel(
         tl.store(block_max_ptr + token_idx * block_max_stride + block_idx, block_max)
         tl.store(block_mass_ptr + token_idx * block_mass_stride + block_idx, block_mass)
         tl.store(
-            fine_mass_ptr
-            + token_idx * fine_mass_stride_0
-            + block_idx * fine_mass_stride_1
-            + fine_block_ids,
+            fine_mass_ptr + token_idx * fine_mass_stride_0 + block_idx * fine_mass_stride_1 + fine_block_ids,
             fine_mass_values,
         )
 
@@ -239,10 +235,7 @@ def _categorical_sample_kernel(
         # Use prepared 1K fine-block masses to avoid rescanning the selected 8K block.
         fine_block_ids = tl.arange(0, NUM_FINE_BLOCKS)
         stored_fine_mass = tl.load(
-            fine_mass_ptr
-            + token_idx * fine_mass_stride_0
-            + selected_block * fine_mass_stride_1
-            + fine_block_ids,
+            fine_mass_ptr + token_idx * fine_mass_stride_0 + selected_block * fine_mass_stride_1 + fine_block_ids,
             mask=is_random & has_total_mass,
             other=0.0,
         ).to(tl.float32)
@@ -271,7 +264,9 @@ def _categorical_sample_kernel(
         token_ids = fine_base + fine_offsets
         token_mask = token_ids < vocab_size
         active_token_mask = token_mask & is_random & has_total_mass
-        logits = tl.load(logits_ptr + token_idx * logits_stride + token_ids, mask=active_token_mask, other=float("-inf")).to(tl.float32)
+        logits = tl.load(
+            logits_ptr + token_idx * logits_stride + token_ids, mask=active_token_mask, other=float("-inf")
+        ).to(tl.float32)
         if APPLY_TEMPERATURE:
             safe_temp = tl.where(is_random, temp, 1.0)
             logits = logits / safe_temp
@@ -301,6 +296,7 @@ def _categorical_sample_kernel(
         categorical_token = tl.where(has_total_mass, categorical_token, 0)
         sampled_token = tl.where(is_random, categorical_token, greedy_token)
         tl.store(sampled_ptr + token_idx, sampled_token)
+
 
 def categorical_sample(
     logits: torch.Tensor,
