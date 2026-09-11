@@ -5,8 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,
+    EplbExpertTensorList,
+    pad_static_expert_capacity,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -110,3 +116,85 @@ def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
 
     assert routed_experts.ascend_expert_map is legacy_map
     assert expert_map_manager._expert_map is legacy_map
+
+
+@pytest.mark.parametrize("ep_size", [1, 4, 6, 12])
+def test_static_expert_padding_preserves_checkpoint_and_dispatch_placement(ep_size):
+    logical_count = 128
+    physical_count = ((logical_count + ep_size - 1) // ep_size) * ep_size
+    placement = []
+    for rank in range(ep_size):
+        parallel = SimpleNamespace(
+            use_ep=ep_size > 1,
+            enable_eplb=False,
+            ep_size=ep_size,
+            ep_rank=rank,
+            needs_round_robin_routing_tables=False,
+        )
+        manager = ExpertMapManager(
+            max_num_batched_tokens=16,
+            top_k=8,
+            global_num_experts=logical_count,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=parallel,
+            placement_strategy="linear",
+            enable_eplb=False,
+        )
+        config = SimpleNamespace(
+            num_experts=logical_count,
+            num_logical_experts=logical_count,
+            num_local_experts=manager.local_num_experts,
+            moe_parallel_config=parallel,
+            ep_size=ep_size,
+            ep_rank=rank,
+        )
+        padding = pad_static_expert_capacity(config, manager)
+
+        assert padding == physical_count - logical_count
+        assert config.num_logical_experts == logical_count
+        assert config.num_experts == physical_count
+        assert config.num_local_experts == physical_count // ep_size
+        _, dispatch_map, log2phy, redundancy = init_eplb_config(
+            SimpleNamespace(dynamic_eplb=False, expert_map_path=None, num_redundant_experts=0),
+            0,
+            config,
+        )
+        assert redundancy == 0  # Dummy slots are not EPLB replicas.
+        assert log2phy is None
+        if ep_size == 1:
+            assert manager.expert_map is dispatch_map is None
+            continue
+        torch.testing.assert_close(dispatch_map, manager.expert_map)
+        # A checkpoint expert must land in the same local slot used by dispatch.
+        local_count = config.num_local_experts
+        expected = torch.full((physical_count,), -1, dtype=torch.int32)
+        expected[rank * local_count : (rank + 1) * local_count] = torch.arange(local_count, dtype=torch.int32)
+        torch.testing.assert_close(manager.expert_map, expected)
+        placement.append(manager.expert_map[:logical_count] >= 0)
+    if placement:
+        assert torch.stack(placement).sum(dim=0).tolist() == [1] * logical_count
+
+
+def test_static_padding_leaves_eplb_capacity_unchanged():
+    config = SimpleNamespace(moe_parallel_config=SimpleNamespace(use_ep=True, enable_eplb=True))
+    # EPLB owns its capacity and placement; static padding must not touch either.
+    assert pad_static_expert_capacity(config, None) == 0
+
+
+def test_padded_profile_routes_only_to_logical_experts(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.routed_experts.get_ascend_config",
+        lambda: SimpleNamespace(enable_force_eplb=False),
+    )
+    weights = torch.ones(16, 8)
+    layer = SimpleNamespace(
+        router=SimpleNamespace(_select_experts=lambda **kwargs: (weights, torch.zeros(16, 8, dtype=torch.int32))),
+        log2phy=None,
+        n_shared_experts=0,
+        moe_config=SimpleNamespace(num_experts=132, num_logical_experts=128),
+        global_redundant_expert_num=0,
+    )
+    _, ids = AscendRoutedExperts._select_experts(layer, torch.ones(16, 4), torch.ones(16, 128), True)
+    assert ids.shape == (16, 8)
+    assert torch.all((ids >= 0) & (ids < 128))
