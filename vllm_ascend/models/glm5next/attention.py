@@ -223,6 +223,7 @@ class Glm5NextMLAAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        allow_short_prefill_indexer_scoring_skip: bool = False,
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
         skip_rope: bool | None = False,
@@ -382,6 +383,7 @@ class Glm5NextMLAAttention(nn.Module):
             quant_config,
             prefix,
             skip_topk=False,
+            allow_short_prefill_indexer_scoring_skip=allow_short_prefill_indexer_scoring_skip,
             fuse_qkv_rmsnorm=True,
         )
         # The pluggable MLA wrapper owns the AttentionLayerBase registered in

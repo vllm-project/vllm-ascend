@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import scipy  # type: ignore
 import torch
 import torch_npu
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
@@ -34,6 +36,8 @@ else:
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+SFA_INDEXER_SPARSE_COUNT = 2048
+SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE = 128
 
 
 @dataclass
@@ -74,6 +78,9 @@ class AscendSFAIndexerMetadata:
     # gather splits the local prefill region on it (all-decode batches skip
     # the gather).
     num_decode_tokens: int = 0
+    # CPU-only eligibility bridge; never copy device sequence lengths to host.
+    seq_lens_cpu: torch.Tensor | None = None
+    attn_state: AscendAttentionState | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -106,6 +113,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     """
 
     accept_output_buffer: bool = True
+
+    # Read-only after creation; shared across layers/requests in this process.
+    _full_visible_index_tables: dict[torch.device, torch.Tensor] = {}
+    _full_visible_index_table: torch.Tensor | None = None
+    allow_short_prefill_indexer_scoring_skip: bool = False
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
@@ -143,7 +155,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     # ---- model-side impl interface (per-layer instance) ----
 
-    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
+    def __init__(
+        self,
+        vllm_indexer: nn.Module,
+        qk_rope_head_dim: int,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
+    ) -> None:
         super().__init__()
 
         self.n_head: int = vllm_indexer.n_head  # 64
@@ -182,6 +199,91 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._dsa_cp_active = enable_dsa_cp()
+        self.allow_short_prefill_indexer_scoring_skip = allow_short_prefill_indexer_scoring_skip
+        self._speculative_active = get_current_vllm_config().speculative_config is not None
+        self._full_visible_index_table = None
+        if (
+            type(self) is AscendSFAIndexerBackend
+            and get_ascend_config().enable_sfa_full_visible_index_bypass
+            and self.allow_short_prefill_indexer_scoring_skip
+            and not get_ascend_config().enable_sparse_sfa_c8
+            and not self.enable_sparse_li_c8
+            and not self._pcp_active
+            and not self._dsa_cp_active
+            and not self._speculative_active
+            and self.topk_tokens == SFA_INDEXER_SPARSE_COUNT
+            and torch.npu.is_available()
+        ):
+            device = torch.device("npu", torch.npu.current_device())
+            self._full_visible_index_table = self._get_or_create_full_visible_index_table(device)
+
+    @classmethod
+    def _get_or_create_full_visible_index_table(cls, device: torch.device) -> torch.Tensor:
+        table = cls._full_visible_index_tables.get(device)
+        if table is None:
+            order = (
+                np.arange(SFA_INDEXER_SPARSE_COUNT, dtype=np.int32)
+                .reshape(-1, SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE)
+                .T.reshape(-1)
+            )
+            host_table = np.full(
+                (SFA_INDEXER_SPARSE_COUNT + 1, SFA_INDEXER_SPARSE_COUNT),
+                -1,
+                dtype=np.int32,
+            )
+            for visible_len in range(1, SFA_INDEXER_SPARSE_COUNT + 1):
+                visible = order[order < visible_len]
+                host_table[visible_len, :visible_len] = visible
+            table = torch.from_numpy(host_table).to(device=device)
+            cls._full_visible_index_tables[device] = table
+        return table
+
+    def _get_full_visible_topk_indices(
+        self,
+        metadata: AscendSFAIndexerMetadata,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if (
+            type(self) is not AscendSFAIndexerBackend
+            or not self.allow_short_prefill_indexer_scoring_skip
+            or not get_ascend_config().enable_sfa_full_visible_index_bypass
+            or get_ascend_config().enable_sparse_sfa_c8
+            or self.enable_sparse_li_c8
+            or self._pcp_active
+            or self._dsa_cp_active
+            or self._speculative_active
+            or self.topk_tokens != SFA_INDEXER_SPARSE_COUNT
+            or device.type != "npu"
+            or metadata.attn_state not in (AscendAttentionState.PrefillNoCache, AscendAttentionState.PrefillCacheHit)
+            or metadata.num_decode_tokens != 0
+            or metadata.block_size != SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE
+            or metadata.seq_lens_cpu is None
+            or metadata.seq_lens_cpu.device.type != "cpu"
+            or metadata.seq_lens_cpu.dtype not in (torch.int32, torch.int64)
+            or metadata.seq_lens_cpu.ndim != 1
+            or metadata.seq_lens_cpu.numel() != 1
+            or metadata.block_table.ndim != 2
+            or metadata.block_table.shape[0] != 1
+            or metadata.seq_lens.numel() != 1
+            or metadata.cum_query_lens.numel() != 1
+            or metadata.num_actual_tokens != num_tokens
+            or num_tokens <= 0
+            or self._full_visible_index_table is None
+            or self._full_visible_index_table.device != device
+        ):
+            return None
+        kv_length = int(metadata.seq_lens_cpu[0])
+        context_length = kv_length - num_tokens
+        if context_length < 0 or kv_length > SFA_INDEXER_SPARSE_COUNT:
+            return None
+        if metadata.block_table.shape[1] * metadata.block_size < kv_length:
+            return None
+        if metadata.attn_state == AscendAttentionState.PrefillNoCache and context_length != 0:
+            return None
+        # Zero-copy, read-only view. SFA consumes final topk; cache destinations
+        # must remain separately allocated and must not mutate this table.
+        return self._full_visible_index_table[context_length + 1 : kv_length + 1].unsqueeze(1)
 
     def process_weights_after_loading(self) -> None:
         if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
@@ -376,6 +478,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
             return None
+        topk_indices = self._get_full_visible_topk_indices(
+            indexer_metadata, hidden_states.shape[0], hidden_states.device
+        )
+        if topk_indices is not None:
+            return topk_indices
 
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
@@ -512,7 +619,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 block_size,
             )
 
+        seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if seq_lens_cpu is None:
+            seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu[:num_reqs]
+
         return AscendSFAIndexerMetadata(
+            seq_lens_cpu=seq_lens_cpu,
+            attn_state=getattr(common_attn_metadata, "attn_state", None),
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens[:num_reqs],
