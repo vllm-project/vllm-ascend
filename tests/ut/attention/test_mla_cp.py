@@ -2,7 +2,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -15,6 +15,7 @@ from vllm_ascend.attention.context_parallel.mla_cp import (
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
+    DecodeMLAPreprocessResult,
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
@@ -35,21 +36,27 @@ def test_mla_dcp_extends_v1_backend() -> None:
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
 
 
-def test_mla_dcp_decode_metadata_slices_mtp_mask_to_decode_batch() -> None:
+def test_mla_dcp_decode_metadata_separates_history_and_pads_queries() -> None:
     decode = AscendMLADCPDecodeMetadata(
         input_positions=torch.arange(4),
         block_table=torch.ones((1, 2), dtype=torch.int32),
         seq_lens=torch.tensor([20]),
         max_seq_lens=20,
         seq_lens_list=[20],
+        actual_seq_lengths_q=[4, 8],
     )
     mtp_mask = torch.zeros((2, 8, 32), dtype=torch.bool)
     dcp_metadata = SimpleNamespace(
         draft_cp_seq_len=torch.tensor([10, 11], dtype=torch.int32),
+        num_computed_tokens_of_dcp=[[12, 8]],
         dcp_mtp_attn_mask=mtp_mask,
     )
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
     builder.num_decodes = 1
+    builder.dcp_size = 2
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 4
+    builder.query_lens = torch.tensor([4, 4])
     builder._require_dcp_metadata = lambda _metadata: dcp_metadata
 
     with patch.object(
@@ -64,8 +71,9 @@ def test_mla_dcp_decode_metadata_slices_mtp_mask_to_decode_batch() -> None:
 
     assert result is decode
     assert result.cp_seq_len.tolist() == [10]
-    assert result.dcp_mtp_attn_mask.shape == (1, 8, 32)
-    assert result.dcp_mtp_attn_mask.data_ptr() == mtp_mask.data_ptr()
+    assert result.cp_history_seq_len == [8, 0]
+    assert result.actual_seq_lengths_q == [4, 8]
+    assert result.dcp_mtp_attn_mask is None
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:
@@ -179,7 +187,14 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
         torch.randn(1, 2, 4, 1),
     )
 
-    impl._forward_decode(q_nope, q_pe, k_nope, k_pe, 2, metadata)
+    metadata.causal = False
+    impl._forward_decode(
+        DecodeMLAPreprocessResult(
+            q_nope, q_pe, k_nope, k_pe,
+        ),
+        2,
+        metadata,
+    )
 
     call_args = mock_fia.call_args.args
     call_kwargs = mock_fia.call_args.kwargs
@@ -248,7 +263,14 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
         torch.randn(1, 96, 4, 1),
     )
 
-    impl._forward_decode(q_nope, q_pe, k_nope, k_pe, 2, metadata)
+    metadata.causal = False
+    impl._forward_decode(
+        DecodeMLAPreprocessResult(
+            q_nope, q_pe, k_nope, k_pe,
+        ),
+        2,
+        metadata,
+    )
 
     call_args = mock_fia.call_args.args
     call_kwargs = mock_fia.call_args.kwargs
@@ -257,3 +279,22 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert call_kwargs["num_heads"] == 96
     assert merged["output_shape"] == (4, 96, 3)
     assert merged["softmax_lse_shape"] == (4, 96, 1)
+
+
+def test_cp_decode_dispatches_split_attention_directly() -> None:
+    result = DecodeMLAPreprocessResult(
+        ql_nope=object(), q_pe=object(), k_nope=object(), k_pe=object(),
+        current_k_nope=object(), current_k_pe=object(),
+    )
+    metadata = SimpleNamespace(causal=True)
+    base = AscendMLAImpl.__new__(AscendMLAImpl)
+    assert not base._decode_requires_current_kv(metadata)
+    cp = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    cp._forward_decode_split_attention = Mock(return_value=torch.tensor([3.0]))
+    actual = cp._forward_decode(result, 384, metadata)
+    assert cp._decode_requires_current_kv(metadata)
+    torch.testing.assert_close(actual, torch.tensor([3.0]))
+    cp._forward_decode_split_attention.assert_called_once_with(
+        result.ql_nope, result.q_pe, result.k_nope, result.k_pe,
+        result.current_k_nope, result.current_k_pe, 384, metadata,
+    )
