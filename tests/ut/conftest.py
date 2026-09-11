@@ -27,7 +27,6 @@ run on CPU via mocks.
 """
 
 import importlib.util
-import os
 import subprocess
 import sys
 import types
@@ -39,23 +38,6 @@ try:
     _npu_available = True
 except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
-
-# Documented CPU UT command sets TORCH_DEVICE_BACKEND_AUTOLOAD=0. Importing real
-# torch_npu after `import torch` double-registers TORCH_LIBRARY `_inductor_test`.
-if os.getenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "1") == "0":
-    _npu_available = False
-
-if _npu_available:
-    # Fully initialize torch_npu before importing vllm_ascend. Otherwise
-    # `from vllm_ascend.utils import ...` runs package __init__ -> logger ->
-    # vllm -> current_platform -> vllm_ascend.utils, which re-enters torch_npu
-    # mid-import and double-registers TORCH_LIBRARY `_inductor_test`.
-    try:
-        import torch_npu  # noqa: F401
-    except RuntimeError as exc:
-        if "TORCH_LIBRARY" not in str(exc):
-            raise
-        _npu_available = False
 
 if not _npu_available:
     triton_runtime = MagicMock()
@@ -203,11 +185,6 @@ build_info = types.ModuleType("vllm_ascend._build_info")
 build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info", loader=None)
 setattr(build_info, "__device_type__", "A2")  # noqa: B010
 sys.modules.setdefault("vllm_ascend._build_info", build_info)
-
-# Complete torch init before loading vllm_ascend. Importing the package used to
-# pull logger -> vllm -> torch and re-enter a partial torch import, which raises
-# "function '_has_torch_function' already has a docstring".
-import torch  # noqa: E402
 
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,
