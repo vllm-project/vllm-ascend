@@ -1186,15 +1186,29 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
         self,
         weights: Iterable[tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]],
     ) -> set[str]:
-        stacked_params_mapping = [
+        params_dict = dict(self.named_parameters())
+        stacked_params_mapping: list[tuple[str, str, str | int | None]] = [
             (".fused_qkv", ".q_proj", "q"),
             (".fused_qkv", ".k_proj", "k"),
             (".fused_qkv", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-            (".fused_qkv_a_proj", ".q_a_proj", 0),
-            (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
+        if any(".fused_bfg_proj." in name for name in params_dict):
+            stacked_params_mapping.extend(
+                [
+                    (".fused_bfg_proj", ".b_proj", 0),
+                    (".fused_bfg_proj.f_a_weight", ".f_a_proj.weight", None),
+                    (".fused_bfg_proj.f_b_weight", ".f_b_proj.weight", None),
+                    (".fused_bfg_proj", ".g_proj", 2),
+                ]
+            )
+        stacked_params_mapping.extend(
+            [
+                (".gate_up_proj", ".gate_proj", 0),
+                (".gate_up_proj", ".up_proj", 1),
+                (".fused_qkv_a_proj", ".q_a_proj", 0),
+                (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+            ]
+        )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
@@ -1202,7 +1216,6 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_experts,
         )
-        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         for args in weights:
@@ -1219,11 +1232,15 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
                     continue
                 if ".experts." in name and name not in params_dict:
                     continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
+                packed_name = name.replace(weight_name, param_name)
+                if packed_name.endswith(".bias") and packed_name not in params_dict:
                     continue
-                if is_pp_missing_parameter(name, self):
+                if is_pp_missing_parameter(packed_name, self):
+                    name = packed_name
                     break
+                if packed_name not in params_dict:
+                    continue
+                name = packed_name
                 param = params_dict[name]
                 param.weight_loader(param, loaded_weight, shard_id)
                 break
@@ -1260,6 +1277,9 @@ class KimiK3TextModel(nn.Module, EagleModelMixin):
 class AscendKimiK3ForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid):
     packed_modules_mapping = {
         "fused_qkv": ["q_proj", "k_proj", "v_proj"],
+        # f_a_proj remains the checkpoint-side quantization metadata alias for
+        # the offline-composed f_proj shard. Both F source projections are FLOAT.
+        "fused_bfg_proj": ["b_proj", "f_a_proj", "g_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.w1", "experts.0.w3", "experts.0.w2"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
