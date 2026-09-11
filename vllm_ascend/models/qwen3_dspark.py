@@ -26,8 +26,6 @@ def _get_draft_rotation_path(vllm_config: VllmConfig, config) -> Path | None:
     injected_rotation_path = getattr(config, "_ascend_target_rotation_path", None)
     if injected_rotation_path is not None:
         return Path(injected_rotation_path)
-    if vllm_config.quant_config is None:
-        return None
     return get_rotation_path(vllm_config)
 
 
@@ -54,6 +52,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     # Qwen3 GQA DSpark consumes the materialized input to each selected target
     # layer instead of Kimi K3's raw prefix-sum residual stream.
     dspark_aux_hidden_state_format = "materialized"
+    requires_target_quarot_alignment = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)

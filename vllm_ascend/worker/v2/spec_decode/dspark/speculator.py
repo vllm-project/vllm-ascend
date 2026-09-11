@@ -22,6 +22,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vll
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -38,8 +39,6 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
-DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED = "materialized"
-
 
 class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
@@ -55,14 +54,22 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         draft_hf_config = self.draft_model_config.hf_config
-        self._configure_target_aux_hidden_state_format(target_model, draft_hf_config)
+        draft_cls = get_model_cls(self.draft_model_config)
+        aux_format = getattr(draft_cls, "dspark_aux_hidden_state_format", None)
+        configured_format = getattr(draft_hf_config, "dspark_aux_hidden_state_format", None)
+        if configured_format is not None and configured_format != aux_format:
+            raise ValueError(
+                f"Draft auxiliary hidden-state format {configured_format!r} conflicts with "
+                f"{draft_cls.__name__}'s required format {aux_format!r}."
+            )
+        self._configure_target_aux_hidden_state_format(target_model, aux_format)
 
         # Upstream clears the target quant config before constructing a BF16
         # draft. Preserve only the target QuaRot path so the draft can align
         # FC, embedding and lm_head before upstream decides whether to share
         # target weights.
         rotation_path = get_rotation_path(self.vllm_config)
-        injected_rotation = rotation_path is not None and self._is_qwen3_gqa_draft(draft_hf_config)
+        injected_rotation = rotation_path is not None and getattr(draft_cls, "requires_target_quarot_alignment", False)
         if injected_rotation:
             draft_hf_config._ascend_target_rotation_path = str(rotation_path)
         try:
@@ -74,20 +81,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         return model
 
     @staticmethod
-    def _is_qwen3_gqa_draft(config: Any) -> bool:
-        architectures = getattr(config, "architectures", ()) or ()
-        return getattr(config, "model_type", None) == "qwen3" or any(
-            architecture in ("Qwen3DSparkModel", "DSparkDraftModel") for architecture in architectures
-        )
-
-    @staticmethod
-    def _configure_target_aux_hidden_state_format(target_model: torch.nn.Module, format_provider: Any) -> None:
-        aux_hidden_format = getattr(format_provider, "dspark_aux_hidden_state_format", None)
-        if aux_hidden_format is None and AscendDSparkSpeculator._is_qwen3_gqa_draft(format_provider):
-            aux_hidden_format = DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+    def _configure_target_aux_hidden_state_format(target_model: torch.nn.Module, aux_hidden_format: str | None) -> None:
         if aux_hidden_format is None:
             return
-        if aux_hidden_format != DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED:
+        if aux_hidden_format != "materialized":
             raise ValueError(f"Unsupported GQA DSpark auxiliary hidden-state format {aux_hidden_format!r}.")
 
         set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)

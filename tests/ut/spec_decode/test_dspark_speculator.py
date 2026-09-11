@@ -9,17 +9,19 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from vllm.model_executor.model_loader.utils import get_model_cls
+from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.models import register_model
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     _get_draft_rotation_path,
     process_weight,
 )
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
-    DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
     AscendDSparkSpeculator,
 )
 
@@ -45,7 +47,7 @@ def _gqa_config() -> SimpleNamespace:
     return SimpleNamespace(
         architectures=["Qwen3DSparkModel"],
         model_type="qwen3",
-        dspark_aux_hidden_state_format=DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
+        dspark_aux_hidden_state_format="materialized",
     )
 
 
@@ -63,25 +65,81 @@ def _vllm_config(*, quarot: bool) -> SimpleNamespace:
 
 def test_qwen3_gqa_draft_declares_materialized_format():
     assert AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format == "materialized"
+    assert AscendQwen3DSparkForCausalLM.requires_target_quarot_alignment
 
 
-@pytest.mark.parametrize(
-    "config",
-    [
-        SimpleNamespace(architectures=["Qwen3DSparkModel"]),
-        SimpleNamespace(architectures=["DSparkDraftModel"], model_type="qwen3"),
-        SimpleNamespace(model_type="qwen3"),
-    ],
-)
-def test_qwen3_config_selects_materialized_target_capture(config):
+@pytest.mark.parametrize("architecture", ["Qwen3DSparkModel", "Qwen3OmniDSparkModel", "DSparkDraftModel"])
+def test_registered_draft_class_declares_capabilities(architecture, monkeypatch):
+    monkeypatch.setattr(ModelRegistry, "models", ModelRegistry.models.copy())
+    register_model()
+    config = SimpleNamespace(
+        model=f"/test/{architecture}",
+        convert_type="none",
+        runner_type="generate",
+        trust_remote_code=False,
+        model_impl="vllm",
+        hf_config=SimpleNamespace(architectures=[architecture]),
+        registry=ModelRegistry,
+        _get_transformers_backend_cls=lambda: "TransformersForCausalLM",
+    )
+    draft_cls = get_model_cls(config)
+    if architecture == "DSparkDraftModel":
+        assert not getattr(draft_cls, "requires_target_quarot_alignment", False)
+        assert getattr(draft_cls, "dspark_aux_hidden_state_format", None) is None
+    else:
+        assert draft_cls is AscendQwen3DSparkForCausalLM
+
+
+def test_explicit_format_conflict_fails_before_loading(monkeypatch):
+    load = MagicMock()
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
+    config = _gqa_config()
+    config.dspark_aux_hidden_state_format = "raw"
+    with pytest.raises(ValueError, match="conflicts"):
+        _spec(_vllm_config(quarot=True), config).load_draft_model(_target(), set())
+    load.assert_not_called()
+
+
+def test_non_gqa_class_does_not_receive_quarot_or_capture(monkeypatch):
+    class OtherDraft:
+        pass
+
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_model_cls",
+        lambda config: OtherDraft,
+    )
+    config = SimpleNamespace(architectures=["DSparkDraftModel"])
     target = _target()
-    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, config)
+    draft = object()
+
+    def load(*args):
+        assert not hasattr(config, "_ascend_target_rotation_path")
+        return draft
+
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
+    assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
+    target.set_dspark_aux_capture_materialized.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def resolve_draft_class(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_model_cls",
+        lambda config: AscendQwen3DSparkForCausalLM,
+    )
+
+
+def test_qwen3_class_selects_materialized_target_capture():
+    target = _target()
+    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+        target, AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format
+    )
     target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
 def test_undeclared_format_preserves_target_capture_mode():
     target = _target()
-    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, SimpleNamespace())
+    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, None)
     target.set_dspark_aux_capture_materialized.assert_not_called()
 
 
@@ -89,7 +147,7 @@ def test_rejects_unknown_gqa_aux_hidden_format():
     with pytest.raises(ValueError, match="Unsupported GQA DSpark"):
         AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
             _target(),
-            SimpleNamespace(dspark_aux_hidden_state_format="raw"),
+            "raw",
         )
 
 
