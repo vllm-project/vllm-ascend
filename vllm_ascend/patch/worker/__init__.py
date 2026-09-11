@@ -43,10 +43,9 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
-# vLLM's use_v2_model_runner may enable the v2 runner without the
-# VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
-# We always patch it so that on Ascend the v2 runner is enabled only
-# when the env var is explicitly set.
+# Re-apply the Ascend V2 model runner overrides in worker processes
+# (whitelist default + remaining V2/V1 feature patches). The env var
+# VLLM_USE_V2_MODEL_RUNNER still wins when set.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

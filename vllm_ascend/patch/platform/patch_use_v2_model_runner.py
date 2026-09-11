@@ -1,10 +1,13 @@
-import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
-_original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
+# Drive use_v2_model_runner from the Ascend model/feature whitelist instead of
+# the env-only override. Also neutralize upstream V2 validation: Ascend owns
+# that decision in mrv2_utils (see apply_v2_model_runner_config_patch).
+apply_v2_model_runner_config_patch()
+
 _original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features
 
 _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
@@ -13,21 +16,6 @@ _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
         "dflash2 drafts",
     }
 )
-
-
-def _patched_use_v2_model_runner(self) -> bool:
-    """Return VLLM_USE_V2_MODEL_RUNNER env directly.
-
-    The upstream use_v2_model_runner gate-keeps the v2 runner with
-    per-model architecture whitelists, Triton availability checks, and
-    feature-support inspections. On Ascend the v2 runner is controlled
-    purely by the VLLM_USE_V2_MODEL_RUNNER environment variable;
-    model-compatibility decisions are deferred to the NPU runner itself.
-    """
-    use_v2 = envs.VLLM_USE_V2_MODEL_RUNNER
-    if use_v2 is not None:
-        return use_v2
-    return False
 
 
 def _patched_get_unsupported_features(self) -> list[str]:
@@ -39,17 +27,7 @@ def _patched_get_unsupported_features(self) -> list[str]:
     return unsupported
 
 
-VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
 VllmConfig._get_v2_model_runner_unsupported_features = _patched_get_unsupported_features
-
-
-def _patched_validate_v2_model_runner(self) -> None:
-    if is_310p():
-        return
-    _original_validate_v2_model_runner(self)
-
-
-VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner
 
 # vLLM main exposes this helper; v0.28.0 does not. Prefer hasattr over
 # vllm_version_is(): CI installs from a commit SHA can report __version__="dev"
