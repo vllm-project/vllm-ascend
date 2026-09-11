@@ -600,8 +600,7 @@ def test_dflash2_acceptance(
     }
 
     compilation_config = (
-        None if is_model_runner_v2
-        else CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
+        None if is_model_runner_v2 else CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
     )
 
     with VllmRunner(
