@@ -1156,7 +1156,7 @@ Here is one accuracy evaluation method for Kimi K3.
 | GPQA | - | accuracy | gen | 93.5 | 1 Atlas 950DT |
 | OCRBench | - | accuracy | gen | 0.891 | 1 Atlas 950DT |
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for the environment setup and evaluation procedure.
 
@@ -1164,11 +1164,11 @@ Here is one accuracy evaluation method for Kimi K3.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for the environment setup and evaluation procedure.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128K-input, 1K-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
 
