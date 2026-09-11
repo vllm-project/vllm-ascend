@@ -1390,7 +1390,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # remapped to target ids.
                 raw_logits = self.model.compute_draft_logits(sample_hidden_states)
 
-
                 if lmhead_tp_enable():
                     # Remove B_max - B communication padding.
                     raw_logits = raw_logits[:num_indices]
