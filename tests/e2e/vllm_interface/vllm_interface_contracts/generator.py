@@ -192,6 +192,10 @@ def _merge_scope_binding_states(
     live_states = [state for state in states if state is not None]
     if not live_states:
         return None
+    if len(live_states) == 1:
+        # Interpreter states already contain sorted, unique alternatives.
+        # Preserve ownership without rebuilding every name's alternative set.
+        return dict(live_states[0])
     names = {name for state in live_states for name in state}
     merged: dict[str, tuple[_ScopeBinding, ...]] = {}
     for name in names:
@@ -256,9 +260,10 @@ def _compact_scope_states(
 ) -> list[dict[str, tuple[_ScopeBinding, ...]]]:
     """Merge path states without losing any per-name binding alternative."""
 
-    unique = {_scope_state_key(state): state for state in states}
-    if not unique:
-        return []
+    candidates = list(states)
+    if len(candidates) < 2:
+        return [dict(state) for state in candidates]
+    unique = {_scope_state_key(state): state for state in candidates}
     merged = _merge_scope_binding_states(list(unique.values()))
     return [merged] if merged is not None else []
 

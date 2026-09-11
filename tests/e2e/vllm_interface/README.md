@@ -69,6 +69,23 @@ This keeps cross-module results deterministic. Use `--index-workers 1` to use th
 The CI implementation does not write or restore persistent repository-index or file-fragment data. This avoids relying
 on state that is not preserved by the job's ephemeral container.
 
+### Avoiding repeated work within a run
+
+The scope interpreter copies an already-normalized state when there is only one execution path, instead of sorting
+and merging every name again. Multiple paths still use the existing binding-alternative merge.
+
+Each base/head snapshot computes a module or class's final namespace once and reuses named bindings, fingerprints,
+and resolved API contracts. Call-contract reuse is keyed by the target expression, access kind, receiver type,
+member, and invocation kind; argument binding and return-use checks still run separately for every call site.
+Snapshots remain isolated between revisions and analysis branches.
+
+Import checks first resolve symbol presence without computing unused signatures or return contracts. Full endpoint
+details are still produced for findings, and all affected import locations are retained. Import discovery also reuses
+the already-parsed vllm-ascend module trees, with a source-reading fallback for files absent from the index.
+
+These are in-process optimizations only: no pickle files, persistent cache, new environment variables, or reduced
+analysis scope are required. Complete source indexing and input verification still run for every PR.
+
 ### Classification and result
 
 New incompatibilities are reported as introduced breaks. Historical incompatibilities are not attributed to the PR,
