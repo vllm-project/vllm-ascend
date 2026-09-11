@@ -20,7 +20,11 @@ from vllm_ascend.attention.mla_v1 import (
 # isort: on
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin, DCPMetadataBuilderMixin
+from vllm_ascend.attention.context_parallel.common_cp import (
+    DCPImplMixin,
+    DCPMetadataBuilderMixin,
+    get_dcp_local_seq_lens,
+)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -85,10 +89,20 @@ class AscendMlaDCPMetadataBuilder(
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
-        )
+        if common_attn_metadata.dcp_local_seq_lens is not None:
+            # MRV2 already provides native DCP metadata. FIA additionally
+            # needs every rank's host-side context length for KV reordering.
+            local_context_lens_allranks = get_dcp_local_seq_lens(
+                self.context_lens_cpu,
+                self.dcp_size,
+                self.cp_local_block_size,
+            )
+        else:
+            # MRV1 keeps the all-rank host lengths in AscendDCPMetadata.
+            local_context_lens_allranks = self._get_dcp_context_lens(
+                common_attn_metadata,
+                start=self.num_decodes,
+            )
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
         )
@@ -144,24 +158,36 @@ class AscendMlaDCPMetadataBuilder(
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
         dcp_metadata = common_attn_metadata.context_parallel_metadata
-        if dcp_metadata is not None and dcp_metadata.draft_cp_seq_len is not None:
-            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+        if dcp_metadata is not None:
+            # Preserve MRV1 and speculative-decode metadata handling.
+            if dcp_metadata.draft_cp_seq_len is not None:
+                decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+            else:
+                decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
+                    common_attn_metadata,
+                    end=self.num_decodes,
+                ).tolist()
+            decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
         else:
-            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
-                common_attn_metadata,
-                end=self.num_decodes,
-            ).tolist()
+            # MRV2 keeps the current-rank lengths on device. Derive FIA's
+            # host list from the already available CPU sequence lengths to
+            # avoid a device-to-host synchronization.
+            local_seq_lens_allranks = get_dcp_local_seq_lens(
+                self.seq_lens[: self.num_decodes],
+                self.dcp_size,
+                self.cp_local_block_size,
+            )
+            decode_metadata.cp_seq_len = local_seq_lens_allranks[:, self.dcp_rank].tolist()
+            decode_metadata.dcp_mtp_attn_mask = None
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
-        decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
         return decode_metadata
 
 class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
-    can_return_lse_for_decode: bool = True
-
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    can_return_lse_for_decode: bool = True
 
     @staticmethod
     def update_graph_params(

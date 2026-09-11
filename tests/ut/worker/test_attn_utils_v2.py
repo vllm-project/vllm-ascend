@@ -711,7 +711,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             num_scheduled_tokens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
-            num_computed_tokens_np=np.zeros(4, dtype=np.int32),
             is_prefilling_np=np.array([True, True, False, False]),
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=torch.arange(8, dtype=torch.int32),
@@ -788,29 +787,3 @@ def test_build_attn_metadata_propagates_prefill_state():
     )
 
     assert metadata["layer.0"] is is_prefilling
-
-
-def test_build_dcp_metadata_uses_full_decode_and_cached_prefill_lens():
-    metadata = attn_utils._build_dcp_metadata(
-        seq_lens_cpu=torch.tensor([9, 14], dtype=torch.int32),
-        num_computed_tokens_cpu=torch.tensor([8, 6], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 1, 9], dtype=torch.int32),
-        is_prefilling=torch.tensor([False, True]),
-        num_reqs=2,
-        num_actual_reqs=2,
-        dcp_size=2,
-        interleave_size=4,
-    )
-
-    np.testing.assert_array_equal(
-        metadata.num_computed_tokens_of_dcp,
-        np.array(
-            [
-                [5, 4],  # decode includes the current token: 9
-                [4, 2],  # prefill uses only its cached prefix: 6
-            ],
-            dtype=np.int32,
-        ),
-    )
-    torch.testing.assert_close(metadata.query_lens_cpu, torch.tensor([1, 8], dtype=torch.int32))
-    assert metadata.max_query_len == 8

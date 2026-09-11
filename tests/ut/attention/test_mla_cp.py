@@ -25,11 +25,11 @@ from vllm_ascend.attention.utils import AscendDCPMetadata
 
 def test_mla_dcp_extends_v1_backend() -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
+    assert AscendMlaDCPImpl.can_return_lse_for_decode is True
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
     )
-    assert AscendMlaDCPImpl.can_return_lse_for_decode is True
     assert AscendMlaDCPMetadataBuilder.decode_metadata_cls is (AscendMLADCPDecodeMetadata)
     base_fields = {field.name for field in fields(AscendMLADecodeMetadata)}
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
@@ -38,7 +38,7 @@ def test_mla_dcp_extends_v1_backend() -> None:
 
 
 @patch.object(AscendMLAMetadataBuilder, "build_decode_metadata")
-def test_mla_dcp_decode_uses_common_host_metadata(mock_build_decode) -> None:
+def test_mla_dcp_decode_preserves_legacy_host_metadata(mock_build_decode) -> None:
     decode_metadata = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
     mock_build_decode.return_value = decode_metadata
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
@@ -50,6 +50,36 @@ def test_mla_dcp_decode_uses_common_host_metadata(mock_build_decode) -> None:
         context_parallel_metadata=AscendDCPMetadata(
             num_computed_tokens_of_dcp=[[5, 4], [8, 6]],
         ),
+        dcp_local_seq_lens=None,
+    )
+
+    result = builder.build_decode_metadata(
+        common_prefix_len=0,
+        common_attn_metadata=common_attn_metadata,
+    )
+
+    assert result is decode_metadata
+    assert result.cp_seq_len == [4, 6]
+    assert result.dcp_mtp_attn_mask is None
+    torch.testing.assert_close(
+        result.actual_seq_lengths_q,
+        torch.tensor([1, 2]),
+    )
+
+
+@patch.object(AscendMLAMetadataBuilder, "build_decode_metadata")
+def test_mla_dcp_decode_uses_mrv2_native_metadata(mock_build_decode) -> None:
+    decode_metadata = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
+    mock_build_decode.return_value = decode_metadata
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 2
+    builder.dcp_size = 2
+    builder.dcp_rank = 1
+    builder.cp_local_block_size = 4
+    builder.seq_lens = torch.tensor([9, 14], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        dcp_local_seq_lens=torch.tensor([4, 6], dtype=torch.int32),
     )
 
     result = builder.build_decode_metadata(
