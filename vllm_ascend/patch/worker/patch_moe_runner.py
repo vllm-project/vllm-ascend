@@ -17,7 +17,7 @@
 from typing import cast
 
 import torch
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 
 def _moe_runner_forward(
