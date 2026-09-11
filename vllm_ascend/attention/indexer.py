@@ -166,6 +166,42 @@ def mask_dcp_inactive_local_candidates(
     return masked_indices, masked_scores
 
 
+def _stable_topk_by_score_and_global_index(
+    candidate_indices: torch.Tensor,
+    candidate_scores: torch.Tensor,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select score-descending TopK with global-index ascending tie order."""
+    valid = candidate_indices >= 0
+    invalid_index = torch.iinfo(torch.int64).max
+    candidate_keys = torch.where(valid, candidate_indices.to(torch.int64), invalid_index)
+    scores = torch.where(valid, candidate_scores, torch.full_like(candidate_scores, float("-inf")))
+
+    index_order = torch.argsort(candidate_keys, dim=-1, stable=True)
+    indices_by_index = torch.gather(candidate_indices, -1, index_order)
+    scores_by_index = torch.gather(scores, -1, index_order)
+    score_order = torch.argsort(scores_by_index, dim=-1, descending=True, stable=True)
+
+    k = min(topk, scores.shape[-1])
+    selected_pos = score_order[..., :k]
+    selected_indices = torch.gather(indices_by_index, -1, selected_pos)
+    selected_scores = torch.gather(scores_by_index, -1, selected_pos)
+    selected_indices = torch.where(selected_indices >= 0, selected_indices, torch.full_like(selected_indices, -1))
+    selected_scores = torch.where(
+        selected_indices >= 0,
+        selected_scores,
+        torch.full_like(selected_scores, float("-inf")),
+    )
+    if selected_indices.shape[-1] < topk:
+        selected_indices = torch.nn.functional.pad(selected_indices, (0, topk - selected_indices.shape[-1]), value=-1)
+        selected_scores = torch.nn.functional.pad(
+            selected_scores,
+            (0, topk - selected_scores.shape[-1]),
+            value=float("-inf"),
+        )
+    return selected_indices, selected_scores
+
+
 def merge_dcp_indexer_candidates(
     candidate_indices: torch.Tensor,
     candidate_scores: torch.Tensor,
@@ -177,9 +213,8 @@ def merge_dcp_indexer_candidates(
     head. A real DCP all-gather therefore produces ``[rank,row,1,candidate]``.
     Preserve the singleton head dimension for the existing SFA consumer ABI.
 
-    Unique-cutoff rows must match incumbent full-K LI. At a cutoff tie the
-    supported contract is strict-threshold equivalence plus deterministic
-    repeat; choosing the same tied subset by global-index order is not required.
+    Unique-cutoff rows must match incumbent full-K LI. At a cutoff tie, choose
+    the smallest global logical indices to preserve exact stable LI ordering.
     """
     preserve_head_dim = False
     if candidate_indices.dim() == 4:
@@ -206,14 +241,7 @@ def merge_dcp_indexer_candidates(
         )
     flat_indices = candidate_indices.permute(1, 0, 2).reshape(candidate_indices.shape[1], -1)
     flat_scores = candidate_scores.permute(1, 0, 2).reshape(candidate_scores.shape[1], -1)
-    valid = flat_indices >= 0
-    scores = torch.where(valid, flat_scores, torch.full_like(flat_scores, float("-inf")))
-    k = min(topk, scores.shape[-1])
-    selected_scores, selected_pos = torch.topk(scores, k=k, dim=-1, largest=True, sorted=True)
-    selected = torch.gather(flat_indices, -1, selected_pos)
-    selected = torch.where(selected_scores > float("-inf"), selected, torch.full_like(selected, -1))
-    if selected.shape[-1] < topk:
-        selected = torch.nn.functional.pad(selected, (0, topk - selected.shape[-1]), value=-1)
+    selected, _ = _stable_topk_by_score_and_global_index(flat_indices, flat_scores, topk)
     return selected.unsqueeze(1) if preserve_head_dim else selected
 
 
@@ -432,14 +460,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             else:
                 candidate_scores = torch.cat((scores, other_scores), dim=-1)
                 candidate_indices = torch.cat((indices, other_indices), dim=-1)
-            scores, selected_pos = torch.topk(
-                candidate_scores,
-                k=self.topk_tokens,
-                dim=-1,
-                largest=True,
-                sorted=True,
+            indices, scores = _stable_topk_by_score_and_global_index(
+                candidate_indices, candidate_scores, self.topk_tokens
             )
-            indices = torch.gather(candidate_indices, -1, selected_pos)
         return indices
 
     def process_weights_after_loading(self) -> None:
