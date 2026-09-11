@@ -313,7 +313,7 @@ a3-560t:
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Deepseek_R1_W8A8_A3.yaml
       - name: Qwen3.8-27B-w8a8-A3
-        os: linux-aarch64-a3-16-cn12-001
+        os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
       - name: Qwq_32b_A3
         os: linux-aarch64-a3-16-cn12-001
