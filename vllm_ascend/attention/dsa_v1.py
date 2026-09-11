@@ -593,8 +593,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         device: torch.device,
         metadata_cls: type[AscendDSAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
+        rope_runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] | None = None,
     ):
         self.kv_cache_spec = kv_cache_spec
+        self.rope_runtime_buffer = rope_runtime_buffer
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -842,6 +844,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
                 use_cache=self.num_prefills == 0,
+                runtime_buffer=self.rope_runtime_buffer,
             )
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
