@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -22,12 +23,15 @@ def _make_runner(need_timing: bool = True):
     runner.vllm_config = SimpleNamespace()
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    # Dump contract from the production initializer; helpers no-op on None.
+    runner.debugger = None
+    runner._debugger_started = False
     return runner
 
 
 def test_execute_model_records_profiling_time():
     runner = _make_runner()
-    scheduler_output = SimpleNamespace(disable_profiling_timing=False)
+    scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
 
     with (
         patch.object(
@@ -59,7 +63,7 @@ def test_execute_model_records_profiling_time():
 def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     runner = _make_runner()
     runner._cpp_execution_time_ms = 123.0
-    scheduler_output = SimpleNamespace(disable_profiling_timing=True)
+    scheduler_output = SimpleNamespace(disable_profiling_timing=True, total_num_scheduled_tokens=0)
 
     with (
         patch.object(
@@ -216,6 +220,213 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
     assert padded_num_tokens.value.id == "batch_desc"
+
+
+def _make_dump_runner(debugger=None):
+    runner = _make_runner(need_timing=False)
+    runner.debugger = debugger
+    runner.model = Mock()
+    runner._debugger_started = False
+    return runner
+
+
+def test_start_dump_data_starts_debugger_and_forwards_kwargs():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+
+    runner._start_dump_data(scheduled_tokens={0: 4})
+
+    debugger.start.assert_called_once_with(runner.model, scheduled_tokens={0: 4})
+    assert runner._debugger_started is True
+
+
+def test_start_dump_data_noop_when_already_started():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner._debugger_started = True
+
+    runner._start_dump_data()
+
+    debugger.start.assert_not_called()
+    debugger.step.assert_not_called()
+
+
+def test_dump_helpers_noop_without_debugger():
+    # No dump config: helpers must be safe no-ops (no AttributeError).
+    runner = _make_dump_runner(None)
+
+    runner._start_dump_data()
+    runner._finalize_dump_data(dump=False)
+
+
+def test_finalize_dump_data_stops_stop_capable_debugger():
+    debugger = Mock()
+    runner = _make_dump_runner(debugger)
+    runner._debugger_started = True
+
+    runner._finalize_dump_data()
+
+    debugger.stop.assert_called_once_with()
+    debugger.step.assert_called_once_with()
+    assert runner._debugger_started is False
+
+
+def test_finalize_dump_data_keeps_window_open_for_graph_debugger():
+    # AclGraphDumper has no stop(); the window stays open across steps and
+    # each step only calls step() (v1 parity).
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner._debugger_started = True
+
+    runner._finalize_dump_data()
+
+    debugger.step.assert_called_once_with()
+    assert runner._debugger_started is True
+
+
+def test_execute_model_opens_dump_window_for_real_step():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={0: 4},
+    )
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=None):
+        output = runner.execute_model(scheduler_output)
+
+    assert output is None
+    debugger.start.assert_called_once_with(runner.model, scheduled_tokens={0: 4})
+    # Last-PP-rank path: the cycle is closed later in sample_tokens().
+    debugger.step.assert_not_called()
+
+
+def test_execute_model_skips_dump_when_no_tokens_scheduled():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={},
+    )
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=None):
+        runner.execute_model(scheduler_output)
+
+    debugger.start.assert_not_called()
+    debugger.step.assert_not_called()
+
+
+def test_execute_model_closes_dummy_run_dump_without_writing():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={},
+    )
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=None):
+        runner.execute_model(scheduler_output, dummy_run=True)
+
+    debugger.start.assert_called_once_with(runner.model, scheduled_tokens={})
+    debugger.step.assert_called_once_with(dump=False)
+
+
+def test_execute_model_finalizes_dump_for_pp_non_last_rank():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={0: 4},
+    )
+    intermediate = IntermediateTensors({"hidden": torch.zeros(1, 2)})
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=intermediate):
+        output = runner.execute_model(scheduler_output)
+
+    assert output is intermediate
+    debugger.start.assert_called_once()
+    # PP non-last ranks never reach sample_tokens(), so finalize here.
+    debugger.step.assert_called_once_with()
+
+
+def test_sample_tokens_closes_dump_cycle_on_last_rank():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner.pcp_manager = None
+    runner.use_spec_pp = False
+    runner._debugger_started = True
+
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
+        result = runner.sample_tokens("grammar")
+
+    assert result == "out"
+    debugger.step.assert_called_once_with()
+
+
+def test_load_model_starts_dump_before_capture_in_graph_mode():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+
+    with patch.object(GPUModelRunner, "load_model") as parent_load_model:
+        runner.load_model()
+
+    parent_load_model.assert_called_once_with()
+    debugger.start.assert_called_once_with(runner.model)
+
+
+def test_load_model_skips_dump_in_eager_mode():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+
+    with patch.object(GPUModelRunner, "load_model"):
+        runner.load_model()
+
+    debugger.start.assert_not_called()
+
+
+def test_pool_closes_dump_cycle_for_pooling_models():
+    # Pooling models never reach sample_tokens(): the worker calls pool()
+    # directly, so the dump cycle must be closed there.
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner._debugger_started = True
+
+    with patch.object(GPUModelRunner, "pool", return_value="pooled") as parent_pool:
+        result = runner.pool()
+
+    assert result == "pooled"
+    parent_pool.assert_called_once_with()
+    debugger.step.assert_called_once_with()
+
+
+def test_dummy_run_flushes_dump_window_without_writing():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    runner._debugger_started = True
+    outputs = (Mock(), Mock())
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", return_value=outputs) as parent_dummy_run,
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+    ):
+        result = runner._dummy_run(8, is_profile=True)
+
+    assert result is outputs
+    parent_dummy_run.assert_called_once_with(
+        8,
+        skip_attn=False,
+        uniform_decode=False,
+        skip_eplb=False,
+        is_profile=True,
+    )
+    # Capture/profiling forwards must not leak into the first real step.
+    debugger.step.assert_called_once_with(dump=False)
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
