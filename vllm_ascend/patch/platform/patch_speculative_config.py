@@ -1,8 +1,12 @@
+import functools
+
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.v1.core.sched.scheduler import Scheduler
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
+_orig_scheduler_init = Scheduler.__init__
 
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
@@ -50,5 +54,38 @@ def _dspark_post_init(self):
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
 
 
+def _num_drafter_query_tokens(self: SpeculativeConfig) -> int:
+    """Return the configured per-request query width of the drafter."""
+    num_query_tokens = self.num_speculative_tokens
+    assert num_query_tokens is not None
+    if self.use_dflash():
+        return num_query_tokens + 1
+    if not self.use_dspark():
+        return num_query_tokens
+
+    assert self.draft_model_config is not None
+    sample_from_anchor = getattr(
+        self.draft_model_config.hf_config,
+        "sample_from_anchor",
+        True,
+    )
+    return num_query_tokens + int(not sample_from_anchor)
+
+
+@functools.wraps(_orig_scheduler_init)
+def _scheduler_init(self: Scheduler, *args, **kwargs) -> None:
+    _orig_scheduler_init(self, *args, **kwargs)
+    speculative_config = self.vllm_config.speculative_config
+    if speculative_config is not None and speculative_config.use_dspark():
+        # This remains the configured maximum even when the per-batch K or the
+        # per-request verification length is reduced dynamically. Those values
+        # trim consumed drafts after the full parallel query has written KV.
+        self.num_lookahead_tokens = _num_drafter_query_tokens(speculative_config)
+
+
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+SpeculativeConfig.num_drafter_query_tokens = property(  # type: ignore[attr-defined]
+    _num_drafter_query_tokens
+)
+Scheduler.__init__ = _scheduler_init

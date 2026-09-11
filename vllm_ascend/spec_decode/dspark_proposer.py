@@ -37,10 +37,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
-        if self.sample_from_anchor:
-            self.num_query_per_req = self.num_speculative_tokens
-        else:
-            self.num_query_per_req = 1 + self.num_speculative_tokens
+        # Keep this at the configured maximum. Per-batch dynamic K and
+        # confidence-based per-request verification lengths only trim the
+        # drafts consumed after this parallel query has written its KV slots.
+        self.num_query_per_req = (
+            vllm_config.speculative_config.num_drafter_query_tokens  # type: ignore[attr-defined]
+        )
 
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
@@ -94,6 +96,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         # groups with different logical block sizes.
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
         self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        self._per_group_num_blocks_per_row: dict[int, torch.Tensor] = {}
+        self._per_group_num_blocks_per_row_cpu: dict[int, torch.Tensor] = {}
         # Per-gid logical block size used to expand slot mappings. The KV
         # manager's physical page can be larger when hybrid cache groups share
         # one allocation, so kv_cache_spec.block_size is not interchangeable
@@ -104,6 +108,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+        self._request_window_ok = torch.zeros(self.max_batch_size, dtype=torch.bool, device=device)
+        self._last_valid_draft_counts_cpu: list[int] | None = None
 
     def _compute_confidence(
         self,
@@ -214,9 +220,38 @@ class AscendDSparkProposer(AscendDflashProposer):
         gid: int,
         block_table: torch.Tensor,
         slot_mapping: torch.Tensor,
+        num_blocks_per_row: torch.Tensor | None = None,
+        num_blocks_per_row_cpu: torch.Tensor | None = None,
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
+        if num_blocks_per_row is None:
+            num_blocks_per_row = torch.full(
+                (block_table.shape[0],),
+                block_table.shape[1],
+                dtype=torch.int32,
+                device=block_table.device,
+            )
+        if num_blocks_per_row_cpu is None:
+            num_blocks_per_row_cpu = torch.full(
+                (block_table.shape[0],),
+                block_table.shape[1],
+                dtype=torch.int32,
+            )
+        self._per_group_num_blocks_per_row[gid] = num_blocks_per_row
+        self._per_group_num_blocks_per_row_cpu[gid] = num_blocks_per_row_cpu
+
+    def mask_invalid_draft_output(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
+        """Turn drafts from unsafe request windows into scheduler placeholders."""
+        num_reqs = draft_token_ids.shape[0]
+        valid_rows = self._request_window_ok[:num_reqs].unsqueeze(1)
+        draft_token_ids.masked_fill_(~valid_rows, -1)
+        if self._last_draft_probs is not None:
+            self._last_draft_probs[:num_reqs].masked_fill_(~valid_rows.unsqueeze(2), 0)
+        return draft_token_ids
+
+    def get_last_valid_draft_counts_cpu(self) -> list[int] | None:
+        return self._last_valid_draft_counts_cpu
 
     def set_inputs_first_pass(
         self,
@@ -249,6 +284,68 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
 
+        effective_seq_lens = cad.seq_lens
+        if num_rejected_tokens_gpu is not None:
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+
+        max_model_len = self.vllm_config.model_config.max_model_len
+        window_end = effective_seq_lens[:batch_size] + self.num_query_per_req
+        request_window_ok = self._request_window_ok[:batch_size]
+        request_window_ok.copy_((effective_seq_lens[:batch_size] >= 0) & (window_end <= max_model_len))
+        ctx_end = cad.query_start_loc[1 : batch_size + 1]
+        if num_rejected_tokens_gpu is not None:
+            request_window_ok.logical_and_(ctx_end > num_rejected_tokens_gpu[:batch_size])
+        else:
+            request_window_ok.logical_and_(ctx_end > 0)
+
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            block_size = self._per_group_kernel_block_sizes[gid]
+            block_table = self._per_group_block_table_buffers[gid]
+            valid_blocks = self._per_group_num_blocks_per_row[gid][:batch_size]
+            required_blocks = torch.div(
+                window_end + block_size - 1,
+                block_size,
+                rounding_mode="floor",
+            )
+            if self.num_query_per_req > block_size:
+                request_window_ok.zero_()
+            request_window_ok.logical_and_(required_blocks <= valid_blocks)
+            request_window_ok.logical_and_(valid_blocks <= block_table.stride(0))
+
+        host_seq_lens = cad._seq_lens_cpu
+        if host_seq_lens is None:
+            host_seq_lens = getattr(cad, "seq_lens_cpu", None)
+        host_window_ok = None
+        if host_seq_lens is not None:
+            host_window_end = host_seq_lens[:batch_size] + self.num_query_per_req
+            host_window_ok = (host_seq_lens[:batch_size] >= 0) & (host_window_end <= max_model_len)
+            host_ctx_lens = cad.query_start_loc_cpu[1 : batch_size + 1] - cad.query_start_loc_cpu[:batch_size]
+            host_window_ok.logical_and_(host_ctx_lens > 0)
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                block_size = self._per_group_kernel_block_sizes[gid]
+                block_table = self._per_group_block_table_buffers[gid]
+                valid_blocks_cpu = self._per_group_num_blocks_per_row_cpu[gid][:batch_size]
+                required_blocks_cpu = torch.div(
+                    host_window_end + block_size - 1,
+                    block_size,
+                    rounding_mode="floor",
+                )
+                if self.num_query_per_req > block_size:
+                    host_window_ok.zero_()
+                host_window_ok.logical_and_(required_blocks_cpu <= valid_blocks_cpu)
+                host_window_ok.logical_and_(valid_blocks_cpu <= block_table.stride(0))
+            self._last_valid_draft_counts_cpu = torch.where(
+                host_window_ok,
+                self.num_speculative_tokens,
+                0,
+            ).tolist()
+        else:
+            # Production metadata always has a host mirror. Be conservative
+            # for compatibility callers that omit it.
+            self._last_valid_draft_counts_cpu = [0] * batch_size
+
         token_indices_to_sample = torch.empty(
             num_sample_total,
             dtype=torch.int32,
@@ -279,6 +376,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 # Block table
                 block_table_ptr=gid_block_table,
                 block_table_stride=gid_block_table.stride(0),
+                num_blocks_per_row_ptr=self._per_group_num_blocks_per_row[gid],
+                request_window_ok_ptr=request_window_ok,
                 # Metadata
                 query_start_loc_ptr=cad.query_start_loc,
                 seq_lens_ptr=cad.seq_lens,
@@ -290,29 +389,40 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 total_input_tokens=self._dflash_num_context,
                 batch_size=batch_size,
+                padding_slot_id=-1,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                CHECK_REQUEST_WINDOW=True,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
         ]
 
-        effective_seq_lens = cad.seq_lens
-        if has_num_rejected:
-            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
-
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
-        cad.seq_lens = effective_seq_lens + self.num_query_per_req
+        expanded_seq_lens = effective_seq_lens + self.num_query_per_req
+        cad.seq_lens = torch.where(
+            request_window_ok,
+            expanded_seq_lens,
+            torch.ones_like(expanded_seq_lens),
+        )
         # The model runner has already corrected this canonical host mirror
         # with the accepted-token count. Extend it on CPU alongside the device
         # lengths, without another reject D2H copy or attention-side wait.
         if cad._seq_lens_cpu is not None:
             draft_seq_lens_cpu = cad._seq_lens_cpu.clone()
-            draft_seq_lens_cpu[:batch_size].add_(self.num_query_per_req)
+            expanded_seq_lens_cpu = draft_seq_lens_cpu[:batch_size] + self.num_query_per_req
+            if host_window_ok is None:
+                draft_seq_lens_cpu[:batch_size].fill_(1)
+            else:
+                draft_seq_lens_cpu[:batch_size] = torch.where(
+                    host_window_ok,
+                    expanded_seq_lens_cpu,
+                    torch.ones_like(expanded_seq_lens_cpu),
+                )
             cad._seq_lens_cpu = draft_seq_lens_cpu
             if getattr(cad, "seq_lens_cpu", None) is not None:
-                cad.seq_lens_cpu = draft_seq_lens_cpu
+                cad.seq_lens_cpu = draft_seq_lens_cpu.clone()
         cad.query_start_loc_cpu = (
             torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
         ).to(torch.int32)
@@ -325,7 +435,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.num_actual_tokens = num_query_total
         cad.num_input_tokens = num_query_total
         cad.max_query_len = self.num_query_per_req
-        cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
+        if cad._seq_lens_cpu is not None:
+            cad.max_seq_len = int(cad._seq_lens_cpu[:batch_size].max().item())
+        else:
+            cad.max_seq_len = min(
+                cad.max_seq_len + self.num_query_per_req,
+                max_model_len,
+            )
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
         if hasattr(self.model, "get_draft_attn_causal"):

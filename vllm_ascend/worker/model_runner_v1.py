@@ -1727,6 +1727,7 @@ class NPUModelRunner(GPUModelRunner):
         # is never used when the drafter does not produce fresh probabilities.
         self._draft_probs = None
         self._draft_prob_req_ids = None
+        self._draft_boundary_k_by_req_id = None
 
         if not self.drafter:
             # Speculative decoding is not enabled.
@@ -1925,6 +1926,15 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            if isinstance(self.drafter, AscendDSparkProposer):
+                draft_token_ids = self.drafter.mask_invalid_draft_output(
+                    draft_token_ids
+                )
+                valid_counts = self.drafter.get_last_valid_draft_counts_cpu()
+                if valid_counts is not None:
+                    self._draft_boundary_k_by_req_id = dict(
+                        zip(self.input_batch.req_ids, valid_counts)
+                    )
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
@@ -2018,16 +2028,25 @@ class NPUModelRunner(GPUModelRunner):
         out = super().take_draft_token_ids()
         if out is None:
             return None
+        boundary_k_by_req_id = getattr(
+            self, "_draft_boundary_k_by_req_id", None
+        )
         dynamic_spec = getattr(self.drafter, "dynamic_spec", None)
-        if dynamic_spec is None:
+        if dynamic_spec is None and boundary_k_by_req_id is None:
             return out
-        per_req_k = dynamic_spec.num_verify_tokens
-        if per_req_k is None:
-            return out
-        per_req_k = [
-            max(0, min(int(k), self.num_spec_tokens))
-            for k in per_req_k
-        ]
+        dynamic_k = (
+            dynamic_spec.num_verify_tokens
+            if dynamic_spec is not None
+            else None
+        )
+        per_req_k = []
+        for idx, req_id in enumerate(out.req_ids):
+            k = self.num_spec_tokens
+            if dynamic_k is not None:
+                k = min(k, int(dynamic_k[idx]))
+            if boundary_k_by_req_id is not None:
+                k = min(k, int(boundary_k_by_req_id.get(req_id, 0)))
+            per_req_k.append(max(0, k))
         cut_tokens = DraftTokenIds(
             req_ids=out.req_ids,
             draft_token_ids=[
@@ -2629,6 +2648,16 @@ class NPUModelRunner(GPUModelRunner):
                     draft_ids_list = draft_token_ids
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
+                    boundary_k_by_req_id = getattr(
+                        self, "_draft_boundary_k_by_req_id", None
+                    )
+                    if boundary_k_by_req_id is not None:
+                        draft_ids_list = [
+                            tokens[: boundary_k_by_req_id.get(req_id, 0)]
+                            for req_id, tokens in zip(
+                                draft_req_ids, draft_ids_list
+                            )
+                        ]
                     draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
                     output_spec_token_ids = [
                         draft_by_req_id.get(req_id, [])
@@ -3414,7 +3443,27 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
+            if self.speculative_config and isinstance(self.drafter, AscendDSparkProposer):
+                blk_table = self.input_batch.block_table[kv_cache_gid]
+                num_blocks_per_row = blk_table.get_num_blocks_per_row_device(
+                    num_reqs_padded
+                )
+                num_blocks_per_row_cpu = blk_table.num_blocks_per_row_buffer.cpu[
+                    :num_reqs_padded
+                ]
+                if num_reqs_padded > num_reqs:
+                    num_blocks_per_row[num_reqs:].zero_()
+                    num_blocks_per_row_cpu[num_reqs:].zero_()
+                self.drafter.set_per_group_attn_metadata(
+                    kv_cache_gid,
+                    cm.block_table_tensor,
+                    cm.slot_mapping,
+                    num_blocks_per_row,
+                    num_blocks_per_row_cpu,
+                )
+            elif self.speculative_config and isinstance(
+                self.drafter, AscendStep3p5MTPProposer
+            ):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can
                 # build per-step attention metadata for the active MTP layer.
