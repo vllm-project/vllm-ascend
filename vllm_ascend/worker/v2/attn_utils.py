@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
@@ -57,6 +58,11 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_cache_tensors_for_sparse_kv_offload,
+    get_sparse_kv_offload_manager,
+    reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -80,6 +86,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    sparse_config = getattr(get_ascend_config(), "sparse_kv_offload_config", None)
+    sparse_kv_offload_enabled = bool(sparse_config is not None and sparse_config.enabled)
     sfa_dcp_replicated_indexer_size = (
         vllm_config.parallel_config.decode_context_parallel_size
         if enable_sfa_dcp_replicated_indexer(vllm_config)
@@ -131,6 +139,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                store_on_host=sparse_kv_offload_enabled,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
@@ -213,6 +222,8 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    req_ids_tensor: torch.Tensor | None = None,
+    token_to_req: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -278,6 +289,8 @@ def build_attn_metadata(
             max_seq_len=max_seq_len,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            req_ids_tensor=req_ids_tensor,
+            token_to_req=token_to_req,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -840,6 +853,35 @@ def _allocate_kv_cache(
                 k_factor, v_factor = calc_split_factor([k_dim, v_dim])
             k_size = int(kv_cache_tensor_size // k_factor)
             v_size = int(kv_cache_tensor_size // v_factor)
+            if getattr(example_spec, "store_on_host", False):
+                if use_hybrid_layout:
+                    raise ValueError("Sparse KV offload does not support hybrid KV cache layouts.")
+                if bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
+                    raise ValueError("Sparse KV offload requires a BF16 main SFA cache.")
+                sparse_config = get_ascend_config().sparse_kv_offload_config
+                tp_rank = get_tensor_model_parallel_rank()
+                if vllm_version_is("0.28.0"):
+                    if len(shared_names) != 1:
+                        raise ValueError("Sparse KV offload does not support aliased HMA cache tensors.")
+                    kv_cache_raw_tensors[shared_names[0]] = allocate_kv_cache_tensors_for_sparse_kv_offload(
+                        k_size,
+                        v_size,
+                        alignment,
+                        tp_rank,
+                        sparse_config.keep_device_kv_cache,
+                        lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                    )
+                else:
+                    for layer_name_inner in shared_names:
+                        kv_cache_raw_tensors[layer_name_inner] = allocate_kv_cache_tensors_for_sparse_kv_offload(
+                            k_size,
+                            v_size,
+                            alignment,
+                            tp_rank,
+                            sparse_config.keep_device_kv_cache,
+                            lambda size, align: _allocate_int8_cache_tensor(size, align, device),
+                        )
+                continue
             if vllm_version_is("0.28.0"):
                 k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
                 v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
@@ -984,6 +1026,22 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+            if getattr(kv_cache_spec, "store_on_host", False):
+                if not isinstance(kv_cache_spec, AttentionSpec):
+                    raise ValueError("Sparse KV offload requires an attention cache spec.")
+                raw_cache = kv_cache_raw_tensors[layer_name]
+                if not isinstance(raw_cache, tuple):
+                    raise ValueError(f"Sparse KV offload cache for {layer_name} must be a tuple.")
+                kv_caches[layer_name] = reshape_kv_cache_tensors_for_sparse_kv_offload(
+                    raw_cache,
+                    kv_cache_spec,
+                    group.backend,
+                    get_tensor_model_parallel_rank(),
+                    vllm_config,
+                    get_ascend_config().sparse_kv_offload_config,
+                )
+                continue
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
@@ -1133,6 +1191,8 @@ def _reshape_kv_cache_v2(
                 )
 
             if sparse_sfa_c8:
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"Sparse C8 cache for {layer_name} must use one raw tensor.")
                 raw_k_tensor = raw_cache
                 k_dtype = (
                     torch.float8_e4m3fn
@@ -1160,6 +1220,12 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    sparse_config = getattr(get_ascend_config(), "sparse_kv_offload_config", None)
+    if sparse_config is not None and sparse_config.enabled:
+        # init_kv_cache constructs the KV connector immediately after reshape.
+        # Register the manager here so SfaRemoteD2HConnector can bind its host
+        # destinations during connector construction.
+        get_sparse_kv_offload_manager().register_kv_caches(kv_caches)
     return kv_caches
 
 
@@ -1178,7 +1244,13 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+def build_draft_attn_metadata_factory(
+    positions,
+    pad,
+    is_prefilling,
+    req_ids_tensor=None,
+    token_to_req=None,
+):
     """Wrap build_attn_metadata to forward rotary positions for the draft block.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1191,6 +1263,10 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        if req_ids_tensor is not None:
+            kwargs["req_ids_tensor"] = req_ids_tensor
+        if token_to_req is not None:
+            kwargs["token_to_req"] = token_to_req[:pad]
         return raw(*args, **kwargs)
 
     try:

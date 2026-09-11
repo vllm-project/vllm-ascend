@@ -56,6 +56,11 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_offload_topk_profile_buffers,
+    init_sparse_kv_offload_manager,
+    update_sparse_kv_offload_metadata_v2,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
@@ -164,6 +169,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
+            enable_sparse_kv_offload=self.ascend_config.sparse_kv_offload_config.enabled,
         )
 
         # Pinned D2H staging for corrected device state after spec rejection.
@@ -240,6 +246,16 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        sparse_config = self.ascend_config.sparse_kv_offload_config
+        self.sparse_kv_offload_manager = None
+        if sparse_config.enabled:
+            # MemFabric must be initialized before allocate_kv_cache creates
+            # pinned host tensors through memfabric_hybrid.offload.empty().
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
+                self.vllm_config,
+                kv_cache_config,
+                sparse_config,
+            )
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
@@ -290,6 +306,13 @@ class NPUModelRunner(GPUModelRunner):
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
+        if self.ascend_config.sparse_kv_offload_config.enabled:
+            allocate_kv_offload_topk_profile_buffers(
+                self.get_kv_cache_spec(),
+                self.vllm_config,
+                self.ascend_config.sparse_kv_offload_config,
+            )
+
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
             if (
@@ -528,6 +551,24 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch,
                 padded_num_tokens=batch_desc.num_tokens,
             )
+
+        if self.ascend_config.sparse_kv_offload_config.enabled:
+            req_ids_buffer = self.input_buffers.offload_req_ids
+            token_to_req_buffer = self.input_buffers.offload_token_to_req
+            if req_ids_buffer is None or token_to_req_buffer is None:
+                raise RuntimeError("Sparse KV offload metadata buffers are not initialized.")
+            update_sparse_kv_offload_metadata_v2(
+                num_tokens=input_batch.num_tokens,
+                num_reqs=input_batch.num_reqs,
+                num_tokens_padded=input_batch.num_tokens_after_padding,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
+                req_ids=input_batch.req_ids,
+                query_start_loc_np=input_batch.query_start_loc_np,
+                offload_req_ids_tensor=req_ids_buffer,
+                offload_token_to_req=token_to_req_buffer,
+            )
+            input_batch.req_ids_tensor = req_ids_buffer.gpu[: input_batch.num_reqs_after_padding]
+            input_batch.token_to_req = token_to_req_buffer.gpu[: input_batch.num_tokens_after_padding]
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

@@ -268,9 +268,10 @@ treated as a terminal state, so Prefill may continue waiting.
 ## 8. Current Boundaries
 
 - Layerwise shared-buffer offload requires the Memcache backend and eager mode.
-- Sparse Decode Offload requires Model Runner V1 and an SFA/MLA sparse-attention
-  model. The main KV cache must use BF16; LIC8 quantization is supported only
-  for the device-resident indexer cache.
+- Sparse Decode Offload supports Model Runner V1 and Model Runner V2 with an
+  SFA/MLA sparse-attention model. Both runners share the same MemFabric-backed
+  Host KV pool and NPU Top-K data path. The main KV cache must use BF16; LIC8
+  quantization is supported only for the device-resident indexer cache.
 - Hybrid KV cache layouts are not supported.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - Joint deployment requires Prefill TP to be greater than or equal to, and

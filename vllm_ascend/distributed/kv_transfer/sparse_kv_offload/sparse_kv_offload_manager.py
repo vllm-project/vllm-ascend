@@ -409,9 +409,43 @@ def update_sparse_kv_offload_metadata(
     Request ids are adler32 hashes of the scheduler request id,
     rows are reset whenever the occupying request changes.
     """
+    update_sparse_kv_offload_metadata_v2(
+        num_tokens=num_tokens,
+        num_reqs=num_reqs,
+        num_tokens_padded=num_tokens_padded,
+        num_reqs_padded=num_reqs_padded,
+        req_ids=req_ids,
+        query_start_loc_np=query_start_loc.cpu[: num_reqs + 1].numpy(),
+        offload_req_ids_tensor=offload_req_ids_tensor,
+        offload_token_to_req=offload_token_to_req,
+    )
+
+
+def update_sparse_kv_offload_metadata_v2(
+    num_tokens: int,
+    num_reqs: int,
+    num_tokens_padded: int,
+    num_reqs_padded: int,
+    req_ids: list[str],
+    query_start_loc_np: np.ndarray,
+    offload_req_ids_tensor: CpuGpuBuffer,
+    offload_token_to_req: CpuGpuBuffer,
+) -> None:
+    """Populate sparse-offload request metadata from an MRV2 input batch.
+
+    MRV2 owns ``query_start_loc`` as a device tensor plus a NumPy staging
+    array, whereas MRV1 exposes a :class:`CpuGpuBuffer`. Keeping the common
+    population logic here preserves identical request hashing, padding and
+    token-to-request semantics in both runners.
+    """
+    if num_reqs_padded < num_reqs or num_tokens_padded < num_tokens:
+        raise ValueError("Sparse KV offload padded sizes must cover the actual batch.")
+    if query_start_loc_np.shape[0] < num_reqs + 1:
+        raise ValueError("Sparse KV offload query_start_loc is shorter than num_reqs + 1.")
+
     offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
     effective_num_reqs = min(num_reqs, len(req_ids))
-    req_id_values = np.asarray(
+    req_id_values: np.ndarray = np.asarray(
         [
             adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
             for row, req_id in enumerate(req_ids[:effective_num_reqs])
@@ -421,9 +455,10 @@ def update_sparse_kv_offload_metadata(
     offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
     offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
 
-    query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
-    query_lens = np.diff(query_start_loc_cpu.numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+    query_lens: np.ndarray = np.diff(query_start_loc_np[: num_reqs + 1]).astype(np.int32, copy=False)
+    if np.any(query_lens < 0):
+        raise ValueError("Sparse KV offload query_start_loc must be non-decreasing.")
+    token_to_req: np.ndarray = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
     if token_to_req.shape[0] < num_tokens:
         raise RuntimeError(
             "KV offload token_to_req metadata is shorter than the scheduled token batch: "
@@ -448,7 +483,7 @@ def prepare_sparse_kv_offload_mtp_dummy_metadata(
         raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
 
     query_lens = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+    token_to_req: np.ndarray = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
     if token_to_req.shape[0] < num_tokens:
         token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
 
@@ -580,7 +615,11 @@ class SparseKVOffloadManager:
         return tuple(cache_or_caches)
 
     def _register_offload_layers(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        self.offload_layer_names = [layer_name for layer_name in kv_caches if "indexer" not in layer_name]
+        self.offload_layer_names = [
+            layer_name
+            for layer_name, cache in kv_caches.items()
+            if isinstance(cache, (tuple, list)) and len(cache) == OFFLOAD_KV_CACHE_TUPLE_LEN
+        ]
         if not self.offload_layer_names:
             raise ValueError("Sparse KV offload did not find SFA KV cache layers.")
 

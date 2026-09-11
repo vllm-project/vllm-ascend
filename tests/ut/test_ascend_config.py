@@ -692,6 +692,26 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
 
+    def test_enabled_supports_model_runner_v2(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=True,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {"enabled": True, "topk_buffer_size": 256},
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.topk, 128)
+
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):
             SparseKVOffloadConfig.from_additional_config(SimpleNamespace(), {"unknown_option": False})
