@@ -108,8 +108,32 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DSV4-Pro-W4A8-1M-PD-MRV2
+        config_file_path: DSV4-Pro-W4A8-1M-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DSV4-Pro-W4A8-MTP-PC-PD-MRV2
+        config_file_path: DSV4-Pro-W4A8-MTP-PC-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DSV4-Pro-W4A8-PC-PD-MRV2
+        config_file_path: DSV4-Pro-W4A8-PC-PD-MRV2.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
