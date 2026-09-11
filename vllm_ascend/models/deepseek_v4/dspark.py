@@ -328,6 +328,10 @@ class DeepseekV4DSparkModel(nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
+    # This adapter provides fixed-address graph inputs, persistent DSA
+    # metadata, and an address-stable context-KV scatter path.
+    supports_dspark_aclgraph = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
