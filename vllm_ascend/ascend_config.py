@@ -276,11 +276,23 @@ class AscendConfig:
         if self.enable_kv_nz:
             if vllm_config.model_config is None:
                 raise RuntimeError("enable_kv_nz requires a valid model_config.")
-            if not vllm_config.model_config.is_deepseek_mla or use_sparse:
-                raise RuntimeError("enable_kv_nz is only supported for mla currently.")
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            is_k3_mla = hf_text_config is not None and getattr(
+                hf_text_config, "model_type", None
+            ) in ("kimi_linear", "k3_dspark")
+            if not (vllm_config.model_config.is_deepseek_mla or is_k3_mla or use_sparse):
+                raise RuntimeError(
+                    "enable_kv_nz is currently supported on DeepSeek MLA, "
+                    "Kimi K3 (kimi_linear/k3_dspark), and sparse SFA models."
+                )
+            is_pd_consumer = (
+                vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.is_kv_consumer
+            )
+            if not (is_k3_mla or is_pd_consumer):
                 raise NotImplementedError(
-                    "enable_kv_nz is only supported in pd scenario and can only be used in D node."
+                    "enable_kv_nz is only supported in pd scenario "
+                    "(D node) for non-K3 models currently."
                 )
 
         self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
