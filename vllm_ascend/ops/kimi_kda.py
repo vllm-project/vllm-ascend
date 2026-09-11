@@ -71,30 +71,6 @@ _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
 
 
-def _zero_padded_spec_output(
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    """Zero graph-padding rows skipped by the recurrent KDA kernel.
-
-    ``recurrent_kda`` leaves the output for zero-length sequences
-    uninitialized. FULL graph replay keeps those rows in the static output
-    shape, so explicitly clear the uncovered tail before it reaches the
-    residual and MoE layers.
-    """
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=query_start_loc.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < query_start_loc[-1]
-    return torch.where(
-        valid_tokens.view(1, -1, 1, 1),
-        output,
-        0.0,
-    )
-
-
 def uses_kimi_k3_global_inputs_embeds(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
     if model_config.enable_prompt_embeds:
@@ -534,6 +510,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         forward_context = get_forward_context()
         attn_metadata_raw: AttentionMetadata | None = forward_context.attn_metadata
         if attn_metadata_raw is None:
+            core_attn_out.zero_()
             return
 
         assert isinstance(attn_metadata_raw, dict)
@@ -604,12 +581,6 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 attn_metadata.spec_query_start_loc,
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
-            )
-            # Clear only static dummy rows skipped by the kernel. Real query
-            # tokens and their accepted lengths are unchanged.
-            core_spec = _zero_padded_spec_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
             )
 
         core_non_spec = None
@@ -698,16 +669,24 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                     attn_metadata.non_spec_state_indices_tensor,
                 )
 
+        if core_spec is None and core_non_spec is None:
+            # Idle DP dummy runs carry graph-shaped metadata with no live work.
+            # Do not feed a previous replay's output through the norm gate.
+            core_attn_out.zero_()
+            return
+
+        # Reuse the caller-owned result buffer. FULL graphs can leave rows
+        # outside the live spec/non-spec index sets, so define them before the
+        # two index copies rather than allocating a temporary merged tensor.
+        core_attn_out[:, :num_actual_tokens].zero_()
         if core_spec is not None and core_non_spec is not None:
-            merged = torch.empty(
-                (1, num_actual_tokens, self.local_num_heads, self.head_dim),
-                dtype=core_non_spec.dtype,
-                device=core_non_spec.device,
-            )
-            merged.index_copy_(1, spec_token_indices, core_spec)
-            merged.index_copy_(1, non_spec_token_indices, core_non_spec)
-            core_attn_out[:, :num_actual_tokens] = merged
+            assert spec_token_indices is not None
+            assert non_spec_token_indices is not None
+            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
+            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
+            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
         elif core_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_spec
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
+        core_attn_out[:, num_actual_tokens:].zero_()
