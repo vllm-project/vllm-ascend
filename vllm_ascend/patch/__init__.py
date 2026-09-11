@@ -319,21 +319,16 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
-#       1. Upstream hybrid prefix cache lookup does not support DCP.
-#       2. Upstream MambaManager#get_num_blocks_to_allocate give the
+#       1. Upstream MambaManager#get_num_blocks_to_allocate gives the
 #          wrong number of blocks when an external cache hit occurred
 #    How:
-#       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
-#          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
-#       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
+#       1. Override the get_num_blocks_to_allocate method to fix the number of blocks
 #          when hitting the external cache and loading synchronously
 #    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm/pull/40996
-#       2. https://github.com/vllm-project/vllm/pull/46892
+#       1. https://github.com/vllm-project/vllm/pull/46892
 #    Future Plan:
-#       1. Remove this patch once the supported upstream revision includes
-#          hybrid prefix cache lookup for DCP.
-#       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
+#       1. Remove this patch once upstream accepts PR #46892 (or fixes the bug
+#          another way) and the supported vLLM revision includes the fix.
 #
 # ** 13. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
