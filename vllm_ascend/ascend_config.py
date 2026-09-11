@@ -1005,34 +1005,22 @@ class FinegrainedTPConfig:
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # wo_a/wo_b are sharded solely by the OTP group (which splits DP,
-            # orthogonal to the standard TP group), but _forward_o_proj reshapes
-            # the attention output with n_local_groups = n_groups // tp_size
-            # (standard TP). When tp_size > 1 the weight-shard and input-shard
-            # operate on different axes of the rank grid and no longer align,
-            # so oproj TP currently requires standard tp_size == 1.
+            # _forward_o_proj reshapes with n_local_groups = n_groups // tp_size (standard TP),
+            # which misaligns with the OTP weight shard (DP axis) when tp_size > 1.
             if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size currently requires "
                     "tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # The DSA o_proj exchange runs on address-stable buffers sized at decode
-            # scale (`get_potential_max_tokens`, overflow fails fast) and shaped for
-            # ACL graph replay — eager prefill chunks can exceed the capacity. V1
-            # also rejects `enforce_eager` for this knob. VllmConfig.__post_init__
-            # maps enforce_eager to cudagraph_mode=NONE, so checking the mode
-            # covers both.
+            # The DSA exchange needs ACL graph capture; NONE also covers enforce_eager (normalized in VllmConfig).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
-            # With PCP on, the upstream dispatch recomputes num_tokens from
-            # per-request num_scheduled_tokens, dropping the DP-padded count
-            # gather_batch_req_state reports — eager steps fall back to
-            # per-rank counts and the cross-DP collectives would hang.
+            # PCP's dispatch recomputes num_tokens per rank, dropping the DP-padded count.
             if vc.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is not supported with prefill_context_parallel_size > 1."
