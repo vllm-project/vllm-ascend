@@ -59,3 +59,50 @@ def test_kimi_k3_attention_residual_triton_matches_reference():
     expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
 
     torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=1e-2, atol=1e-2)
+
+
+@torch.inference_mode()
+def test_kimi_k3_attention_residual_fused_add_and_norm_matches_reference():
+    torch.manual_seed(2)
+    num_tokens = 8
+    hidden_size = 7168
+    num_blocks = 4
+    eps = 1e-6
+    prefix_sum = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16, device="npu")
+    addend = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16, device="npu")
+    block_residual = torch.randn(
+        (num_tokens, num_blocks, hidden_size),
+        dtype=torch.bfloat16,
+        device="npu",
+    )
+    projection = SimpleNamespace(weight=torch.randn((1, hidden_size), dtype=torch.bfloat16, device="npu"))
+    norm = SimpleNamespace(weight=torch.randn((hidden_size,), dtype=torch.bfloat16, device="npu"), variance_epsilon=eps)
+    out_norm = SimpleNamespace(
+        weight=torch.randn((hidden_size,), dtype=torch.bfloat16, device="npu"),
+        variance_epsilon=eps,
+    )
+    sum_out = torch.empty_like(prefix_sum)
+
+    actual = apply_attn_res(
+        prefix_sum,
+        block_residual,
+        projection,
+        norm,
+        addend=addend,
+        sum_out=sum_out,
+        out_norm=out_norm,
+    )
+
+    prefix_sum_ref = prefix_sum + addend
+    values = torch.cat((block_residual, prefix_sum_ref.unsqueeze(1)), dim=1).float()
+    normalized = values * torch.rsqrt(values.square().mean(dim=-1, keepdim=True) + eps)
+    score_weight = norm.weight.float() * projection.weight.squeeze(0).float()
+    scores = (normalized * score_weight).sum(dim=-1)
+    probabilities = scores.softmax(-1).unsqueeze(1)
+    mixed = torch.matmul(probabilities, values).squeeze(1)
+    expected = (
+        mixed * torch.rsqrt(mixed.square().mean(dim=-1, keepdim=True) + eps) * out_norm.weight.float()
+    ).to(prefix_sum.dtype)
+
+    torch.testing.assert_close(sum_out.cpu(), prefix_sum_ref.cpu())
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=1e-2, atol=1e-2)
