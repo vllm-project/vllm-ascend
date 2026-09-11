@@ -642,6 +642,45 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
 
+    def uses_target_batch_descriptor_for_graph(self) -> bool:
+        return False
+
+    def get_graph_num_input_tokens(self, batch_descriptor: BatchDescriptor) -> int:
+        return batch_descriptor.num_tokens
+
+    def prepare_target_batch_descriptor_for_graph(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_descriptor: BatchDescriptor,
+        num_actual_tokens: int,
+    ) -> int:
+        """Prepare draft metadata keyed by a target-model graph descriptor.
+
+        Most proposers dispatch their own graph descriptor and never call this
+        hook. A proposer that reuses the target descriptor can override it to
+        translate target padding into its own query geometry.
+        """
+        return common_attn_metadata.num_reqs
+
+    def _can_use_target_batch_descriptor_for_graph(
+        self,
+        runtime_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
+    ) -> bool:
+        """Whether a target descriptor can safely key the draft graph.
+
+        A non-uniform descriptor returned with eager/piecewise fallback carries
+        the target batch token count (which can be a large prefill), not the
+        number of draft queries. It must never replace the actual draft token
+        count used to build attention metadata.
+        """
+        return (
+            self.uses_target_batch_descriptor_for_graph()
+            and runtime_mode == CUDAGraphMode.FULL
+            and batch_descriptor.uniform
+            and batch_descriptor.num_reqs is not None
+        )
+
     @torch.inference_mode()
     def dummy_run(
         self,
@@ -922,7 +961,26 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
 
-        if self.use_cuda_graph:
+        try_target_batch_descriptor = (
+            self.use_cuda_graph
+            and self.uses_target_batch_descriptor_for_graph()
+            and target_model_batch_desc is not None
+        )
+        use_target_batch_descriptor = False
+        if try_target_batch_descriptor:
+            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=target_model_batch_desc.num_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            use_target_batch_descriptor = self._can_use_target_batch_descriptor_for_graph(
+                aclgraph_runtime_mode,
+                batch_descriptor,
+            )
+            num_input_tokens = (
+                self.get_graph_num_input_tokens(batch_descriptor) if use_target_batch_descriptor else num_tokens
+            )
+        elif self.use_cuda_graph:
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -938,7 +996,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if num_tokens_across_dp is not None:
             num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
-        if self.use_cuda_graph:
+        if use_target_batch_descriptor:
+            # The ACLGraph cache key remains the target verifier descriptor;
+            # only the draft execution width is transformed.
+            num_input_tokens = self.get_graph_num_input_tokens(batch_descriptor)
+        elif self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -947,7 +1009,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_target_batch_descriptor:
+            num_reqs_padded = self.prepare_target_batch_descriptor_for_graph(
+                common_attn_metadata,
+                batch_descriptor,
+                num_tokens,
+            )
+        elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
@@ -1058,7 +1126,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._pad_draft_buffers(num_tokens, num_input_tokens)
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
-            common_attn_metadata, num_input_tokens, num_tokens
+            common_attn_metadata,
+            num_input_tokens,
+            num_tokens,
+            batch_descriptor=(batch_descriptor if aclgraph_runtime_mode == CUDAGraphMode.FULL else None),
         )
 
         if self.uses_mrope:
@@ -2369,6 +2440,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
+        batch_descriptor: BatchDescriptor | None = None,
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
@@ -2437,7 +2509,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         if device_metadata_executor is not None and device_metadata_tasks:
-            device_metadata_executor.submit(device_metadata_tasks)
+            if batch_descriptor is None:
+                device_metadata_executor.submit(device_metadata_tasks)
+            else:
+                device_metadata_executor.submit(
+                    device_metadata_tasks,
+                    batch_descriptor=batch_descriptor,
+                    event_namespace="dspark-draft",
+                )
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]

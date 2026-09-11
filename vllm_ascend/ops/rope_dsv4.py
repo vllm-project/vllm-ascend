@@ -84,6 +84,7 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    cached_output_len: int | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
@@ -115,6 +116,17 @@ def get_cos_and_sin_dsa(
 
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
+                output_len = (
+                    num_tokens
+                    if cached_output_len is None
+                    else cached_output_len
+                )
+                if output_len < num_tokens:
+                    raise ValueError(
+                        "DSA RoPE cached_output_len cannot be smaller than "
+                        "the number of positions: "
+                        f"output_len={output_len}, num_tokens={num_tokens}"
+                    )
 
                 # This is semantically equivalent to the previous
                 # `full_rope_cos[pos_tensor] / full_rope_sin[pos_tensor]`
@@ -131,16 +143,49 @@ def get_cos_and_sin_dsa(
                     pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_rope_cos.size(-1))
                 )
                 if draft_index is None:
+                    if output_len > buf_cos.shape[0]:
+                        raise ValueError(
+                            "DSA RoPE runtime buffer is too small: "
+                            f"capacity={buf_cos.shape[0]}, "
+                            f"required={output_len}"
+                        )
                     torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[:num_tokens])
                     torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[:num_tokens])
+                    if output_len > num_tokens:
+                        buf_cos[num_tokens:output_len].fill_(1)
+                        buf_sin[num_tokens:output_len].zero_()
 
-                    batch_result[config_key][group_name] = (buf_cos[:num_tokens], buf_sin[:num_tokens])
-                else:
-                    torch.gather(full_rope_cos, 0, gather_idx, out=buf_cos[draft_index - 1][:num_tokens])
-                    torch.gather(full_rope_sin, 0, gather_idx, out=buf_sin[draft_index - 1][:num_tokens])
                     batch_result[config_key][group_name] = (
-                        buf_cos[draft_index - 1][:num_tokens],
-                        buf_sin[draft_index - 1][:num_tokens],
+                        buf_cos[:output_len],
+                        buf_sin[:output_len],
+                    )
+                else:
+                    draft_cos = buf_cos[draft_index - 1]
+                    draft_sin = buf_sin[draft_index - 1]
+                    if output_len > draft_cos.shape[0]:
+                        raise ValueError(
+                            "DSA speculative RoPE buffer is too small: "
+                            f"capacity={draft_cos.shape[0]}, "
+                            f"required={output_len}"
+                        )
+                    torch.gather(
+                        full_rope_cos,
+                        0,
+                        gather_idx,
+                        out=draft_cos[:num_tokens],
+                    )
+                    torch.gather(
+                        full_rope_sin,
+                        0,
+                        gather_idx,
+                        out=draft_sin[:num_tokens],
+                    )
+                    if output_len > num_tokens:
+                        draft_cos[num_tokens:output_len].fill_(1)
+                        draft_sin[num_tokens:output_len].zero_()
+                    batch_result[config_key][group_name] = (
+                        draft_cos[:output_len],
+                        draft_sin[:output_len],
                     )
             else:
                 curr_cos = full_rope_cos[pos_tensor]

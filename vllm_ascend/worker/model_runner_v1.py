@@ -5781,6 +5781,10 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_extract_hidden_states()
+                or (
+                    self.speculative_config.use_dspark()
+                    and self.drafter.use_cuda_graph
+                )
             )
         ):
             assert isinstance(
@@ -5796,12 +5800,23 @@ class NPUModelRunner(GPUModelRunner):
             for desc in descs
         })
 
+        get_draft_graph_num_tokens = getattr(
+            self.drafter,
+            "get_graph_num_input_tokens",
+            lambda desc: desc.num_tokens,
+        )
+        draft_capture_sizes = sorted({
+            get_draft_graph_num_tokens(desc)
+            for _, descs in capture_descs
+            for desc in descs
+        })
+
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

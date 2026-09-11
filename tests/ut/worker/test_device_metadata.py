@@ -199,6 +199,23 @@ def test_external_event_frontiers_must_remain_stable(executor_env):
     assert not executor.submission_in_flight
 
 
+def test_external_event_frontiers_are_isolated_by_namespace(executor_env):
+    executor, calls, allocations = executor_env
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
+
+    executor.submit(_tasks(calls), descriptor, event_namespace="target")
+    executor.release()
+    executor.submit(
+        _tasks(calls)[:-1],
+        descriptor,
+        event_namespace="dspark-draft",
+    )
+
+    assert executor.uses_external_events
+    assert allocations[-2:] == ["external-3", "external-4"]
+    executor.release()
+
+
 def test_submit_failure_keeps_partial_submission_in_flight(executor_env):
     executor, calls, _ = executor_env
 

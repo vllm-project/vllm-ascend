@@ -24,6 +24,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _dsa_swa_only_cmp_ratio,
     _has_weight_scale,
     build_dspark_swa_indices,
+    get_dspark_swa_index_width,
     get_dspark_sparse_sas_window,
 )
 from vllm_ascend.attention.utils import (
@@ -282,6 +283,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
         if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
             vllm_config
         ):
@@ -309,6 +311,21 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
                 for _ in range(spec_token_num)
             ]
+            if self.speculative_config.use_dspark():
+                index_width = get_dspark_swa_index_width(
+                    self.model_config.hf_config.sliding_window,
+                    spec_token_num,
+                )
+                max_dspark_rows = max(
+                    scheduler_config.max_num_batched_tokens,
+                    scheduler_config.max_num_seqs * (spec_token_num + 1),
+                )
+                self.dspark_swa_indices_buffer = torch.full(
+                    (max_dspark_rows, 1, index_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -473,10 +490,19 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 treat_short_extends_as_decodes=False,
             )
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            tp_size = get_tp_group().world_size
+            rope_output_len = (
+                (num_input_tokens + tp_size - 1) // tp_size
+            ) * tp_size
             # Use per-draft-index RoPE buffer so tensor addresses stay stable
             # across graph capture/replay; the per-step cache below then lets
             # sibling kv-cache groups reuse the same stable tensors.
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=True,
+                draft_index=draft_index,
+                cached_output_len=rope_output_len,
+            )
             if metadata_cache is not None:
                 metadata_cache.update(
                     num_decodes=num_decodes,
@@ -609,8 +635,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # freshly built values from the same (stable) buffer addresses.
             # Returning a fresh clone would leave the graph reading stale
             # capture-time metadata and cause illegal device memory accesses.
-            local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
-            local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
+            local_cos = cos[local_start:local_end_with_pad]
+            local_sin = sin[local_start:local_end_with_pad]
 
             _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
                 num_reqs=num_reqs,
@@ -634,20 +660,23 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     local_end_with_pad=local_end_with_pad,
                     tokens_per_rank=tokens_per_rank,
                     num_tokens_pad=num_tokens_pad,
-                    local_query_start_loc=local_query_start_loc.clone(),
-                    local_seq_lens=local_seq_lens.clone(),
+                    local_query_start_loc=local_query_start_loc,
+                    local_seq_lens=local_seq_lens,
                     max_local_query_len=max_local_query_len,
                     max_local_seq_lens=max_local_seq_lens,
                     local_cos=local_cos,
                     local_sin=local_sin,
-                    start_pos=start_pos.clone(),
+                    start_pos=start_pos,
                 )
 
         dspark_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if is_noncausal:
             assert self.speculative_config is not None
-            # todo: If DSA CP is adapted to v2 DSpark graph mode, there may be issues.
+            if self.dspark_swa_indices_buffer is None:
+                raise RuntimeError(
+                    "DSpark DSA-CP requires a persistent SWA-index buffer"
+                )
             global_dspark_indices, _ = build_dspark_swa_indices(
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
@@ -656,6 +685,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: num_reqs + 1],
                 self.seq_lens[:num_reqs],
                 self.num_actual_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
             pad_rows = num_tokens_pad - global_dspark_indices.shape[0]
             if pad_rows < 0:
@@ -664,8 +694,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     f"num_tokens_pad={num_tokens_pad}, actual={global_dspark_indices.shape[0]}"
                 )
             if pad_rows:
-                global_dspark_indices = F.pad(global_dspark_indices, (0, 0, 0, 0, 0, pad_rows), value=-1)
-            dspark_swa_indices = global_dspark_indices[local_start:local_end_with_pad].contiguous()
+                self.dspark_swa_indices_buffer[
+                    global_dspark_indices.shape[0]:num_tokens_pad
+                ].fill_(-1)
+            dspark_swa_indices = self.dspark_swa_indices_buffer[
+                local_start:local_end_with_pad
+            ]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         assert self.spec_slot_mapping is not None
