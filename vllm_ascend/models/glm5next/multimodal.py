@@ -31,6 +31,7 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
 )
+from vllm.model_executor.models.glm_ocr import GlmOcrVisionAttention
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -584,6 +585,187 @@ class Glm5NextVisionTransformer(nn.Module):
     def load_weights(self, weights) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+class Glm5NextVisionRMSNorm(nn.Module):
+    """Weight-only RMSNorm matching the Transformers GLM5Next ViT.
+
+    Keep this vision-specific implementation independent from vLLM's RMSNorm.
+    On Ascend, the latter can acquire a quantization bias from the global text
+    quantization config even though the vision tower itself is unquantized.
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
+class AscendGlm5NextVisionAttention(GlmOcrVisionAttention):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        projection_size: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            projection_size=projection_size,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        # q/k norm eps stays at 1e-5, identical to the base tower; only the
+        # implementation is swapped for the quant-decoupled RMSNorm.
+        self.q_norm = Glm5NextVisionRMSNorm(self.head_dim, eps=1e-5)
+        self.k_norm = Glm5NextVisionRMSNorm(self.head_dim, eps=1e-5)
+
+
+class AscendGlm5NextVisionBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_hidden_dim: int,
+        norm_eps: float,
+        swiglu_limit: float,
+        bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.norm1 = Glm5NextVisionRMSNorm(dim, eps=norm_eps)
+        self.norm2 = Glm5NextVisionRMSNorm(dim, eps=norm_eps)
+        self.attn = AscendGlm5NextVisionAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+        self.mlp = Glm5NextVisionMLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            swiglu_limit=swiglu_limit,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
+        max_seqlen: int | None = None,
+    ) -> torch.Tensor:
+        x = x + self.attn(
+            self.norm1(x),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            max_seqlen=max_seqlen,
+        )
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class AscendGlm5NextVisionTransformer(Glm5NextVisionTransformer):
+    """Ascend vision tower for GLM-5.3-Flash (private-repo implementation).
+
+    Only the normalization layers differ from the base tower: every vision
+    RMSNorm is replaced with the weight-only Glm5NextVisionRMSNorm (a plain
+    nn.Module with identical eps values), which is immune to text-quant
+    pollution. MLP, merger, forward, prepare_encoder_metadata, rot_pos_emb
+    and weight loading are inherited from Glm5NextVisionTransformer so the
+    encoder-CUDAGraph path keeps working.
+    """
+
+    def __init__(
+        self,
+        text_config,  # noqa: ANN001
+        vision_config,  # noqa: ANN001
+        norm_eps: float = 1e-5,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        # Initialize the dedicated GLM5Next tower directly. Calling the base
+        # initializer and replacing its blocks would briefly allocate two
+        # complete vision towers for the production 24-layer config.
+        nn.Module.__init__(self)
+        # text_config remains in the signature for compatibility with the
+        # existing multimodal model construction path.
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
+
+        self.hidden_size = vision_config.hidden_size
+        self.num_heads = vision_config.num_heads
+        self.patch_size = vision_config.patch_size
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.out_hidden_size = vision_config.out_hidden_size
+
+        self.patch_embed = Glm5NextVisionPatchEmbed(
+            patch_size=vision_config.patch_size,
+            temporal_patch_size=vision_config.temporal_patch_size,
+            in_channels=vision_config.in_channels,
+            hidden_size=self.hidden_size,
+        )
+        head_dim = self.hidden_size // self.num_heads
+        self.rotary_pos_emb = get_rope(
+            head_size=head_dim,
+            max_position=8192,
+            is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
+        )
+        swiglu_limit = vision_config.swiglu_limit
+        attention_bias = vision_config.attention_bias
+        self.blocks = nn.ModuleList(
+            [
+                AscendGlm5NextVisionBlock(
+                    dim=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_hidden_dim=vision_config.intermediate_size,
+                    norm_eps=norm_eps,
+                    swiglu_limit=swiglu_limit,
+                    bias=attention_bias,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.blocks.{layer_idx}",
+                )
+                for layer_idx in range(vision_config.depth)
+            ]
+        )
+        self.merger = Glm5NextPatchMerger(
+            d_model=vision_config.out_hidden_size,
+            context_dim=vision_config.projection_intermediate_size,
+            swiglu_limit=swiglu_limit,
+            quant_config=quant_config,
+            bias=False,
+            prefix=f"{prefix}.merger",
+        )
+        self.downsample = Conv2dLayer(
+            in_channels=vision_config.hidden_size,
+            out_channels=vision_config.out_hidden_size,
+            kernel_size=vision_config.spatial_merge_size,
+            stride=vision_config.spatial_merge_size,
+        )
+        self.post_layernorm = Glm5NextVisionRMSNorm(
+            vision_config.hidden_size,
+            eps=norm_eps,
+        )
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+        )
 
 
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
