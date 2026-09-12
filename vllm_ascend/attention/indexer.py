@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.context_parallel.common_cp import ReplicatedKVMetadataMixin
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
@@ -449,12 +450,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         )
 
 
-class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerMetadata]):
+class AscendSFAIndexerMetadataBuilder(
+    ReplicatedKVMetadataMixin,
+    AttentionMetadataBuilder[AscendSFAIndexerMetadata],
+):
     """Builds the metadata consumed by SFA indexer forwards.
 
-    The indexer cache layer shares block ids with the main SFA cache group,
-    so the slot mapping and block table mirror the ``*.attn`` layer's; the
-    rope tables are rebuilt from the same positions via the shared helper.
+    The indexer cache layer shares allocation block ids with the SFA cache.
+    Replicated DCP indexer caches derive full addresses from their own spec;
+    the rope tables are rebuilt from the same positions via the shared helper.
     The slot mapping is emitted write-ready for the active parallel mode
     (full gather mapping under PCP). Variants with their own cache geometry
     override this construction to supply their layout's equivalents.
@@ -473,6 +477,16 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFAIndexerBackend])
         self._pcp_active = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self._replicated_dcp = getattr(kv_cache_spec, "sfa_dcp_replicated_indexer_size", 1)
+        if self._replicated_dcp > 1 and not self._pcp_active:
+            self._init_replicated_view(
+                kv_cache_spec,
+                self.kernel_block_size,
+                self._replicated_dcp,
+                vllm_config.scheduler_config.max_num_seqs + 1,
+                vllm_config,
+                device,
+            )
 
     @classmethod
     def get_cudagraph_support(
@@ -500,6 +514,12 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        if self._replicated_dcp > 1 and not self._pcp_active:
+            block_table = self._build_block_table_replicated_view(
+                self._get_dcp_local_block_table(block_table, num_reqs), common_attn_metadata.seq_lens
+            )
+            slot_mapping = self._build_slot_mapping_replicated_view(common_attn_metadata, block_table)
 
         cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
 
@@ -517,7 +537,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens[:num_reqs],
             cum_query_lens=common_attn_metadata.query_start_loc[1 : num_reqs + 1],
-            block_table=common_attn_metadata.block_table_tensor[:num_reqs],
+            block_table=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
             block_size=block_size,
