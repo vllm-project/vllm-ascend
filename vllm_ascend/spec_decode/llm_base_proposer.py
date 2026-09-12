@@ -114,6 +114,16 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    arange: torch.Tensor
+
+    def _ensure_query_start_loc_arange_capacity(self) -> None:
+        required_size = max(self.max_batch_size, self.max_num_tokens) + 1
+        if self.arange.numel() < required_size:
+            self.arange = torch.arange(
+                required_size,
+                device=self.arange.device,
+                dtype=self.arange.dtype,
+            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
@@ -162,6 +172,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+        self._ensure_query_start_loc_arange_capacity()
 
         # Assign runner before it's used in the methods below
         self.runner = runner
