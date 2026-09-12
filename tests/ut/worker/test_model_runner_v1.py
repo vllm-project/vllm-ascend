@@ -45,6 +45,57 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
+class TestGlm5MtpGraphMetadata(unittest.TestCase):
+    @staticmethod
+    def _build_dispatch_runner(speculative: bool) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 6
+        runner.speculative_config = object() if speculative else None
+        # ``use_dcp`` is derived from this field in production initialization.
+        runner.dcp_size = 1
+        runner._pad_for_sequence_parallelism = lambda num_tokens: num_tokens
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([9, 10], dtype=np.int32),
+            num_prompt_tokens=np.array([10, 10], dtype=np.int32),
+            lora_id_to_lora_request={},
+        )
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.cudagraph_dispatcher = MagicMock(
+            dispatch=MagicMock(
+                return_value=(
+                    CUDAGraphMode.NONE,
+                    SimpleNamespace(num_tokens=12),
+                )
+            )
+        )
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            observability_config=SimpleNamespace(cudagraph_metrics=False),
+        )
+        return runner
+
+    def test_partial_prompt_with_state_dispatches_speculative_decode_graph(self):
+        runner = self._build_dispatch_runner(speculative=True)
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.enable_sp",
+            return_value=False,
+        ):
+            runner._determine_batch_execution_and_padding(
+                num_tokens=12,
+                num_reqs=2,
+                num_scheduled_tokens_np=np.array([6, 6], dtype=np.int32),
+                max_num_scheduled_tokens=6,
+                use_cascade_attn=False,
+            )
+
+        call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
+        self.assertTrue(call_kwargs["uniform_decode"])
+
+
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
