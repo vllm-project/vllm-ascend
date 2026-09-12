@@ -388,10 +388,7 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
     positions = positions_storage[:, 3 : 3 + num_tokens]
     if num_tokens > 0:
         assert not positions.is_contiguous()
-    inv_freq = 1.0 / (
-        10000
-        ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device=device) / rope_dim)
-    )
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device=device) / rope_dim))
     freqs = positions.to(torch.float32).unsqueeze(-1) * inv_freq
     cos = freqs.cos()
     sin = freqs.sin()
@@ -407,9 +404,7 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
     else:
         qkv_for_ref = qkv
 
-    reference = (
-        naive_split_qkv_rmsnorm_mrope_interleaved if is_interleaved else naive_split_qkv_rmsnorm_mrope
-    )
+    reference = naive_split_qkv_rmsnorm_mrope_interleaved if is_interleaved else naive_split_qkv_rmsnorm_mrope
     golden_q, golden_k, golden_v = reference(
         qkv_for_ref.cpu(),
         q_weight.cpu().to(torch.float32) + rms_weight_offset,
@@ -452,3 +447,4 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+

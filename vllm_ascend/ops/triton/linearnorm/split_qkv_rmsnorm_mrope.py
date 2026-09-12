@@ -124,9 +124,7 @@ def split_qkv_rmsnorm_mrope_kernel(
             t_mask = ~(h_mask | w_mask)
         else:
             t_mask = cos_offsets_fp32 < mrope_section_t
-            h_mask = (mrope_section_t <= cos_offsets_fp32) & (
-                cos_offsets_fp32 < mrope_section_t + mrope_section_h
-            )
+            h_mask = (mrope_section_t <= cos_offsets_fp32) & (cos_offsets_fp32 < mrope_section_t + mrope_section_h)
             w_mask = (mrope_section_t + mrope_section_h <= cos_offsets_fp32) & (
                 cos_offsets_fp32 < mrope_section_t + mrope_section_h + mrope_section_w
             )
@@ -515,3 +513,4 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
