@@ -15,6 +15,7 @@ from tools.bisect.version_compat import (
     PackageVersions,
     VersionAdapter,
     VersionPolicy,
+    environment_drift,
     expected_versions,
     installed_package_version,
     versions_equal,
@@ -222,3 +223,41 @@ def test_adapter_switches_real_vllm_release_and_restores_source(tmp_path: Path):
     assert git_ops.current_commit(VLLM_SOURCE_DIR) == original_commit
     if original_version is not None:
         assert versions_equal(_installed_vllm_version_from_test_interpreter(), original_version)
+
+
+def test_environment_drift_detects_installed_mismatch(monkeypatch: pytest.MonkeyPatch):
+    """The nightly image carries its own build (e.g. vllm 0.28.0+empty) that
+    may differ from the pin every endpoint declares -- that drift must be
+    visible to the adaptation gate."""
+    monkeypatch.setattr(
+        "tools.bisect.version_compat.installed_versions",
+        lambda: PackageVersions(vllm="0.28.0+empty", torch_npu="2.10.0"),
+    )
+
+    drift = environment_drift(PackageVersions(vllm="v0.27.1", torch_npu="2.10.0"))
+
+    assert drift == ("vllm",)
+
+
+def test_environment_drift_empty_when_environment_matches_pin(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "tools.bisect.version_compat.installed_versions",
+        lambda: PackageVersions(vllm="0.27.1", torch_npu="2.10.0"),
+    )
+
+    drift = environment_drift(PackageVersions(vllm="v0.27.1", torch_npu="2.10.0"))
+
+    assert drift == ()
+
+
+def test_environment_drift_skips_undeclared_packages(monkeypatch: pytest.MonkeyPatch):
+    """A package without a declared pin has nothing to adapt to, so a
+    differing installed version is not actionable drift."""
+    monkeypatch.setattr(
+        "tools.bisect.version_compat.installed_versions",
+        lambda: PackageVersions(vllm="0.28.0+empty", torch_npu="2.10.0"),
+    )
+
+    drift = environment_drift(PackageVersions(vllm=None, torch_npu="2.10.0"))
+
+    assert drift == ()

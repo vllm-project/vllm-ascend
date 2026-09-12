@@ -242,3 +242,56 @@ def test_main_returns_2_on_fatal_abort(tmp_path: Path, monkeypatch: pytest.Monke
     )
 
     assert rc == 2
+
+
+def _wired_bisector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift):
+    """Bisector whose git/version reads are stubbed so run() reaches the
+    version-policy wiring; returns (bisector, captured_policy_dict)."""
+    monkeypatch.setattr("tools.bisect.runner.kill_stray_servers", lambda: None)
+    monkeypatch.setattr(git_ops, "describe", lambda repo, ref: Candidate(commit=ref, pr_number=None, subject="s"))
+    monkeypatch.setattr(
+        git_ops,
+        "candidate_list",
+        lambda repo, good, bad: [
+            Candidate(commit=good, pr_number=None, subject="good"),
+            Candidate(commit=bad, pr_number=None, subject="bad"),
+        ],
+    )
+    monkeypatch.setattr(
+        "tools.bisect.auto_bisect.expected_versions",
+        lambda repo, commit=None: PackageVersions(vllm="v0.27.1"),
+    )
+    monkeypatch.setattr("tools.bisect.auto_bisect.environment_drift", lambda expected: drift)
+    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit="b" * 40, soc="a2", good_commit="a" * 40)
+    opt = BisectOptions(repo_dir=tmp_path, work_dir=str(tmp_path / "work"), assume_built_head=False)
+    bisector = Bisector(inp, opt)
+    captured = {}
+    monkeypatch.setattr(bisector.runner, "configure_version_policy", lambda policy: captured.update(policy=policy))
+
+    def fatal(good, candidates, state):
+        raise BisectFatalError("stop after wiring")
+
+    monkeypatch.setattr(bisector, "_verify_endpoints", fatal)
+    return bisector, captured
+
+
+def test_run_enables_version_adaptation_on_environment_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Endpoints may pin the same version while the installed environment
+    differs (the nightly image carries its own build): adaptation must stay
+    enabled, or every trial runs against the wrong dependency."""
+    bisector, captured = _wired_bisector(tmp_path, monkeypatch, drift=("vllm",))
+
+    with pytest.raises(BisectFatalError):
+        bisector.run()
+
+    assert captured["policy"].enabled
+    assert captured["policy"].checked_packages == ("vllm",)
+
+
+def test_run_keeps_adaptation_disabled_when_environment_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    bisector, captured = _wired_bisector(tmp_path, monkeypatch, drift=())
+
+    with pytest.raises(BisectFatalError):
+        bisector.run()
+
+    assert not captured["policy"].enabled

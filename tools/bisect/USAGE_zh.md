@@ -148,8 +148,8 @@ python -m tools.bisect.auto_bisect \
 
 工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
 
-- 两端版本相同:该包后续不再检查;
-- 两端版本不同:每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
+- 两端版本相同**且环境实际版本与该 pin 一致**:该包后续不再检查;
+- 两端版本不同,**或环境实际版本与两端共同的 pin 不一致**(nightly 镜像自带构建,不保证跟随 pin):每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
 
 vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
 

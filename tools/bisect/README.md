@@ -53,8 +53,10 @@ trigger (case FAIL)
 * **Dependency adaptation**: the tool reads vLLM from
   `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
   `pyproject.toml` as fallback). If the good and bad endpoints declare the same
-  vLLM and torch-npu versions, no version checks run. If either endpoint
-  version differs, every candidate is adapted before pytest: vLLM is checked
+  vLLM and torch-npu versions AND the installed environment matches that common pin, no version
+  checks run. Otherwise -- endpoint versions differ, or the installed
+  environment drifts from the pin (nightly images carry their own build) --
+  every candidate is adapted before pytest: vLLM is checked
   out from the configured vLLM source directory (default
   `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
 
