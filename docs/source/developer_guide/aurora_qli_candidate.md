@@ -122,7 +122,7 @@ while single-head CSA specialization is A2/A3-only and split-G/vectorized
 addressing is A5-only. HCA, independent original-KV sparse templates, other
 layouts and FP16 are excluded on both architectures. Host validation rejects
 pruned contracts before kernel lookup. See the operator's
-[compilation matrix](../../../csrc/attention/sparse_flash_mla/docs/ratio2_a2a3.md#7-当前仓库的模型编译范围).
+[compilation matrix](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/attention/sparse_flash_mla/docs/ratio2_a2a3.md#7-%E5%BD%93%E5%89%8D%E4%BB%93%E5%BA%93%E7%9A%84%E6%A8%A1%E5%9E%8B%E7%BC%96%E8%AF%91%E8%8C%83%E5%9B%B4).
 HcPre already isolates A2/A3 key 0 from A5 keys 1000/1001; both A5 paths can
 be selected by runtime token counts, so neither is removed.
 
