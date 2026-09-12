@@ -144,6 +144,35 @@ def test_kimi_model_declares_fused_bfg_checkpoint_mapping():
     ]
 
 
+def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
+    mlp = kimi_k3.AscendKimiMLP.__new__(kimi_k3.AscendKimiMLP)
+    nn.Module.__init__(mlp)
+    mlp.use_sequence_parallel = True
+    calls = []
+
+    def fake_all_gather(hidden_states):
+        calls.append(("gather", hidden_states.clone()))
+        return torch.cat((hidden_states, hidden_states + 10), dim=0)
+
+    def fake_mlp_forward(_self, hidden_states):
+        calls.append(("mlp", hidden_states.clone()))
+        return hidden_states + 1
+
+    def fake_reduce_scatter(hidden_states):
+        calls.append(("reduce_scatter", hidden_states.clone()))
+        return hidden_states.chunk(2, dim=0)[0]
+
+    monkeypatch.setattr(kimi_k3, "sp_all_gather", fake_all_gather)
+    monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
+    monkeypatch.setattr(kimi_k3.KimiMLP, "forward", fake_mlp_forward)
+
+    output = mlp(torch.tensor([[1.0], [2.0]]))
+
+    assert [name for name, _ in calls] == ["gather", "mlp", "reduce_scatter"]
+    torch.testing.assert_close(calls[1][1], torch.tensor([[1.0], [2.0], [11.0], [12.0]]))
+    torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
+
+
 def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     class IdentityAttention(nn.Module):
         def forward(self, *, hidden_states, positions):
