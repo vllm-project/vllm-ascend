@@ -12,6 +12,7 @@ test_cases:
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--no-enable-prefix-caching"
       - "--tensor-parallel-size"
