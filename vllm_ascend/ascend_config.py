@@ -1008,7 +1008,8 @@ class DynamicSpecConfig:
     # An object opts into physical K, automatic V2 support and hybrid. Example:
     # {"min_k": 3, "capture_k": [3, 5]}. Advanced knobs are slack, percentile,
     # and hybrid.{enabled,min_batch_size,acceptance_threshold,low_steps,
-    # high_steps,probe_interval}. None retains the legacy configuration path.
+    # high_steps,probe_interval}. Set auto_tune.enabled to learn K from
+    # online end-to-end timings. None retains the legacy configuration path.
     physical_k: dict[str, Any] | None = None
     # ``hardware_aware`` adds Ascend physical K control over upstream
     # confidence-based adaptive verification.

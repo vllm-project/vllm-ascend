@@ -36,6 +36,12 @@ def test_compact_config_defaults_and_overrides():
         "hybrid_low_steps": 4,
         "hybrid_high_steps": 2,
         "hybrid_probe_interval": 0,
+        "auto_tune_enabled": False,
+        "auto_tune_warmup_steps": 64,
+        "auto_tune_explore_ratio": 0.05,
+        "auto_tune_update_interval": 32,
+        "auto_tune_min_gain": 0.02,
+        "auto_tune_ema_decay": 0.9,
     }
     assert v2_physical_k_enabled(compact())
     assert not v2_physical_k_enabled(compact(enabled=False))
@@ -54,6 +60,9 @@ def test_compact_config_defaults_and_overrides():
         {"hybrid": False},
         {"hybrid": {"low_steps": 0}},
         {"hybrid": {"unknown": 1}},
+        {"auto_tune": False},
+        {"auto_tune": {"warmup_steps": 0}},
+        {"auto_tune": {"unknown": 1}},
         {"unknown": 1},
     ],
 )
@@ -110,6 +119,27 @@ def test_non_hybrid_tracks_accepted_width_and_recovers():
     assert controller.cap(5) == 4
     controller.observe([4, 4], [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
     assert controller.cap(5) == 5
+
+
+def test_online_cost_model_explores_and_selects_best_k():
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=4,
+        capture_k=(4, 5),
+        auto_tune_enabled=True,
+        auto_tune_warmup_steps=1,
+        auto_tune_explore_ratio=0.0,
+        auto_tune_update_interval=1,
+        auto_tune_min_gain=0.0,
+    )
+    assert controller.cap(5) == 5
+    # First observation measures K=5, then warmup exploration switches to K=4.
+    controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0)
+    assert controller.current_k == 4
+    # K=4 produces more effective tokens for the same measured time.
+    controller.observe([4] * 8, [[0, 1, 2, 3, 4]] * 8, elapsed_ms=10.0)
+    assert controller.current_k == 4
+    assert controller.last_reason == "auto_cost_model_best_k"
 
 
 def test_dynamic_spec_config_validates_compact_interface():

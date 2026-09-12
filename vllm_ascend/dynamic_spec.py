@@ -11,6 +11,7 @@ Ascend draft width.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import wraps
@@ -29,6 +30,14 @@ _HYBRID_DEFAULTS = {
     "low_steps": 4,
     "high_steps": 2,
     "probe_interval": 32,
+}
+_AUTO_TUNE_DEFAULTS = {
+    "enabled": False,
+    "warmup_steps": 64,
+    "explore_ratio": 0.05,
+    "update_interval": 32,
+    "min_gain": 0.02,
+    "ema_decay": 0.9,
 }
 
 
@@ -85,6 +94,17 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
         value = hybrid.get(name, default)
         _validate_number(name, value, default)
         result[f"hybrid_{name}"] = value
+
+    auto_tune = physical.get("auto_tune", {})
+    if not isinstance(auto_tune, dict):
+        raise ValueError("physical_k.auto_tune must be an object")
+    unknown = set(auto_tune) - set(_AUTO_TUNE_DEFAULTS)
+    if unknown:
+        raise ValueError(f"Unknown physical_k.auto_tune fields: {sorted(unknown)}")
+    for name, default in _AUTO_TUNE_DEFAULTS.items():
+        value = auto_tune.get(name, default)
+        _validate_number(name, value, default)
+        result[f"auto_tune_{name}"] = value
     return result
 
 
@@ -94,8 +114,20 @@ def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
 
 
 @dataclass
+class _CostEstimate:
+    """EMA of effective output tokens per millisecond for one K candidate."""
+
+    ema_score: float = 0.0
+    samples: int = 0
+
+    def observe(self, score: float, decay: float) -> None:
+        self.ema_score = score if not self.samples else decay * self.ema_score + (1 - decay) * score
+        self.samples += 1
+
+
+@dataclass
 class AdaptiveDraftKController:
-    """Choose the next physical K from batch size and observed acceptance."""
+    """Choose the next physical K from acceptance or an online cost model."""
 
     max_k: int
     min_k: int = 1
@@ -107,6 +139,14 @@ class AdaptiveDraftKController:
     hybrid_low_steps: int = 4
     hybrid_high_steps: int = 2
     hybrid_probe_interval: int = 32
+    capture_k: tuple[int, ...] = ()
+    graph_mode: str = "unknown"
+    auto_tune_enabled: bool = False
+    auto_tune_warmup_steps: int = 64
+    auto_tune_explore_ratio: float = 0.05
+    auto_tune_update_interval: int = 32
+    auto_tune_min_gain: float = 0.02
+    auto_tune_ema_decay: float = 0.9
 
     def __post_init__(self) -> None:
         self.max_k = max(int(self.max_k), 0)
@@ -118,6 +158,21 @@ class AdaptiveDraftKController:
         self.hybrid_low_steps = max(int(self.hybrid_low_steps), 1)
         self.hybrid_high_steps = max(int(self.hybrid_high_steps), 1)
         self.hybrid_probe_interval = max(int(self.hybrid_probe_interval), 0)
+        self.auto_tune_warmup_steps = max(int(self.auto_tune_warmup_steps), 1)
+        self.auto_tune_explore_ratio = min(max(float(self.auto_tune_explore_ratio), 0.0), 1.0)
+        self.auto_tune_update_interval = max(int(self.auto_tune_update_interval), 1)
+        self.auto_tune_min_gain = min(max(float(self.auto_tune_min_gain), 0.0), 1.0)
+        self.auto_tune_ema_decay = min(max(float(self.auto_tune_ema_decay), 0.0), 1.0)
+        candidates = {
+            int(k)
+            for k in self.capture_k
+            if self.min_k <= int(k) <= self.max_k
+        }
+        if self.max_k >= self.min_k:
+            candidates.add(self.max_k)
+        self._candidate_k = tuple(sorted(candidates))
+        self._cost_model: dict[tuple[str, int, int], _CostEstimate] = {}
+        self._last_auto_decision = 0
         self._current_k: int | None = None
         self._low_acceptance_steps = 0
         self._high_acceptance_steps = 0
@@ -140,6 +195,91 @@ class AdaptiveDraftKController:
             self._current_k = min(self._current_k, configured_k)
         return self._current_k
 
+    @staticmethod
+    def _batch_bucket(batch_size: int) -> int:
+        batch_size = max(int(batch_size), 1)
+        return 1 << (batch_size - 1).bit_length()
+
+    def _cost_key(self, batch_size: int, k: int) -> tuple[str, int, int]:
+        return self.graph_mode, self._batch_bucket(batch_size), int(k)
+
+    def _select_least_sampled(self, batch_size: int, exclude: int | None = None) -> int | None:
+        choices = [k for k in self._candidate_k if k != exclude]
+        if not choices:
+            return None
+        return min(
+            choices,
+            key=lambda k: (
+                self._cost_model.get(self._cost_key(batch_size, k), _CostEstimate()).samples,
+                k,
+            ),
+        )
+
+    def _observe_cost(
+        self,
+        widths: Sequence[int],
+        accepted: Sequence[int],
+        elapsed_ms: float,
+    ) -> None:
+        if elapsed_ms <= 0 or not self._candidate_k:
+            return
+        batch_size = len(widths)
+        observed_k = max(widths)
+        if observed_k not in self._candidate_k:
+            return
+        # Every request produces one target token, in addition to accepted
+        # draft tokens.  This makes candidates with different K comparable.
+        effective_tokens = sum(accepted) + batch_size
+        score = effective_tokens / elapsed_ms
+        key = self._cost_key(batch_size, observed_k)
+        estimate = self._cost_model.setdefault(key, _CostEstimate())
+        estimate.observe(score, self.auto_tune_ema_decay)
+
+    def _choose_auto_k(self, batch_size: int) -> None:
+        if not self._candidate_k:
+            return
+        # During warmup, deliberately cover every configured candidate.  This
+        # is bounded exploration and does not require extra graph capture.
+        if self.observation_count <= self.auto_tune_warmup_steps:
+            selected = self._select_least_sampled(batch_size)
+            if selected is not None:
+                self._current_k = selected
+                self.last_reason = "auto_warmup_explore"
+            return
+
+        if self.observation_count - self._last_auto_decision < self.auto_tune_update_interval:
+            return
+        self._last_auto_decision = self.observation_count
+
+        if self.auto_tune_explore_ratio:
+            period = max(round(1 / self.auto_tune_explore_ratio), 1)
+            if self.observation_count % period == 0:
+                selected = self._select_least_sampled(batch_size, self._current_k)
+                if selected is not None:
+                    self._current_k = selected
+                    self.last_reason = "auto_periodic_explore"
+                    return
+
+        estimates = {
+            k: self._cost_model.get(self._cost_key(batch_size, k))
+            for k in self._candidate_k
+        }
+        usable = {k: value for k, value in estimates.items() if value is not None and value.samples > 0}
+        if not usable:
+            selected = self._select_least_sampled(batch_size)
+            if selected is not None:
+                self._current_k = selected
+                self.last_reason = "auto_new_batch_bucket_explore"
+            return
+        best_k = max(usable, key=lambda k: usable[k].ema_score)
+        current = usable.get(self._current_k)
+        best = usable[best_k]
+        if current is None or best.ema_score >= current.ema_score * (1 + self.auto_tune_min_gain):
+            self._current_k = best_k
+            self.last_reason = "auto_cost_model_best_k"
+        else:
+            self.last_reason = "auto_cost_model_keep_k"
+
     def update(self, lengths: Iterable[int]) -> None:
         if self.max_k <= 0:
             return
@@ -159,6 +299,7 @@ class AdaptiveDraftKController:
         self,
         scheduled_widths: Sequence[int],
         sampled_token_ids: Sequence[Sequence[int]],
+        elapsed_ms: float | None = None,
     ) -> None:
         if len(scheduled_widths) != len(sampled_token_ids):
             return
@@ -175,6 +316,10 @@ class AdaptiveDraftKController:
         self.last_scheduled_widths = widths
         self.last_accepted_lengths = accepted
         self.observation_count += 1
+        if self.auto_tune_enabled and elapsed_ms is not None:
+            self._observe_cost(widths, accepted, float(elapsed_ms))
+            self._choose_auto_k(len(widths))
+            return
         if not self.hybrid_enabled:
             self.update(accepted)
             return
@@ -236,15 +381,33 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
         hybrid_low_steps=params["hybrid_low_steps"],
         hybrid_high_steps=params["hybrid_high_steps"],
         hybrid_probe_interval=params["hybrid_probe_interval"],
+        capture_k=tuple(params.get("capture_k", ())),
+        graph_mode=_graph_mode(vllm_config),
+        auto_tune_enabled=params["auto_tune_enabled"],
+        auto_tune_warmup_steps=params["auto_tune_warmup_steps"],
+        auto_tune_explore_ratio=params["auto_tune_explore_ratio"],
+        auto_tune_update_interval=params["auto_tune_update_interval"],
+        auto_tune_min_gain=params["auto_tune_min_gain"],
+        auto_tune_ema_decay=params["auto_tune_ema_decay"],
     )
 
 
-def _update_controller(controller, scheduler_output, model_runner_output) -> None:
+def _graph_mode(vllm_config: Any) -> str:
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    mode = getattr(compilation_config, "cudagraph_mode", "unknown")
+    return getattr(mode, "name", str(mode))
+
+
+def _update_controller(controller, scheduler_output, model_runner_output, elapsed_ms: float | None = None) -> None:
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
     req_ids = getattr(model_runner_output, "req_ids", ())
     scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
     if sampled is not None and len(req_ids) == len(sampled):
-        controller.observe([len(scheduled.get(req_id, ())) for req_id in req_ids], sampled)
+        controller.observe(
+            [len(scheduled.get(req_id, ())) for req_id in req_ids],
+            sampled,
+            elapsed_ms=elapsed_ms,
+        )
         return
     lengths = getattr(model_runner_output, "proposal_lengths", None)
     if lengths is not None:
@@ -274,6 +437,8 @@ def install_scheduler_policy() -> None:
         @wraps(original_update_after_schedule)
         def patched_update_after_schedule(self, scheduler_output):
             controller = getattr(self, "_ascend_physical_k_controller", None)
+            if controller is not None and controller.auto_tune_enabled:
+                self._ascend_physical_k_profile_start_ns = time.perf_counter_ns()
             if controller is not None:
                 scheduler_output.num_spec_tokens_to_schedule = controller.cap(
                     scheduler_output.num_spec_tokens_to_schedule
@@ -291,7 +456,15 @@ def install_scheduler_policy() -> None:
             outputs = original_update_from_output(self, scheduler_output, model_runner_output)
             controller = getattr(self, "_ascend_physical_k_controller", None)
             if controller is not None:
-                _update_controller(controller, scheduler_output, model_runner_output)
+                start_ns = getattr(self, "_ascend_physical_k_profile_start_ns", None)
+                elapsed_ms = (
+                    (time.perf_counter_ns() - start_ns) / 1_000_000
+                    if start_ns is not None
+                    else None
+                )
+                _update_controller(controller, scheduler_output, model_runner_output, elapsed_ms)
+                if start_ns is not None:
+                    del self._ascend_physical_k_profile_start_ns
             return outputs
 
         patched_update_from_output._vllm_ascend_physical_k_patched = True  # type: ignore[attr-defined]
