@@ -234,7 +234,10 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=pcp_manager.global_batch,
             )
 
-        self._restore_replicated_draft_target_states()
+        # vLLM #56107 restores aux states in sample_tokens and passes local
+        # target states to propose; replicated drafters restore those there.
+        if vllm_version_is("0.28.0"):
+            self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
