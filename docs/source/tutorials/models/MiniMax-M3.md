@@ -906,21 +906,419 @@ Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/
 
 ### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
 
-In addition to the direct Mooncake KV transfer described in Section 5.3, MiniMax-M3 1P1D can be deployed with a KV Cache Pool (Ascend Store). The engine uses `MultiConnector`: `MooncakeConnectorV1` transfers KV cache directly between the prefill and decode nodes, while `AscendStoreConnector` stores KV cache into and loads it from the pool, allowing KV reuse across decode instances and a recompute fallback on load failure.
+This section reuses the Section 5.3 topology, `launch_online_dp.py`, proxy mapping, and most `vllm serve` flags. The difference is that Prefill and Decode use `MultiConnector` so that live P→D KV transfer and Mooncake KV Cache Pool work together.
 
-For environment prerequisites (CANN >= 8.5.0, `mooncake-transfer-engine-npu >= 0.3.11.post1`), Mooncake master/etcd startup, the `mooncake.json` configuration file, and the full connector parameter list, refer to the [KV Cache Pool (Ascend Store) Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+Use Mooncake for both paths:
 
-Key points common to both the prefill and decode nodes:
+- `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time.
+- `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool.
+- By default, the Prefill node looks up, loads, and writes the pool.
 
-- Export `PYTHONHASHSEED=0` on every node to guarantee uniform hash generation between the pool, the prefill node, and the decode node.
-- Export `MOONCAKE_CONFIG_PATH` pointing to the `mooncake.json` used by the pool backend.
-- `--kv-transfer-config` uses `"kv_connector": "MultiConnector"` with `"kv_load_failure_policy": "recompute"`, so a failed KV load from the pool rolls the request back to recomputation instead of failing it.
-- The `connectors` list contains `MooncakeConnectorV1` (its `prefill`/`decode` `dp_size`, `tp_size`, and `pp_size` must match the actual global layout, same as in Section 5.3) and `AscendStoreConnector` (`"backend": "mooncake"`, and a unique `lookup_rpc_port` for each instance).
-- The decode side can set `"load_async": true` to load KV cache from the pool asynchronously.
+Reuse the `launch_online_dp.py` from Section 5.3. The launcher still passes visible devices, port, DP size, DP rank, DP address, DP RPC port, TP size, and PP size as positional arguments. Refer to the [KV Cache Pool Guide](../../user_guide/feature_guide/kv_pool.md) for backend, eviction, and tenant options. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
-The launch flow and `launch_online_dp.py` launcher are the same as in Section 5.3; only the role-specific `run_dp_template.sh` differs in the `--kv-transfer-config` connector composition and the pool-related environment variables.
+Before startup, mount the host HCCN config into every container that participates in pooling:
 
-<!-- TODO: paste the verified A3 / 950DT products run_dp_template.sh configs with MultiConnector + AscendStoreConnector here. -->
+```bash
+-v /etc/hccn.conf:/etc/hccn.conf:ro
+```
+
+Place `mooncake.json` next to `run_dp_template.sh` on each node. Prefill contributes pool memory; Decode does not. Replace `xxxx` with the Prefill node IP. A non-zero `global_segment_size` must be aligned to `1GB`.
+
+Prefill `mooncake.json`:
+
+```json
+{"metadata_server":"P2PHANDSHAKE","protocol":"ascend","device_name":"","master_server_address":"xxxx:50088","global_segment_size":"16GB","preferred_segment":true,"prefer_alloc_in_same_node":true,"enable_ssd_offload":false,"tenant_id":"default"}
+```
+
+Decode `mooncake.json` (same Master and `tenant_id`, no donated segment):
+
+```json
+{"metadata_server":"P2PHANDSHAKE","protocol":"ascend","device_name":"","master_server_address":"xxxx:50088","global_segment_size":0,"preferred_segment":false,"prefer_alloc_in_same_node":true,"enable_ssd_offload":false,"tenant_id":"default"}
+```
+
+Both nodes must use the same `PYTHONHASHSEED`, Mooncake Master address, and `tenant_id`. Set `MOONCAKE_CONFIG_PATH` to the local `mooncake.json`. Prefill pooling RPC ports start at `37000`; Decode pooling RPC ports start at `37100`; add the DP rank so every rank is unique.
+
+Start the services in this order: Mooncake Master → Decode → Prefill → Proxy.
+
+#### A3 series
+
+Prefill-Decode disaggregation with KV Cache Pool can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with EAGLE3. Keep expert dual-stream, Shared Expert DP, EAGLE3, Prefill eager, Decode `FULL_DECODE_ONLY`, and `max-model-len=133000` from Section 5.3.
+
+**Deployment topology:**
+
+| Node group | Nodes | Parallelism | Engine ports | GPU Memory Utilization |
+| ---------- | ----- | ----------- | ------------ | ---------------------- |
+| Prefill | 1 | `DP2 TP4 PP2` (2 ranks, 8 NPUs each) | 31050/31051 | 0.85 |
+| Decode | 1 | `DP4 TP4 PP1` (4 ranks, 4 NPUs each) | 31060-31063 | 0.92 |
+
+Model and serving limits stay the same as Section 5.3: Prefill `max-num-seqs=32`, Decode `max-num-seqs=64`, `max-model-len=133000`.
+
+1. Prefill node `run_dp_template.sh`
+
+```bash
+unset http_proxy https_proxy ftp_proxy
+
+nic_name="xxxx"                 # NIC corresponding to local_ip
+local_ip="xxxx"                 # Prefill node IP
+model_path="xxxx"               # MiniMax-M3 model path
+draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+
+export VLLM_PP_LAYER_PARTITION="30,30"
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+
+# If Mooncake is installed in a non-standard path, set this before startup.
+if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+    export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+fi
+
+vllm serve "$model_path" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --pipeline-parallel-size $8 \
+    --enforce-eager \
+    --distributed-executor-backend mp \
+    --served-model-name minimax-m3 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --max-model-len 133000 \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 32768 \
+    --long-prefill-token-threshold 2048 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.85 \
+    --reasoning-parser minimax_m3 \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+    --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"0","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":"37000"}}]}}'
+```
+
+2. Decode node `run_dp_template.sh`
+
+```bash
+unset http_proxy https_proxy ftp_proxy
+
+nic_name="xxxx"                 # NIC corresponding to local_ip
+local_ip="xxxx"                 # Decode node IP
+model_path="xxxx"               # MiniMax-M3 model path
+draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+
+export HCCL_BUFFSIZE=2048
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+
+# If Mooncake is installed in a non-standard path, set this before startup.
+if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+    export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+fi
+
+vllm serve "$model_path" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --pipeline-parallel-size $8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name minimax-m3 \
+    --reasoning-parser minimax_m3 \
+    --distributed-executor-backend mp \
+    --max-model-len 133000 \
+    --max-num-batched-tokens 32768 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --max-num-seqs 64 \
+    --gpu-memory-utilization 0.92 \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+    --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"1","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":"37100"}}]}}'
+```
+
+3. Mooncake Master on the Prefill node
+
+```bash
+mooncake_master \
+  --port 50088 \
+  --eviction_high_watermark_ratio 0.9 \
+  --eviction_ratio 0.1 \
+  --default_kv_lease_ttl 11000 \
+  --enable_offload=false \
+  --client_ttl=120
+```
+
+4. Decode node
+
+```bash
+python launch_online_dp.py \
+    --dp-size 4 --tp-size 4 --pp-size 1 \
+    --dp-size-local 4 --dp-rank-start 0 \
+    --dp-address $node_d_ip --dp-rpc-port 5964 \
+    --vllm-start-port 31060
+```
+
+This starts four Decode API servers on ports `31060` through `31063`. Wait until all ranks print `Application startup complete`.
+
+5. Prefill node
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 4 --pp-size 2 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address $node_p_ip --dp-rpc-port 6884 \
+    --vllm-start-port 31050
+```
+
+This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
+
+6. Proxy
+
+Use the same A3 proxy command as Section 5.3. The service is then accessible at `http://<proxy_ip>:8009`.
+
+```bash
+unset http_proxy
+unset https_proxy
+unset ftp_proxy
+
+python load_balance_proxy_server_example.py \
+--port 8009 \
+--host $node_p_ip \
+--prefiller-hosts \
+    $node_p_ip $node_p_ip \
+--prefiller-ports \
+    31050 31051 \
+--decoder-hosts \
+    $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
+--decoder-ports \
+    31060 31061 31062 31063 \
+--max-retries 3
+```
+
+#### 950DT products
+
+Prefill-Decode disaggregation with KV Cache Pool can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Keep the Section 5.3 MXFP8 serving flags, including `quantization mxfp8`, Prefill eager, Decode `FULL_DECODE_ONLY`, and `max-model-len=133000`. Mount `/etc/hixlep/` for UBOE / Ascend direct KV transfer, and also mount `/etc/hccn.conf` for the KV Pool.
+
+**Deployment topology:**
+
+| Node group | Nodes | Parallelism | Engine ports | GPU Memory Utilization |
+| ---------- | ----- | ----------- | ------------ | ---------------------- |
+| Prefill | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31050/31051 | 0.92 |
+| Decode | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31060/31061 | 0.92 |
+
+Model and serving limits stay the same as Section 5.3: Prefill `max-num-seqs=128`, Decode `max-num-seqs=256`, `max-model-len=133000`. Both roles use `PP=1`, so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in the Mooncake child connector: Prefill `dp_size=2, tp_size=4, pp_size=1` and Decode `dp_size=2, tp_size=4, pp_size=1`.
+
+1. Prefill node `run_dp_template.sh`
+
+```bash
+unset ftp_proxy https_proxy http_proxy all_proxy
+unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
+
+nic_name="xxxx"                 # NIC corresponding to local_ip
+local_ip="xxxx"                 # Prefill node IP
+model_path="xxxx"               # MiniMax-M3-MXFP8 model path
+draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+
+export HCCL_BUFFSIZE=256
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE=AIV
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+vllm serve "$model_path" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --pipeline-parallel-size $8 \
+    --served-model-name minimax-m3 \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --max-num-seqs 128 \
+    --max-num-batched-tokens 32768 \
+    --max-model-len 133000 \
+    --enable-expert-parallel \
+    --quantization mxfp8 \
+    --gpu-memory-utilization 0.92 \
+    --distributed-executor-backend mp \
+    --kv-cache-dtype fp8 \
+    --reasoning-parser minimax_m3 \
+    --safetensors-load-strategy prefetch \
+    --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+    --enforce-eager \
+    --no-async-scheduling \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"0","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":"37000"}}]}}'
+```
+
+2. Decode node `run_dp_template.sh`
+
+```bash
+unset ftp_proxy https_proxy http_proxy all_proxy
+unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
+
+nic_name="xxxx"                 # NIC corresponding to local_ip
+local_ip="xxxx"                 # Decode node IP
+model_path="xxxx"               # MiniMax-M3-MXFP8 model path
+draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+
+export HCCL_BUFFSIZE=2048
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+
+vllm serve "$model_path" \
+    --host 0.0.0.0 \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
+    --pipeline-parallel-size $8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name minimax-m3 \
+    --reasoning-parser minimax_m3 \
+    --distributed-executor-backend mp \
+    --max-model-len 133000 \
+    --max-num-batched-tokens 32768 \
+    --trust-remote-code \
+    --max-num-seqs 256 \
+    --gpu-memory-utilization 0.92 \
+    --dtype bfloat16 \
+    --quantization mxfp8 \
+    --kv-cache-dtype fp8 \
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+    --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+    --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"1","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":"37100"}}]}}'
+```
+
+3. Mooncake Master on the Prefill node
+
+```bash
+mooncake_master \
+  --port 50088 \
+  --eviction_high_watermark_ratio 0.9 \
+  --eviction_ratio 0.1 \
+  --default_kv_lease_ttl 11000 \
+  --enable_offload=false \
+  --client_ttl=120
+```
+
+4. Decode node
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 4 --pp-size 1 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address $node_d_ip --dp-rpc-port 5964 \
+    --vllm-start-port 31060
+```
+
+This starts two Decode API servers on ports `31060` and `31061`. Wait until both ranks print `Application startup complete`.
+
+5. Prefill node
+
+```bash
+python launch_online_dp.py \
+    --dp-size 2 --tp-size 4 --pp-size 1 \
+    --dp-size-local 2 --dp-rank-start 0 \
+    --dp-address $node_p_ip --dp-rpc-port 6884 \
+    --vllm-start-port 31050
+```
+
+This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
+
+6. Proxy
+
+Use the same 950DT products proxy command as Section 5.3. The service is then accessible at `http://<proxy_ip>:8009`.
+
+```bash
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+
+python load_balance_proxy_server_example.py \
+--port 8009 \
+--host $node_p_ip \
+--prefiller-hosts \
+    $node_p_ip $node_p_ip \
+--prefiller-ports \
+    31050 31051 \
+--decoder-hosts \
+    $node_d_ip $node_d_ip \
+--decoder-ports \
+    31060 31061
+```
+
+**Parameters to add on top of Section 5.3:**
+
+| Item | Where | What to set |
+| ---- | ----- | ----------- |
+| `PYTHONHASHSEED=0` | Prefill and Decode | Keep the same value on every node so block hashes match. |
+| `MOONCAKE_CONFIG_PATH` | Prefill and Decode | Point to the local `mooncake.json`. |
+| Mooncake `LD_LIBRARY_PATH` | Prefill and Decode | Add the Mooncake package directory. |
+| `--kv-transfer-config` | Prefill and Decode | Replace `MooncakeConnectorV1` with `MultiConnector`. |
+| `MooncakeConnectorV1` child | Extra config | Keep the Section 5.3 P→D transfer settings (`kv_role`, `kv_port`, `prefill` / `decode` topology). |
+| `AscendStoreConnector` child | Extra config | Set `backend: mooncake` and a unique `lookup_rpc_port` per DP rank. |
+| `engine_id` | Prefill and Decode | Use a unique ID per DP rank, for example `0` / `1`. |
+| Prefill `mooncake.json` | Prefill node | `global_segment_size=16GB`, `preferred_segment=true`, Master `xxxx:50088`. |
+| Decode `mooncake.json` | Decode node | Same Master and `tenant_id`, but `global_segment_size=0`. |
+| `/etc/hccn.conf` | Container | Mount read-only. 950DT products still also need `/etc/hixlep/`. |
+
+**Steps to enable PD pooling:**
+
+1. Add `-v /etc/hccn.conf:/etc/hccn.conf:ro` to the container. On 950DT products, keep the `/etc/hixlep/` mount from Section 5.3.
+2. Write `mooncake.json` on both nodes. Prefill donates `16GB` per NPU; Decode donates `0`. Use the same Master address and `tenant_id`.
+3. Start `mooncake_master` on the Prefill node and confirm port `50088` is reachable.
+4. In each `run_dp_template.sh`, export `PYTHONHASHSEED`, `MOONCAKE_CONFIG_PATH`, and the Mooncake library path, then replace `--kv-transfer-config` with the `MultiConnector` JSON above.
+5. Assign unique pooling RPC ports: Prefill `37000` plus DP rank, Decode `37100` plus DP rank.
+6. Start Decode, wait until every Decode rank is ready, then start Prefill, then start the proxy on port `8009`.
+7. Send requests to the proxy. After a repeated-prefix warmup, check Prefill logs for KV Pool lookup/get/put and hit information, and check Decode logs for a normal Mooncake P→D KV transfer.
+
+The `launch_online_dp.py` arguments, proxy host/port lists, and remaining serving flags stay the same as Section 5.3. Requests still go to the proxy endpoint in Section 7.
+
+> The pooling combination on MiniMax-M3 + EAGLE3 + A3 `PP2` still needs a live bring-up to confirm. 950DT products use `PP=1` on both roles.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
