@@ -556,10 +556,10 @@ test_cases:
                 url: "{IMAGE_0}"
             - type: image_url
               image_url:
-                url: "http://image.huawei.com/tiny-lts/v1/images/99d58af0586928f6ecd61f3013996fbd_1180x200.png"
+                url: "https://www.huawei.com/-/media/hcomponent-header/1.0.1.20260519084135/component/img/huawei_logo.png"
             - type: image_url
               image_url:
-                url: "http://image.huawei.com/tiny-lts/v1/images/89c4e25feaddc849ddc7_400x60.png"
+                url: "https://e-file.huawei.com/marketingcloud/pep/asset/2000000101/images/case-studies/industries/finance/202607-tianjin-binhai-rural-commercial-bank/1.jpg"
       api_args:
         max_tokens: 500
     expected_response:

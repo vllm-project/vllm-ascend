@@ -197,7 +197,7 @@ templates:
       - --max-num-batched-tokens
       - "128"
       - --gpu-memory-utilization
-      - "0.93"
+      - "0.9"
       - --max-num-seqs
       - "32"
       - --data-parallel-size
@@ -254,7 +254,7 @@ templates:
       - --max-num-batched-tokens
       - "128"
       - --gpu-memory-utilization
-      - "0.93"
+      - "0.9"
       - --max-num-seqs
       - "32"
       - --data-parallel-size
