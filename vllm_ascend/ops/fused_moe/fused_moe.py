@@ -120,9 +120,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # choice here (the old forward-time
         # `weight_fp32 if hasattr else weight.to(fp32)` judgment) so ACLGraph
         # capture never emits a per-forward aclop Cast.
-        if self.is_internal_router:
-            gate = self.gate
-            assert gate is not None
+        # Use the ctor `gate` arg (same as is_internal_router): nn.Module.__getattr__
+        # can shadow `@property is_internal_router` / `gate` while __init__ runs,
+        # which breaks cpu-ut construction stubs that only set `_gate`.
+        if gate is not None:
             if hasattr(gate, "weight_fp32"):
                 # Already materialized (e.g. DeepSeek-V4 sets it itself).
                 pass
