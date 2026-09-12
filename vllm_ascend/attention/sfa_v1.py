@@ -57,6 +57,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_sp,
     maybe_trans_nz,
+    parse_layer_idx,
 )
 
 if TYPE_CHECKING:
@@ -96,6 +97,19 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
+
+
+def _is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 class AscendSFABackend(AttentionBackend):
@@ -449,7 +463,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -473,6 +487,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or index_cache_enabled
+        self._is_mtp_layer = _is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -530,6 +546,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @property
     def kv_cache_indexer_k_idx(self) -> int:
@@ -1426,7 +1456,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # separate cache specs, while the current kernel path still expects the
         # legacy combined tuple layout.
         main_cache = kv_cache
-        if main_cache is None or not self.has_indexer:
+        if main_cache is None or not self.runtime_has_indexer:
             return main_cache
 
         # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -1546,7 +1576,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
                 )
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             else:
                 k_li, k_li_scale = None, None
@@ -1581,7 +1611,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
                     x=hidden_states,
                     cos=cos,
@@ -1636,7 +1666,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-        if self.has_indexer:
+        if self.runtime_has_indexer:
             assert k_li is not None
             if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
                 assert attn_metadata.pcp_slot_mapping is not None
