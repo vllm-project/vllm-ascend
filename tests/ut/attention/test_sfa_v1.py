@@ -1,8 +1,10 @@
 import sys
+import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch_npu
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -501,6 +503,61 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["kv_cache_quant_mode"], 3)
         self.assertEqual(call_kwargs["ckvkr_repo_mode"], 1)
         self.assertEqual(call_kwargs["quant_scale_repo_mode"], 1)
+
+
+class TestAscendSFAQUpProjTransposeBMM(TestBase):
+    """q up-projection via the transpose-fused batch matmul."""
+
+    def _make_impl(self, num_tokens=3):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.local_num_heads = 2
+        impl.qk_nope_head_dim = 8
+        impl.qk_rope_head_dim = 4
+        impl.qk_head_dim = 12
+        impl.kv_lora_rank = 6
+        impl.W_UK_T = torch.randn(impl.local_num_heads, impl.qk_nope_head_dim, impl.kv_lora_rank)
+        impl.W_UK_T_padded = None
+        q = torch.randn(num_tokens, impl.local_num_heads, impl.qk_head_dim)
+        impl.q_proj = MagicMock(return_value=(q,))
+        return impl, q
+
+    def _legacy_reference(self, q, impl):
+        q_nope, q_pe = q.split([impl.qk_nope_head_dim, impl.qk_rope_head_dim], dim=-1)
+        ql_nope = torch.bmm(q_nope.transpose(0, 1), impl.W_UK_T).transpose(0, 1)
+        return ql_nope, q_pe
+
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_transpose_batchmatmul", create=True)
+    def test_transpose_fused_path_matches_legacy_bmm(self, mock_tbmm):
+        impl, q = self._make_impl()
+        impl.W_UK_T_padded = torch.cat(
+            [impl.W_UK_T, torch.zeros(impl.local_num_heads, impl.qk_rope_head_dim, impl.kv_lora_rank)],
+            dim=1,
+        )
+        # Emulate the CANN op: (B, N, P) x (N, P, L) -> (B, N, L).
+        mock_tbmm.side_effect = lambda x, w, perm_x1, perm_x2, perm_y: torch.einsum("bnp,npl->bnl", x, w)
+
+        ql_nope, q_pe = impl._q_proj_and_k_up_proj(torch.randn(3, 5))
+
+        mock_tbmm.assert_called_once()
+        call_args = mock_tbmm.call_args
+        self.assertEqual(call_args.args[0].shape, (3, impl.local_num_heads, impl.qk_head_dim))
+        self.assertIs(call_args.args[1], impl.W_UK_T_padded)
+        self.assertEqual(call_args.kwargs["perm_x1"], (1, 0, 2))
+        self.assertEqual(call_args.kwargs["perm_x2"], (0, 1, 2))
+        self.assertEqual(call_args.kwargs["perm_y"], (1, 0, 2))
+
+        ql_nope_ref, q_pe_ref = self._legacy_reference(q, impl)
+        self.assertTrue(torch.allclose(ql_nope, ql_nope_ref, atol=1e-4))
+        self.assertTrue(torch.equal(q_pe, q_pe_ref))
+
+    def test_fallback_without_padded_weight_uses_bmm(self):
+        impl, q = self._make_impl()
+
+        ql_nope, q_pe = impl._q_proj_and_k_up_proj(torch.randn(3, 5))
+
+        ql_nope_ref, q_pe_ref = self._legacy_reference(q, impl)
+        self.assertTrue(torch.allclose(ql_nope, ql_nope_ref, atol=1e-4))
+        self.assertTrue(torch.equal(q_pe, q_pe_ref))
 
 
 class TestAscendSFAMetadata(TestBase):
@@ -1056,6 +1113,41 @@ class TestAscendSFAImpl(TestBase):
 
         mock_dispose.assert_called_once()
         mock_maybe_trans_nz.assert_called_once()
+
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    @unittest.skipIf(
+        not hasattr(torch_npu, "npu_transpose_batchmatmul"),
+        "torch_npu.npu_transpose_batchmatmul is unavailable",
+    )
+    def test_process_weights_after_loading_builds_padded_w_uk_t(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """W_UK_T_padded keeps W_UK_T in its nope rows and zeroes the rope rows."""
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        padded = self.impl.W_UK_T_padded
+        self.assertIsNotNone(padded)
+        self.assertEqual(padded.shape[0], self.impl.num_heads)
+        self.assertEqual(padded.shape[1], self.impl.qk_head_dim)
+        self.assertEqual(padded.shape[2], self.impl.kv_lora_rank)
+        self.assertTrue(torch.equal(padded[:, : self.impl.qk_nope_head_dim, :], self.impl.W_UK_T))
+        self.assertTrue(
+            torch.equal(
+                padded[:, self.impl.qk_nope_head_dim :, :],
+                torch.zeros(
+                    self.impl.num_heads,
+                    self.impl.qk_rope_head_dim,
+                    self.impl.kv_lora_rank,
+                    dtype=padded.dtype,
+                ),
+            )
+        )
 
     # ============ _process_weights_for_fused_prolog_v3 ============
 

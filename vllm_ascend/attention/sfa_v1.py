@@ -65,6 +65,9 @@ if TYPE_CHECKING:
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
+# npu_transpose_batchmatmul rejects operand dimensions >= 65536.
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"
@@ -474,6 +477,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         self.local_num_heads = self.num_heads
         self.layer_name = kwargs.get("layer_name")
+        # (N, qk_head_dim, kv_lora_rank) copy of W_UK_T whose rope rows are
+        # zero, built in process_weights_after_loading for the transpose-fused
+        # q up-projection (see _q_proj_and_k_up_proj). None when unsupported.
+        self.W_UK_T_padded: torch.Tensor | None = None
         hf_config = self.vllm_config.model_config.hf_config
         hf_text_config = getattr(self.vllm_config.model_config, "hf_text_config", None)
         config_candidates = (hf_config, hf_text_config)
@@ -579,6 +586,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         else:
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+
+        self._build_w_uk_t_padded(act_dtype)
 
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
@@ -859,13 +868,52 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return None, None
 
+    def _build_w_uk_t_padded(self, act_dtype: torch.dtype) -> None:
+        """Build the rope-zero-padded W_UK_T for the transpose-fused q up-projection.
+
+        ``_q_proj_and_k_up_proj`` feeds the full contiguous (B, N, qk_head_dim)
+        query to ``npu_transpose_batchmatmul`` by padding the rope rows of
+        W_UK_T with zeros, which keeps the q_nope view (and its extra
+        AsStrided materialization inside torch.bmm) out of the hot path.
+        """
+        if not (
+            act_dtype in (torch.float16, torch.bfloat16)
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and self.local_num_heads * self.qk_head_dim < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+            and self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            return
+        # Zero-pad dim 1 (qk_nope_head_dim -> qk_head_dim); the rope part of q
+        # multiplies these zero rows and is dropped by the matmul. Build via
+        # zeros + copy_ instead of F.pad: on CPU tensors the npu backend
+        # autoload can misroute F.pad in test environments.
+        padded = self.W_UK_T_padded
+        if padded is None:
+            padded = self.W_UK_T.new_zeros(self.W_UK_T.shape[0], self.qk_head_dim, self.W_UK_T.shape[2])
+            self.W_UK_T_padded = padded
+        padded[:, : self.qk_nope_head_dim, :].copy_(self.W_UK_T)
+
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
-        q_nope, q_pe = (
-            self.q_proj(x)[0]
-            .view(-1, self.local_num_heads, self.qk_head_dim)
-            .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        )
+        q = self.q_proj(x)[0].view(-1, self.local_num_heads, self.qk_head_dim)
+        if self.W_UK_T_padded is not None and q.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
+            # (B, N, P + rope) x (N, P + rope, L) -> (B, N, L) in one fused
+            # kernel; the zero-padded rope rows of the weight drop the rope
+            # part of q inside the matmul. torch.bmm on the non-contiguous
+            # q_nope view instead makes aclnnBatchMatMul launch an extra
+            # AsStrided kernel and return a head-major output that needs
+            # another transpose before the attention kernel consumes it.
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q,
+                self.W_UK_T_padded,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+            q_pe = q[..., self.qk_nope_head_dim :]
+            return ql_nope, q_pe
+
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
