@@ -114,6 +114,7 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    supports_mm_inputs: bool
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
@@ -352,14 +353,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         with self.maybe_eager_context:
             self.model = self._get_model()
 
-        if self.supports_mm_inputs:
-            # Match upstream: a multimodal target can use a text-only drafter.
-            try:
-                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
-                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
-                self.supports_mm_inputs: bool = False
+        # vLLM #56379 enables embedding inputs on main-lane KV consumers. A
+        # DSpark draft without its own embedding must share the target embedding
+        # before this check; release retains its original ordering.
+        if vllm_version_is("0.28.0"):
+            self._check_draft_multimodal_inputs()
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
@@ -439,6 +437,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(target_language_model)
+        if not vllm_version_is("0.28.0"):
+            self._check_draft_multimodal_inputs()
 
         if (
             self.parallel_drafting
@@ -450,6 +450,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if self.eagle3_use_aux_hidden_state
                 else self.model.mask_hidden.view(self.hidden_size)
             )
+
+    def _check_draft_multimodal_inputs(self) -> None:
+        if not self.supports_mm_inputs:
+            return
+        # Match upstream: a multimodal target can use a text-only drafter.
+        try:
+            dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
+            self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
+        except (NotImplementedError, AttributeError, TypeError):
+            logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
+            self.supports_mm_inputs = False
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
