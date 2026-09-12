@@ -81,10 +81,10 @@ def _chunk_gated_delta_rule_fla_npu(
         chunk_indices=chunk_indices,
         scale=scale,
         layout="BSND",
-        use_exp2=True,
+        use_exp2=False,
         use_qk_l2norm_in_kernel=True,
         allow_neg_eigval=False,
-        disable_recompute=True,
+        disable_recompute=False,
         state_v_first=True,
     )
     if keep_meta is not None:
