@@ -288,6 +288,11 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
+    def gelu_tanh_and_mul(hidden_states: torch.Tensor) -> torch.Tensor:
+        gate, up = hidden_states.chunk(2, dim=-1)
+        return F.gelu(gate, approximate="tanh") * up
+
+    @staticmethod
     def clipped_swiglu(
         hidden_states: torch.Tensor,
         swiglu_limit: float,
@@ -771,6 +776,13 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def gelu_tanh_and_mul(hidden_states: torch.Tensor) -> torch.Tensor:
+        # Gemma's packed projection stores gate before up. GeGlu activates
+        # the right half by default, so activate_left must be explicit.
+        out, _ = torch_npu.npu_geglu(hidden_states, dim=-1, approximate=1, activate_left=True)
+        return out
+
     @classmethod
     def npu_fused_infer_attention_score(
         cls,
