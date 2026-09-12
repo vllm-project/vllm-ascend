@@ -10,12 +10,15 @@ Ascend draft width.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _PHYSICAL_DEFAULTS = {
     "enabled": True,
@@ -280,6 +283,24 @@ class AdaptiveDraftKController:
         else:
             self.last_reason = "auto_cost_model_keep_k"
 
+    def _log_auto_decision(self, batch_size: int, elapsed_ms: float) -> None:
+        bucket = self._batch_bucket(batch_size)
+        scores = []
+        for k in self._candidate_k:
+            estimate = self._cost_model.get(self._cost_key(batch_size, k))
+            if estimate is not None and estimate.samples:
+                scores.append((k, estimate.samples, round(estimate.ema_score, 4)))
+        logger.info(
+            "ASCEND_AUTO_K mode=%s batch_bucket=%s selected_k=%s elapsed_ms=%.3f "
+            "candidates=%s reason=%s",
+            self.graph_mode,
+            bucket,
+            self._current_k,
+            elapsed_ms,
+            scores,
+            self.last_reason,
+        )
+
     def update(self, lengths: Iterable[int]) -> None:
         if self.max_k <= 0:
             return
@@ -317,8 +338,11 @@ class AdaptiveDraftKController:
         self.last_accepted_lengths = accepted
         self.observation_count += 1
         if self.auto_tune_enabled and elapsed_ms is not None:
+            previous_k = self._current_k
             self._observe_cost(widths, accepted, float(elapsed_ms))
             self._choose_auto_k(len(widths))
+            if self._current_k != previous_k or self.last_reason.startswith("auto_cost_model"):
+                self._log_auto_decision(len(widths), float(elapsed_ms))
             return
         if not self.hybrid_enabled:
             self.update(accepted)
