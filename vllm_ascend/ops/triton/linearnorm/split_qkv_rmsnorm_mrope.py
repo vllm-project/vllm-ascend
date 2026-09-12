@@ -320,12 +320,13 @@ def triton_split_qkv_rmsnorm_mrope(
 
     q_size = num_q_heads * head_size
     kv_size = num_kv_heads * head_size
-    num_tokens = qkv.shape[0]
 
+    qkv = qkv.contiguous()
     gate_size = q_size if has_gate else 0
     expected_qkv_width = q_size + gate_size + 2 * kv_size
     if qkv.ndim != 2 or qkv.shape[1] != expected_qkv_width:
         raise ValueError(f"qkv must have shape [num_tokens, {expected_qkv_width}]")
+    num_tokens = qkv.shape[0]
     if q_weight.numel() != head_size or k_weight.numel() != head_size:
         raise ValueError("q_weight and k_weight must each contain head_size elements")
     if q_bias is None and k_bias is not None:
@@ -354,6 +355,8 @@ def triton_split_qkv_rmsnorm_mrope(
     if cos_sin is not None:
         if cos_sin.ndim != 3 or cos_sin.shape != (3, num_tokens, rope_dim):
             raise ValueError("cos_sin must have shape [3, num_tokens, rope_dim]")
+        if cos_sin.device != qkv.device:
+            raise ValueError("cos_sin must be on the same device as qkv")
         cos_sin = cos_sin.contiguous()
 
     front_core_num = core_num
@@ -387,10 +390,14 @@ def triton_split_qkv_rmsnorm_mrope(
             raise ValueError("positions strides must be positive")
         if positions.dtype not in (torch.int32, torch.int64):
             raise ValueError("positions must use int32 or int64 indices")
+        if positions.device != qkv.device:
+            raise ValueError("positions must be on the same device as qkv")
         if inv_freq.numel() != rope_dim // 2:
             raise ValueError("inv_freq length must equal rope_dim // 2")
         if inv_freq.dtype != torch.float32 or not inv_freq.is_contiguous():
             raise ValueError("inv_freq must be a contiguous float32 tensor")
+        if inv_freq.device != qkv.device:
+            raise ValueError("inv_freq must be on the same device as qkv")
         positions_stride_0 = positions.stride(0)
         positions_stride_1 = positions.stride(1)
 
