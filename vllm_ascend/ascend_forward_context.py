@@ -12,6 +12,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -144,6 +145,7 @@ def set_ascend_forward_context(
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            model_instance=model_instance,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -316,11 +318,19 @@ def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
 ) -> MoECommType:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    if cann_mega_moe_supported is None:
+        cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
+    if get_ascend_config().enable_fused_mc2 == 1 and is_mega_moe_supported() and cann_mega_moe_supported:
+        return MoECommType.FUSED_MC2
+
     num_experts_per_tok = getattr(
-        vllm_config.model_config.hf_text_config,
+        hf_text_config,
         "num_experts_per_tok",
-        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+        getattr(hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
@@ -330,7 +340,13 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -342,14 +358,19 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
        group size is small enough; otherwise use MC2 within capacity or
        all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, prefer CANN MegaMoe when explicitly
+       enabled and supported by the model. This must not depend on local
+       batch metadata: active and idle DP ranks share the same EP group.
+       Otherwise use MC2 within capacity, all-gather for small EP groups,
+       or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode.
+        model_instance (torch.nn.Module | None): Loaded model used to aggregate
+            registered MegaMoe layer capabilities.
+        cann_mega_moe_supported (bool | None): Optional already-aggregated
+            capability result for initialization paths without a model handle.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -380,7 +401,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             vllm_config,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            model_instance,
+            cann_mega_moe_supported,
+        )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 

@@ -766,11 +766,17 @@ class TestNPUWorker(TestBase):
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
-            # Test execute_dummy_batch
-            worker.execute_dummy_batch()
-
-            # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
+            for device_type in (AscendDeviceType.A5, AscendDeviceType.A3, AscendDeviceType._310P):
+                for use_v2 in (False, True):
+                    with self.subTest(device_type=device_type, use_v2=use_v2):
+                        worker.use_v2_model_runner = use_v2
+                        mock_model_runner._dummy_run.reset_mock()
+                        with patch("vllm_ascend.worker.worker.get_ascend_device_type", return_value=device_type):
+                            worker.execute_dummy_batch()
+                        kwargs = {"uniform_decode": True}
+                        if device_type == AscendDeviceType.A5 and not use_v2:
+                            kwargs["num_actual_tokens"] = 0
+                        mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, **kwargs)
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
