@@ -267,9 +267,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
     def test_folded_state_copy_uses_packed_device_indices_for_every_layer(self):
         runner = self._build_runner()
         runner._folded_prefill_rows = (5,)
-        runner.kv_cache_config = SimpleNamespace(
-            kv_cache_groups=[SimpleNamespace(layer_names=["kda0", "kda1"])]
-        )
+        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["kda0", "kda1"])])
         runner.compilation_config = SimpleNamespace(
             static_forward_context={
                 name: SimpleNamespace(kv_cache=(torch.empty(1), torch.empty(1))) for name in ("kda0", "kda1")
