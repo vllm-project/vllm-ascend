@@ -31,7 +31,6 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
@@ -42,7 +41,6 @@ from vllm_ascend.ops.gdn import (
 _GDN_PATCH_TARGET = _GDNBaseCls
 _ORIGINAL_GDN_INIT = _GDN_PATCH_TARGET.__init__
 _ORIGINAL_REARRANGE_MIXED_QKV = _GDN_PATCH_TARGET.rearrange_mixed_qkv
-_ENABLE_GDN_SINGLE_TOKEN_QKV_VIEW = ascend_envs.VLLM_ASCEND_ENABLE_GDN_SINGLE_TOKEN_QKV_VIEW
 
 
 def _ascend_gdn_init(self, *args, **kwargs) -> None:
@@ -53,7 +51,7 @@ def _ascend_gdn_init(self, *args, **kwargs) -> None:
 def _ascend_rearrange_mixed_qkv(
     self, mixed_qkv: torch.Tensor | None
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-    if _ENABLE_GDN_SINGLE_TOKEN_QKV_VIEW and mixed_qkv is not None:
+    if mixed_qkv is not None:
         q_dim = self.key_dim // self.tp_size
         k_dim = self.key_dim // self.tp_size
         v_dim = self.value_dim // self.tp_size
