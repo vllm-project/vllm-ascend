@@ -20,9 +20,18 @@ from unittest import mock
 from unittest.mock import patch
 
 import torch
+import torch.nn.functional as F
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+
+
+def _cpu_unquantized_apply(layer, x, bias=None):
+    """Stand in for AscendUnquantizedLinearMethod.apply on CPU.
+
+    Production apply dispatches vllm::unquantized_gemm (PrivateUse1 / NPU only).
+    """
+    return F.linear(x, layer.weight, bias)
 
 
 class TestAscendGateLinear(TestBase):
@@ -66,9 +75,11 @@ class TestAscendGateLinear(TestBase):
         self.assertEqual(gate.out_dtype, torch.float32)
 
         hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
-        output, output_bias = gate(hidden_states)
+        with patch.object(gate.quant_method, "apply", side_effect=_cpu_unquantized_apply):
+            output, output_bias = gate(hidden_states)
 
         self.assertEqual(output.dtype, torch.float32)
+        self.assertEqual(output.shape, (2, 4))
         self.assertIsNone(output_bias)
 
 
