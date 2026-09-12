@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+import weakref
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -2341,6 +2342,51 @@ class TestRunMergedDraft(TestBase):
 
     def get_param_names(self, sig):
         return [p.name for p in sig.parameters.values()]
+
+    def test_mtp_releases_previous_output_storage_before_next_forward(self):
+        class Draft(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.storage_refs = []
+
+            def forward(self, input_ids, **kwargs):
+                # Check storage, not Tensor objects: a small view can pin a full output.
+                assert all(ref() is None for ref in self.storage_refs)
+                self.calls += 1
+                output = torch.full((input_ids.numel(), 4), float(self.calls))
+                recycle = output + 10
+                self.storage_refs = [weakref.ref(t.untyped_storage()) for t in (output, recycle)]
+                return output, recycle
+
+            def compute_logits(self, hidden_states):
+                logits = torch.zeros(hidden_states.shape[0], 4)
+                logits[:, self.calls] = 1
+                self.storage_refs.append(weakref.ref(logits.untyped_storage()))
+                return logits
+
+        self.proposer.method = "mtp"
+        self.proposer.model = Draft()
+        self.proposer.supports_mm_inputs = False
+        self.proposer._enable_probabilistic_draft_probs = False
+        # MagicMock records arguments and would itself keep output storage alive.
+        self.proposer.maybe_all_gather_and_unpad = lambda *tensors: tensors
+        with (
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace(enable_reduce_sample=False)),
+            patch.object(llm_base_proposer, "get_forward_context", return_value=SimpleNamespace(attn_metadata=None)),
+        ):
+            drafts = self.proposer._run_merged_draft(
+                num_input_tokens=16,
+                batch_size=2,
+                token_indices_to_sample=torch.tensor([14, 15]),
+                target_positions=self.proposer.positions[:16],
+                inputs_embeds=None,
+                multi_steps_attn_metadata=None,
+                num_tokens=16,
+            )
+        self.assertEqual(self.proposer.model.calls, 3)
+        self.assertEqual(drafts.tolist(), [[1, 2, 3], [1, 2, 3]])
 
     def test_run_merged_draft_eagle3_decode_prepares_each_forward_input(self):
         self.proposer.model = MockDraftModel(returns_tuple=True)
