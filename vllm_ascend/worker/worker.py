@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from contextlib import nullcontext
 from types import NoneType
 from typing import Any
 
@@ -58,7 +59,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -792,10 +793,8 @@ class NPUWorker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
-        if self.profiler is not None:
-            self.profiler.step()
-
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        with self.annotate_profile(scheduler_output):
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -828,6 +827,91 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    def annotate_profile(self, scheduler_output: SchedulerOutput):
+        """Advance the profiler and annotate this worker iteration."""
+        if self.profiler is None:
+            return nullcontext()
+
+        self.profiler.step()
+        if not self.profiler.is_running:
+            return nullcontext()
+
+        iteration_details = compute_iteration_details(scheduler_output)
+        if self.vllm_config.profiler_config.detailed_trace_annotation:
+            ctx_seq_len_sum = 0
+            ctx_qq_compute = 0
+            ctx_qk_compute = 0
+            gen_seq_len_sum = 0
+            gen_qq_compute = 0
+            gen_qk_compute = 0
+            total_scheduled_tokens = 0
+
+            new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
+            num_computed_tokens_by_req = {
+                new_req.req_id: new_req.num_computed_tokens for new_req in scheduler_output.scheduled_new_reqs
+            }
+            for req_id, num_computed_tokens in zip(
+                scheduler_output.scheduled_cached_reqs.req_ids,
+                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+            ):
+                num_computed_tokens_by_req[req_id] = num_computed_tokens
+
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                query_len = num_tokens
+                total_scheduled_tokens += query_len
+                seq_len = num_computed_tokens_by_req.get(req_id, 0) + query_len
+                if req_id in new_req_ids or scheduler_output.scheduled_cached_reqs.is_context_phase(req_id):
+                    ctx_seq_len_sum += seq_len
+                    ctx_qq_compute += query_len * query_len
+                    ctx_qk_compute += query_len * seq_len
+                else:
+                    gen_seq_len_sum += seq_len
+                    gen_qq_compute += query_len * query_len
+                    gen_qk_compute += query_len * seq_len
+
+            annotation = "".join(
+                [
+                    "execute_",
+                    str(total_scheduled_tokens),
+                    "_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(sq",
+                    str(iteration_details.num_ctx_tokens),
+                    "sk",
+                    str(ctx_seq_len_sum),
+                    "sqsq",
+                    str(ctx_qq_compute),
+                    "sqsk",
+                    str(ctx_qk_compute),
+                    ")_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(sq",
+                    str(iteration_details.num_generation_tokens),
+                    "sk",
+                    str(gen_seq_len_sum),
+                    "sqsq",
+                    str(gen_qq_compute),
+                    "sqsk",
+                    str(gen_qk_compute),
+                    ")",
+                ]
+            )
+        else:
+            annotation = "".join(
+                [
+                    "execute_context_",
+                    str(iteration_details.num_ctx_requests),
+                    "(",
+                    str(iteration_details.num_ctx_tokens),
+                    ")_generation_",
+                    str(iteration_details.num_generation_requests),
+                    "(",
+                    str(iteration_details.num_generation_tokens),
+                    ")",
+                ]
+            )
+        return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -1198,7 +1282,13 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
-            self.profiler.stop()
+            try:
+                self.profiler.stop()
+            finally:
+                # A stopped torch-npu profiler cannot collect another trace
+                # when start() is called again. Recreate the wrapper on the
+                # next request so its schedule and trace name are reset too.
+                self.profiler = None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

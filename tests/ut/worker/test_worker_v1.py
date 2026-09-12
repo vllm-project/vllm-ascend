@@ -801,8 +801,8 @@ class TestNPUWorker(TestBase):
             self.assertIs(worker.profiler, mock_profiler_wrapper.return_value)
             mock_profiler_wrapper.return_value.start.assert_called_once()
 
-    def test_profile_restart_reuses_existing_profiler(self):
-        """[RFC #6954] Restarting profile reuses existing profiler."""
+    def test_profile_restart_recreates_npu_profiler(self):
+        """Restarting recreates the one-shot torch-npu profiler."""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -828,9 +828,13 @@ class TestNPUWorker(TestBase):
             )
 
             worker.profile(is_start=False)
-            worker.profile(is_start=True)  # Restart without new prefix
-            # Should NOT create new profiler, just restart existing
-            mock_wrapper.assert_called_once()
+            worker.profile(is_start=True, profile_prefix="session2")
+
+            self.assertEqual(mock_wrapper.call_count, 2)
+            mock_wrapper.assert_called_with(
+                profiler_config,
+                "session2_dp0_pp0_tp0_dcp0_ep0_rank0",
+            )
             self.assertEqual(mock_profiler.start.call_count, 2)
             mock_profiler.stop.assert_called_once()
 
@@ -1389,6 +1393,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
             worker.profiler = MagicMock()
+            worker.profiler.is_running = False
             worker.profiler.step.side_effect = lambda: call_order.append("step")
             worker._pp_send_work = []
 
@@ -1413,6 +1418,84 @@ class TestNPUWorker(TestBase):
             worker.model_runner.execute_model.assert_called_once_with(mock_scheduler_output, None)
             self.assertEqual(call_order, ["step", "execute"])
             self.assertEqual(result, mock_model_output)
+
+    def test_annotate_profile_returns_noop_without_profiler(self):
+        from contextlib import nullcontext
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.profiler = None
+
+        self.assertIsInstance(worker.annotate_profile(MagicMock()), nullcontext)
+
+    @patch("vllm_ascend.worker.worker.compute_iteration_details")
+    def test_annotate_profile_uses_simple_upstream_annotation(self, mock_compute_details):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.profiler = MagicMock(is_running=True)
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.profiler_config.detailed_trace_annotation = False
+        mock_compute_details.return_value = SimpleNamespace(
+            num_ctx_requests=2,
+            num_ctx_tokens=8,
+            num_generation_requests=3,
+            num_generation_tokens=3,
+        )
+
+        context = worker.annotate_profile(MagicMock())
+
+        worker.profiler.step.assert_called_once()
+        worker.profiler.annotate_context_manager.assert_called_once_with("execute_context_2(8)_generation_3(3)")
+        self.assertIs(context, worker.profiler.annotate_context_manager.return_value)
+
+    @patch("vllm_ascend.worker.worker.compute_iteration_details")
+    def test_annotate_profile_uses_detailed_upstream_annotation(self, mock_compute_details):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.profiler = MagicMock(is_running=True)
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.profiler_config.detailed_trace_annotation = True
+        mock_compute_details.return_value = SimpleNamespace(
+            num_ctx_requests=1,
+            num_ctx_tokens=3,
+            num_generation_requests=1,
+            num_generation_tokens=1,
+        )
+        cached_reqs = MagicMock()
+        cached_reqs.req_ids = ["generation"]
+        cached_reqs.num_computed_tokens = [20]
+        cached_reqs.is_context_phase.return_value = False
+        scheduler_output = SimpleNamespace(
+            scheduled_new_reqs=[SimpleNamespace(req_id="context", num_computed_tokens=10)],
+            scheduled_cached_reqs=cached_reqs,
+            num_scheduled_tokens={"context": 3, "generation": 1},
+        )
+
+        worker.annotate_profile(scheduler_output)
+
+        worker.profiler.annotate_context_manager.assert_called_once_with(
+            "execute_4_context_1(sq3sk13sqsq9sqsk39)_generation_1(sq1sk21sqsq1sqsk21)"
+        )
+        cached_reqs.is_context_phase.assert_called_once_with("generation")
+
+    @patch("vllm_ascend.worker.worker.compute_iteration_details")
+    def test_annotate_profile_skips_annotation_when_schedule_not_running(self, mock_compute_details):
+        from contextlib import nullcontext
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.profiler = MagicMock(is_running=False)
+
+        context = worker.annotate_profile(MagicMock())
+
+        worker.profiler.step.assert_called_once()
+        mock_compute_details.assert_not_called()
+        worker.profiler.annotate_context_manager.assert_not_called()
+        self.assertIsInstance(context, nullcontext)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
