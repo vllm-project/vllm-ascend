@@ -379,7 +379,7 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
     ("is_sequence_parallel", "output_is_reduced", "should_reduce"),
     [
         (False, False, True),
-        (False, True, False),
+        (False, True, True),
         (True, False, False),
         (True, True, False),
     ],
@@ -390,8 +390,13 @@ def test_final_output_never_all_reduces_sequence_shards(
     output_is_reduced,
     should_reduce,
 ):
+    # The op-based path ignores the (compile-time-stale) output_is_reduced
+    # flag and recomputes the predicate from the live comm type: under
+    # ALLGATHER a non-SP batch is reduced, an SP batch never is.
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel, tp_size=1, ep_size=1)
+    runner.routed_output_transform = None
+    runner.ascend_shared_experts = None
     states = torch.ones(2, 4)
     reduced_states = states + 1
     all_reduce = MagicMock(return_value=reduced_states)
@@ -399,6 +404,11 @@ def test_final_output_never_all_reduces_sequence_shards(
         fused_moe_module,
         "tensor_model_parallel_all_reduce",
         all_reduce,
+    )
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
     )
 
     result = runner._maybe_reduce_final_output(
@@ -408,31 +418,38 @@ def test_final_output_never_all_reduces_sequence_shards(
     )
 
     if should_reduce:
-        assert result is reduced_states
+        assert torch.equal(result, reduced_states)
         all_reduce.assert_called_once_with(states)
     else:
-        assert result is states
+        assert torch.equal(result, states)
         all_reduce.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    ("mode", "fused_output_is_reduced", "reduce_shared"),
+    ("mode", "moe_comm_type", "reduce_shared"),
     [
-        (SharedExpertParallelMode.TENSOR_PARALLEL, False, False),
-        (SharedExpertParallelMode.TENSOR_PARALLEL, True, True),
-        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, True, False),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, False),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, True, False),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.MC2, True),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.ALLGATHER, False),
+        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, MoECommType.MC2, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, MoECommType.MC2, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SDP, MoECommType.MC2, False),
     ],
 )
 def test_shared_output_reduction_depends_on_weight_layout(
     monkeypatch,
     mode,
-    fused_output_is_reduced,
+    moe_comm_type,
     reduce_shared,
 ):
+    # Only TENSOR_PARALLEL weights need the standalone shared-output
+    # all-reduce, and only when the live comm type says the routed output
+    # was already reduced by the combine kernel (e.g. MC2). Under
+    # ALLGATHER the routed output is still TP-partial, so the final
+    # reduction covers both and the shared half must not be reduced twice.
     runner = AscendMoERunner.__new__(AscendMoERunner)
     runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=False, tp_size=1, ep_size=1)
+    runner.routed_output_transform = None
     shared_output = torch.ones(2, 4)
     reduced_output = shared_output + 1
     all_reduce = MagicMock(return_value=reduced_output)
@@ -441,33 +458,45 @@ def test_shared_output_reduction_depends_on_weight_layout(
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type),
+    )
 
     result = runner._reduce_shared_output_if_needed(
         shared_output,
-        fused_output_is_reduced,
+        fused_output_is_reduced=moe_comm_type
+        in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2},
     )
 
     if reduce_shared:
-        assert result is reduced_output
+        assert torch.equal(result, reduced_output)
         all_reduce.assert_called_once_with(shared_output)
     else:
-        assert result is shared_output
+        assert torch.equal(result, shared_output)
         all_reduce.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    ("mode", "reduce_routed"),
+    ("mode", "moe_comm_type", "reduce_routed"),
     [
-        (SharedExpertParallelMode.TENSOR_PARALLEL, False),
-        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, True),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, False),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.ALLGATHER, False),
+        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, MoECommType.ALLGATHER, True),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SDP, MoECommType.ALLGATHER, False),
+        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, MoECommType.MC2, False),
     ],
 )
 def test_local_shared_expert_dp_reduces_partial_routed_output(
     monkeypatch,
     mode,
+    moe_comm_type,
     reduce_routed,
 ):
+    # A DP-only shared expert sums the full hidden state, so the routed
+    # half must be reduced beforehand -- but only when the combine kernel
+    # has not already done it (ALLGATHER leaves it TP-partial, MC2 does
+    # not). The passthrough flag is no longer consumed downstream.
     runner = AscendMoERunner.__new__(AscendMoERunner)
     runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
     runner.routed_output_transform = None
@@ -484,6 +513,11 @@ def test_local_shared_expert_dp_reduces_partial_routed_output(
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type),
+    )
 
     result, result_is_reduced = runner._maybe_reduce_routed_output_before_transform(
         routed_output,
@@ -491,11 +525,10 @@ def test_local_shared_expert_dp_reduces_partial_routed_output(
     )
 
     if reduce_routed:
-        assert result is reduced_output
-        assert result_is_reduced
+        assert torch.equal(result, reduced_output)
         all_reduce.assert_called_once_with(routed_output)
     else:
-        assert result is routed_output
+        assert torch.equal(result, routed_output)
         assert not result_is_reduced
         all_reduce.assert_not_called()
 
