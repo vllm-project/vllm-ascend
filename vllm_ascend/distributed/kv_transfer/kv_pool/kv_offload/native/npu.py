@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from typing_extensions import override
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
@@ -16,6 +18,41 @@ from vllm.v1.kv_offload.tiering.spec import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def _cpu_offload_num_chunks(spec: Any) -> int:
+    """Upstream renamed CPUOffloadingSpec.num_blocks -> num_chunks on main."""
+    if vllm_version_is("0.28.0"):
+        return spec.num_blocks
+    return spec.num_chunks
+
+
+def _make_shared_offload_region(
+    *,
+    engine_id: str,
+    num_chunks: int,
+    rank: int,
+    kv_bytes_per_chunk: int,
+    cpu_page_size: int,
+) -> SharedOffloadRegion:
+    """Construct with the release or main keyword names for the renamed fields."""
+    region_cls: Any = SharedOffloadRegion
+    if vllm_version_is("0.28.0"):
+        return region_cls(
+            engine_id=engine_id,
+            num_blocks=num_chunks,
+            rank=rank,
+            kv_bytes_per_block=kv_bytes_per_chunk,
+            cpu_page_size=cpu_page_size,
+        )
+    return region_cls(
+        engine_id=engine_id,
+        num_chunks=num_chunks,
+        rank=rank,
+        kv_bytes_per_chunk=kv_bytes_per_chunk,
+        cpu_page_size=cpu_page_size,
+    )
 
 
 class _NPUWorkerMixin:
@@ -54,7 +91,7 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=_cpu_offload_num_chunks(self),
         )
 
 
@@ -82,16 +119,17 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             # physical device index into that replica's mmap slot range.
             rank = int(torch.npu.current_device()) % world_size
 
-        worker_mmap = SharedOffloadRegion(
+        num_chunks = _cpu_offload_num_chunks(self)
+        worker_mmap = _make_shared_offload_region(
             engine_id=self._engine_id,
-            num_blocks=self.num_blocks,
+            num_chunks=num_chunks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_chunk,
+            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=num_chunks,
             mmap_region=worker_mmap,
         )

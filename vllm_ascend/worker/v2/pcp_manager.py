@@ -68,7 +68,6 @@ class AscendPCPManager(PCPManager):
             pcp_world_size=pcp_world_size,
             pcp_rank=pcp_rank,
             device=device,
-            req_states=req_states,
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             block_tables=block_tables,
@@ -76,6 +75,9 @@ class AscendPCPManager(PCPManager):
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
         )
+        if vllm_version_is("0.28.0"):
+            # v0.28.0's PCPManager stores req_states; main dropped the argument.
+            self._req_states = req_states
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU

@@ -1381,13 +1381,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -1539,12 +1532,11 @@ class NPUModelRunner(GPUModelRunner):
             self.positions[:total_num_scheduled_tokens],
         )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
-            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            target.gpu[:, :total_num_scheduled_tokens] += drift
+            self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1682,6 +1674,19 @@ class NPUModelRunner(GPUModelRunner):
         pending_copies.append((cpu_metadata, copy_done))
         return device_metadata
 
+    @staticmethod
+    def _pin_spec_decode_metadata_tensor(value: np.ndarray) -> torch.Tensor:
+        tensor = torch.from_numpy(value)
+        if tensor.is_pinned():
+            return tensor
+        try:
+            return tensor.pin_memory()
+        except RuntimeError:
+            # Some CPU-only test environments register a PrivateUse1
+            # accelerator without a pinned-memory allocator. An unpinned
+            # tensor still stages correctly, just without copy overlap.
+            return tensor
+
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -1728,7 +1733,7 @@ class NPUModelRunner(GPUModelRunner):
         target_logits_indices += arange
 
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            self._pin_spec_decode_metadata_tensor(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,
@@ -3896,8 +3901,6 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
-                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 

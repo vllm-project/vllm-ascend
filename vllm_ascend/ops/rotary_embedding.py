@@ -17,6 +17,7 @@
 
 import math
 import os
+from typing import Any
 
 import torch
 import torch_npu
@@ -35,7 +36,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model, vllm_version_is
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -314,17 +315,34 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         beta_fast: int = 32,
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = False,
     ) -> None:
-        extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
+        # v0.28.0 takes extrapolation_factor/attn_factor/apply_yarn_scaling;
+        # main replaced them with mscale/mscale_all_dim/attention_factor.
+        extra_kwargs: dict[str, Any] = {
             "beta_fast": beta_fast,
             "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
             "truncate": truncate,
         }
+        if vllm_version_is("0.28.0"):
+            extra_kwargs.update(
+                {
+                    "extrapolation_factor": extrapolation_factor,
+                    "attn_factor": attn_factor,
+                    "apply_yarn_scaling": apply_yarn_scaling,
+                }
+            )
+        else:
+            extra_kwargs.update(
+                {
+                    "mscale": mscale,
+                    "mscale_all_dim": mscale_all_dim,
+                    "attention_factor": attention_factor,
+                }
+            )
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, scaling_factor, dtype, **extra_kwargs
         )

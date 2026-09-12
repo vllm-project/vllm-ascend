@@ -280,10 +280,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._runnable = self._run_merged_draft
         if self.uses_mrope:
-            self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            self.xdrope_positions = torch.zeros(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+            if vllm_version_is("0.28.0"):
+                mrope_num_dims = 3
+            else:
+                mrope_num_dims = self.draft_model_config.mrope_num_dims
+            self.mrope_positions = torch.zeros(
+                (mrope_num_dims, self.max_num_tokens + 1),
                 dtype=torch.int32,
                 device=device,
             )
@@ -1674,9 +1676,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
-            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
-                target_positions = target_positions[0]
-
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 

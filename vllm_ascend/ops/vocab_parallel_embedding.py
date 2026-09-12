@@ -58,10 +58,17 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        parallel_group: GroupCoordinator | None = None,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
+        # Base VocabParallelEmbedding owns this attribute (Engram ETP path);
+        # keep it in sync even though Ascend selects its own comm group.
+        self.parallel_group = parallel_group
+        if parallel_group is not None:
+            self.comm_group = parallel_group
+        elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()

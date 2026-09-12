@@ -94,8 +94,6 @@ def _create_common_attn_metadata(
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
-    context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
         batch_spec.batch_size * max_blocks,
@@ -108,8 +106,6 @@ def _create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max(batch_spec.query_lens),
@@ -380,7 +376,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
 
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
-    assert metadata.causal_mask.shape == (2048, 2048)
+    assert metadata.causal_mask.shape == (2048, 2048)  # type: ignore[union-attr]
     if batch_spec.name == "decode_only":
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
@@ -417,8 +413,6 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
         query_start_loc=padded_query_start_loc,
         query_start_loc_cpu=padded_query_start_loc_cpu,
         seq_lens=common.seq_lens,
-        _seq_lens_cpu=common._seq_lens_cpu,
-        _num_computed_tokens_cpu=common._num_computed_tokens_cpu,
         num_reqs=batch_size + 1,
         num_actual_tokens=common.num_actual_tokens,
         max_query_len=common.max_query_len,
@@ -474,8 +468,8 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
     assert first.num_decode_tokens == 60
     assert first.decode is not None
     assert first.decode.tp_score is not None
-    assert first.decode.cu_seqlens_q.shape == (16,)
-    assert first.decode.cu_seqlens_q[-1] == 60
+    assert first.decode.cu_seqlens_q.shape == (16,)  # type: ignore[union-attr]
+    assert first.decode.cu_seqlens_q[-1] == 60  # type: ignore[index]
     assert first.decode.block_table.shape[0] == 15
     assert first.decode.tp_score.context_lens.shape == (15,)
     assert second.decode is not None
@@ -582,7 +576,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )
@@ -661,7 +655,7 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )
@@ -1497,7 +1491,7 @@ def test_indexer_speculative_decode_uses_tp_block_parallel_path(
     impl.topk_blocks = 2
     impl.init_blocks = 1
     impl.local_blocks = 1
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )

@@ -26,6 +26,7 @@ from vllm_ascend.ops.rotary_embedding import (
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
 )
+from vllm_ascend.utils import vllm_version_is
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -43,7 +44,7 @@ def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     return positions, query, key
 
 
-def check_parent_init_signature_has_not_changed(parent_func, child_func):
+def check_parent_init_signature_has_not_changed(parent_func, child_func, ignore_child_only=()):
     parent_sig = inspect.signature(parent_func)
     parent_params = set(parent_sig.parameters) - {"self"}
 
@@ -51,7 +52,7 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     child_params = set(child_sig.parameters) - {"self"}
 
     added = parent_params - child_params
-    removed = child_params - parent_params
+    removed = child_params - parent_params - set(ignore_child_only)
 
     assert not added, (
         f"{parent_func.__name__} added new parameter(s): {added}. "
@@ -362,6 +363,14 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         renames parameters, so a developer knows to update AscendYaRNRotaryEmbedding
         accordingly.
         """
+        # The child keeps both the v0.28.0 and main keyword sets; ignore the
+        # ones the installed parent does not define.
+        if vllm_version_is("0.28.0"):
+            foreign = {"mscale", "mscale_all_dim", "attention_factor"}
+        else:
+            foreign = {"extrapolation_factor", "attn_factor", "apply_yarn_scaling"}
         check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+            YaRNScalingRotaryEmbedding.__init__,
+            AscendYaRNRotaryEmbedding.__init__,
+            ignore_child_only=foreign,
         )

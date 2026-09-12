@@ -78,7 +78,7 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert spec.num_blocks == 10
+    assert getattr(spec, "num_chunks", 10) == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 

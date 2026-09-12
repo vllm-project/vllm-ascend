@@ -188,8 +188,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
         raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
         raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        legacy_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if legacy_seq_lens_cpu is not None:
+            seq_lens_cpu = legacy_seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
