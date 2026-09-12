@@ -1,0 +1,90 @@
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_BUFFSIZE: "1024"
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--data-parallel-size"
+  - "1"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--max-num-seqs"
+  - "128"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--trust-remote-code"
+  - "--async-scheduling"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--additional-config"
+  - '{"enable_cpu_binding":true}'
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1500
+    batch_size: 32
+    request_rate: 0
+    baseline: 90
+    threshold: 0.97
+
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+# =======Supports d-flash speculative reasoning acceptance rate testing===============
+test_cases:
+  - name: "Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "8000"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--quantization"
+      - "ascend"
+      - "--speculative-config"
+      - '{"method": "dflash", "num_speculative_tokens": 3, "model":"z-lab/Qwen3.6-35B-A3B-DFlash"}'
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: 0.8397
+      tolerance: 0.05
+
+# # =======Qwen3.6_27B_eagle3_A3 Acceptance Rate Test===============
+  - name: "Qwen3.6-27B"
+    model: "Qwen/Qwen3.6-27B"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "36864"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "eagle3", "model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full", "enforce_eager": true, "num_speculative_tokens": 9}'
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: 0.3633
+      tolerance: 0.05
