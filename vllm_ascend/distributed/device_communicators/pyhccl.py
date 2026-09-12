@@ -87,6 +87,8 @@ class PyHcclCommunicator:
 
         logger.info("vLLM is using pyhccl")
 
+        if device is None:
+            device = torch.npu.current_device()
         if isinstance(device, int):
             device = torch.device(f"npu:{device}")
         elif isinstance(device, str):
