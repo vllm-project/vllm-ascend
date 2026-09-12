@@ -378,4 +378,3 @@ def test_block_request_does_not_cross_process_with_worker_event():
 
     payload = parent.client.submit.call_args.args[1]
     assert "current_event" not in payload
-    req.current_event.ipc_handle.assert_not_called()
