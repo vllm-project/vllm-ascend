@@ -244,7 +244,10 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     )
 
 
-def test_build_draft_attn_metadata_forwards_ascend_context(monkeypatch):
+@pytest.mark.parametrize(
+    "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
+)
+def test_build_draft_attn_metadata_preserves_caller_state(monkeypatch, state_kwargs):
     captured_kwargs = {}
 
     def raw_build_attn_metadata(*_args, **kwargs):
@@ -264,12 +267,12 @@ def test_build_draft_attn_metadata_forwards_ascend_context(monkeypatch):
         pad=5,
         is_prefilling=is_prefilling,
     ):
-        metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata()
+        metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata(**state_kwargs)
 
     assert metadata == "metadata"
     torch.testing.assert_close(captured_kwargs["positions"], positions[:5])
     assert captured_kwargs["is_prefilling"] is is_prefilling
-    assert captured_kwargs["attn_state"] is AscendAttentionState.SpecDecoding
+    assert {key: value for key, value in captured_kwargs.items() if key == "attn_state"} == state_kwargs
 
 
 @pytest.mark.parametrize(
