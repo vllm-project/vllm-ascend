@@ -1,12 +1,15 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file causal_conv1d_tiling_planner.h
+ * \brief CausalConv1d tiling planning utilities.
  */
 
 #ifndef CAUSAL_CONV1D_TILING_PLANNER_H
@@ -49,18 +52,12 @@ inline DimTileChoice ChooseCanonicalUpdateBaseDimChoice(gert::TilingContext *con
             if (gridSize >= static_cast<int64_t>(coreNum)) {
                 const int64_t gap = gridSize - static_cast<int64_t>(coreNum);
                 if (gap < bestOverGap) {
-                    // bestOver = {baseDim, baseDimCnt, gridSize};
-                    bestOver.baseDim = baseDim;
-                    bestOver.baseDimCnt = baseDimCnt;
-                    bestOver.gridSize = gridSize;
+                    bestOver = {baseDim, baseDimCnt, gridSize};
                     bestOverGap = gap;
                 }
             } else if (gridSize > bestUnder.gridSize ||
                        (gridSize == bestUnder.gridSize && baseDim < bestUnder.baseDim)) {
-                // bestUnder = {baseDim, baseDimCnt, gridSize};
-                bestUnder.baseDim = baseDim;
-                bestUnder.baseDimCnt = baseDimCnt;
-                bestUnder.gridSize = gridSize;
+                bestUnder = {baseDim, baseDimCnt, gridSize};
             }
         }
 
@@ -110,11 +107,7 @@ inline DimTileChoice ChooseFnTokenFirstBaseDimChoice(int64_t dim)
     if (dim <= 0 || dim > MAX_DIM_TILE_SIZE) {
         return {};
     }
-    DimTileChoice choice;
-    choice.baseDim = dim;
-    choice.baseDimCnt = 1;
-    choice.gridSize = 1;
-    return choice;
+    return {dim, 1, 1};
 }
 
 inline DimTileChoice ChooseFnTokenDimCoSplitBaseDimChoice(gert::TilingContext *context, int64_t dim, uint64_t ubSize,
@@ -307,6 +300,6 @@ inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const CausalCon
     return plan;
 }
 
-} // namespace optiling::causal_conv1d_host
+}
 
-#endif // CAUSAL_CONV1D_TILING_PLANNER_H
+#endif

@@ -26,7 +26,7 @@ from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -333,7 +333,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
+                null_block_id=NULL_BLOCK_ID,
                 run_mode=1,
+                max_query_len=spec_causal_conv1d_meta.max_query_len,
             )
             mixed_qkv_spec = output_spec
 
@@ -380,6 +382,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         num_accepted_tokens_opt=None,
                         activation_mode=activation_num,
                         pad_slot_id=PAD_SLOT_ID,
+                        null_block_id=NULL_BLOCK_ID,
                         run_mode=0,
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
@@ -403,6 +406,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         num_accepted_tokens_opt=None,
                         activation_mode=activation_num,
                         pad_slot_id=PAD_SLOT_ID,
+                        null_block_id=NULL_BLOCK_ID,
                         run_mode=0,
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
@@ -424,7 +428,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 num_accepted_tokens_opt=None,
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
+                null_block_id=NULL_BLOCK_ID,
                 run_mode=1,
+                max_query_len=non_spec_causal_conv1d_meta.max_query_len,
             )
             mixed_qkv_non_spec = output_non_spec
         else:

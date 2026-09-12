@@ -1,17 +1,21 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file causal_conv1d_tiling_utils.h
+ * \brief CausalConv1d tiling common constants and helpers.
  */
 
 #ifndef CAUSAL_CONV1D_TILING_UTILS_H
 #define CAUSAL_CONV1D_TILING_UTILS_H
 
+#include "log/log.h"
 #include "tiling_base/tiling_util.h"
 #include "../op_kernel/causal_conv1d_tiling_key.h"
 
@@ -23,12 +27,24 @@ constexpr uint32_t BIAS_INDEX = 2;
 constexpr uint32_t CONV_STATES_INDEX = 3;
 constexpr uint32_t QUERY_START_LOC_INDEX = 4;
 constexpr uint32_t CACHE_INDICES_INDEX = 5;
-constexpr uint32_t INITIAL_STATE_MODE_INDEX = 6;
+constexpr uint32_t HAS_INITIAL_STATE_INDEX = 6;
 constexpr uint32_t NUM_ACCEPTED_TOKENS_INDEX = 7;
+constexpr uint32_t QUERY_START_LOC_CPU_INDEX = 8;
+constexpr uint32_t CACHE_INDICES_CPU_INDEX = 9;
+constexpr uint32_t HAS_INITIAL_STATE_CPU_INDEX = 10;
+constexpr uint32_t NUM_ACCEPTED_TOKENS_CPU_INDEX = 11;
 
-constexpr int32_t ATTR_ACTIVATION_MODE_INDEX = 0;
+constexpr int32_t ATTR_ACTIVATION_INDEX = 0;
 constexpr int32_t ATTR_PAD_SLOT_ID_INDEX = 1;
-constexpr int32_t ATTR_RUN_MODE_INDEX = 2;
+constexpr int32_t ATTR_NULL_BLOCK_ID_INDEX = 2;
+constexpr int32_t ATTR_RUN_MODE_INDEX = 3;
+constexpr int32_t ATTR_HEAD_NUM_INDEX = 4;
+constexpr int32_t ATTR_MAX_QUERY_LEN_INDEX = 5;
+
+constexpr int64_t METADATA_DTYPE_INT64 = 0;
+constexpr int64_t METADATA_DTYPE_INT32 = 1;
+constexpr int64_t METADATA_DTYPE_BOOL = 2;
+
 constexpr int64_t ASCENDC_RESERVED_WORKSPACE_SIZE = 16 * 1024 * 1024;
 
 struct CausalConv1dCompileInfo {
@@ -38,8 +54,22 @@ struct CausalConv1dCompileInfo {
 
 struct CausalConv1dAttrInfo {
     int64_t activationMode = 0;
-    int64_t padSlotId = -1;
     int64_t runMode = 0;
+    int64_t headNum = 0;
+    int64_t maxQueryLen = -1;
+    int64_t padSlotId = -1;
+    int64_t nullBlockId = -1;
+};
+
+struct ResolvedMetadataInputs {
+    uint32_t queryStartLocIndex = QUERY_START_LOC_INDEX;
+    uint32_t cacheIndicesIndex = CACHE_INDICES_INDEX;
+    uint32_t hasInitialStateIndex = HAS_INITIAL_STATE_INDEX;
+    uint32_t numAcceptedTokensIndex = NUM_ACCEPTED_TOKENS_INDEX;
+    bool queryStartLocUseCpu = false;
+    bool cacheIndicesUseCpu = false;
+    bool hasInitialStateUseCpu = false;
+    bool numAcceptedTokensUseCpu = false;
 };
 
 struct DimTileChoice {
@@ -95,7 +125,7 @@ constexpr int64_t RING_SLOT_CNT = 5;
 constexpr int64_t FN_OUT_SLOT_CNT = 2;
 constexpr int64_t FN_CALC_FP32_SLOT_CNT = 8;
 
-inline uint32_t NormalizeFnPlanTilingKey(uint32_t runModeKey, FnExecutionPlan fnExecutionPlan)
+inline constexpr uint32_t NormalizeFnPlanTilingKey(uint32_t runModeKey, FnExecutionPlan fnExecutionPlan)
 {
     if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
         return CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
@@ -110,7 +140,7 @@ inline uint32_t NormalizeFnPlanTilingKey(uint32_t runModeKey, FnExecutionPlan fn
     }
 }
 
-inline uint32_t NormalizeWidthTilingKey(uint32_t runModeKey, int32_t width)
+inline constexpr uint32_t NormalizeWidthTilingKey(uint32_t runModeKey, int32_t width)
 {
     if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
         return CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
@@ -160,6 +190,6 @@ inline const char *GetFnTilingCaseName(FnTilingCaseKind caseKind)
     }
 }
 
-} // namespace optiling::causal_conv1d_host
+}
 
-#endif // CAUSAL_CONV1D_TILING_UTILS_H
+#endif

@@ -1,16 +1,15 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
 /*!
  * \file causal_conv1d_common.h
+ * \brief CausalConv1d shared constants, ring-buffer helpers and buffer layouts.
  */
 
 #ifndef CAUSAL_CONV1D_COMMON_H
@@ -22,6 +21,7 @@ namespace NsCausalConv1dCommon {
 
 constexpr int32_t MAX_WIDTH = 4;
 constexpr int32_t MAX_BLOCK_DIM = 4096;
+
 constexpr int32_t RING_SLOTS = 5;
 
 __aicore__ inline int32_t SlotCurr(int32_t t)
@@ -61,6 +61,6 @@ struct CalcBufLayout {
     }
 };
 
-} // namespace NsCausalConv1dCommon
+}
 
-#endif // CAUSAL_CONV1D_COMMON_H
+#endif
