@@ -60,6 +60,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.offloader.base import get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
@@ -108,28 +109,13 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_model_runner import (
     AsyncGPUModelRunnerOutput,
     GPUModelRunner,
+    nans_to_dict,
 )
-
-# vLLM main (#15146) exports nans_to_dict / gpu_sync_allowed / raise_if_nan_logits;
-# v0.28.0 does not. Import optionally so the v1 runner starts on the release lane.
-try:
-    from vllm.v1.worker.gpu_model_runner import nans_to_dict
-except ImportError:  # pragma: no cover - exercised on v0.28.0
-    nans_to_dict = None
-try:
-    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-except ImportError:  # pragma: no cover - exercised on v0.28.0
-    gpu_sync_allowed = None
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
-
-try:
-    from vllm.v1.worker.utils import raise_if_nan_logits
-except ImportError:  # pragma: no cover - exercised on v0.28.0
-    raise_if_nan_logits = None
+from vllm.v1.worker.utils import AttentionGroup, raise_if_nan_logits, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -2742,7 +2728,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_connector_output=kv_connector_output,
             pooler_output=[],
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
-            **({"num_nans_in_logits": num_nans_in_logits} if nans_to_dict is not None else {}),
+            num_nans_in_logits=num_nans_in_logits,
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
@@ -2802,7 +2788,7 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
             routed_experts=routed_experts_snapshot,
-            **({"num_nans": num_nans_device} if nans_to_dict is not None else {}),
+            num_nans=num_nans_device,
         )
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
@@ -2842,13 +2828,11 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_nans_in_logits(self, logits: torch.Tensor | None) -> dict[str, int]:
         """Count NaNs per request with an NPU-compatible reduction."""
-        if nans_to_dict is None or gpu_sync_allowed is None:
-            return {}
         try:
             with gpu_sync_allowed():
                 counts = [] if logits is None else _count_nans_per_row(logits).tolist()
             num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
-            if raise_if_nan_logits is not None and getattr(envs, "VLLM_RAISE_ON_LOGIT_NANS", False):
+            if getattr(envs, "VLLM_RAISE_ON_LOGIT_NANS", False):
                 raise_if_nan_logits(num_nans_in_logits)
             return num_nans_in_logits
         except IndexError:
@@ -2876,7 +2860,7 @@ class NPUModelRunner(GPUModelRunner):
     ]:
         num_nans: torch.Tensor | None = None
         num_nans_in_logits: dict[str, int] = {}
-        if nans_to_dict is not None and getattr(envs, "VLLM_COMPUTE_NANS_IN_LOGITS", False):
+        if getattr(envs, "VLLM_COMPUTE_NANS_IN_LOGITS", False):
             if self.use_async_scheduling:
                 # Keep the counts on device; they ride the async output copy
                 # stream rather than blocking here.
