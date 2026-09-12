@@ -127,6 +127,8 @@ def _select_num_idx_from_topk(topk_idx: torch.Tensor) -> torch.Tensor:
 
 
 def _to_fp8_e4m3(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dtype == torch.float8_e4m3fn:
+        return tensor
     return tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX).to(torch.float8_e4m3fn)
 
 
