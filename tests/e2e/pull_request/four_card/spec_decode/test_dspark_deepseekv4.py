@@ -88,6 +88,8 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
             "tensor_parallel_size": 4,
+            # A5 FP8 KV attention requires 64/128 local heads; TP4 without CP has 16.
+            "kv_cache_dtype": "bfloat16",
             "max_model_len": 4096,
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
             "additional_config": additional_config,

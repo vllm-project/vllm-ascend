@@ -22,7 +22,13 @@ def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
         ) from exc
 
 
-def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
+def _adapt_compressed_kv(kwargs: dict[str, Any], *, has_cmp_kv: bool) -> None:
+    # SparseFlashMla validates the inactive branch too; its default mask is 3.
+    # Use the same inactive-branch attributes for metadata and execution.
+    if not has_cmp_kv:
+        kwargs["cmp_ratio"] = 1
+        kwargs["cmp_mask_mode"] = 0
+        return
     cmp_ratio = kwargs.get("cmp_ratio") or 0
     seqused_ori_kv = kwargs.get("seqused_ori_kv")
     if cmp_ratio <= 1 or seqused_ori_kv is None:
@@ -40,11 +46,14 @@ def sparse_flash_mla_metadata(**kwargs):
     # This adapter is only selected for the BF16 paged-KV path. SparseFlashMla
     # accepts PA_BBND for this cache; PA_ND belongs to the FP8 quantized op.
     kwargs["layout_kv"] = "PA_BBND"
+    # Paged KV uses block tables and seqused lengths, not TND cumulative offsets.
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
-    _add_compressed_kv_lengths(kwargs)
+    _adapt_compressed_kv(kwargs, has_cmp_kv=kwargs.get("has_cmp_kv", True))
     _, metadata_op = _get_sparse_flash_mla_ops()
     return metadata_op(**kwargs)
 
@@ -55,8 +64,11 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     kwargs.pop("tile_size", None)
     kwargs.pop("rope_head_dim", None)
     kwargs["layout_kv"] = "PA_BBND"
+    # Paged KV uses block tables and seqused lengths, not TND cumulative offsets.
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
-    _add_compressed_kv_lengths(kwargs)
+    _adapt_compressed_kv(kwargs, has_cmp_kv=kwargs.get("cmp_kv") is not None)
     attention_op, _ = _get_sparse_flash_mla_ops()
     return attention_op(q, **kwargs)
