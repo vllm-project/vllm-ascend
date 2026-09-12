@@ -40,6 +40,7 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+
 def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
     """Store a causal-conv1d weight in the layout consumed by the NPU op.
 
@@ -101,7 +102,6 @@ def try_rearrange_single_token_mixed_qkv(
     key = key.view(1, 1, -1, head_k_dim)
     value = value.view(1, 1, -1, head_v_dim)
     return query, key, value
-
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
