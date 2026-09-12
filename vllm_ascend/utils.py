@@ -1389,6 +1389,15 @@ def enable_dsa_cp() -> bool:
     return get_ascend_config().enable_dsa_cp
 
 
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
+
+
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
     """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
