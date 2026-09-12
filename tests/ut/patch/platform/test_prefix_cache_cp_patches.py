@@ -503,15 +503,14 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     )
 
     assert num_blocks == expected_num_blocks
-    assert len(tensors) == 10
-    assert [len(tensor.layers) for tensor in tensors] == [23] * 4 + [1] * 6
+    assert len(tensors) == 4
+    assert [len(tensor.layers) for tensor in tensors] == [29, 23, 23, 23]
+    assert [tensor.layers for tensor in tensors] == [group.layer_names for group in groups]
     assert all(tensor.size == available_memory for tensor in tensors)
     assert all(tensor.block_stride == page_size for tensor in tensors)
     tuple_stride = page_size * expected_num_blocks
-    assert all(tensor.offset == 0 and tensor.layer_stride == tuple_stride for tensor in tensors[:4])
-    assert [tensor.offset for tensor in tensors[4:]] == [slot * tuple_stride for slot in range(23, 29)]
-    assert all(tensor.layer_stride == 0 for tensor in tensors[4:])
-    assert tensors[-1].offset + tuple_stride == available_memory
+    assert all(tensor.offset == 0 and tensor.layer_stride == tuple_stride for tensor in tensors)
+    assert max(tensor.offset + len(tensor.layers) * tensor.layer_stride for tensor in tensors) == available_memory
 
 
 def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
