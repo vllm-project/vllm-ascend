@@ -343,7 +343,8 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
 
     else:
         # vLLM #56446 replaced the legacy YaRN factors with these parameters.
-        def __init__(
+        # The two version-specific constructors intentionally have different signatures.
+        def __init__(  # type: ignore[misc]
             self,
             head_size: int,
             rotary_dim: int,
