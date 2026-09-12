@@ -470,7 +470,9 @@ class BaseDeviceAdaptor:
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
@@ -814,7 +816,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         result = torch_npu.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,

@@ -187,6 +187,24 @@ class AscendSFAMetadata:
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
+def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+    """Convert the KV slot mapping to int64 once per scheduling step.
+
+    ``npu_kv_rmsnorm_rope_cache`` requires int64 cache indices while the SFA
+    metadata carries int32 slots. Every layer of a step shares the same slot
+    tensor, so cache the converted copy on the metadata object instead of
+    re-casting it inside each layer's ``exec_kv`` (one Cast kernel per step
+    instead of one per layer).
+    """
+    if slots.dtype == torch.int64:
+        return slots
+    cached = getattr(attn_metadata, "kv_slots_i64", None)
+    if cached is None or cached[0] is not slots:
+        cached = (slots, slots.to(torch.int64))
+        attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
+    return cached[1]
+
+
 @dataclass
 class SFAForwardContext:
     """Parallel-layout inputs consumed by the shared SFA forward template."""
@@ -525,6 +543,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.preprocess_type = PreprocessType.NATIVE
 
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
+        # Opt-in for the PROLOG_V3 fused decode path outside PD KV-consumer
+        # workers; see _resolve_preprocess_type.
+        self.enable_sfa_prolog_v3 = bool(ascend_config.enable_sfa_prolog_v3)
 
         self.enable_sp = enable_sp()
 
@@ -610,7 +631,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         self._quant_type = type(quant_method) if quant_method is not None else None
         qt = self._quant_type
 
-        if self.is_kv_consumer and (
+        # PROLOG_V3 serves PD decode (KV-consumer) workers by default. Plain
+        # non-PD serving may opt in via the enable_sfa_prolog_v3 config:
+        # decode steps then take the fused single-op path while prefill keeps
+        # the NATIVE path. The opt-in requires a quantized fused_qkv_a_proj
+        # because the unquantized weight preparation transposes
+        # fused_qkv_a_proj.weight in place, which the NATIVE prefill fallback
+        # still consumes.
+        prolog_v3_eligible = self.is_kv_consumer or (self.enable_sfa_prolog_v3 and qt is not None)
+        if prolog_v3_eligible and (
             (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
             or qt is AscendW8A8MXFP8DynamicLinearMethod
             or qt is None
@@ -851,7 +880,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             cos,
             sin,
-            slots.to(torch.int64),
+            _int64_kv_slots(slots, attn_metadata),
             kv_cache[1],
             kv_cache[0],
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -949,6 +978,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             kr_cache = kv_cache[1]
         rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
         rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+        # The caller forwards the per-step cached int64 slots, so the .to()
+        # below is a no-op in production; kept for direct-call safety.
         cache_index = slot_mapping.view(-1).to(torch.int64)
 
         if qt is not None:
@@ -1371,7 +1402,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
+                    # the per-step conversion so all layers of a step share
+                    # one Cast kernel (the .to() inside is a no-op on int64).
+                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1532,8 +1566,10 @@ def custom_kv_rmsnorm_rope(
     k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     prefix_shape = k_nope.shape[:-1]
+    # npu_rms_norm returns a contiguous tensor, so the explicit
+    # .contiguous() copy before the view is redundant.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
-        k_nope.contiguous().view(-1, 1, kv_lora_rank),
+        k_nope.view(-1, 1, kv_lora_rank),
         dst_type=dst_type,
         row_block_size=1,
         col_block_size=tile_size,

@@ -335,6 +335,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "enable_sfa_prolog_v3": false,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -474,6 +475,13 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    # Opt-in: use the SFA PROLOG_V3 fused decode preprocessing outside PD
+    # KV-consumer workers (plain serving). Decode steps take the single
+    # npu_mla_prolog_v3 op instead of the per-layer NATIVE K chain, while
+    # prefill keeps the NATIVE path. The original qkv_a/q_b weights are
+    # retained for that fallback, so this trades extra NPU weight memory
+    # for decode kernel savings.
+    enable_sfa_prolog_v3: bool = False
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
