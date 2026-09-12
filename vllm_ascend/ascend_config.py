@@ -1083,31 +1083,33 @@ class FinegrainedTPConfig:
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
+        # Local import to avoid a circular import during platform resolution.
+        from vllm.config.compilation import CUDAGraphMode
+
         vc = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
-            # wo_a/wo_b are sharded solely by the OTP group (which splits DP,
-            # orthogonal to the standard TP group), but _forward_o_proj reshapes
-            # the attention output with n_local_groups = n_groups // tp_size
-            # (standard TP). When tp_size > 1 the weight-shard and input-shard
-            # operate on different axes of the rank grid and no longer align,
-            # so oproj TP currently requires standard tp_size == 1.
+            # _forward_o_proj reshapes with n_local_groups = n_groups // tp_size (standard TP),
+            # which misaligns with the OTP weight shard (DP axis) when tp_size > 1.
             if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
                     "oproj_tensor_parallel_size currently requires "
                     "tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # The static all_to_all / reduce_scatter exchange buffers used by
-            # _forward_o_proj are sized for graph replay and require ACL graph
-            # capture; dummy_run does not run the entire attention module in
-            # eager mode, so o_proj tp split can only be used in graph mode.
-            if vc.model_config and vc.model_config.enforce_eager:
+            # The DP padding is only validated with a graph mode (V1 rejects eager for this knob too); the DSA
+            # path additionally fails fast on oversized eager steps (decode-scale buffers). NONE covers enforce_eager.
+            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
+            # PCP's dispatch recomputes num_tokens per rank, dropping the DP-padded count.
+            if vc.parallel_config.prefill_context_parallel_size > 1:
+                raise AssertionError(
+                    "oproj_tensor_parallel_size is not supported with prefill_context_parallel_size > 1."
                 )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
