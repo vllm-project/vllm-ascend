@@ -1024,6 +1024,7 @@ class TestAscendSFAImpl(TestBase):
                     self.impl.forward("layer", hidden, (), None, output)
                 self.assertEqual(events, [])
                 self.assertEqual(torch.count_nonzero(output).item(), 0)
+
     def _setup_shared_fia(self, query_lengths=(4096,), kv_lengths=(4096,)):
         impl = self.impl
         impl.enable_sfa_fia_shared_prefill = True
@@ -1222,7 +1223,6 @@ class TestAscendSFAImpl(TestBase):
         for name, value in tensor_before.items():
             torch.testing.assert_close(getattr(metadata, name), value)
         torch.testing.assert_close(indices, indices_before)
-
 
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
