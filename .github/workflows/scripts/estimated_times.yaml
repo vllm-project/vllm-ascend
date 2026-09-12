@@ -76,6 +76,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
+  tests/e2e/pull_request/two_card/spec_decode/test_dflash2_qwen38_27b.py: 600
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
