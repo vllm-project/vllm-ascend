@@ -171,8 +171,6 @@ def _process_attn_out_lse(
 def _npu_attention_update(
     head_size,
     attn_out_lse: torch.Tensor,
-    current_output: torch.Tensor | None = None,
-    current_lse: torch.Tensor | None = None,
     *,
     dcp_size: int | None = None,
 ) -> torch.Tensor:
@@ -195,24 +193,6 @@ def _npu_attention_update(
     #  unbind to list
     out_list = out_flat.unbind(0)  # [S*H, D]
     lse_list = lse_flat.unbind(0)  # [S*H]
-    # Current KV is replicated, so append it once after the history all-to-all.
-    if current_output is not None:
-        assert current_lse is not None
-        out_list = (*out_list, current_output.float().reshape(S * H, D))
-        lse_list = (*lse_list, current_lse.float().reshape(S * H))
-    # The fused operator accepts at most 16 partial outputs. DCP=16 plus
-    # the replicated current chunk produces 17, so merge with torch ops.
-    max_fused_partials = 16
-    if len(out_list) > max_fused_partials:
-        # FIA uses +inf as the LSE sentinel for empty KV partitions.
-        # Match npu_attention_update by excluding these before logsumexp.
-        partial_lse = torch.stack(lse_list).view(-1, S, H, 1)
-        partial_lse = partial_lse.masked_fill(torch.isposinf(partial_lse), -torch.inf)
-        attn_out, _ = _update_out_and_lse(
-            torch.stack(out_list).view(-1, S, H, D),
-            partial_lse,
-        )
-        return attn_out
     attn_out, _ = torch_npu.npu_attention_update(lse_list, out_list, 0)
     attn_out = attn_out.view(-1, H, D)
     return attn_out
@@ -252,9 +232,5 @@ def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch
         lse_final: shape = [batch_size, num_heads, 1]
     """
     lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
-    # Empty (fully masked) partitions have LSE=-inf. Avoid -inf - -inf
-    # for padded queries and ignore undefined outputs of empty partitions.
-    safe_lse_final = torch.where(torch.isneginf(lse_final), 0.0, lse_final)
-    weights = torch.exp(lse_list - safe_lse_final)
-    out_final = torch.sum(torch.where(weights > 0, weights * out_list, 0.0), dim=0)
+    out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
     return out_final, lse_final

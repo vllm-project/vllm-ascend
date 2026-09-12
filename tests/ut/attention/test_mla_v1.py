@@ -2795,3 +2795,31 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
+        fia_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
+        self.assertEqual(fia_kwargs["query_quant_mode"], 3)
+        torch.testing.assert_close(
+            fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope
+        )
+
+def test_mla_nope_decode_preserves_current_kv_contract():
+    """DCP needs current KV tensors in addition to the paged NoPE cache."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_mla_rope = True
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 0
+    impl.kv_a_layernorm = MagicMock(side_effect=lambda x: x)
+    tokens = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    slots = torch.tensor([0, 2])
+    for return_current_kv in (False, True):
+        cache = (torch.zeros(2, 2, 1, 4), torch.empty(2, 2, 1, 0))
+        result = impl.exec_kv_decode(
+            tokens, None, None, cache, slots, return_current_kv=return_current_kv
+        )
+        assert result[0] is cache[1]
+        assert result[1] is cache[0]
+        torch.testing.assert_close(cache[0].view(-1, 4)[slots], tokens)
+        assert len(result) == (4 if return_current_kv else 2)
+        if return_current_kv:
+            assert result[2].shape == (2, 1, 1, 0)
+            torch.testing.assert_close(result[3].reshape(2, 4), tokens)

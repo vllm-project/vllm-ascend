@@ -8,8 +8,6 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def _get_sparse_index_kpool(model_config) -> int | None:
     """Return the active sparse index-kpool ratio, if configured."""
@@ -130,14 +128,9 @@ def verify_and_update_config(cls, vllm_config) -> None:
             ssm_block_page_size,
             kernel_block_size * attn_single_token_k_page_size,
         )
-        # Legacy shared buffers require exact SSM/K page alignment. Main
-        # allocates independent contiguous layer buffers and trims trailing
-        # padding, so rounding up is sufficient (e.g. Kimi TP32 has 3 SSM
-        # heads, equivalent to 192 MLA tokens rather than a C128 multiple).
-        if vllm_version_is("0.28.0"):
-            assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
-                "Cannot align ssm_page_size and attn_page_size."
-            )
+        assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
+            "Cannot align ssm_page_size and attn_page_size."
+        )
 
         # Override attention block size if it is unset or too small.
         if cache_config.block_size is None or cache_config.block_size < attn_block_size:

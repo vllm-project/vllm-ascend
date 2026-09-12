@@ -2944,10 +2944,6 @@ class MooncakeConnectorWorker:
         remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
-        hybrid_mla_state = self._is_hma_required and (self.use_mla or self.use_sparse) and any(
-            spec["kv_cache_spec_type"] == "MambaSpec" and layers
-            for spec, layers in self.kv_group2layeridx.values()
-        )
 
         if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
@@ -3089,25 +3085,6 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
-            if hybrid_mla_state:
-                # Count the actual transfers, including appended SSM sources.
-                # Which attention port shares the final SSM transfer depends
-                # on the request's tail CP rank, so this is not engine-static.
-                transfer_plans = {}
-                last_cp_rank = (meta.num_prompt_blocks - 1) % (meta.remote_pcp_size * meta.remote_dcp_size)
-                for d_port, head_groups in local_remote_block_port_mappings.items():
-                    shards = [list(ports) for ports in zip(*head_groups)]
-                    for idx, ports in enumerate(shards):
-                        offset = ports[0] - meta.remote_port
-                        cp_rank = offset // prefill_tp_size * meta.remote_dcp_size + offset % meta.remote_dcp_size
-                        if cp_rank == last_cp_rank:
-                            shards.append(shards.pop(idx))
-                            break
-                    transfer_plans[d_port] = _set_hma_shared_port(
-                        prefill_tp_size, meta, shards, req_id,
-                        tp_rank=(d_port - self.side_channel_port) % self.tp_size,
-                    )
-                local_remote_block_port_mappings = transfer_plans
             remote_ports: set[int] = set(
                 range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
             )
@@ -3135,11 +3112,10 @@ class MooncakeConnectorWorker:
                         remote_port_send_num[remote_port]["num"] += 1
             return remote_port_send_num
 
-        def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id, tp_rank=None):
+        def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
             """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
 
-            Attention replica balancing applies only to non-MLA/non-sparse models.
-            SSM source ports are also required by hybrid MLA models. It does two things:
+            Only applies to HMA (hybrid) non-MLA/non-sparse models. It does two things:
 
             1. Attention replica balancing. A remote attention port offset decomposes as
                ``kv_head_group_offset + dcp_repeat_offset + dcp_rank``. Within the same head
@@ -3169,15 +3145,13 @@ class MooncakeConnectorWorker:
                             # Determine replica ID using random choice of current request to maintain load balancing.
                             replica = (chosen_tp_list[i % len(chosen_tp_list)] // remote_dcp) % n_replica
                             shard_ports[i] = meta.remote_port + pcp_seg + group_off + replica * remote_dcp + dcp_part
-            if self._is_hma_required and (not (self.use_mla or self.use_sparse) or hybrid_mla_state):
-                tp_rank = self.tp_rank if tp_rank is None else tp_rank
                 # Append this D rank's matching Mamba ports to the final shard (the one that
                 # carries the Mamba state); k = prefill_tp / decode_tp ports per D rank.
                 k = prefill_tp_size // self.tp_size
                 final_ports = remote_handshake_port_list[-1]
                 pcp_seg = (final_ports[0] - meta.remote_port) // prefill_tp_size * prefill_tp_size
                 for j in range(k):
-                    p = meta.remote_port + pcp_seg + tp_rank * k + j
+                    p = meta.remote_port + pcp_seg + self.tp_rank * k + j
                     if p not in final_ports:
                         final_ports.append(p)
             return remote_handshake_port_list
@@ -3198,11 +3172,6 @@ class MooncakeConnectorWorker:
             ]
             self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
                 local_remote_block_port_mappings
-            )
-
-        if hybrid_mla_state:
-            self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
-                get_local_remote_block_port_mappings()
             )
 
         local_remote_block_port_mapping = copy.deepcopy(self.local_remote_block_port_mapping[meta.remote_engine_id])
