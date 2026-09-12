@@ -57,6 +57,16 @@ def _uses_causal_draft_attention(config) -> bool:
     return bool(getattr(config, "full_attention_causal", False))
 
 
+def _get_target_rotation_path(vllm_config):
+    rotation_path = get_rotation_path(vllm_config)
+    if rotation_path is not None:
+        return rotation_path
+    # MRV2 clears target quantization before constructing a BF16 draft.
+    # Its MLA speculator preserves this path for model-owned loading.
+    config = vllm_config.speculative_config.draft_model_config.hf_config
+    return getattr(config, "_ascend_target_rotation_path", None)
+
+
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
     def __init__(
         self,
@@ -257,7 +267,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
-        self.rotation_path = get_rotation_path(vllm_config)
+        self.rotation_path = _get_target_rotation_path(vllm_config)
         self.target_model_path = vllm_config.model_config.model
         if self.rotation_path is not None:
             target_config = vllm_config.model_config.hf_text_config
