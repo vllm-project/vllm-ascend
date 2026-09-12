@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -364,6 +365,13 @@ def sfa_dcp_a2a_fused_combine(
     scatter_size is the All2All group size, not the unified DCP size when
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
+    # Keep PCP composition and token-scatter paths on the upstream implementation.
+    # This is the tested raw-bit All2All path, not the experimental VMM peer path.
+    if pcp_group is None and scatter_size == 8 and scatter_dim == 1 and can_exchange(sfa_output, softmax_lse):
+        if scatter_group is None:
+            raise ValueError("SFA output scatter requires an explicit All2All group.")
+        return exchange(sfa_output, softmax_lse, scatter_group).to(sfa_output.dtype)
+
     send = pack_sfa_dcp_output_lse(
         sfa_output,
         softmax_lse,

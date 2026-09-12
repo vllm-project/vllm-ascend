@@ -27,6 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops.triton.sfa_dcp_query import can_prepare_query, prepare_query_head_major, unpack_query
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -204,6 +205,7 @@ class DCPGatherContext(NamedTuple):
     handle: torch.distributed.Work | None
     restore_perm: tuple[int, ...] | None
     split_sizes: tuple[int, ...]
+    query_prepared: bool = False
 
 
 @dataclass
@@ -1145,6 +1147,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
+        if context.query_prepared:
+            return unpack_query(context.gathered)
         gathered = context.gathered
         if context.restore_perm is not None:
             gathered = gathered.permute(context.restore_perm).contiguous()
@@ -1267,6 +1271,19 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 "Cannot fuse DCP query gather for ql_nope/q_pe with "
                 f"shapes {tuple(ql_nope.shape)} / {tuple(q_pe.shape)} "
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
+            )
+
+        # Decode-only callers reach this method; PCP+DCP keeps
+        # its separate TP-group override and DSA-CP gathers tokens on dim 0.
+        if query_gather_dim == 1 and self.dcp_size == 8 and can_prepare_query(ql_nope, q_pe):
+            prepared = prepare_query_head_major(ql_nope, q_pe)
+            gathered, handle = all_gather_async(prepared, self.dcp_group)
+            return DCPGatherContext(
+                gathered=gathered,
+                handle=handle,
+                restore_perm=(1, 0, 2),
+                split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+                query_prepared=True,
             )
 
         # Avoid back-to-back DCP all_gather calls for the two SFA query

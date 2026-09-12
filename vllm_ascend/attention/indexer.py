@@ -23,6 +23,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.ops.triton.sfa_indexer_store import can_fuse_store, store_indexer_key_scale
 from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
 
 if vllm_version_is("0.28.0"):
@@ -180,6 +181,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # prefill region across the CP group, DSA-CP all-gathers the indexer
         # k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
+        self._dcp_size = parallel_config.decode_context_parallel_size
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._dsa_cp_active = enable_dsa_cp()
 
@@ -261,6 +263,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        *,
+        defer_scale_cast: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
@@ -298,7 +302,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAIndexerBackend.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            if not defer_scale_cast:
+                k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
             k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
@@ -371,9 +376,40 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         DSA-CP shards them to the local token shard, matching the sharded
         inputs. ``indexer_metadata`` carries the indexer's own cache view
         plus the parallel-layout values injected by SFA."""
-        k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin)
+        # Only the native backend may bypass its ordinary write_cache method.
+        # PCP/DSA-CP and custom cache subclasses keep their established layout.
+        fuse_store = (
+            type(self) is AscendSFAIndexerBackend
+            and getattr(self, "_dcp_size", 1) == 8
+            and not self._pcp_active
+            and not self._dsa_cp_active
+            and self.enable_sparse_li_c8
+            and not self._use_c8_reshape_optim()
+            and indexer_metadata.num_actual_tokens > 0
+            and indexer_metadata.num_decode_tokens == indexer_metadata.num_actual_tokens
+            and can_fuse_store(
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+                indexer_metadata.slot_mapping,
+                k_hidden_states.shape[0],
+            )
+        )
+        if fuse_store:
+            k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin, defer_scale_cast=True)
+        else:
+            k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
-        self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
+        if fuse_store:
+            assert k_li_scale is not None
+            store_indexer_key_scale(
+                k_li,
+                k_li_scale,
+                slot_mapping,
+                self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT],
+                self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT],
+            )
+        else:
+            self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
             return None
 
