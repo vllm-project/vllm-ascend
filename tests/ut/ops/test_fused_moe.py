@@ -1954,9 +1954,7 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
         parallel_mode=MagicMock(return_value=None),
         forward=MagicMock(return_value=shared_out),
     )
-    runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=(routed_out, routed_events))
-    )
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, routed_events)))
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     current_stream = MagicMock()
     monkeypatch.setattr(fused_moe_module.F, "linear", fake_linear)
