@@ -32,9 +32,41 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import (
+    AscendGatedDeltaNetAttention,
+    prepare_causal_conv1d_weight_for_loading,
+    try_rearrange_single_token_mixed_qkv,
+)
 
 _GDN_PATCH_TARGET = _GDNBaseCls
+_ORIGINAL_GDN_INIT = _GDN_PATCH_TARGET.__init__
+_ORIGINAL_REARRANGE_MIXED_QKV = _GDN_PATCH_TARGET.rearrange_mixed_qkv
+
+
+def _ascend_gdn_init(self, *args, **kwargs) -> None:
+    _ORIGINAL_GDN_INIT(self, *args, **kwargs)
+    prepare_causal_conv1d_weight_for_loading(self.conv1d)
+
+
+def _ascend_rearrange_mixed_qkv(
+    self, mixed_qkv: torch.Tensor | None
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    if mixed_qkv is not None:
+        q_dim = self.key_dim // self.tp_size
+        k_dim = self.key_dim // self.tp_size
+        v_dim = self.value_dim // self.tp_size
+        single_token_qkv = try_rearrange_single_token_mixed_qkv(
+            mixed_qkv,
+            q_dim,
+            k_dim,
+            v_dim,
+            self.head_k_dim,
+            self.head_v_dim,
+        )
+        if single_token_qkv is not None:
+            return single_token_qkv
+
+    return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -210,6 +242,8 @@ if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY)
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
+    _GDN_PATCH_TARGET.__init__ = _ascend_gdn_init
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
+    _GDN_PATCH_TARGET.rearrange_mixed_qkv = _ascend_rearrange_mixed_qkv
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
