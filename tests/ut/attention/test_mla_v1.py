@@ -2269,7 +2269,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             block_size,
             metadata,
@@ -2574,7 +2577,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2652,7 +2658,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2736,7 +2745,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2785,7 +2797,10 @@ class TestAscendMLAImpl(TestBase):
         dequant_scale_q_nope = torch.randn(B, N)  # shape is [B, num_heads]
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
                 dequant_scale_q_nope=dequant_scale_q_nope,
             ),
             BS,
@@ -2797,9 +2812,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], HD)
         fia_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
         self.assertEqual(fia_kwargs["query_quant_mode"], 3)
-        torch.testing.assert_close(
-            fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope
-        )
+        torch.testing.assert_close(fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope)
+
 
 def test_mla_nope_decode_preserves_current_kv_contract():
     """DCP needs current KV tensors in addition to the paged NoPE cache."""
@@ -2813,9 +2827,7 @@ def test_mla_nope_decode_preserves_current_kv_contract():
     slots = torch.tensor([0, 2])
     for return_current_kv in (False, True):
         cache = (torch.zeros(2, 2, 1, 4), torch.empty(2, 2, 1, 0))
-        result = impl.exec_kv_decode(
-            tokens, None, None, cache, slots, return_current_kv=return_current_kv
-        )
+        result = impl.exec_kv_decode(tokens, None, None, cache, slots, return_current_kv=return_current_kv)
         assert result[0] is cache[1]
         assert result[1] is cache[0]
         torch.testing.assert_close(cache[0].view(-1, 4)[slots], tokens)

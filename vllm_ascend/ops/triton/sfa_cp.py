@@ -396,9 +396,7 @@ def sfa_dcp_a2a_fused_combine(
         # O and LSE travel together, so the source-rank order is immaterial
         # to their weighted sum; no logical-DCP permutation is needed here.
         recv = pcp_group.all_gather(recv, dim=0)
-    return fused_sfa_dcp_lse_combine(
-        recv, sfa_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse
-    )
+    return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
 
 
 def sfa_dcp_a2a_fused(

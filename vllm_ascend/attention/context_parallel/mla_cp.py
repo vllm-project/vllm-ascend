@@ -63,8 +63,6 @@ def _dcp_mtp_comm_stream() -> torch.npu.Stream:
     return _DCP_MTP_COMM_STREAM
 
 
-
-
 @dataclass
 class DCPChunkedContextMetadata(ChunkedContextMetadata):
     """MLA chunk metadata for DCP-local context shards."""
@@ -501,9 +499,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         if _EXTRA_CTX.capturing:
             if _EXTRA_CTX.is_draft_model:
                 graph_params = (
-                    get_draft_graph_prefill_params()
-                    if _EXTRA_CTX.is_draft_model_prefill
-                    else get_draft_graph_params()
+                    get_draft_graph_prefill_params() if _EXTRA_CTX.is_draft_model_prefill else get_draft_graph_params()
                 )
             else:
                 graph_params = get_graph_params()
@@ -523,18 +519,29 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 }
                 workspaces = [
                     torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                        q_nope, history_k_nope, history_k_nope,
-                        query_rope=q_pe, key_rope=history_k_pe,
-                        num_heads=num_heads, atten_mask=None, sparse_mode=0,
-                        block_table=decode_meta.block_table, block_size=block_size,
+                        q_nope,
+                        history_k_nope,
+                        history_k_nope,
+                        query_rope=q_pe,
+                        key_rope=history_k_pe,
+                        num_heads=num_heads,
+                        atten_mask=None,
+                        sparse_mode=0,
+                        block_table=decode_meta.block_table,
+                        block_size=block_size,
                         actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
                         **workspace_kwargs,
                     ),
                     torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                        current_q_nope, current_k_nope, current_k_nope,
-                        query_rope=current_q_pe, key_rope=current_k_pe,
-                        num_heads=self.num_heads, atten_mask=decode_meta.attn_mask,
-                        sparse_mode=3, actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                        current_q_nope,
+                        current_k_nope,
+                        current_k_nope,
+                        query_rope=current_q_pe,
+                        key_rope=current_k_pe,
+                        num_heads=self.num_heads,
+                        atten_mask=decode_meta.attn_mask,
+                        sparse_mode=3,
+                        actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
                         **workspace_kwargs,
                     ),
                 ]
