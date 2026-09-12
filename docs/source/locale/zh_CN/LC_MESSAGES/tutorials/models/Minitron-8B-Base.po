@@ -31,7 +31,7 @@ msgid ""
 "serving and evaluation on Ascend NPU hardware through `vllm-ascend`."
 msgstr ""
 "发布的 `Minitron-8B-Base` 是 NVIDIA 开发的一款轻量级、高效的大语言模型。它专为通用文本生成和推理任务设计，可通过 "
-"`vllm-ascend` 在升腾 NPU 硬件上使用 vLLM 进行在线服务部署和评估。"
+"`vllm-ascend` 在昇腾 NPU 硬件上使用 vLLM 进行在线服务部署和评估。"
 
 msgid ""
 "This document describes the main verification steps of the model, including "

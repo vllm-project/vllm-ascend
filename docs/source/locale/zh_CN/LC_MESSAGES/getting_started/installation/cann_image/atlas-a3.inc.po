@@ -39,7 +39,7 @@ msgstr "???+ warning \"A3容器启动要求\""
 msgid ""
 "A3 uses a dual-DIE design and requires two Ascend device nodes, such as "
 "`/dev/davinci0` and `/dev/davinci1`."
-msgstr "A3采用双DIE设计，需要两个升腾设备节点，例如`/dev/davinci0`和`/dev/davinci1`。"
+msgstr "A3采用双DIE设计，需要两个昇腾设备节点，例如`/dev/davinci0`和`/dev/davinci1`。"
 
 msgid "=== \"Ubuntu\""
 msgstr "=== \"Ubuntu\""

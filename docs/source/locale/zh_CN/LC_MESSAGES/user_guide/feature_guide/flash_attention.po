@@ -165,7 +165,7 @@ msgid ""
 "FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.\n"
 "We will support other NPUs in the future."
 msgstr ""
-"FA3目前需要升腾Atlas A2和A3推理NPU。\n"
+"FA3目前需要昇腾Atlas A2和A3推理NPU。\n"
 "我们将在未来支持其他NPU。"
 
 msgid ""

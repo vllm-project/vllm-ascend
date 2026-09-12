@@ -178,7 +178,7 @@ msgid ""
 "latency for your AI applications."
 msgstr ""
 "Mixtral-8x7B-Instruct-v0.1 是一个强大的 MoE 模型，为指令遵循任务提供了卓越的性能。通过使用 vllm-ascend "
-"在升腾硬件上进行适当部署，您可以为 AI 应用实现高吞吐量和低延迟。"
+"在昇腾硬件上进行适当部署，您可以为 AI 应用实现高吞吐量和低延迟。"
 
 msgid ""
 "For more details about model capabilities and best practices, refer to the "
