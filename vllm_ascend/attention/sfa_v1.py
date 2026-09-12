@@ -65,6 +65,9 @@ if TYPE_CHECKING:
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
+# npu_transpose_batchmatmul rejects operand dimensions >= 65536
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"
@@ -867,12 +870,30 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if (
+            q_nope.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            # Convert from (B, N, P) to (N, B, P) and multiply
+            # (N, B, P) x (N, P, L) -> (B, N, L)
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            # Fallback for torch_npu builds without the fused op, unsupported
+            # dtypes, or a token dim beyond the operand limit.
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
