@@ -42,6 +42,9 @@ CHECK_IMPORTS = {
         allowed_files={
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
+            # Only opaque torch-npu storage handle tuples cross this local
+            # process boundary; transfer commands use MessagePack.
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/mp/npu_ipc.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
         },
     ),
