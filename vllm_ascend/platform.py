@@ -122,8 +122,6 @@ class NPUPlatform(Platform):
         # Keep runtime initialization lazy and independent of compute-op flags.
         bootstrap_custom_op_env()
         import_module("vllm_ascend.vllm_ascend_C")
-        if not hasattr(torch.ops._C_ascend, "get_physical_device_id"):
-            raise RuntimeError("NPU physical device lookup requires get_physical_device_id; rebuild vllm-ascend.")
         return torch.ops._C_ascend.get_physical_device_id(device_id)
 
     def is_sleep_mode_available(self) -> bool:
