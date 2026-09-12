@@ -159,7 +159,7 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                 # Stable device slot buffer; content refreshed before each replay.
                 slot_tensor = self.speculator.block_tables.get_dummy_slot_mappings(num_tokens)
                 slot_by_layer = build_slot_mappings_by_layer(slot_tensor, self.speculator.kv_cache_config)
-                attn_metadata = self.speculator._build_draft_attn_metadata(
+                attn_metadata = self.speculator._build_draft_attn_metadata(  # type: ignore[attr-defined]
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs,
                     num_tokens_padded=num_tokens,

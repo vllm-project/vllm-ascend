@@ -44,6 +44,7 @@ What is NOT guarded here (structurally unreachable without a real engine):
 import ast
 import inspect
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -582,9 +583,21 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
-        "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
-    )
+    live_run_engine_core = _UpstreamEngineCoreProc.run_engine_core
+    profiling_patch = sys.modules.get("vllm_ascend.patch.platform.patch_profiling_chunk")
+    if profiling_patch is not None and live_run_engine_core is getattr(
+        profiling_patch, "_patched_run_engine_core", None
+    ):
+        # A previously loaded profiling-chunk patch wraps run_engine_core; it
+        # must delegate to the DyntraLB wrapper for the chain to hold.
+        original_run_engine_core = getattr(profiling_patch, "_original_run_engine_core", None)
+        assert original_run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+            "DyntraLB must be the wrapper the profiling-chunk patch delegates to"
+        )
+    else:
+        assert live_run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+            "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
+        )
     assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (
         "DyntraLB must delegate to the balance wrapper when DyntraLB is disabled"
     )

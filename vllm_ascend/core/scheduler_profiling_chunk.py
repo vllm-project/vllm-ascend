@@ -770,7 +770,8 @@ class ProfilingChunkScheduler(Scheduler):
                 )
                 snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
                 kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    req_ids=snapshot_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
                     boundary_state_offloads=boundary_state_offloads,
                 )
 

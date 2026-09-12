@@ -271,7 +271,15 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         weak_ref_workspaces()
 
-    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
+    def _capture_budget_graph(
+        self,
+        token_budget: int,
+        path: str = "default",
+        axis_keys: tuple = (),
+    ):
+        # vLLM main added the capture-axes `axis_keys` argument (#42785);
+        # Ascend does not configure capture axes, so it is accepted and ignored
+        # here (the graph is keyed by token_budget on both trees).
         logger.debug(
             "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
             token_budget,
@@ -318,7 +326,11 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         mm_kwargs: dict[str, Any],
         token_budget: int,
         path: str = "default",
+        axis_keys: tuple = (),
     ) -> torch.Tensor | None:
+        # vLLM main passes the capture-axes `axis_keys` (#42785); Ascend does
+        # not configure capture axes, so graphs stay keyed by token_budget.
+        del axis_keys
         num_items = len(self._get_item_specs(mm_kwargs))
         graph_set = self._get_graph_set(path)
         if token_budget not in graph_set:

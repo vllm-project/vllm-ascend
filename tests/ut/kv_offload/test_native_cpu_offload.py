@@ -33,16 +33,26 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_co
     AscendOffloadingConnectorWorker,
     _canonicalize_split_cache,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def _make_group_config() -> OffloadingGroupConfig:
+    if vllm_version_is("0.28.0"):
+        return OffloadingGroupConfig(
+            tokens_per_block=16,
+            layer_names=("model.layers.0.self_attn",),
+        )
+    # vLLM main added a required ``group_id`` to the offloading group config.
+    return OffloadingGroupConfig(
+        tokens_per_block=16,
+        layer_names=("model.layers.0.self_attn",),
+        group_id=0,  # type: ignore[call-arg]
+    )
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
     return OffloadingConfig(
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block=16,
-                layer_names=("model.layers.0.self_attn",),
-            ),
-        ),
+        groups=(_make_group_config(),),
         worker_kv_bytes_per_block=64,
         enable_kv_cache_events=False,
         extra_config=extra_config,
@@ -78,7 +88,9 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert spec.num_blocks == 10
+    # vLLM main renamed the spec's offload block counter to num_chunks (#52615).
+    chunk_count = spec.num_blocks if vllm_version_is("0.28.0") else spec.num_chunks
+    assert chunk_count == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 
