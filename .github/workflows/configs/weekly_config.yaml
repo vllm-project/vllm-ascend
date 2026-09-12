@@ -319,6 +319,9 @@ a3:
       - name: Qwen3.5-397B-Memcache-perf
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
+      - name: Qwen3.6_35B_27B_A3_acceptance_rate
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: Qwen3.6_35B_27B_A3_acceptance_rate.yaml
 #310p:
 #  single_node:
 #    test_config:
