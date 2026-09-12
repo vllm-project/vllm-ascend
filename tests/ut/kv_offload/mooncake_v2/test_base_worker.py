@@ -8,7 +8,6 @@ import torch
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -19,20 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
-from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
-
-
-def make_kv_cache_tensor(*, size: int, layers: list[str], layer_stride: int, block_stride: int) -> KVCacheTensor:
-    """Build descriptors across the vLLM 0.28 and main field names."""
-    try:
-        return KVCacheTensor(
-            size=size,
-            layers=layers,
-            layer_stride=layer_stride,
-            block_stride=block_stride,
-        )
-    except TypeError:
-        return KVCacheTensor(size=size, shared_by=layers)
+from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:

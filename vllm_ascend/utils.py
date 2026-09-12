@@ -790,6 +790,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
     }
+    if not vllm_version_is("0.28.0"):
+        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+
+        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config

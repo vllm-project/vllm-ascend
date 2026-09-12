@@ -240,6 +240,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * self.num_query_per_req
         num_sample_total = batch_size * self.num_speculative_tokens
         has_num_rejected = num_rejected_tokens_gpu is not None
+        dcp_size = getattr(self, "dcp_size", 1)
+        dcp_rank = getattr(self, "dcp_rank", 0)
+        cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
+        long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
             attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
@@ -292,6 +296,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                DCP_SIZE=dcp_size,
+                DCP_RANK=dcp_rank,
+                CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -336,7 +343,18 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        if dcp_size > 1:
+            if cad.is_prefilling is not None:
+                cad.is_prefilling.fill_(False)
+            assert self.runner is not None
+            dcp_manager = getattr(self.runner, "dcp_manager", None)
+            assert dcp_manager is not None
+            long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
+                common_attn_metadata=cad,
+                num_query_per_req=self.num_query_per_req,
+            )
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(
@@ -358,8 +376,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE

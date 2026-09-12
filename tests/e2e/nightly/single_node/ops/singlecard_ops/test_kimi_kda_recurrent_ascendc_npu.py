@@ -152,9 +152,26 @@ def recurrent_kda_reference(
     return _restore_layout(out_flat.to(q.dtype), v, layout), state.to(state_dtype)
 
 
+def _padded_feature_view(
+    tensor: torch.Tensor,
+    *,
+    padding: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    storage = torch.full(
+        (*tensor.shape[:-1], tensor.shape[-1] + padding),
+        11.0,
+        dtype=tensor.dtype,
+        device=device,
+    )
+    view = storage[..., : tensor.shape[-1]]
+    view.copy_(tensor.to(device))
+    return view, storage, storage[..., tensor.shape[-1] :].clone()
+
+
 @torch.inference_mode()
-def test_kimi_k3_tp16_recurrent_kda_non_contiguous_state_pool():
-    """Preserve a strided cache view while updating only selected Kimi slots."""
+def test_kimi_k3_tp16_recurrent_kda_non_contiguous_qkv_and_state_pool():
+    """Read strided QKV views and update only selected Kimi state slots."""
     torch.manual_seed(20260806)
     device = torch.device("npu")
     batch, heads, dim = 4, 6, 128
@@ -201,13 +218,20 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_state_pool():
     state_before = state_view.clone()
     state_stride = state_view.stride()
     state_storage = state_view.untyped_storage().data_ptr()
+    q_view, q_storage, q_guard = _padded_feature_view(q_cpu, padding=16, device=device)
+    k_view, k_storage, k_guard = _padded_feature_view(k_cpu, padding=32, device=device)
+    v_view, v_storage, v_guard = _padded_feature_view(v_cpu, padding=48, device=device)
+    qkv_views = (q_view, k_view, v_view)
+    qkv_strides = tuple(tensor.stride() for tensor in qkv_views)
+    qkv_storage = tuple(tensor.untyped_storage().data_ptr() for tensor in qkv_views)
     assert not state_view.is_contiguous()
     assert state_view.storage_offset() > 0
+    assert all(not tensor.is_contiguous() for tensor in qkv_views)
 
     out = torch.ops._C_ascend.recurrent_kda(
-        q_cpu.to(device),
-        k_cpu.to(device),
-        v_cpu.to(device),
+        q_view,
+        k_view,
+        v_view,
         raw_gate_cpu.to(device),
         beta_cpu.to(device),
         state_view,
@@ -227,9 +251,14 @@ def test_kimi_k3_tp16_recurrent_kda_non_contiguous_state_pool():
 
     assert state_view.stride() == state_stride
     assert state_view.untyped_storage().data_ptr() == state_storage
+    assert tuple(tensor.stride() for tensor in qkv_views) == qkv_strides
+    assert tuple(tensor.untyped_storage().data_ptr() for tensor in qkv_views) == qkv_storage
     torch.testing.assert_close(out.cpu(), ref_out, rtol=0.02, atol=0.02)
     torch.testing.assert_close(state_view.cpu(), ref_state, rtol=0.02, atol=0.02)
     torch.testing.assert_close(state_pool[1:, 1], guard_layer, rtol=0, atol=0)
+    torch.testing.assert_close(q_storage[..., dim:], q_guard, rtol=0, atol=0)
+    torch.testing.assert_close(k_storage[..., dim:], k_guard, rtol=0, atol=0)
+    torch.testing.assert_close(v_storage[..., dim:], v_guard, rtol=0, atol=0)
     used_slots = set(state_indices_cpu.tolist())
     untouched_slots = [slot for slot in range(state_capacity) if slot not in used_slots]
     torch.testing.assert_close(state_view[untouched_slots], state_before[untouched_slots], rtol=0, atol=0)

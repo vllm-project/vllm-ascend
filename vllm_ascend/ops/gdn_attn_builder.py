@@ -327,13 +327,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             speculative_config = self.vllm_config.speculative_config
             method = getattr(speculative_config, "method", None)
             num_spec = getattr(speculative_config, "num_speculative_tokens", None)
-            if num_spec is not None:
-                # dflash counts the base token in addition to the N speculative
-                # tokens; dspark's threshold is just N by design.
-                if method == "dflash":
-                    self.reorder_batch_threshold = 1 + num_spec
-                elif method == "dspark":
-                    self.reorder_batch_threshold = num_spec
+            if num_spec is not None and method in ("dflash", "dspark"):
+                # The target-model verification query always contains the
+                # base token plus N speculative tokens. DSpark's
+                # sample_from_anchor only makes the draft-model forward use N
+                # queries; it must not change target batch reordering.
+                self.reorder_batch_threshold = 1 + num_spec
 
     def _copy_sequence_indices_to_device(
         self,
@@ -590,11 +589,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # carries no draft tokens. Treat it as ordinary decode unless a
                 # stateful spec-width prompt chunk must use the spec branch.
                 spec_sequence_masks_cpu.zero_()
-            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
-                m,
-                spec_sequence_masks_cpu,
-                num_accepted_tokens,
-            )
+            # DCP must retain prefill metadata for prompt chunks, even when
+            # their width matches speculative decode. Keep the legacy fold
+            # when decode context parallelism is disabled.
+            if self.vllm_config.parallel_config.decode_context_parallel_size == 1:
+                spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
+                    m,
+                    spec_sequence_masks_cpu,
+                    num_accepted_tokens,
+                )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None

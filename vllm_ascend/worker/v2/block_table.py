@@ -24,17 +24,14 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
-
-# Staging a complete block-table row gives substantially faster contiguous GM
-# access on Ascend, but the staged fp32 row must fit in UB together with the
-# per-token temporaries. PR #15212 validated rows through 16K entries on A3.
-# Larger rows use the direct-load path in the same kernel to keep compilation
-# resource usage bounded.
-_MAX_STAGED_BLOCK_TABLE_PAD_SIZE = 16384
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
+
+    block_sizes_tensor: torch.Tensor
+    kernel_block_sizes_tensor: torch.Tensor
 
     def __init__(
         self,
@@ -47,27 +44,43 @@ class AscendBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
-        super().__init__(
-            block_sizes,
-            max_num_reqs,
-            max_num_batched_tokens,
-            max_num_blocks_per_group,
-            device,
-            kernel_block_sizes,
-            cp_size,
-            cp_rank,
-            cp_interleave,
-        )
-        # The kernel block-table row can be wider than
-        # max_num_blocks_per_group when one KV block maps to multiple kernel
-        # blocks. Use the allocated row stride so the staged row is complete.
-        max_block_table_stride = max(block_table.gpu.stride(0) for block_table in self.block_tables)
-        # tl.arange needs a compile-time power-of-two size. This value is
-        # passed as a constexpr and covers every KV cache group's row.
-        self._block_table_pad_size = triton.next_power_of_2(max_block_table_stride)
+        if vllm_version_is("0.28.0"):
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+            )
+        else:
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+                slot_mapping_enabled=slot_mapping_enabled,
+            )
+        self._triton_block_size = 1024
+        # kernel_block_sizes determine the number of block-table entries
+        # touched by one token tile. Use the smallest kernel block size to form
+        # one safe constexpr window for all groups, without staging a whole
+        # row.
+        min_kernel_block_size = min(kernel_block_sizes)
+        window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
+        self._block_table_window_size = triton.next_power_of_2(window_size)
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -80,6 +93,16 @@ class AscendBlockTables(BlockTables):
             device=self.device,
         )
 
+    def init_block_table_layout_tensors(self) -> None:
+        super().init_block_table_layout_tensors()
+        if vllm_version_is("0.28.0"):
+            # Both versions expand KV block IDs into kernel block IDs. The
+            # release parent stores kernel sizes in block_sizes_tensor, while
+            # main separates KV and kernel sizes. Normalize that contract on
+            # KV-cache wake-up as well as at startup.
+            self.kernel_block_sizes_tensor = self.block_sizes_tensor
+            self.block_sizes_tensor = torch.tensor(self.block_sizes, dtype=torch.int32, device=self.device)
+
     def compute_slot_mappings(
         self,
         idx_mapping: torch.Tensor,
@@ -91,6 +114,10 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        if vllm_version_is("0.28.0"):
+            slot_mapping_enabled = None
+        else:
+            slot_mapping_enabled = self.slot_mapping_enabled
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -99,14 +126,16 @@ class AscendBlockTables(BlockTables):
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
+            self.kernel_block_sizes_tensor,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
-            TRITON_BLOCK_SIZE=1024,
-            BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
-            USE_BLOCK_TABLE_STAGING=(self._block_table_pad_size <= _MAX_STAGED_BLOCK_TABLE_PAD_SIZE),
+            TRITON_BLOCK_SIZE=self._triton_block_size,
+            BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
+            slot_mapping_enabled=slot_mapping_enabled,
+            HAS_SLOT_MAPPING_ENABLED=not vllm_version_is("0.28.0"),
         )
         return slot_mappings[:, :num_tokens_padded]

@@ -62,6 +62,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def _make_impl(self, linear_method=None):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.layerwise_kv_cache_hook = None
         impl.tp_size = 2
         impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
         impl._o_proj_weight_switch_enabled = False
@@ -186,6 +187,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.layerwise_kv_cache_hook = None
         impl.enable_dsa_cp_full_o_proj = True
         impl.enable_sp = False
         impl.has_indexer = False
@@ -197,6 +199,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
+        impl.g_proj = None
         impl.layer_name = "layers.0.attn"
 
         q_c = MagicMock()

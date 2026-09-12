@@ -353,6 +353,31 @@ class CoverageSelector:
             pass
         return docstring_lines
 
+    @staticmethod
+    def _get_blank_lines(filepath: str) -> set[int]:
+        """
+        Get line numbers of all blank/whitespace-only lines in file.
+
+        Coverage arc data can record blank lines as control-flow nodes
+        (e.g., block boundaries after if/return statements). These lines
+        are not executable and must be filtered out to avoid false matches.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers that are blank or whitespace-only
+        """
+        blank_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, start=1):
+                    if not line.strip():
+                        blank_lines.add(line_no)
+        except Exception:
+            pass
+        return blank_lines
+
     def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
         """
         Filter out invalid noise lines from coverage data:
@@ -360,6 +385,7 @@ class CoverageSelector:
         2. Function definition lines (def line only)
         3. Class definition lines
         4. Docstring lines
+        5. Blank/whitespace-only lines
 
         Args:
             filepath: Source file path
@@ -377,7 +403,8 @@ class CoverageSelector:
             def_lines = self._get_function_def_lines(filepath)
             class_lines = self._get_class_def_lines(filepath)
             docstring_lines = self._get_docstring_lines(filepath)
-            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines
+            blank_lines = self._get_blank_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines | blank_lines
 
         return lines - self._noise_lines_cache[filepath]
 
@@ -445,7 +472,7 @@ class CoverageSelector:
                 "line_count": data["line_count"],
             }
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(serializable_map, f, indent=2, ensure_ascii=False)
         print(f"\nTest case mapping saved to: {output_path}")
 
@@ -575,8 +602,8 @@ class CodeChangeDetector:
                     old_count = int(match.group(2)) if match.group(2) else 1
                     # Rule: start line = old_start + 2, end line = old_start + old_count - 3
                     start_line = old_start + 2
-                    end_line = old_start + old_count - 3
-                    if end_line <= start_line:
+                    end_line = old_start + old_count - 4
+                    if end_line < start_line:
                         end_line = old_start + old_count
                     # Collect all lines in hunk, check if there are new lines (starting with +)
                     hunk_lines = []
@@ -593,7 +620,6 @@ class CodeChangeDetector:
                     has_addition = any(hline.lstrip().startswith("+") for hline in hunk_lines)
                     if not has_addition:
                         start_line += 1
-                        end_line -= 1
                     for line_no in range(start_line, end_line + 1):
                         changed_files[current_file].add(line_no)
 

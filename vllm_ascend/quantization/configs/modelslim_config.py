@@ -102,6 +102,12 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
     },
+    "glm5_next_mtp": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+    },
     "deepseek_mtp": {
         "gate_up_proj": ["gate_proj", "up_proj"],
     },
@@ -174,6 +180,11 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim
+    # description retains checkpoint-style names.
+    "glm5_next_mtp": {
         ".mtp_block.": ".",
     },
     # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
@@ -460,6 +471,35 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
+        if model_type in ("glm5_next", "glm5_next_text"):
+            candidate = None
+            if prefix.startswith("language_model.model."):
+                candidate = prefix.replace(
+                    "language_model.model.",
+                    "model.language_model.",
+                    1,
+                )
+            elif prefix.startswith("language_model.lm_head"):
+                candidate = prefix.replace("language_model.lm_head", "lm_head", 1)
+            elif prefix.startswith("model.layers."):
+                candidate = prefix.replace(
+                    "model.layers.",
+                    "language_model.model.layers.",
+                    1,
+                )
+            if candidate and not self._has_quant_weight(prefix):
+                if self._has_quant_weight(candidate):
+                    return candidate
+
+        if model_type == "glm5_next_mtp" and prefix.startswith("model.layers."):
+            candidate = prefix.replace(
+                "model.layers.",
+                "model.language_model.layers.",
+                1,
+            )
+            if not self._has_quant_weight(prefix) and self._has_quant_weight(candidate):
+                return candidate
+
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
             # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
@@ -486,8 +526,9 @@ class AscendModelSlimConfig(QuantizationConfig):
           all expert shards (gate/up/down or w1/w2/w3).
         """
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
-        if model_type in UPDATED_PACKED_MODULES_MAPPING:
-            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[model_type])
+        mapping_model_type = "glm5_next" if model_type == "glm5_next_text" else model_type
+        if mapping_model_type in UPDATED_PACKED_MODULES_MAPPING:
+            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[mapping_model_type])
         if model_type in ("kimi_k3", "kimi_linear"):
             from vllm.models.kimi_k3.nvidia.model import KimiLinearModel
 

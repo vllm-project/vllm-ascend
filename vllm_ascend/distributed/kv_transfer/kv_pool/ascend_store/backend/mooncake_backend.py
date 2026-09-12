@@ -12,7 +12,6 @@ import torch
 # Third Party
 from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
@@ -23,6 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
+    set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -194,6 +194,7 @@ class MooncakeBackend(Backend):
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _inject_store_qos(extra_config)
         _validate_store_qos()
+        self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
@@ -233,6 +234,7 @@ class MooncakeBackend(Backend):
                 "to run vLLM with MooncakeConnector."
             ) from e
 
+        self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
         ssd_kwargs = _ssd_setup_kwargs(self.config)
@@ -300,13 +302,11 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
+        set_scheduler_device(parallel_config)
         return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
-        local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
-        torch.npu.set_device(device)
+        torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
         if self._use_store_independent_te:
