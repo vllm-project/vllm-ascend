@@ -55,8 +55,12 @@ hidden_states[t, h] = sum_n(probs[t, n] * v[t, n, h])
 ## 约束说明
 
 - 四个输入张量必须位于同一 NPU，dtype 均为 BF16，shape 满足上表的对应关系。
-- 模型调用前将输入转为 contiguous，并仅传入 `block_residual[:, :num_valid_blocks, :]`，
-  排除预分配但尚未写入的 block。
+- PyTorch 和 ACLNN 接口支持非连续输入。ACLNN 内部通过 `l0op::Contiguous` 将非连续输入
+  转为连续布局，再交给内核计算；调用方无需提前调用 `.contiguous()`。
+- 模型仅传入 `block_residual[:, :num_valid_blocks, :]`，排除预分配但尚未写入的 block。
+  当该切片非连续时，接口仍需打包数据。内核按连续布局寻址，不直接读取原始 tensor stride。
+- 连续化不改变 dtype，可能产生 Slice/StridedSlice 等布局拷贝；已连续输入无需拷贝。
+  BF16 与 FP32 之间的内核内转换融合在 AttnResFwd 中，不是额外的 Cast 算子。
 - 模型接入在 `num_valid_blocks <= 0` 时直接返回 `prefix_sum`，不启动算子。
 - 算子用于前向推理，不提供 PyTorch autograd backward。`need_backward` 仅控制前向中间量输出。
 - 调用前须安装匹配的 CANN、自定义 ACLNN 算子包及 `vllm_ascend_C` 扩展，并完成算子注册。
@@ -87,7 +91,8 @@ output = torch.ops._C_ascend.attn_res_fwd(
 assert output.shape == (7, 256)
 ```
 
-单算子用例在仓库根目录运行，覆盖不同 token 数、block 数、hidden size 和 epsilon：
+单算子用例在仓库根目录运行，覆盖不同 token 数、block 数、hidden size 和 epsilon，
+以及连续输入、有效 block 切片、带 storage offset 的步长切片和转置输入：
 
 ```bash
 python - <<'PY'

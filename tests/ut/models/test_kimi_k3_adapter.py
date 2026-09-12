@@ -51,7 +51,7 @@ def test_ascend_attn_res_calls_native_op(monkeypatch):
     assert output is native_op.return_value
     torch.testing.assert_close(args[0], prefix_sum)
     torch.testing.assert_close(args[1], block_residual[:, :2])
-    assert all(tensor.is_contiguous() for tensor in args[:4])
+    assert not args[1].is_contiguous()
     assert args[2] is proj.weight
     assert args[3] is norm.weight
     assert args[4] == norm.variance_epsilon
