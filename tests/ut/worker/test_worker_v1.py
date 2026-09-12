@@ -331,7 +331,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
-    @patch("vllm_ascend.worker.worker.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker.register_all_custom_ops")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
@@ -344,7 +344,7 @@ class TestNPUWorker(TestBase):
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
-        mock_register_ascend_customop,
+        mock_register_all_custom_ops,
         mock_register_atb_extensions,
         mock_ops,
         mock_adapt_patch,
@@ -371,7 +371,7 @@ class TestNPUWorker(TestBase):
         mock_adapt_patch.assert_called_once()
         mock_ops.register_dummy_fusion_op.assert_called_once()
         mock_register_atb_extensions.assert_called_once()
-        mock_register_ascend_customop.assert_called_once()
+        mock_register_all_custom_ops.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
         mock_check_ascend_device_type.assert_called_once()
 
@@ -386,7 +386,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
-    @patch("vllm_ascend.worker.worker.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker.register_all_custom_ops")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
@@ -399,7 +399,7 @@ class TestNPUWorker(TestBase):
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
-        mock_register_ascend_customop,
+        mock_register_all_custom_ops,
         mock_register_atb_extensions,
         mock_ops,
         mock_adapt_patch,
@@ -429,7 +429,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
-    @patch("vllm_ascend.worker.worker.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker.register_all_custom_ops")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.init_ascend_config")
     @patch("vllm_ascend.worker.worker.check_ascend_device_type")
@@ -442,7 +442,7 @@ class TestNPUWorker(TestBase):
         mock_check_ascend_device_type,
         mock_init_ascend_config,
         mock_get_ascend_config,
-        mock_register_ascend_customop,
+        mock_register_all_custom_ops,
         mock_register_atb_extensions,
         mock_ops,
         mock_adapt_patch,
