@@ -946,9 +946,11 @@ def recompute_w_u_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = torch.empty_like(k)
-    u = torch.empty_like(v)
-    kg = torch.empty_like(k) if gk is not None else None
+    # Zero-init: the triton kernels write tile-shaped regions and can leave
+    # tail elements untouched; stale allocator bytes would leak between calls.
+    w = torch.zeros_like(k)
+    u = torch.zeros_like(v)
+    kg = torch.zeros_like(k) if gk is not None else None
     recompute_w_u_fwd_kernel[(NT, B * H)](
         q=q,
         k=k,
