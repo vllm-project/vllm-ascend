@@ -35,7 +35,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
@@ -1765,13 +1767,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 
+        negate_sin = get_ascend_device_type() != AscendDeviceType.A5
+        sin_arg = sin[:actual_tokens] if negate_sin else -sin[:actual_tokens]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            sin[:actual_tokens],
+            sin_arg,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         # o
