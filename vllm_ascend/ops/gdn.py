@@ -72,7 +72,7 @@ def _chunk_gated_delta_rule_fla_npu(
     # print("q.shape=%s",q.shape)
     # print("k.shape=%s",k.shape)
     # print("v.shape=%s",v.shape)
-    output, final_state = fused_fwd(
+    output, final_state ,_ ,_ = fused_fwd(
         q,
         k,
         v,
@@ -86,9 +86,9 @@ def _chunk_gated_delta_rule_fla_npu(
         scale=scale,
         layout="BSND",
         use_exp2=False,
-        use_qk_l2norm_in_kernel=False,
+        use_qk_l2norm_in_kernel=True,
         allow_neg_eigval=False,
-        disable_recompute=False,
+        disable_recompute=True,
         state_v_first=True,
     )
     if keep_meta is not None:
@@ -577,9 +577,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 value_non_spec = value_non_spec[:, num_decode_tokens:]
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
-
-            query_non_spec = l2norm_fwd(query_non_spec).contiguous()  # [T, Nk, Dk]
-            key_non_spec = l2norm_fwd(key_non_spec).contiguous()  # [T, Nk, Dk]
 
             ascend_config = get_ascend_config()
             if ascend_config.gdn_prefill_backend == "fla_npu":
