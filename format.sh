@@ -33,12 +33,52 @@ check_command() {
     fi
 }
 
+usage() {
+    cat <<'EOF'
+Usage: bash format.sh [changed|all|ci]
+
+Modes:
+  changed  Run pre-commit on changed files only (default).
+  all      Run pre-commit on all files.
+  ci       Run the same all-file manual hooks as CI.
+EOF
+}
+
+mode="${1:-changed}"
+if [[ "${mode}" == "-h" || "${mode}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
 check_command pre-commit
 
 # TODO: cleanup SC exclude
 export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
-if [[ "$1" != 'ci' ]]; then
-    pre-commit run --all-files
-else
-    pre-commit run --all-files --hook-stage manual
-fi
+
+case "${mode}" in
+    changed)
+        mapfile -t changed_files < <(
+            {
+                git diff --name-only --diff-filter=d
+                git diff --cached --name-only --diff-filter=d
+                git ls-files --others --exclude-standard
+            } | sort -u
+        )
+        if [[ "${#changed_files[@]}" -eq 0 ]]; then
+            echo "No changed files to format."
+            exit 0
+        fi
+        pre-commit run --files "${changed_files[@]}"
+        ;;
+    all)
+        pre-commit run --all-files
+        ;;
+    ci)
+        pre-commit run --all-files --hook-stage manual
+        ;;
+    *)
+        echo "Unknown format mode: ${mode}"
+        usage
+        exit 2
+        ;;
+esac
