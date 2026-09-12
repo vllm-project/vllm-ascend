@@ -167,8 +167,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
         "multistream_overlap_shared_expert": true,
         "enable_shared_expert_dp": true,
         "weight_nz_mode": 2,
-        "enable_flashcomm1": true,
-        "enable_reduce_sample": true
+        "enable_flashcomm1": true
     }' \
     --port 11223 > ${LOG_PATH} 2>&1 &
     ```
@@ -207,7 +206,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```

@@ -411,6 +411,9 @@ class MiniMaxM3SparseForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits_local(hidden_states)
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.set_aux_hidden_state_layers(layers)
 

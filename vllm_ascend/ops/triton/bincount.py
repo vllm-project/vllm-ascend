@@ -21,10 +21,8 @@
 # Reference: https://github.com/vllm-project/vllm-ascend/pull/6979
 
 import torch
-from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -44,7 +42,6 @@ def token_bin_counts_and_mask_kernel(
     seq_len,
     vocab_size,
     bin_counts_ptr,
-    tp_rank,
     counts_batch_stride,
     counts_vocab_stride,
     total_blocks,
@@ -59,7 +56,6 @@ def token_bin_counts_and_mask_kernel(
     pid = tl.program_id(axis=0)
     num_progs = tl.num_programs(axis=0)
 
-    vocab_start_idx = tp_rank * vocab_size
     n_seq_blocks = tl.cdiv(seq_len, SEQ_BLOCK)
 
     for linear_block in tl.range(pid, total_blocks, num_progs):
@@ -75,13 +71,12 @@ def token_bin_counts_and_mask_kernel(
         token = tl.load(
             batch_tokens_start + pos_offsets * tokens_seq_stride,
             mask=pos_mask,
-            other=vocab_size + vocab_start_idx,
+            other=vocab_size,
         )
 
-        local_token = token - vocab_start_idx
-        token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
+        token_in_range = pos_mask & (token < vocab_size)
 
-        safe_local_token = tl.where(token_in_range, local_token, 0)
+        safe_local_token = tl.where(token_in_range, token, 0)
         count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
         tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
@@ -126,11 +121,6 @@ def get_token_bin_counts_and_mask_triton(
     total_blocks = n_rows * n_seq_blocks
     grid_size = min(core_num, total_blocks)
 
-    if get_ascend_config().enable_reduce_sample:
-        tp_group = get_tp_group()
-        tp_rank = tp_group.rank_in_group
-    else:
-        tp_rank = 0
     token_bin_counts_and_mask_kernel[(grid_size,)](
         tokens,
         tokens.stride(0),
@@ -139,7 +129,6 @@ def get_token_bin_counts_and_mask_triton(
         n_cols,
         vocab_size,
         bin_counts,
-        tp_rank,
         bin_counts.stride(0),
         bin_counts.stride(1),
         total_blocks,

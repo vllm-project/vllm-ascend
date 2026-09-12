@@ -36,7 +36,6 @@ def test_rejection_sampler_triton_warmup(
     mock_random,
 ):
     mock_get_config.return_value = MagicMock(
-        enable_reduce_sample=False,
         rejection_sampler_config=MagicMock(
             enable_block_verify=False,
             enable_entropy_verify=False,
