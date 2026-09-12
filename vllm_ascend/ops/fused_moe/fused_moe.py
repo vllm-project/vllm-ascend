@@ -120,19 +120,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # choice here (the old forward-time
         # `weight_fp32 if hasattr else weight.to(fp32)` judgment) so ACLGraph
         # capture never emits a per-forward aclop Cast.
-        # Use the ctor `gate` arg directly: nn.Module.__getattr__ can shadow
-        # `@property is_internal_router` / `gate` while __init__ is still running.
-        if gate is not None:
+        if self.is_internal_router:
+            gate = self.gate
+            assert gate is not None
             if hasattr(gate, "weight_fp32"):
                 # Already materialized (e.g. DeepSeek-V4 sets it itself).
                 pass
             else:
-                # Resolve fp32 weight up front when Parameter already exists, then
-                # still request load-time refresh so process_weights_after_loading
-                # overwrites with the real checkpoint values (init-time Parameter
-                # would otherwise freeze stale random weights).
-                gate.weight_fp32 = gate.weight.to(torch.float32)
+                # Request load-time refresh, then seed weight_fp32 so the hot
+                # path can read it even before process_weights_after_loading.
+                # precast overwrites this buffer with checkpoint values on load.
                 gate.precast_fp32_weight = True
+                gate.weight_fp32 = gate.weight.to(torch.float32)
 
         self.ascend_shared_experts = None
         if shared_experts is not None:

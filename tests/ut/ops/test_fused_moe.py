@@ -1830,6 +1830,7 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
         runner.routed_experts = experts
         runner._shared_experts = shared_experts_arg
         runner._gate = gate_arg
+        runner.gate = gate_arg
         runner.routed_input_transform = routed_input_transform
         runner.routed_output_transform = routed_output_transform
         runner.routed_scaling_factor = routed_scaling_factor
@@ -1853,15 +1854,15 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
 
 
 def test_runner_casts_weight_fp32_then_sets_precast(monkeypatch):
-    """Init casts gate.weight → weight_fp32, then sets precast for load refresh."""
+    """Init sets precast, then seeds weight_fp32 from gate.weight."""
     weight = torch.randn(8, 4, dtype=torch.float16)
     gate = SimpleNamespace(weight=weight)
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
+    assert gate.precast_fp32_weight is True
     assert gate.weight_fp32.dtype == torch.float32
     torch.testing.assert_close(gate.weight_fp32, weight.to(torch.float32))
-    assert gate.precast_fp32_weight is True
 
 
 def test_runner_skips_precast_when_weight_fp32_already_exists(monkeypatch):
