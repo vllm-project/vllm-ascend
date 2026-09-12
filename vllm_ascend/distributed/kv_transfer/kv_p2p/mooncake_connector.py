@@ -2137,23 +2137,14 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
         main_block_ids = groups[self.main_group_idx]
         if num_external_tokens > 0 and bound_blocks > len(main_block_ids):
             raise ValueError("vLLM has not allocated enough Main Host blocks")
-        invalid_block_ids = groups[0]
-        if num_external_tokens > 0 and tracker.num_computed_tokens > 0:
-            # Diagnostic only: do not silently narrow the current reporting range.
-            # A partially cached block overlaps the read and is not protected here.
-            group0_block_size = self.block_size[0]
-            prefix_blocks = tracker.num_computed_tokens // group0_block_size
-            prefix_block_ids = groups[0][:prefix_blocks]
-            misreported_prefix_ids = sorted(set(invalid_block_ids).intersection(prefix_block_ids))
-            assert not misreported_prefix_ids, (
-                "Mooncake DSA failure-reporting range includes untouched prefix blocks before transfer: "
-                f"request={request.request_id}, group=0, group_block_size={group0_block_size}, "
-                f"read_tokens=[{tracker.num_computed_tokens}, {bound_tokens}), "
-                f"invalid_block_ids={invalid_block_ids}, "
-                f"untouched_prefix_block_ids={misreported_prefix_ids}. "
-                "A later load failure would invalidate these locally cached blocks; "
-                "no transfer failure or impact on other requests has been observed by this check."
-            )
+        unhashed_block_ids = (
+            blocks.get_unhashed_block_ids_all_groups()
+            if num_external_tokens > 0
+            else ()
+        )
+        invalid_block_ids = (
+            tuple(unhashed_block_ids[0]) if unhashed_block_ids else ()
+        )
         tracker.source = replace(tracker.source, num_external_tokens=num_external_tokens)
         tracker.allocated = True
         tracker.notify_only = num_external_tokens == 0

@@ -26,6 +26,18 @@ def _scheduler():
     return scheduler
 
 
+def _blocks(group0, group1, unhashed_group0=None):
+    if unhashed_group0 is None:
+        unhashed_group0 = group0
+    return SimpleNamespace(
+        get_block_ids=lambda: (group0, group1),
+        get_unhashed_block_ids_all_groups=lambda: (
+            unhashed_group0,
+            group1,
+        ),
+    )
+
+
 def _request():
     return SimpleNamespace(
         request_id="request",
@@ -46,36 +58,46 @@ def _request():
 
 
 @pytest.mark.parametrize("group0_block_size,prefix_tokens", [(2, 2), (1, 2)])
-def test_failure_reporting_asserts_before_emitting_cached_prefix(group0_block_size, prefix_tokens):
+def test_failure_reporting_excludes_untouched_cached_prefix(
+    group0_block_size, prefix_tokens
+):
     scheduler = _scheduler()
     scheduler.block_size[0] = group0_block_size
     request = _request()
     external_tokens, _ = scheduler.get_num_new_matched_tokens(request, prefix_tokens)
     group0_ids = list(range(30, 30 + 4 // group0_block_size))
-    blocks = SimpleNamespace(get_block_ids=lambda: (group0_ids, [40, 41]))
-    with pytest.raises(AssertionError, match="failure-reporting range includes untouched prefix") as error:
-        scheduler.update_state_after_alloc(request, blocks, external_tokens)
-    assert "request=request" in str(error.value)
-    assert "read_tokens=[2, 4)" in str(error.value)
-    assert f"untouched_prefix_block_ids={group0_ids[: prefix_tokens // group0_block_size]}" in str(error.value)
-    assert scheduler.build_connector_meta(None).requests == ()
+    blocks = _blocks(
+        group0_ids,
+        [40, 41],
+        group0_ids[prefix_tokens // group0_block_size :],
+    )
+    scheduler.update_state_after_alloc(request, blocks, external_tokens)
+    (command,) = scheduler.build_connector_meta(None).requests
+    first_transferred_block = prefix_tokens // group0_block_size
+    assert command.invalid_block_ids == tuple(group0_ids[first_transferred_block:])
 
 
 @pytest.mark.parametrize(
-    "group0_block_size,prefix_tokens,external_tokens", [(2, 0, 4), (2, 1, 3), (4, 2, 2), (2, 4, 0)]
+    "group0_block_size,prefix_tokens,external_tokens,expected_invalid_ids",
+    [
+        (2, 0, 4, (30, 31)),
+        (2, 1, 3, (30, 31)),
+        (4, 2, 2, (30,)),
+        (2, 4, 0, ()),
+    ],
 )
-def test_failure_reporting_allows_overlapping_block_and_notification_only(
-    group0_block_size, prefix_tokens, external_tokens
+def test_failure_reporting_includes_overlapping_block_and_handles_notification_only(
+    group0_block_size, prefix_tokens, external_tokens, expected_invalid_ids
 ):
     scheduler = _scheduler()
     scheduler.block_size[0] = group0_block_size
     request = _request()
     scheduler.get_num_new_matched_tokens(request, prefix_tokens)
     group0_ids = list(range(30, 30 + 4 // group0_block_size))
-    blocks = SimpleNamespace(get_block_ids=lambda: (group0_ids, [40, 41]))
+    blocks = _blocks(group0_ids, [40, 41], expected_invalid_ids)
     scheduler.update_state_after_alloc(request, blocks, external_tokens)
     (command,) = scheduler.build_connector_meta(None).requests
-    assert command.invalid_block_ids == tuple(group0_ids)
+    assert command.invalid_block_ids == expected_invalid_ids
     assert command.notify_only == (external_tokens == 0)
 
 
@@ -83,7 +105,7 @@ def test_dsa_scheduler_emits_once_and_waits_for_all_tp_results():
     scheduler = _scheduler()
     request = _request()
     assert scheduler.get_num_new_matched_tokens(request, 0) == (4, True)
-    blocks = SimpleNamespace(get_block_ids=lambda: ([30, 31], [40, 41]))
+    blocks = _blocks([30, 31], [40, 41])
     scheduler.update_state_after_alloc(request, blocks, 4)
 
     metadata = scheduler.build_connector_meta(None)
@@ -130,7 +152,7 @@ def test_dsa_scheduler_failure_never_requests_local_recompute():
     scheduler.get_num_new_matched_tokens(request, 0)
     scheduler.update_state_after_alloc(
         request,
-        SimpleNamespace(get_block_ids=lambda: ([30, 31], [40, 41])),
+        _blocks([30, 31], [40, 41]),
         4,
     )
     output = SimpleNamespace(
@@ -161,7 +183,7 @@ def test_empty_external_receive_only_notifies_prefill():
     scheduler = _scheduler()
     request = _request()
     assert scheduler.get_num_new_matched_tokens(request, 4) == (0, False)
-    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([], [])), 0)
+    scheduler.update_state_after_alloc(request, _blocks([], []), 0)
     (command,) = scheduler.build_connector_meta(None).requests
     assert command.notify_only
     assert command.main_host_block_ids == ()
@@ -181,7 +203,7 @@ def test_cancel_keeps_delayed_free_until_rank_results():
     scheduler = _scheduler()
     request = _request()
     scheduler.get_num_new_matched_tokens(request, 0)
-    scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: ([30, 31], [40, 41])), 4)
+    scheduler.update_state_after_alloc(request, _blocks([30, 31], [40, 41]), 4)
     scheduler.build_connector_meta(None)
     assert scheduler.request_finished(request, ()) == (True, None)
     assert scheduler.build_connector_meta(None).cancelled_requests == ("request",)
