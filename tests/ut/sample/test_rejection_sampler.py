@@ -979,6 +979,102 @@ def _replace(obj, **kwargs):
     return SimpleNamespace(**data)
 
 
+@pytest.mark.parametrize(
+    (
+        "is_processed_logprobs_mode",
+        "max_num_logprobs",
+        "entropy_verify",
+        "expected_clone",
+    ),
+    [
+        pytest.param(False, None, False, False, id="raw-without-consumer"),
+        pytest.param(False, 5, False, True, id="raw-logprobs"),
+        pytest.param(False, 0, False, True, id="raw-zero-logprobs"),
+        pytest.param(False, None, True, True, id="raw-entropy-verify"),
+        pytest.param(True, 5, False, False, id="processed-logprobs"),
+        pytest.param(True, None, True, True, id="processed-entropy-verify"),
+    ],
+)
+def test_forward_clones_raw_target_logits_only_when_needed(
+    monkeypatch,
+    is_processed_logprobs_mode,
+    max_num_logprobs,
+    entropy_verify,
+    expected_clone,
+):
+    rejection_sampler = AscendRejectionSampler.__new__(AscendRejectionSampler)
+    rejection_sampler.sampler = MagicMock()
+    rejection_sampler.sampler.logprobs_mode = "processed_logprobs" if is_processed_logprobs_mode else "raw_logprobs"
+    rejection_sampler.sampler.return_value = SimpleNamespace(
+        sampled_token_ids=torch.tensor([[9]], dtype=torch.int32),
+        logprobs_tensors=SimpleNamespace(logprobs=torch.zeros(1, 3)),
+    )
+    rejection_sampler.top_k = None
+    rejection_sampler.synthetic_mode = False
+    rejection_sampler.synthetic_conditional_rates = None
+    rejection_sampler.is_processed_logprobs_mode = is_processed_logprobs_mode
+    rejection_sampler._log_rejection_sampler_entry = MagicMock()
+    rejection_sampler._log_rejection_sampler_exit = MagicMock()
+    rejection_sampler._get_logprobs_tensors = MagicMock(return_value="logprobs")
+
+    raw_logits = torch.tensor([[0.1, 0.9, 0.0]])
+    processor_offset = 10.0
+    logits = torch.cat((raw_logits, torch.tensor([[0.0, 0.0, 1.0]])))
+    metadata = SimpleNamespace(
+        max_spec_len=1,
+        bonus_logits_indices=torch.tensor([1]),
+        target_logits_indices=torch.tensor([0]),
+        draft_token_ids=torch.tensor([1]),
+        num_draft_tokens=[1],
+        cu_num_draft_tokens=torch.tensor([1]),
+    )
+    sampling_metadata = SimpleNamespace(max_num_logprobs=max_num_logprobs)
+    captured = {}
+
+    def apply_logits_processors(target_logits, *_args):
+        return target_logits.add_(processor_offset)
+
+    def fake_rejection_sample(*args, ori_target_logits, **_kwargs):
+        captured["processed"] = torch.tensor(args[5].tolist())
+        captured["raw"] = torch.tensor(ori_target_logits.tolist())
+        return torch.tensor([[1, 9]], dtype=torch.int32)
+
+    rejection_sampler.apply_logits_processors = apply_logits_processors
+    original_clone = torch.Tensor.clone
+    target_logits_clone_count = 0
+
+    def track_target_logits_clone(tensor, *args, **kwargs):
+        nonlocal target_logits_clone_count
+        if tensor.shape == raw_logits.shape:
+            target_logits_clone_count += 1
+        return original_clone(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", track_target_logits_clone)
+    with (
+        patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.get_ascend_config",
+            return_value=_ascend_cfg(entropy_verify=entropy_verify),
+        ),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
+            side_effect=lambda values, *_args: values,
+        ),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.rejection_sample",
+            side_effect=fake_rejection_sample,
+        ),
+    ):
+        output = rejection_sampler.forward(metadata, None, logits, sampling_metadata)
+
+    assert target_logits_clone_count == int(expected_clone)
+    assert torch.equal(captured["processed"], raw_logits + processor_offset)
+    if expected_clone:
+        assert torch.equal(captured["raw"], raw_logits)
+    assert output.sampled_token_ids.tolist() == [[1, 9]]
+    assert output.logprobs_tensors == ("logprobs" if max_num_logprobs is not None else None)
+
+
 def test_ascend_rejection_sampler_methods():
     logits = torch.tensor([[0.1, 0.8, 0.1]])
     with (
