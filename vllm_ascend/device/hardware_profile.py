@@ -29,6 +29,7 @@ class HardwareCapability(Enum):
     DSV4_COMPRESSED_CACHE = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
+    FIA_HEAD_256_PAGED_PREFILL_WORKAROUND = auto()
     FP8_ATTENTION = auto()
     FUSED_MOE_COMPATIBILITY = auto()
     FUSED_SWIGLU_TUNING_ARGS = auto()
@@ -166,7 +167,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            capabilities=_STANDARD_CAPABILITIES
+            | {
+                HardwareCapability.FIA_HEAD_256_PAGED_PREFILL_WORKAROUND,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,

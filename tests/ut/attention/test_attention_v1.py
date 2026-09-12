@@ -483,6 +483,84 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.forward_fused_infer_attention.assert_called_once()
         self.assertIs(result, output)
 
+    def test_w8a8_head_256_chunked_prefill_gathers_paged_kv(self):
+        impl = AscendAttentionBackendImpl(
+            num_heads=4,
+            head_size=256,
+            scale=1.0,
+            num_kv_heads=2,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+        impl._use_dense_kv_for_w8a8_head_256_prefill = True
+        impl.key_cache = torch.randn(4, 128, 2, 256)
+        impl.value_cache = torch.randn_like(impl.key_cache)
+        query = torch.randn(2, 4, 256)
+        current_key = torch.randn(2, 2, 256)
+        current_value = torch.randn_like(current_key)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.actual_seq_lengths_q = [2]
+        metadata.seq_lens_list = [130]
+        metadata.block_tables = torch.tensor([[0, 1]])
+        metadata.attn_mask = None
+        metadata.causal = True
+        metadata.num_decodes = 0
+        metadata.num_prefills = 1
+        dense_key = torch.randn(130, 2, 256)
+        dense_value = torch.randn_like(dense_key)
+
+        with (
+            patch(
+                "vllm_ascend.ascend_forward_context.get_forward_context",
+                return_value=MagicMock(capturing=False),
+            ),
+            patch.object(
+                attn_module.device_utils,
+                "get_dense_prefill_kv",
+                return_value=(dense_key, dense_value, [130]),
+            ) as gather_kv,
+            patch.object(
+                attn_module.DeviceOperator,
+                "npu_fused_infer_attention_score",
+                return_value=(torch.ones_like(query), None),
+            ) as fused_attention,
+        ):
+            result = impl.forward_fused_infer_attention(
+                query,
+                current_key,
+                current_value,
+                metadata,
+                output,
+                (impl.key_cache, impl.value_cache),
+            )
+
+        gather_kv.assert_called_once()
+        call_kwargs = fused_attention.call_args.kwargs
+        self.assertIsNone(call_kwargs["block_table"])
+        self.assertEqual(call_kwargs["actual_seq_lengths_kv"], [130])
+        self.assertIs(call_kwargs["key"], dense_key)
+        self.assertIs(call_kwargs["value"], dense_value)
+        self.assertTrue(torch.equal(result, torch.ones_like(query)))
+
+    def test_fia_params_rejects_incomplete_kv_cache(self):
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        self.impl.key_cache = torch.empty(1, 1, 1, 1)
+        self.impl.value_cache = None
+
+        with self.assertRaisesRegex(RuntimeError, "KV cache is not fully initialized"):
+            self.impl._get_fia_params(
+                torch.empty(1, 1, 1),
+                torch.empty(1, 1, 1),
+                metadata,
+            )
+
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     def test_decode_uses_paged_attention(self, mock_using_pa):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)

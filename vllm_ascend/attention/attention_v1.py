@@ -54,6 +54,7 @@ from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
 )
+from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -548,6 +549,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
+        quant_description = getattr(self.vllm_config.quant_config, "quant_description", None)
+        self._use_dense_kv_for_w8a8_head_256_prefill = (
+            self.head_size == device_utils.FIA_TND_W8A8_PAGED_PREFILL_FALLBACK_HEAD_SIZE
+            and isinstance(quant_description, dict)
+            and "W8A8_DYNAMIC" in quant_description.values()
+            and get_current_hardware_profile().supports(HardwareCapability.FIA_HEAD_256_PAGED_PREFILL_WORKAROUND)
+        )
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
@@ -781,9 +789,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-            if self.key_cache is None:
+            if self.key_cache is None or self.value_cache is None:
                 raise RuntimeError(
-                    f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
+                    f"KV cache is not fully initialized for mode {attn_metadata.attn_state}: "
+                    f"key_cache={self.key_cache is not None}, value_cache={self.value_cache is not None}"
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
@@ -941,6 +950,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
+                if (
+                    self._use_dense_kv_for_w8a8_head_256_prefill
+                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                    and block_table is not None
+                ):
+                    # A2 FIA can return non-finite values for a short continuation
+                    # prefill with ModelSlim W8A8_DYNAMIC and 256-wide heads. The
+                    # dense TND path is numerically stable for the same Q/K/V.
+                    key, value, actual_seq_lengths_kv = device_utils.get_dense_prefill_kv(
+                        key,
+                        value,
+                        attn_metadata,
+                        num_tokens,
+                        self.key_cache,
+                        self.value_cache,
+                        self.num_kv_heads,
+                        self.head_size,
+                        False,
+                    )
+                    block_table = None
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
