@@ -205,25 +205,57 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         ]
 
     @staticmethod
-    def _format_mxfp4_weight(weight: torch.Tensor) -> torch.Tensor:
+    def _format_mxfp4_weight(weight: torch.Tensor, input_dtype) -> torch.Tensor:
         return torch_npu.npu_format_cast(
             weight,
             29,
             customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
+            input_dtype=input_dtype,
         )
+
+    @staticmethod
+    def _format_mxfp4_weight_inplace(weight: torch.Tensor, input_dtype) -> torch.Tensor:
+        """Convert an independent ND expert tensor to NZ in place."""
+        torch_npu.npu_format_cast_(
+            weight,
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=input_dtype,
+        )
+        return weight
 
     def _process_moe_weights_after_loading(self, layer, reinterpret_as_uint8: bool = False) -> None:
         for tensor_name in ("w13_weight", "w2_weight"):
             tensor = getattr(layer, tensor_name)
-            weight = tensor.data.view(torch.uint8) if reinterpret_as_uint8 else tensor.data
+            weight = tensor.data
+            input_dtype = torch_npu.float4_e2m1fn_x2
+            use_native_fp4 = (
+                not reinterpret_as_uint8
+                and tensor_name == "w13_weight"
+                and getattr(layer, "activation", None) in (MoEActivation.SITU, "situ")
+            )
+            if reinterpret_as_uint8:
+                weight = weight.view(torch.uint8)
+            elif use_native_fp4:
+                input_dtype = torch.float4_e2m1fn_x2
+
             if self.use_expert_weight_list:
-                weight = weight.transpose(1, 2).contiguous()
-                expert_list = [self._format_mxfp4_weight(expert.clone()) for expert in weight.unbind(dim=0)]
+                # Keep the checkpoint N-major layout while splitting it by
+                # expert. clone() creates independent storage with
+                # storage_offset == 0 for EPLB D2D replacement.
+                expert_list = []
+                for expert in weight.unbind(dim=0):
+                    expert = expert.clone()
+                    if use_native_fp4:
+                        expert = expert.view(torch.float4_e2m1fn_x2)
+                    expert = self._format_mxfp4_weight_inplace(expert, input_dtype)
+                    expert_list.append(expert)
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
             else:
-                tensor.data = self._format_mxfp4_weight(weight).transpose(1, 2)
+                if use_native_fp4:
+                    weight = weight.view(torch.float4_e2m1fn_x2)
+                tensor.data = self._format_mxfp4_weight(weight, input_dtype).transpose(1, 2)
 
         for tensor_name in ("w13_weight_scale", "w2_weight_scale"):
             tensor = getattr(layer, tensor_name)
@@ -231,13 +263,12 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             scale = tensor.data.reshape(g, n, k // 2, 2)
             if reinterpret_as_uint8:
                 scale = scale.view(torch.uint8)
-            scale = scale.transpose(-3, -2).contiguous()
             if self.use_expert_weight_list:
-                expert_list = [expert.clone() for expert in scale.unbind(dim=0)]
+                expert_list = [expert.transpose(0, 1).contiguous() for expert in scale.unbind(dim=0)]
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
             else:
-                tensor.data = scale
+                tensor.data = scale.transpose(-3, -2)
 
         if self.use_expert_weight_list:
             torch.npu.empty_cache()
@@ -248,9 +279,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     def _get_mlp_weights(self, layer):
         if self.use_expert_weight_list:
             return (
-                layer.w13_weight_list,
+                [weight.transpose(0, 1) for weight in layer.w13_weight_list],
                 layer.w13_weight_scale_list,
-                layer.w2_weight_list,
+                [weight.transpose(0, 1) for weight in layer.w2_weight_list],
                 layer.w2_weight_scale_list,
             )
         return (
