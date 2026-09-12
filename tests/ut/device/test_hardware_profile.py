@@ -69,6 +69,7 @@ _EXPECTED_CAPABILITIES = {
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

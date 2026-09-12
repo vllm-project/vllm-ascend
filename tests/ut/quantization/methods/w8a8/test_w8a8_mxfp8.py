@@ -218,7 +218,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.assertEqual(result["w13_weight_scale"].shape, (8, 512, 4))
         self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
-    def test_process_weights_stores_original_shapes(self):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
+    def test_process_weights_stores_original_shapes(self, mock_use_cann_megamoe, mock_vllm):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
@@ -243,7 +245,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
 
-    def test_restore_weights_for_rl_loading(self):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
+    def test_restore_weights_for_rl_loading(self, mock_use_cann_megamoe, mock_vllm):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
@@ -253,8 +257,10 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX")
-    def test_apply_full_params(self, mock_ctx):
+    def test_apply_full_params(self, mock_ctx, mock_use_cann_megamoe, mock_vllm):
         tokens = 4
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
