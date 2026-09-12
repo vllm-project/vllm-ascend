@@ -19,11 +19,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.compilation.updatable_graph import (
-    ContextSource,
-    UpdatableGraph,
-)
-from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -86,20 +81,14 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
-        attn_backend = list(self.speculator.attn_backends.values())[0]
+
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
-        if use_updatable_graph(attn_backend):
-            return self._updatable_graph_replay(desc, draft_attn_metadatas)
-        else:
-            # This will be removed once the refactoring is fully complete.
-            return self._graph_replay(desc, attn_backend, num_tokens, draft_attn_metadatas)
-
-    def _graph_replay(self, desc, attn_backend, num_tokens, draft_attn_metadatas):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
+
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         # DPMetadata validates these counts on the host. An NPU tensor would
@@ -124,7 +113,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
+                list(self.speculator.attn_backends.values())[0],
                 self.update_stream,
                 forward_context,
                 num_tokens,
@@ -132,13 +121,4 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 self.speculator.speculative_config,
                 draft_attn_metadatas=draft_attn_metadatas,
             )
-        return ret
-
-    def _updatable_graph_replay(self, desc, draft_attn_metadatas):
-        graph = self.graphs[desc]
-        assert isinstance(graph, UpdatableGraph)
-        resolved_tasks = graph.resolve_tasks(ContextSource(draft_attn_metadatas[0]))
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
-        graph.update(self.update_stream, resolved_tasks)
         return ret
