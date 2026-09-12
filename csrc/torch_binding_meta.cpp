@@ -1259,7 +1259,15 @@ at::Tensor construct_hc_pre_pre_output_tensor(const at::Tensor& x, int64_t hc_mu
     return at::empty_symint(c10::SymIntArrayRef(pre_size), x.options().dtype(at::kFloat));
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_meta(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_meta(
+    const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    auto output_tensors = construct_hc_pre_output_tensor(x, hc_mult);
+    return {std::get<0>(output_tensors), std::get<1>(output_tensors), std::get<2>(output_tensors)};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_meta(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     const c10::optional<at::Tensor>& pre_mix, int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps,
     double hc_eps)
@@ -2206,6 +2214,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
+    ops.impl("npu_hc_pre_v3", &vllm_ascend::meta::npu_hc_pre_v3_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);

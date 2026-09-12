@@ -1519,7 +1519,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> run_hc_pre_fusion(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag, pre);
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
+    const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
+    int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
+{
+    const c10::optional<at::Tensor> pre_mix = c10::nullopt;
+    check_hc_pre_shape_and_dtype(x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult);
+    auto outputs = run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, pre_mix, hc_mult, hc_sinkhorn_iters, norm_eps,
+                                     hc_eps);
+    return {std::get<0>(outputs), std::get<1>(outputs), std::get<2>(outputs)};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v3_npu(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     const c10::optional<at::Tensor>& pre_mix, int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps,
     double hc_eps)
@@ -3381,12 +3392,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "npu_hc_pre_v2("
+            "Tensor x, Tensor hc_fn, Tensor hc_scale, Tensor hc_base, "
+            "int hc_mult, int hc_sinkhorn_iters, "
+            "float norm_eps, float hc_eps"
+        ") -> (Tensor y, Tensor post, Tensor comb_frag)"
+        );
+    ops.impl("npu_hc_pre_v2", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v2_npu);
+
+    ops.def(
+        "npu_hc_pre_v3("
             "Tensor x, Tensor hc_fn, Tensor hc_scale, Tensor hc_base, Tensor? pre_mix=None, *, "
             "int hc_mult=4, int hc_sinkhorn_iters=20, "
             "float norm_eps=1e-6, float hc_eps=1e-6"
         ") -> (Tensor y, Tensor post, Tensor comb_frag, Tensor pre)"
         );
-    ops.impl("npu_hc_pre_v2", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v2_npu);
+    ops.impl("npu_hc_pre_v3", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_v3_npu);
 
     ops.def(
         "inplace_partial_rotary_mul("

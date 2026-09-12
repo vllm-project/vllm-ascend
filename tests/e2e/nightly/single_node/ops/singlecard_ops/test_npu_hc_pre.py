@@ -105,37 +105,32 @@ def _assert_close_with_pass_rate(
     )
 
 
-def _compare_hc_pre_with_cpu(shape: tuple[int, ...], *, use_pre_mix: bool = False):
+def _compare_hc_pre_with_cpu(shape: tuple[int, ...]):
     x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
-    pre_mix = torch.rand(shape[:-1], dtype=torch.float32) if use_pre_mix else None
-    expected_y, expected_post, expected_comb_frag, expected_pre = _hc_pre_cpu(
+    expected_y, expected_post, expected_comb_frag, _ = _hc_pre_cpu(
         x,
         hc_fn,
         hc_scale,
         hc_base,
-        pre_mix,
     )
-    y, post, comb_frag, pre = torch.ops._C_ascend.npu_hc_pre_v2(
+    y, post, comb_frag = torch.ops._C_ascend.npu_hc_pre_v2(
         x.npu(),
         hc_fn.npu(),
         hc_scale.npu(),
         hc_base.npu(),
-        pre_mix.npu() if pre_mix is not None else None,
-        hc_mult=HC_MULT,
-        hc_sinkhorn_iters=HC_SINKHORN_ITERS,
-        norm_eps=NORM_EPS,
-        hc_eps=HC_EPS,
+        HC_MULT,
+        HC_SINKHORN_ITERS,
+        NORM_EPS,
+        HC_EPS,
     )
 
     batch_shape = shape[:-2]
     assert y.shape == (*batch_shape, shape[-1])
     assert post.shape == (*batch_shape, HC_MULT)
     assert comb_frag.shape == (*batch_shape, HC_MULT, HC_MULT)
-    assert pre.shape == (*batch_shape, HC_MULT)
     assert y.dtype == torch.bfloat16
     assert post.dtype == torch.float32
     assert comb_frag.dtype == torch.float32
-    assert pre.dtype == torch.float32
     _assert_close_with_pass_rate(
         y,
         expected_y,
@@ -151,12 +146,6 @@ def _compare_hc_pre_with_cpu(shape: tuple[int, ...], *, use_pre_mix: bool = Fals
     _assert_close_with_pass_rate(
         comb_frag,
         expected_comb_frag,
-        diff_threshold=AUX_DIFF_THRESHOLD,
-        required_pass_rate=AUX_REQUIRED_PASS_RATE,
-    )
-    _assert_close_with_pass_rate(
-        pre,
-        expected_pre,
         diff_threshold=AUX_DIFF_THRESHOLD,
         required_pass_rate=AUX_REQUIRED_PASS_RATE,
     )
@@ -195,8 +184,42 @@ def test_npu_hc_pre_v2_bf16_extended_hidden_size():
 
 
 @torch.inference_mode()
-def test_npu_hc_pre_v2_uses_external_pre_mix():
-    _compare_hc_pre_with_cpu((2, HC_MULT, HIDDEN_SIZE), use_pre_mix=True)
+def test_npu_hc_pre_v3_uses_external_pre_mix():
+    shape = (2, HC_MULT, HIDDEN_SIZE)
+    x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
+    pre_mix = torch.rand(shape[:-1], dtype=torch.float32)
+    expected_y, expected_post, expected_comb_frag, expected_pre = _hc_pre_cpu(x, hc_fn, hc_scale, hc_base, pre_mix)
+    y, post, comb_frag, pre = torch.ops._C_ascend.npu_hc_pre_v3(
+        x.npu(),
+        hc_fn.npu(),
+        hc_scale.npu(),
+        hc_base.npu(),
+        pre_mix.npu(),
+        hc_mult=HC_MULT,
+        hc_sinkhorn_iters=HC_SINKHORN_ITERS,
+        norm_eps=NORM_EPS,
+        hc_eps=HC_EPS,
+    )
+    assert y.shape == (shape[0], shape[-1])
+    assert post.shape == (shape[0], HC_MULT)
+    assert comb_frag.shape == (shape[0], HC_MULT, HC_MULT)
+    assert pre.shape == (shape[0], HC_MULT)
+    assert y.dtype == torch.bfloat16
+    assert post.dtype == torch.float32
+    assert comb_frag.dtype == torch.float32
+    assert pre.dtype == torch.float32
+    for actual, expected, diff_threshold, required_pass_rate in (
+        (y, expected_y, Y_DIFF_THRESHOLD, Y_REQUIRED_PASS_RATE),
+        (post, expected_post, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+        (comb_frag, expected_comb_frag, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+        (pre, expected_pre, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+    ):
+        _assert_close_with_pass_rate(
+            actual,
+            expected,
+            diff_threshold=diff_threshold,
+            required_pass_rate=required_pass_rate,
+        )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
