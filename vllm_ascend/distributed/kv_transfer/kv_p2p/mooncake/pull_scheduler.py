@@ -457,7 +457,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # Requests waiting for the worker to start a READ transfer.
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         # Producer requests whose blocks must remain allocated until read.
-        self._reqs_need_send: dict[str, float] = {}
+        self._reqs_need_send: dict[str, int] = {}
+        self._num_delayed_release_blocks = 0
         self._reqs_in_batch: set[str] = set()
         # D request -> (P scheduler host, port, P request id).
         self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
@@ -623,12 +624,18 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 request.request_id,
             )
             delay_start_time = time.time()
-            self._reqs_need_send[request.request_id] = delay_start_time
+            num_delayed_release_blocks = sum(len(group_block_ids) for group_block_ids in block_ids)
+            self._reqs_need_send[request.request_id] = num_delayed_release_blocks
+            self._num_delayed_release_blocks += num_delayed_release_blocks
             if self._sending_thread is None:
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
             self._sending_thread.add_delayed_request(
                 request.request_id,
                 delay_start_time,
+            )
+            self._kv_stats.set_delayed_release(
+                len(self._reqs_need_send),
+                self._num_delayed_release_blocks,
             )
 
         return delay_free_blocks, {
@@ -667,7 +674,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         )
         if finished_sending:
             for req_id in finished_sending:
-                self._reqs_need_send.pop(req_id, None)
+                self._num_delayed_release_blocks -= self._reqs_need_send.pop(req_id, 0)
+            self._kv_stats.set_delayed_release(
+                len(self._reqs_need_send),
+                self._num_delayed_release_blocks,
+            )
             if connector_output.finished_sending is None:
                 connector_output.finished_sending = finished_sending
             else:

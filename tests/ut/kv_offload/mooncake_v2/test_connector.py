@@ -45,11 +45,13 @@ def test_facade_delegates_scheduler_methods() -> None:
     output = MagicMock()
     connector.connector_scheduler.get_num_new_matched_tokens.return_value = (8, True)
     connector.connector_scheduler.request_finished.return_value = (True, {"remote": True})
+    connector.connector_scheduler.get_kv_connector_stats.return_value = MagicMock()
 
     assert connector.get_num_new_matched_tokens(request, 4) == (8, True)
     connector.update_state_after_alloc(request, blocks, 8)
     connector.update_connector_output(output)
     assert connector.request_finished(request, [1, 2]) == (True, {"remote": True})
+    assert connector.get_kv_connector_stats() is connector.connector_scheduler.get_kv_connector_stats.return_value
 
     connector.connector_scheduler.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
     connector.connector_scheduler.request_finished.assert_called_once_with(request, ([1, 2],))

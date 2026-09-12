@@ -25,6 +25,9 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+    MooncakeKVConnectorStats,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -85,6 +88,7 @@ class MooncakeBaseConnectorScheduler:
         self.group_block_size = [group.kv_cache_spec.block_size for group in self.kv_cache_groups]
         self.group_unique_specs = [self._get_group_unique_specs(group) for group in self.kv_cache_groups]
         self.need_truncate = self._needs_prefill_token_truncation()
+        self._kv_stats = MooncakeKVConnectorStats()
 
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
@@ -166,6 +170,11 @@ class MooncakeBaseConnectorScheduler:
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
         params["_p_side_truncated"] = True
+
+    def get_kv_connector_stats(self) -> MooncakeKVConnectorStats | None:
+        if self._kv_stats.is_empty():
+            return None
+        return self._kv_stats.clone_and_reset()
 
     def on_new_request(self, request: "Request") -> None:
         raise NotImplementedError

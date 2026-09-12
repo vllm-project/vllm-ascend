@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
+from unittest.mock import MagicMock, call
+
+from prometheus_client import Counter, Gauge, Histogram
+
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+    MooncakeKVConnectorStats,
+    MooncakePromMetrics,
+)
 
 
 def test_stats_record_reduce_and_reset() -> None:
@@ -35,3 +42,33 @@ def test_stats_aggregate_ignores_empty_and_merges_nonempty() -> None:
     assert stats.data["transfer_duration"] == [0.1]
     assert stats.data["bytes_transferred"] == [1024]
     assert stats.data["num_failed_transfers"] == [1]
+
+
+def test_stats_aggregate_uses_latest_delayed_release_snapshot() -> None:
+    stats = MooncakeKVConnectorStats(data={})
+    entered = MooncakeKVConnectorStats(data={})
+    entered.set_delayed_release(2, 7)
+    released = MooncakeKVConnectorStats(data={})
+    released.set_delayed_release(0, 0)
+
+    stats.aggregate(entered).aggregate(released)
+
+    assert stats.data["delayed_release_requests"] == 0
+    assert stats.data["delayed_release_blocks"] == 0
+    assert not stats.is_empty()
+
+
+def test_prom_metrics_observes_delayed_release_snapshot() -> None:
+    gauge_cls = MagicMock()
+    metric_types = {Gauge: gauge_cls, Counter: MagicMock(), Histogram: MagicMock()}
+    metrics = MooncakePromMetrics(MagicMock(), metric_types, ["model_name"], {0: ["test-model"]})
+    stats = MooncakeKVConnectorStats()
+    stats.set_delayed_release(2, 7)
+
+    metrics.observe(stats.data)
+
+    assert [metric.kwargs["name"] for metric in gauge_cls.call_args_list] == [
+        "vllm:mooncake_pd_delayed_release_requests",
+        "vllm:mooncake_pd_delayed_release_blocks",
+    ]
+    assert gauge_cls.return_value.labels.return_value.set.call_args_list == [call(2), call(7)]
