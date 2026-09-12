@@ -730,10 +730,6 @@ at::Tensor attn_res_fwd_meta(const at::Tensor& prefix_sum,
                              const at::Tensor& norm_weight,
                              double norm_eps)
 {
-    (void)block_residual;
-    (void)proj_weight;
-    (void)norm_weight;
-    (void)norm_eps;
     return at::empty_symint(prefix_sum.sym_sizes(), prefix_sum.options());
 }
 
