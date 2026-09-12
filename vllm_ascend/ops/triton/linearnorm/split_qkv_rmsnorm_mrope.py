@@ -328,9 +328,13 @@ def triton_split_qkv_rmsnorm_mrope(
         raise ValueError(f"qkv must have shape [num_tokens, {expected_qkv_width}]")
     if q_weight.numel() != head_size or k_weight.numel() != head_size:
         raise ValueError("q_weight and k_weight must each contain head_size elements")
-    if (q_bias is None) != (k_bias is None):
+    if q_bias is None and k_bias is not None:
         raise ValueError("q_bias and k_bias must be both present or both absent")
-    if q_bias is not None and (q_bias.numel() != head_size or k_bias.numel() != head_size):
+    if q_bias is not None and k_bias is None:
+        raise ValueError("q_bias and k_bias must be both present or both absent")
+    if q_bias is not None and k_bias is not None and (
+        q_bias.numel() != head_size or k_bias.numel() != head_size
+    ):
         raise ValueError("q_bias and k_bias must each contain head_size elements")
 
     if rope_dim is None:
@@ -376,6 +380,7 @@ def triton_split_qkv_rmsnorm_mrope(
     positions_stride_0 = 0
     positions_stride_1 = 0
     if INLINE_COS_SIN:
+        assert positions is not None and inv_freq is not None
         if positions.ndim != 2 or positions.shape[0] != 3:
             raise ValueError("positions must have shape [3, num_tokens] for inline MRoPE")
         if positions.shape[1] != num_tokens:
