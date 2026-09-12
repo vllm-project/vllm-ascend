@@ -826,10 +826,6 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
 
     with (
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.vllm_version_is",
-            return_value=False,
-        ),
-        patch(
             "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
             return_value=input_batch,
         ) as make_dummy,
