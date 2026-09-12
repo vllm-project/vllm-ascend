@@ -20,9 +20,7 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
@@ -53,52 +51,23 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        # Upstream replaces quant_config with None for a BF16 draft. Pass only
+        # the target QuaRot path so the draft's existing load_weights can fold
+        # input inverse rotation into FC (W @ R) and align fallback embedding /
+        # lm_head before upstream decides weight sharing. Do not rotate again
+        # after loading or replace the draft's own quantization configuration.
         draft_hf_config = self.draft_model_config.hf_config
-        draft_cls = get_model_cls(self.draft_model_config)
-        aux_format = getattr(draft_cls, "dspark_aux_hidden_state_format", None)
-        configured_format = getattr(draft_hf_config, "dspark_aux_hidden_state_format", None)
-        if configured_format is not None and configured_format != aux_format:
-            raise ValueError(
-                f"Draft auxiliary hidden-state format {configured_format!r} conflicts with "
-                f"{draft_cls.__name__}'s required format {aux_format!r}."
-            )
-        self._configure_target_aux_hidden_state_format(target_model, aux_format)
-
-        # Upstream clears the target quant config before constructing a BF16
-        # draft. Preserve only the target QuaRot path so the draft can align
-        # FC, embedding and lm_head before upstream decides whether to share
-        # target weights.
         rotation_path = get_rotation_path(self.vllm_config)
-        injected_rotation = rotation_path is not None and getattr(draft_cls, "requires_target_quarot_alignment", False)
-        if injected_rotation:
-            draft_hf_config._ascend_target_rotation_path = str(rotation_path)
+        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
         try:
             model = super().load_draft_model(target_model, target_attn_layer_names)
         finally:
-            if injected_rotation:
-                delattr(draft_hf_config, "_ascend_target_rotation_path")
+            delattr(draft_hf_config, "_ascend_target_rotation_path")
+        set_target_model_capture_mode = getattr(model, "set_target_model_capture_mode", None)
+        if set_target_model_capture_mode is not None:
+            set_target_model_capture_mode(target_model)
 
         return model
-
-    @staticmethod
-    def _configure_target_aux_hidden_state_format(target_model: torch.nn.Module, aux_hidden_format: str | None) -> None:
-        if aux_hidden_format is None:
-            return
-        if aux_hidden_format != "materialized":
-            raise ValueError(f"Unsupported GQA DSpark auxiliary hidden-state format {aux_hidden_format!r}.")
-
-        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
-        if set_capture_mode is None:
-            get_language_model = getattr(target_model, "get_language_model", None)
-            if callable(get_language_model):
-                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
-        if set_capture_mode is None:
-            raise RuntimeError(
-                f"GQA DSpark requires materialized auxiliary hidden states, but target "
-                f"{type(target_model).__name__} has no capture-mode setter."
-            )
-        set_capture_mode(True)
-        logger.info("GQA DSpark target auxiliary hidden-state format: materialized.")
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:

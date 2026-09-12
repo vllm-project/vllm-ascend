@@ -21,14 +21,6 @@ TARGET_LM_HEAD_WEIGHT_NAMES = (
 )
 
 
-def _get_draft_rotation_path(vllm_config: VllmConfig, config) -> Path | None:
-    """Keep target QuaRot metadata available while building a BF16 draft."""
-    injected_rotation_path = getattr(config, "_ascend_target_rotation_path", None)
-    if injected_rotation_path is not None:
-        return Path(injected_rotation_path)
-    return get_rotation_path(vllm_config)
-
-
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
 def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     assert linear_weight.shape[1] % rotation_weight.shape[0] == 0, (
@@ -49,17 +41,12 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
-    # Qwen3 GQA DSpark consumes the materialized input to each selected target
-    # layer instead of Kimi K3's raw prefix-sum residual stream.
-    dspark_aux_hidden_state_format = "materialized"
-    requires_target_quarot_alignment = True
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        self.rotation_path = _get_draft_rotation_path(vllm_config, self.config)
+        self.rotation_path = get_rotation_path(vllm_config)
         self.target_model_path = Path(vllm_config.model_config.model)
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
@@ -69,11 +56,26 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
+    def set_target_model_capture_mode(self, target_model: torch.nn.Module) -> None:
+        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is not None:
+            set_capture_mode(True)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         all_weights = list(weights)
         includes_embed_tokens = any("embed_tokens" in name for name, _ in all_weights)
         includes_lm_head = any("lm_head" in name for name, _ in all_weights)
         rotation_weight = None
+        injected_rotation_path = getattr(self.config, "_ascend_target_rotation_path", None)
+        # FC consumes target-space hidden states, so the target rotation takes
+        # precedence over any path inferred from the draft's own quant config.
+        if injected_rotation_path is not None:
+            self.rotation_path = Path(injected_rotation_path)
+
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
             rotation_weight = get_rotation_matrix(self.rotation_path)

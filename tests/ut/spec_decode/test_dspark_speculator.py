@@ -18,7 +18,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm_ascend.models import register_model
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
-    _get_draft_rotation_path,
     process_weight,
 )
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
@@ -63,9 +62,11 @@ def _vllm_config(*, quarot: bool) -> SimpleNamespace:
     )
 
 
-def test_qwen3_gqa_draft_declares_materialized_format():
-    assert AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format == "materialized"
-    assert AscendQwen3DSparkForCausalLM.requires_target_quarot_alignment
+def _draft():
+    draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.config = _gqa_config()
+    return draft
 
 
 @pytest.mark.parametrize("architecture", ["Qwen3DSparkModel", "Qwen3OmniDSparkModel", "DSparkDraftModel"])
@@ -84,78 +85,59 @@ def test_registered_draft_class_declares_capabilities(architecture, monkeypatch)
     )
     draft_cls = get_model_cls(config)
     if architecture == "DSparkDraftModel":
-        assert not getattr(draft_cls, "requires_target_quarot_alignment", False)
-        assert getattr(draft_cls, "dspark_aux_hidden_state_format", None) is None
+        assert not hasattr(draft_cls, "set_target_model_capture_mode")
     else:
         assert draft_cls is AscendQwen3DSparkForCausalLM
 
 
-def test_explicit_format_conflict_fails_before_loading(monkeypatch):
-    load = MagicMock()
-    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
-    config = _gqa_config()
-    config.dspark_aux_hidden_state_format = "raw"
-    with pytest.raises(ValueError, match="conflicts"):
-        _spec(_vllm_config(quarot=True), config).load_draft_model(_target(), set())
-    load.assert_not_called()
-
-
-def test_non_gqa_class_does_not_receive_quarot_or_capture(monkeypatch):
-    class OtherDraft:
-        pass
-
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_model_cls",
-        lambda config: OtherDraft,
-    )
+def test_draft_without_hook_preserves_target_capture(monkeypatch):
     config = SimpleNamespace(architectures=["DSparkDraftModel"])
     target = _target()
     draft = object()
 
     def load(*args):
-        assert not hasattr(config, "_ascend_target_rotation_path")
+        assert config._ascend_target_rotation_path is not None
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
     target.set_dspark_aux_capture_materialized.assert_not_called()
-
-
-@pytest.fixture(autouse=True)
-def resolve_draft_class(monkeypatch):
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_model_cls",
-        lambda config: AscendQwen3DSparkForCausalLM,
-    )
+    assert not hasattr(config, "_ascend_target_rotation_path")
 
 
 def test_qwen3_class_selects_materialized_target_capture():
     target = _target()
-    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
-        target, AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format
-    )
+    _draft().set_target_model_capture_mode(target)
     target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
-def test_undeclared_format_preserves_target_capture_mode():
+def test_undeclared_format_uses_materialized_capture():
     target = _target()
-    AscendDSparkSpeculator._configure_target_aux_hidden_state_format(target, None)
-    target.set_dspark_aux_capture_materialized.assert_not_called()
+    draft = _draft()
+    del draft.config.dspark_aux_hidden_state_format
+    draft.set_target_model_capture_mode(target)
+    target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
-def test_rejects_unknown_gqa_aux_hidden_format():
-    with pytest.raises(ValueError, match="Unsupported GQA DSpark"):
-        AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
-            _target(),
-            "raw",
-        )
+def test_wrapped_target_capture():
+    target = _target()
+    _draft().set_target_model_capture_mode(SimpleNamespace(get_language_model=lambda: target))
+    target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
-def test_configures_capture_before_loading_draft(monkeypatch):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_missing_target_setter_preserves_native_behavior(wrapped):
+    target = SimpleNamespace()
+    model = SimpleNamespace(get_language_model=lambda: target) if wrapped else target
+    _draft().set_target_model_capture_mode(model)
+    assert vars(target) == {}
+
+
+def test_configures_capture_after_loading_draft(monkeypatch):
     events = []
     target = _target()
     target.set_dspark_aux_capture_materialized = lambda enabled: events.append(("capture", enabled))
-    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=object()), lm_head=object())
+    draft = _draft()
 
     def _load(self, target_model, target_attn_layer_names):
         events.append(("load", None))
@@ -165,7 +147,7 @@ def test_configures_capture_before_loading_draft(monkeypatch):
     spec = _spec(_vllm_config(quarot=False), _gqa_config())
 
     assert spec.load_draft_model(target, set()) is draft
-    assert events == [("capture", True), ("load", None)]
+    assert events == [("load", None), ("capture", True)]
 
 
 def test_injects_rotation_before_draft_construction(monkeypatch):
@@ -207,14 +189,43 @@ def test_injected_rotation_path_is_removed_when_loading_fails(monkeypatch):
     assert not hasattr(draft_config, "_ascend_target_rotation_path")
 
 
-def test_injected_rotation_path_does_not_require_draft_quant_config():
-    config = SimpleNamespace(_ascend_target_rotation_path="/rotation")
-    assert _get_draft_rotation_path(SimpleNamespace(quant_config=None), config) == Path("/rotation")
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("quarot", [False, True])
+def test_temporary_rotation_path_is_removed(monkeypatch, fail, quarot):
+    config = _gqa_config()
+
+    def load(*args):
+        expected = str(Path("/target") / "rotation.safetensors") if quarot else None
+        assert config._ascend_target_rotation_path == expected
+        if fail:
+            raise ValueError("load failed")
+        return object()
+
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
+    with pytest.raises(ValueError, match="load failed") if fail else nullcontext():
+        _spec(_vllm_config(quarot=quarot), config).load_draft_model(_target(), set())
+    assert not hasattr(config, "_ascend_target_rotation_path")
+
+
+@pytest.mark.parametrize("initial_path", [None, Path("/draft-rotation")])
+def test_load_weights_uses_target_rotation(monkeypatch, initial_path):
+    draft = _draft()
+    draft.rotation_path = initial_path
+    draft.config._ascend_target_rotation_path = "/target-rotation"
+    rotation_loader = MagicMock(return_value=torch.eye(2))
+    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.get_rotation_matrix", rotation_loader)
+    loaded = []
+    monkeypatch.setattr(Qwen3DSparkForCausalLM, "load_weights", lambda self, weights: loaded.extend(weights))
+    weight = torch.ones(2, 2)
+    draft.load_weights([("fc.weight", weight), ("embed_tokens.weight", weight), ("lm_head.weight", weight)])
+    rotation_loader.assert_called_once_with(Path("/target-rotation"))
+    torch.testing.assert_close(loaded[0][1], weight)
 
 
 def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):
     draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
     torch.nn.Module.__init__(draft)
+    draft.config = _gqa_config()
     draft.model = torch.nn.Module()
     draft.model.embed_tokens = torch.nn.Embedding(4, 2)
     draft.lm_head = torch.nn.Linear(2, 4, bias=False)
