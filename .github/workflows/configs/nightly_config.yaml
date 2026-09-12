@@ -265,6 +265,9 @@ a3:
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-arrch64-nightly-a3-16
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
@@ -351,6 +354,9 @@ a3-560t:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests

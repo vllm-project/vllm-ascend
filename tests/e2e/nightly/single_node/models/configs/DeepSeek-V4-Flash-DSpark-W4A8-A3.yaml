@@ -1,0 +1,61 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "DeepSeek-V4-Flash-DSpark-W4A8-A3"
+    model: "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
+    envs:
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "1024"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--max-model-len"
+      - "16384"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-seqs"
+      - "32"
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--model-loader-extra-config"
+      - '{"enable_mutithread_load": true, "num_threads": 128}'
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--block-size"
+      - "32"
+      - "--speculative-config"
+      - '{"method": "dspark","num_speculative_tokens": 7,"enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding": true,"enable_dsa_cp": true,"multistream_overlap_shared_expert": true}'
+    benchmarks:
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 32
+        baseline: [0.80, 0.61, 0.46, 0.33, 0.23, 0.15, 0.09]
+        threshold: 0.05
