@@ -13,7 +13,6 @@ namespace optiling {
 namespace {
 constexpr uint64_t TILE_ELEMENTS = 160 * 1024 / sizeof(uint16_t);
 constexpr uint32_t MAX_DMA_BLOCK_COUNT = 4095;
-constexpr uint32_t MAX_AIC_BLOCKS = 20;
 }  // namespace
 
 static ge::graphStatus RearrangeQkvDmaTilingFunc(gert::TilingContext* context)
@@ -28,8 +27,7 @@ static ge::graphStatus RearrangeQkvDmaTilingFunc(gert::TilingContext* context)
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     const uint32_t aicCoreNum = ascendcPlatform.GetCoreNumAic();
-    const uint64_t availableCoreNum = std::min<uint64_t>(aicCoreNum, MAX_AIC_BLOCKS);
-    const uint32_t usedCoreNum = static_cast<uint32_t>(std::min<uint64_t>(tokens, availableCoreNum));
+    const uint32_t usedCoreNum = static_cast<uint32_t>(std::min<uint64_t>(tokens, aicCoreNum));
     const uint32_t tileRows = static_cast<uint32_t>(
         std::min<uint64_t>(TILE_ELEMENTS / static_cast<uint64_t>(rowDim), MAX_DMA_BLOCK_COUNT));
 

@@ -34,6 +34,9 @@ at::Tensor npu_rearrange_qkv(
 
     const c10_npu::OptionalNPUGuard guard(x.device());
     at::Tensor output = at::empty({x.numel()}, x.options());
+    if (x.numel() == 0) {
+        return output;
+    }
     EXEC_NPU_CMD(aclnnRearrangeQkvDma, x, q_dim, k_dim, v_dim, output);
     return output;
 }

@@ -24,7 +24,7 @@ def load_op():
         pytest.skip("npu_rearrange_qkv is only built for A2 and A3")
 
 
-@pytest.mark.parametrize("tokens", [1, 4, 15, 16, 17, 19, 20, 21, 64, 319, 320, 321, 1024, 4096])
+@pytest.mark.parametrize("tokens", [0, 1, 4, 15, 16, 17, 19, 20, 21, 64, 319, 320, 321, 1024, 4096])
 @pytest.mark.parametrize("offset", [0, 1])
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @torch.inference_mode()
