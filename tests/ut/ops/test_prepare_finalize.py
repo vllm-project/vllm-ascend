@@ -5,11 +5,14 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestPrepareAndFinalize(unittest.TestCase):
@@ -247,3 +250,34 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_current_hardware_profile")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.torch_npu.npu_dynamic_quant")
+    def test_allgather_w8a8_prequant_depends_on_hardware(self, mock_dynamic_quant, mock_hardware_profile):
+        self.moe_config.is_sequence_parallel = True
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        hidden_states = torch.randn(3, 8)
+        router_logits = torch.randn(3, 2)
+        quantized_hidden_states = torch.randint(-128, 127, hidden_states.shape, dtype=torch.int8)
+        pertoken_scale = torch.rand(3)
+        mock_dynamic_quant.return_value = (quantized_hidden_states, pertoken_scale)
+
+        with patch.object(
+            torch.ops.vllm,
+            "maybe_all_gather_and_maybe_unpad",
+            side_effect=lambda tensor: tensor,
+        ):
+            mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+            a2_output = layer.prepare(hidden_states, router_logits, quant_type=QuantType.W8A8)
+
+            mock_dynamic_quant.assert_called_once_with(hidden_states)
+            self.assertIs(a2_output.hidden_states, quantized_hidden_states)
+            self.assertIs(a2_output.pertoken_scale, pertoken_scale)
+
+            mock_dynamic_quant.reset_mock()
+            mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A3)
+            a3_output = layer.prepare(hidden_states, router_logits, quant_type=QuantType.W8A8)
+
+            mock_dynamic_quant.assert_not_called()
+            self.assertIs(a3_output.hidden_states, hidden_states)
+            self.assertIsNone(a3_output.pertoken_scale)

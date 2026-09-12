@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -401,7 +402,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
         pertoken_scale = None
-        if quant_type == QuantType.W8A8:
+        # A3 routing must receive BF16 input and quantize after AllGather.
+        # Pre-quantized INT8 input can corrupt subsequent MoE computation.
+        if quant_type == QuantType.W8A8 and get_current_hardware_profile().supports(
+            HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION
+        ):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(

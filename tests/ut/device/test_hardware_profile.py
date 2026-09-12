@@ -45,7 +45,11 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+    },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
@@ -61,6 +65,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
             HardwareCapability.GDN_COMPATIBILITY,
             HardwareCapability.IRQ_CPU_RESERVATION,
+            HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
             HardwareCapability.RC_DEVICE_DISCOVERY,
             HardwareCapability.RUNTIME_CUSTOM_OPS,
         }
@@ -84,6 +89,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+            HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
             HardwareCapability.STANDARD_MAMBA_PATCH,
