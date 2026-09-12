@@ -238,6 +238,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self._restore_tp_across_dp()
+        # (unpadded rows, trailing shape, dtype, padded rows) -> persistent padded buffer
+        self._pad_cache: dict[tuple[int, tuple[int, ...], torch.dtype, int], torch.Tensor] = {}
 
     def _restore_tp_across_dp(self):
         """
@@ -247,6 +249,39 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+
+    def _pad_to(self, t: torch.Tensor, target: int) -> torch.Tensor:
+        """Pad `t` up to `target` rows along dim 0 using a persistent buffer.
+
+        `nn.functional.pad` allocates a new tensor and zero-fills it on every call, which
+        for MC2 means two extra kernels (PadV3 + MemSet) per MoE layer per forward. The
+        padded length is `padded_num_tokens`, a function of the TP width rather than of the
+        data, so it is constant for a given captured shape and the buffer can be allocated
+        and zeroed once.
+
+        `nn.functional.pad` guarantees the padded rows are zero, and that guarantee must be
+        preserved: `mc2_mask` is only handed to the dispatch op when `global_bs == 0`, so on
+        the other path the op does read the padded rows.
+
+        The cache key therefore includes the unpadded row count as well as the target. Several
+        batch sizes map to the same `padded_num_tokens` (with tp_size 8, batches 1..8 all pad
+        to 8), and a buffer shared between them would keep the larger batch's rows where the
+        smaller one expects zeros. Keying on both means rows `[t.shape[0]:target]` are never
+        written for a given buffer, so they stay zero from allocation onwards. One buffer per
+        captured shape costs a few KB.
+
+        Reusing a buffer across layers is safe because this method has no multistream path, so
+        each layer's dispatch consumes the padded tensor before the next layer's `prepare`
+        rewrites it. A persistent allocation also suits ACL graph capture, which wants static
+        addresses.
+        """
+        key = (t.shape[0], tuple(t.shape[1:]), t.dtype, target)
+        buf = self._pad_cache.get(key)
+        if buf is None or buf.device != t.device:
+            buf = torch.zeros((target, *t.shape[1:]), dtype=t.dtype, device=t.device)
+            self._pad_cache[key] = buf
+        buf[: t.shape[0]].copy_(t)
+        return buf
 
     def prepare(
         self,
@@ -293,8 +328,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             pad_size = target_pad_length - self.num_tokens
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                hidden_states = self._pad_to(hidden_states, target_pad_length)
+                router_logits = self._pad_to(router_logits, target_pad_length)
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
