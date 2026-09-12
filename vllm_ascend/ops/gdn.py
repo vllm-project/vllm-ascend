@@ -366,9 +366,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1. Convolution sequence transformation
         if self.conv1d.weight.ndim == 3:
-            conv_weights_T = self.conv1d.weight.view(
-                self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-            ).transpose(0, 1)
+            conv_weights_T = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2)).transpose(
+                0, 1
+            )
         else:
             conv_weights_T = self.conv1d.weight
         if spec_sequence_masks is not None:
