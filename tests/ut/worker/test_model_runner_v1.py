@@ -431,9 +431,7 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the lane-specific descriptor changed by vLLM #51718."""
-    if "shared_by" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    """Build the standardized descriptor shared by both supported versions."""
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
