@@ -126,6 +126,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 540
   tests/e2e/pull_request/one_card/test_mla_precision.py: 190
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 120
+  tests/e2e/pull_request/one_card/test_sfa_v1_shared_prefill.py: 600
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 30
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
