@@ -182,7 +182,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
         logger.debug_once("Updating host-side attention metadata with UpdatableGraph.")
         with torch.npu.stream(update_stream):
             # This is specially designed for PA.
-            workspace_buffer = {}
+            workspace_buffer: dict[Hashable, Any] = {}
             for task in resolved_tasks:
                 task.apply(update_stream, workspace_buffer)
 
