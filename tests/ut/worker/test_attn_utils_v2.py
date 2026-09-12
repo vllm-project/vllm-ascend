@@ -924,3 +924,41 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
         make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
     )
     assert_attention_cache_views(caches, raw, packed)
+
+
+def test_build_attn_metadata_propagates_pcp_context_to_sfa_indexer(monkeypatch):
+    monkeypatch.setattr(attn_utils, "AscendSFAIndexerMetadataBuilder", _PrefillStateBuilder)
+    builder = _PrefillStateBuilder()
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0.indexer.k_cache"],
+        get_metadata_builder=lambda _: builder,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    is_prefilling = torch.tensor([True])
+    pcp_context = object()
+
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        is_prefilling=is_prefilling,
+        pcp_context=pcp_context,
+        seq_lens_np=np.array([1], dtype=np.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+    )
+
+    assert metadata["layer.0.indexer.k_cache"] is is_prefilling
+    assert builder.extra_kwargs == {
+        "pcp_context": pcp_context,
+        "pcp_cache_group_idx": 0,
+    }
