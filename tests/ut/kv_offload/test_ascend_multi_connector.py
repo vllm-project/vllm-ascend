@@ -40,7 +40,9 @@ def test_kv_cache_events_combines_child_events_and_workers(num_event_sources):
     combined = connector.get_kv_connector_kv_cache_events()
 
     assert combined is event_batches[0]
-    assert combined.add_events.call_args_list == [call(batch.get_all_events.return_value) for batch in event_batches[1:]]
+    assert combined.add_events.call_args_list == [
+        call(batch.get_all_events.return_value) for batch in event_batches[1:]
+    ]
     assert combined.increment_workers.call_args_list == [
         call(batch.get_number_of_workers.return_value) for batch in event_batches[1:]
     ]
