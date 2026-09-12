@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -18,60 +18,36 @@ from vllm_ascend.models.kimi_k3_dspark import (
 )
 
 
-def test_ascend_attn_res_matches_canonical_k3_math():
-    prefix_sum = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    block_residual = torch.tensor(
-        [
-            [[0.5, 1.5], [2.5, 3.5], [1000.0, 1000.0]],
-            [[1.0, 0.0], [0.0, 1.0], [1000.0, 1000.0]],
-        ]
-    )
-    norm = SimpleNamespace(weight=torch.tensor([1.0, 1.5]), variance_epsilon=1e-5)
-    proj = SimpleNamespace(weight=torch.tensor([[0.25, -0.5]]))
-
-    output = kimi_k3._apply_ascend_attn_res(
-        prefix_sum,
-        block_residual,
-        proj,
-        norm,
-        num_valid_blocks=2,
-    )
-
-    values = torch.cat(
-        (block_residual[:, :2], prefix_sum.unsqueeze(1)),
-        dim=1,
-    ).float()
-    inverse_rms = torch.rsqrt(values.square().mean(-1, keepdim=True) + norm.variance_epsilon)
-    normalized_without_gamma = values * inverse_rms
-    score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    probabilities = (normalized_without_gamma * score_weight).sum(-1).softmax(-1).unsqueeze(1)
-    expected = torch.matmul(probabilities, values).squeeze(1).to(prefix_sum.dtype)
-    torch.testing.assert_close(output, expected)
-
-
-def test_ascend_attn_res_keeps_empty_blocks_on_eager_path(monkeypatch):
+def test_ascend_attn_res_calls_native_op(monkeypatch):
     prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
-    block_residual = torch.empty(2, 0, 4, dtype=torch.bfloat16)
-    projection = SimpleNamespace(weight=torch.randn(1, 4, dtype=torch.bfloat16))
-    norm = SimpleNamespace(
-        weight=torch.randn(4, dtype=torch.bfloat16),
-        variance_epsilon=1e-5,
-    )
+    block_residual = torch.randn(2, 3, 4, dtype=torch.bfloat16)
+    proj = SimpleNamespace(weight=torch.randn(1, 4, dtype=torch.bfloat16))
+    norm = SimpleNamespace(weight=torch.ones(4, dtype=torch.bfloat16), variance_epsilon=1e-5)
+    native_op = MagicMock(return_value=torch.empty_like(prefix_sum))
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", native_op, raising=False)
 
-    def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("empty block_residual must stay on the eager path")
+    output = kimi_k3._apply_ascend_attn_res(prefix_sum, block_residual, proj, norm, 2)
 
-    monkeypatch.setattr(kimi_k3, "apply_attn_res", fail_if_called)
+    native_op.assert_called_once()
+    args = native_op.call_args.args
+    assert output is native_op.return_value
+    torch.testing.assert_close(args[0], prefix_sum)
+    torch.testing.assert_close(args[1], block_residual[:, :2])
+    assert all(tensor.is_contiguous() for tensor in args[:4])
+    assert args[2] is proj.weight
+    assert args[3] is norm.weight
+    assert args[4] == norm.variance_epsilon
 
-    output = kimi_k3._apply_ascend_attn_res(
-        prefix_sum,
-        block_residual,
-        projection,
-        norm,
-        num_valid_blocks=0,
-    )
+
+def test_ascend_attn_res_returns_prefix_for_empty_blocks(monkeypatch):
+    prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
+    native_op = MagicMock(side_effect=AssertionError("empty blocks must not invoke the operator"))
+    monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", native_op, raising=False)
+
+    output = kimi_k3._apply_ascend_attn_res(prefix_sum, torch.empty(2, 0, 4), None, None, 0)
 
     assert output is prefix_sum
+    native_op.assert_not_called()
 
 
 def test_k3_dspark_reports_draft_attention_causality():

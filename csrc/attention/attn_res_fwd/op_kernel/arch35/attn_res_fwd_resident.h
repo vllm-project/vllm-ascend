@@ -171,7 +171,12 @@ private:
             }
             LocalTensor<D_IN> dstRow = GetResidentRow(n);
             // UB→UB：用 Vector Copy，勿用 DataCopy / DataCopyParams
-            Copy(dstRow, inLocal, static_cast<uint64_t>(hiddenSizeAlignBf16_), 1, {1, 1, 8, 8});
+            constexpr uint32_t copyElemsPerRepeat = 256U / sizeof(D_IN);
+            for (uint32_t offset = 0; offset < hiddenSizeAlignBf16_; offset += copyElemsPerRepeat) {
+                const uint32_t remaining = hiddenSizeAlignBf16_ - offset;
+                const uint64_t mask = remaining < copyElemsPerRepeat ? remaining : copyElemsPerRepeat;
+                Copy(dstRow[offset], inLocal[offset], mask, 1, {1, 1, 8, 8});
+            }
             PipeBarrier<PIPE_V>();
             RegBase::CastB16ToFp32Dual(vRow_, inLocal, hiddenSize_);
             FreeInRow(inLocal);
