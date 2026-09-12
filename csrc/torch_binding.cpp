@@ -46,6 +46,7 @@
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
+#include "attention/rearrange_qkv_dma/rearrange_qkv_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
@@ -2772,6 +2773,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? g=None, "
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
+
+    ops.def(
+        "npu_rearrange_qkv(Tensor x, int q_dim, int k_dim, int v_dim) -> Tensor"
+    );
+    ops.impl("npu_rearrange_qkv", torch::kPrivateUse1, &vllm_ascend::npu_rearrange_qkv);
 
     ops.def(
         "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
