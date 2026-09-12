@@ -1160,6 +1160,30 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_compat_npu(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    int64_t topk, int64_t quant_mode,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &output_idx_offset,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+{
+    TORCH_CHECK(return_value == 0, "npu_quant_lightning_indexer_v2 only supports return_value=0");
+    auto outputs = qli_v2::QuantLightningIndexerCandidate(
+        query, key, weights, query_dequant_scale, key_dequant_scale, topk, quant_mode,
+        c10::nullopt, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k,
+        block_table, output_idx_offset, metadata, max_seqlen_q, layout_q, layout_k,
+        mask_mode, cmp_ratio, 3, 2048, 8);
+    return {std::get<0>(outputs), std::get<1>(outputs)};
+}
+
 std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
     bool return_softmax_lse)
 {
@@ -3315,7 +3339,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int mask_mode=3, int cmp_ratio=4, int return_value=0"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
-    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
+    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1,
+             &vllm_ascend::npu_quant_lightning_indexer_v2_compat_npu);
 
     ops.def(
         "npu_sparse_attn_sharedkv("
