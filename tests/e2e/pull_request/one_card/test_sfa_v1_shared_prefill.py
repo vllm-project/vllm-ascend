@@ -67,6 +67,7 @@ def _build_prefill_case(
     query_lens: tuple[int, ...],
     kv_lengths: tuple[int, ...],
     seed: int,
+    attn_state: AscendAttentionState = AscendAttentionState.PrefillCacheHit,
 ) -> tuple[AscendSFAMetadata, tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
     assert len(query_lens) == len(kv_lengths)
@@ -147,7 +148,7 @@ def _build_prefill_case(
         sin=torch.empty(0, device=_DEVICE),
         cos=torch.empty(0, device=_DEVICE),
     )
-    metadata.attn_state = AscendAttentionState.PrefillCacheHit
+    metadata.attn_state = attn_state
     metadata.num_input_tokens = num_tokens
     metadata.num_actual_tokens = num_tokens
     metadata.num_decodes = 0
@@ -463,10 +464,13 @@ def _run_case_latency(
     query_lens: tuple[int, ...],
     kv_lengths: tuple[int, ...],
     seed: int,
+    attn_state: AscendAttentionState,
     iters: int,
     warmup: int,
 ) -> tuple[list[float], list[float]]:
-    baseline_metadata, kv_cache, ql_nope, q_pe, topk_indices = _build_prefill_case(query_lens, kv_lengths, seed)
+    baseline_metadata, kv_cache, ql_nope, q_pe, topk_indices = _build_prefill_case(
+        query_lens, kv_lengths, seed, attn_state=attn_state
+    )
     candidate_metadata = copy.deepcopy(baseline_metadata)
     impl = _create_shared_prefill_impl(seed)
 
@@ -530,15 +534,32 @@ def _main_benchmark() -> None:
     args = parser.parse_args()
 
     cases = {
-        "single_q4096": ((4096,), (4096,), 2026),
-        "group_q1536_kv2560": ((1536, 1536), (2560, 2560), 2027),
+        "single_q4096": (
+            (4096,),
+            (4096,),
+            2026,
+            AscendAttentionState.PrefillCacheHit,
+        ),
+        "group_q1536_kv2560": (
+            (1536, 1536),
+            (2560, 2560),
+            2027,
+            AscendAttentionState.PrefillCacheHit,
+        ),
+        "generic_heterogeneous_q3007_4111_1074": (
+            (3007, 4111, 1074),
+            (3007, 4111, 1074),
+            2032,
+            AscendAttentionState.PrefillNoCache,
+        ),
     }
 
-    for name, (query_lens, kv_lengths, seed) in cases.items():
+    for name, (query_lens, kv_lengths, seed, attn_state) in cases.items():
         baseline_samples_ms, candidate_samples_ms = _run_case_latency(
             query_lens,
             kv_lengths,
             seed,
+            attn_state,
             iters=args.iters,
             warmup=args.warmup,
         )
@@ -551,6 +572,7 @@ def _main_benchmark() -> None:
         print(
             f"[SFA_SHARED_PREFILL_BENCH] case={name} baseline_samples_ms={baseline_samples_ms} "
             f"candidate_samples_ms={candidate_samples_ms} "
+            f"attn_state={attn_state.name} "
             f"baseline_mean_ms={baseline_mean:.4f} baseline_median_ms={baseline_median:.4f} "
             f"candidate_mean_ms={candidate_mean:.4f} candidate_median_ms={candidate_median:.4f}"
         )
