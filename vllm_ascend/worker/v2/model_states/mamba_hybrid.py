@@ -96,6 +96,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
+            num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
