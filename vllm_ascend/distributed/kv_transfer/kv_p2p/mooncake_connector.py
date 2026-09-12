@@ -1822,7 +1822,6 @@ class MooncakeConnectorScheduler:
         assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
 
         transfer_block_ids = []
-        cp_size = max(1, self.pcp_size * self.dcp_size)
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
             is_aligned_state_group = group_info.is_state_group and (
                 getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
@@ -1830,9 +1829,9 @@ class MooncakeConnectorScheduler:
             if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)
             elif is_aligned_state_group:
-                # Mamba state is not CP-sharded like attention KV. Its aligned
+                # Mamba state is not DCP-sharded like attention KV. Its aligned
                 # block index is derived from the actual (already truncated)
-                # prompt length, without multiplying by the CP size.
+                # prompt length, without multiplying by the DCP size.
                 num_prompt_state_blocks = cdiv(prompt_len, group_info.tokens_per_block)
                 if num_prompt_state_blocks <= 0 or num_prompt_state_blocks > len(blocks):
                     raise RuntimeError(
@@ -1842,10 +1841,9 @@ class MooncakeConnectorScheduler:
                     )
                 transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
             else:
-                # In context parallelism, each scheduler-visible block id is a
-                # CP-grouped/virtual block shared by all CP ranks. It therefore
-                # covers cp_size times the token span of one no-CP block.
-                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block * cp_size)
+                # Each scheduler-visible block id is a DCP-grouped virtual
+                # block shared by all DCP ranks.
+                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block * self.dcp_size)
                 transfer_block_ids.append(blocks[:num_prompt_blocks])
         return tuple(transfer_block_ids)
 
@@ -2140,6 +2138,11 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        if self.kv_role == "kv_consumer" and self.pcp_size > 1:
+            raise ValueError(
+                "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
+                "Set prefill_context_parallel_size=1 on the decode (kv_consumer) engine."
+            )
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # kv cache config
@@ -2936,21 +2939,24 @@ class MooncakeConnectorWorker:
             * remote_block_ids_list[i]: remote kernel block ids, grouped by KV cache
               group, where blocks are read from.
 
-        In PCP/DCP scenarios, prompt blocks can be split across multiple remote
-        P workers. This method also accounts for unequal P/D prefix-cache hits
-        by reducing the number of remote blocks that still need to be pulled.
+        PCP selects one complete P-side KV replica; DCP splits prompt blocks
+        across P workers. Unequal P/D prefix-cache hits reduce the number of
+        remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
+        if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
 
-            remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
-            # No CP: expand logical blocks into kernel blocks here so the transfer
-            # stage consumes kernel-level ids directly (chunk_starts no longer needed).
+            # Select the same TP rank in the chosen PCP replica.
+            # E.g. TP2/PP1, PCP rank 1, TP rank 1: offset = 2, port = base + 3.
+            pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
+            remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+            # Complete KV replicas use the same logical-to-kernel block mapping
+            # as the non-CP path.
             use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
                 self.kv_group2layeridx,
                 self.block_size_scale,
@@ -3336,9 +3342,8 @@ class MooncakeConnectorWorker:
 
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
-    def _get_cp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size):
-        # CP case: `group_pulls` is derived from `port` (which already includes the random selection result),
-        # eliminating the need for a table lookup.
+    def _get_dcp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port):
+        """Build group pulls from the selected ports of each DCP shard."""
         mamba_num = prefill_tp_size // self.tp_size
         attn_num = self._get_tp_num_need_pulls(prefill_tp_size)
         attn_gids = [
@@ -3355,9 +3360,8 @@ class MooncakeConnectorWorker:
             for port_idx, port in enumerate(ports):
                 pulls = []
                 port_tp = (port - remote_base_port) % prefill_tp_size
-                # PCP and PP are mutually exclusive; when PCP > 1, pp_rank is always 0.
-                pp_rank = 0 if remote_pcp_size > 1 else (port - remote_base_port) // prefill_tp_size
-                # The first attn_num ports of each shard (i.e., the original ports with randomly substituted TPs).
+                pp_rank = (port - remote_base_port) // prefill_tp_size
+                # Attention uses the leading ports selected for each DCP shard.
                 if port_idx < attn_num:
                     pulls += [
                         GroupPull(
@@ -3369,7 +3373,7 @@ class MooncakeConnectorWorker:
                         )
                         for g in attn_gids
                     ]
-                # Mamba: Only applicable to the final shard; the offset is back-calculated from the port's TP ID.
+                # Transfer Mamba state only on the final DCP shard, using the port's TP rank to derive its offset.
                 if is_final:
                     m_off = port_tp - self.tp_rank * mamba_num
                     if 0 <= m_off < mamba_num:
@@ -3419,19 +3423,21 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
-        cp_transfer = remote_pcp_size * remote_dcp_size * self.pcp_size * self.dcp_size > 1
+        dcp_transfer = remote_dcp_size * self.dcp_size > 1
         if self._is_hma_required:
-            if not cp_transfer:
-                # Non-CP case: port = base + chosen_rank, which has a one-to-one correspondence
-                # with the table keys, maintaining the original logic.
+            if not dcp_transfer:
+                # The table uses TP/PP ranks without PCP replica offsets.
+                # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
+                # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
                 _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-                return [[rank_group_pulls[p - remote_base_port] for p in ports] for ports in remote_handshake_port_list]
+                pcp_offset = self._get_selected_pcp_rank(req_id, remote_pcp_size) * prefill_tp_size
+                return [
+                    [rank_group_pulls[p - remote_base_port - pcp_offset] for p in ports]
+                    for ports in remote_handshake_port_list
+                ]
 
-            # CP case: `group_pulls` is derived from `port` (which already includes the random selection result),
-            # eliminating the need for a table lookup.
-            return self._get_cp_shard_pulls(
-                remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size
-            )
+            # The DCP path has already selected the source ports for each shard.
+            return self._get_dcp_shard_pulls(remote_handshake_port_list, prefill_tp_size, remote_base_port)
 
         tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
         group_ids = [group_id for group_id, (_, layer_indices) in self.kv_group2layeridx.items() if layer_indices]
@@ -3449,9 +3455,9 @@ class MooncakeConnectorWorker:
             ]
 
         group_pulls_list = []
-        for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
+        for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
             if len(remote_ports) == 1:
-                remote_tp_offsets = [pcp_dcp_rank % tp_num_need_pulls]
+                remote_tp_offsets = [shard_idx % tp_num_need_pulls]
                 prefill_pp_ranks = [
                     ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
                     // prefill_tp_size
@@ -3743,7 +3749,7 @@ class MooncakeConnectorWorker:
                 meta.remote_dcp_size,
             )
 
-            for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
+            for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
                 for remote_tp_offset, remote_handshake_port in enumerate(remote_ports):
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
@@ -3754,9 +3760,7 @@ class MooncakeConnectorWorker:
                         meta.remote_multi_nodes_meta_mapping,
                     )
                     remote_port_send_num = (
-                        self.remote_port_send_num[meta.remote_engine_id]
-                        if meta.remote_pcp_size * meta.remote_dcp_size > 1
-                        else None
+                        self.remote_port_send_num[meta.remote_engine_id] if meta.remote_dcp_size > 1 else None
                     )
                     local_block_ids_replicate_k_for_port = (
                         local_block_ids_replicate_k
@@ -3771,32 +3775,35 @@ class MooncakeConnectorWorker:
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
                         remote_request_id=remote_req_id,
-                        local_block_ids=local_block_ids_list[pcp_dcp_rank],
-                        remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
-                        group_pulls=group_pulls_list[pcp_dcp_rank][remote_tp_offset],
+                        local_block_ids=local_block_ids_list[shard_idx],
+                        remote_block_ids=remote_block_ids_list[shard_idx],
+                        group_pulls=group_pulls_list[shard_idx][remote_tp_offset],
                         remote_engine_id=remote_engine_id,
                         remote_host=remote_host,
                         remote_handshake_port=remote_handshake_port,
                         remote_port_send_num=remote_port_send_num,
                         num_computed_tokens=meta.num_computed_tokens,
                         all_task_done=(
-                            pcp_dcp_rank == len(remote_handshake_port_list) - 1
+                            shard_idx == len(remote_handshake_port_list) - 1
                             and remote_tp_offset == len(remote_ports) - 1
                         ),
-                        shard_idx=pcp_dcp_rank,
+                        shard_idx=shard_idx,
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
                     )
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
+        if self.kv_send_thread is not None and self.dcp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._prefill_get_remote_rank(req_id):
+                # Unused PCP replicas report completion locally; only transfer
+                # sources wait for the D-side completion signal.
+                selected_pcp_rank = self._get_selected_pcp_rank(req_id, self.pcp_size)
+                if self.pcp_rank == selected_pcp_rank and self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
 
-        if self.kv_send_thread is not None and self.pcp_size * self.dcp_size > 1:
+        if self.kv_send_thread is not None and self.dcp_size > 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
@@ -3814,6 +3821,14 @@ class MooncakeConnectorWorker:
             num_p_block_heads = max(1, self.num_key_value_heads // prefill_tp_size)
             tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         return tp_num_need_pulls
+
+    @staticmethod
+    def _get_selected_pcp_rank(req_id: str, pcp_size: int) -> int:
+        if pcp_size == 1:
+            return 0
+        # P and D use the P request ID to select the same replica, independently
+        # of TP routing.
+        return random.Random(string_to_int64_hash(f"pcp:{req_id}")).randrange(pcp_size)
 
     def _get_remote_host_info_by_port(
         self,

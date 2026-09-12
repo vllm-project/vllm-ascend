@@ -3,10 +3,11 @@
 
 """V2 hardware-aware adapters layered over upstream speculative decoding.
 
-Sections own runtime widths/buffers, width-matched draft graphs, and PIECEWISE
-verification profiling respectively. Target graphs remain PIECEWISE; uncaptured
-draft widths retain eager fallback. Confidence and prefix allocation stay in
-vLLM. Runner call sites keep their explicit input/attention ordering.
+Sections own runtime widths/buffers, width-matched draft graphs, and the
+PIECEWISE verification fallback respectively. Target FULL graphs and their
+profiling remain owned by upstream vLLM/vLLM-Ascend; uncaptured draft widths
+retain eager fallback. Confidence and prefix allocation stay in vLLM. Runner
+call sites keep their explicit input/attention ordering.
 """
 
 from __future__ import annotations
@@ -618,18 +619,22 @@ def configure_piecewise_manager(
 
 
 @contextmanager
-def adaptive_verification_gate_wrapper(runner_module):
-    """Relax the upstream ``AttentionCGSupport.ALWAYS`` requirement on Ascend.
+def adaptive_verification_gate_wrapper(
+    runner_module,
+    cudagraph_mode: CUDAGraphMode,
+):
+    """Adapt upstream verification only for the Ascend PIECEWISE fallback.
 
-    Upstream adaptive verification captures varlen FULL decode graphs, so its
-    factory refuses to create the manager unless every attention builder
-    reports ``AttentionCGSupport.ALWAYS`` (``adaptive_verification.py``).
-    Ascend attention backends only report ``UNIFORM_BATCH`` today, which would
-    make ``enable_adaptive_verification=true`` fail at startup. Under Plan A
-    the decode runs through PIECEWISE graphs (see ``graph_manager_wrapper``),
-    so the ALWAYS hard gate is relaxed here while every other upstream
-    validation (device/CPU query-len mismatch support, etc.) still runs.
+    PR #15098 owns the native FULL path, including graph validation, varlen
+    capture and startup cost profiling.  Do not replace any of that behavior.
+    PIECEWISE has no target FULL graphs to profile, so only that mode relaxes
+    the upstream ``AttentionCGSupport.ALWAYS`` gate and installs the Ascend
+    PIECEWISE cost-curve sampler.
     """
+    if cudagraph_mode != CUDAGraphMode.PIECEWISE:
+        yield
+        return
+
     original_factory = getattr(runner_module, "maybe_create_adaptive_verification_manager", None)
     if original_factory is None:
         yield

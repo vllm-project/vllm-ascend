@@ -24,7 +24,11 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
 from vllm_ascend.utils import vllm_version_is
 
 
-def _scheduler(*, is_kv_consumer: bool | None):
+def _scheduler(
+    *,
+    is_kv_consumer: bool | None,
+    uses_sparse_index_kpool: bool = False,
+):
     kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
     # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split; v0.28.0
@@ -32,9 +36,17 @@ def _scheduler(*, is_kv_consumer: bool | None):
     scheduler_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
+    indexer_config = {"index_topk": 2048, "index_kpool": 4} if uses_sparse_index_kpool else {}
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_transfer_config),
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=kv_transfer_config,
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(),
+                hf_text_config=SimpleNamespace(**indexer_config),
+            ),
+        ),
         cache_config=SimpleNamespace(block_size=384),
+        block_size=128,
         use_eagle=True,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -114,6 +126,58 @@ def test_producer_decode_fast_path_remains_unsplit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
         _request(num_computed_tokens=380),
+        num_new_tokens=8,
+    )
+
+    assert result == 8
+
+
+def test_sparse_index_kpool_prefill_uses_resolved_common_block_size():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
+        _request(
+            num_computed_tokens=128,
+            num_prompt_tokens=500,
+            num_tokens=500,
+        ),
+        num_new_tokens=200,
+    )
+
+    assert result == 128
+
+
+def test_sparse_index_kpool_stops_at_last_cacheable_boundary():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
+        _request(
+            num_computed_tokens=220,
+            num_prompt_tokens=500,
+            num_tokens=500,
+        ),
+        num_new_tokens=100,
+    )
+
+    assert result == 36
+
+
+def test_sparse_index_kpool_does_not_round_small_chunk_to_zero():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False, uses_sparse_index_kpool=True),
+        _request(
+            num_computed_tokens=128,
+            num_prompt_tokens=500,
+            num_tokens=500,
+        ),
+        num_new_tokens=64,
+    )
+
+    assert result == 64
+
+
+def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=True),
+        _request(),
         num_new_tokens=8,
     )
 

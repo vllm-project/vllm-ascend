@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from dataclasses import dataclass, replace
-from typing import Any
 
 import torch
 from typing_extensions import Self
@@ -20,6 +20,13 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.utils import vllm_version_is
+
+
+def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    """Return the MLA compression ratio across vLLM cache-spec APIs."""
+    if vllm_version_is("0.28.0"):
+        return kv_cache_spec.compress_ratio
+    return kv_cache_spec.tokens_per_state
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
@@ -49,6 +56,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Ascend kernels consume padded pages through an explicit physical block
+    # stride. vLLM main removed this field from AttentionSpec, but it remains
+    # part of the Ascend runner/backend contract.
+    indexes_kv_by_block_stride: bool = False
 
     @property
     def storage_block_size(self) -> int:
@@ -86,7 +97,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
-                spec.compress_ratio if vllm_version_is("0.28.0") else spec.tokens_per_state,
+                get_kv_cache_compression_ratio(spec),
+                spec.indexes_kv_by_block_stride,
             )
             for spec in specs
         }
@@ -99,11 +111,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
         first_spec = specs[0]
         merged = super().merge(specs)
-        # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
-        # only carry it through on the legacy lane.
-        merged_kwargs: dict[str, Any] = {}
-        if vllm_version_is("0.28.0"):
-            merged_kwargs["indexes_kv_by_block_stride"] = first_spec.indexes_kv_by_block_stride
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
@@ -111,7 +118,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
-            **merged_kwargs,
+            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -197,6 +204,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1
     model_version: str | None = None
+    indexes_kv_by_block_stride: bool = False
 
     def __post_init__(self):
         pass
@@ -241,6 +249,38 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
+    """Paged FP32 state used by an indexer K-pool compressor."""
+
+    cache_role: str = "indexer_state"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.dtype != torch.float32:
+            raise ValueError(f"Indexer K-pool compressor state must use FP32, got {self.dtype}.")
+        if self.block_size != self.sliding_window:
+            raise ValueError(
+                "Indexer K-pool compressor state requires block_size == "
+                f"sliding_window, got {self.block_size} and {self.sliding_window}."
+            )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs)
+        assert all(spec == specs[0] for spec in specs[1:]), (
+            "All indexer K-pool compressor-state layers in one cache group must have the same layout and cache role."
+        )
+        return copy.deepcopy(specs[0])
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        # The state group keeps only the current incomplete pool. Since its
+        # sliding window and block size are identical, one page per request is
+        # sufficient on every context-parallel rank.
+        return self.page_size_bytes
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -258,11 +298,8 @@ def register_ascend_kv_cache_specs() -> None:
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
 
-    # Imported lazily so this module stays independent of any single model.
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, KpoolTailSpec
-
     KVCacheSpecRegistry.register(
-        kvcache_spec_cls=KpoolTailSpec,
-        manager_class=KpoolTailManager,
-        uniform_type_base_spec=KpoolTailSpec,
+        kvcache_spec_cls=AscendIndexerKPoolStateSpec,
+        manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
     )

@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
     IndexedConfidenceBuffer,
     IndexedDraftTokenBuffer,
+    adaptive_verification_gate_wrapper,
     configured_capture_k,
     physical_k_scope,
 )
@@ -40,6 +42,30 @@ def make_speculator():
 
 def test_capture_widths_use_compact_config():
     assert configured_capture_k(make_speculator().vllm_config, 5) == (2, 5)
+
+
+def test_full_mode_preserves_upstream_adaptive_verification_factory():
+    def original_factory(**kwargs):
+        return kwargs
+
+    runner_module = SimpleNamespace(
+        maybe_create_adaptive_verification_manager=original_factory
+    )
+    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.FULL):
+        assert runner_module.maybe_create_adaptive_verification_manager is original_factory
+    assert runner_module.maybe_create_adaptive_verification_manager is original_factory
+
+
+def test_piecewise_mode_temporarily_installs_ascend_adapter():
+    def original_factory(**kwargs):
+        return kwargs
+
+    runner_module = SimpleNamespace(
+        maybe_create_adaptive_verification_manager=original_factory
+    )
+    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.PIECEWISE):
+        assert runner_module.maybe_create_adaptive_verification_manager is not original_factory
+    assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 
 
 def test_physical_k_scope_updates_and_restores_query_layout():

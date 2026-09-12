@@ -347,6 +347,55 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertTrue(ascend_compilation_config.enable_super_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_super_kernel_explicit_disable(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": False,
+            },
+            "refresh": True,
+        }
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self, _mock_profile):
+        cfg = AscendCompilationConfig(enable_static_kernel=True)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=False)
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=True, enable_super_kernel=False)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel="true")
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig()
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_ascend_compilation_config_rejects_super_kernel_without_static_kernel(self, _mock_profile):
+        with self.assertRaisesRegex(ValueError, "Super kernel generation requires static kernel to be enabled"):
+            AscendCompilationConfig(enable_static_kernel=False, enable_super_kernel=True)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -465,10 +514,16 @@ class TestAscendConfig(TestBase):
 
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
         self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
         self.assertIn(
             "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
+            warning_messages,
+        )
+        self.assertIn(
+            "super kernel requires static kernel, which is not supported by the current hardware profile. "
+            "Disabling it.",
             warning_messages,
         )
 
@@ -534,6 +589,10 @@ class TestAscendConfig(TestBase):
                 )
                 test_vllm_config.additional_config = {
                     "enable_shared_expert_dp": enable_shared_expert_dp,
+                    # Keep the explicitly assigned all2all_backend: without an
+                    # explicit flashcomm switch, derive_and_validate forces
+                    # flashinfer_all2allv and would clobber the SP setup above.
+                    "enable_flashcomm1": True,
                 }
 
                 ascend_config = init_ascend_config(test_vllm_config)
@@ -1091,11 +1150,108 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             architectures=[],
         )
         supported_vc.additional_config = {"enable_dsa_cp": True}
+        # DSA-CP additionally requires sequence parallelism: EP + TP>1 + DP>1
+        # makes ParallelConfig.use_sequence_parallel_moe True.
+        supported_vc.parallel_config.enable_expert_parallel = True
+        supported_vc.parallel_config.tensor_parallel_size = 2
+        supported_vc.parallel_config.data_parallel_size = 2
         self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
 
         # init_ascend_config clears process caches after publishing the new
         # singleton. This read must not require vLLM's temporary config context.
         self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_enabled_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 1: flashcomm on + SP conditions met -> SP stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_flashcomm1": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_disabled_forces_sp_off_when_conditions_met(self, mock_fix):
+        """Case 2: flashcomm off + SP conditions met -> SP still forced off."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {}
+
+            init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
+            self.assertFalse(enable_sp(vc))
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 3: dsa_cp on + SP conditions met (+indexer) -> SP auto-kept, dsa stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertTrue(config.enable_dsa_cp)
+            self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
+        """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 1
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertFalse(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+            self.assertFalse(enable_dsa_cp())
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)

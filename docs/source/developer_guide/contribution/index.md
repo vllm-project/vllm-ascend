@@ -22,7 +22,7 @@ python3 -m venv .venv
 source ./.venv/bin/activate
 
 # Clone vllm-ascend and install
-git clone https://github.com/vllm-project/vllm-ascend.git
+git clone --branch main https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
 # Install lint requirement and enable pre-commit hook
@@ -39,8 +39,11 @@ After completing "Run lint" setup, you can run CI (Continuous integration) local
 ```bash
 cd ~/vllm-project/
 
-# Run CI needs vLLM installed
-git clone --branch {{ vllm_version }} https://github.com/vllm-project/vllm.git
+# Install the vLLM commit verified by the main-branch plugin checkout.
+VLLM_COMMIT=$(tr -d '[:space:]' < vllm-ascend/.github/vllm-main-verified.commit)
+git init vllm
+git -C vllm fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_COMMIT"
+git -C vllm checkout --detach FETCH_HEAD
 cd vllm
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .

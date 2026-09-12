@@ -293,6 +293,7 @@ class ModelWithContext(nn.Module):
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
         return self.original_model.compute_confidence(head_hidden, markov_embed)
 
+
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
     """Context manager to override speculator's model for speculator capturing."""
