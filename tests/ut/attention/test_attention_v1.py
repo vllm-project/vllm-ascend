@@ -807,10 +807,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
-        param: list[MagicMock | None] = [MagicMock()] * 22
+        param: list[MagicMock | str | None] = [MagicMock()] * 22
         param[16] = None  # sliding_window
         param[17] = None  # c8_k_aq_scale
-        param[21] = None  # layer_name
+        param[21] = "model.layers.2.self_attn.attn"  # layer_name
 
         mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
         mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}

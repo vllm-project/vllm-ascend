@@ -637,13 +637,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: We use a new variable `attn_keys` to ensure the loop count is
             # correct after get by `zip` because of the new structure of the attn_metadata
             # when running with the merged full eagle-graph. Should check it with Qwen3-next.
-            num_layers = len(attn_keys)
-            if num_layers == 0:
+            if not attn_keys:
                 return
             captured_attn_params = graph_params.attn_params[num_tokens]
             handles = graph_params.handles[num_tokens]
             events = graph_params.events[num_tokens]
             graph_param_count = len(captured_attn_params)
+            if graph_param_count != len(handles) or graph_param_count != len(events):
+                raise RuntimeError(
+                    "FULL_REPLAY_CAPTURE_LENGTH_MISMATCH: "
+                    f"params={graph_param_count}, handles={len(handles)}, "
+                    f"events={len(events)}"
+                )
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 if graph_param_count > len(draft_attn_key_steps):
@@ -652,12 +657,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 else:
                     draft_attn_key_steps = draft_attn_key_steps[:graph_param_count]
                 attn_keys = [key for _, key in draft_attn_key_steps]
-            elif use_layer_aware_replay:
-                # One graph size can contain captured FIA ops from all layers.
-                # Repeat attn keys to match the captured op count, then use the
-                # stored layer name in each op param to resolve the exact
-                # metadata entry during replay.
-                attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
+            else:
+                replay_keys = []
+                for captured_param in captured_attn_params:
+                    captured_layer_name = (
+                        captured_param.layer_name
+                        if isinstance(captured_param, PagedAttentionGraphParam)
+                        else captured_param[-1]
+                    )
+                    if captured_layer_name is None:
+                        raise RuntimeError(
+                            "FULL_REPLAY_METADATA_KEY_MISSING: captured attention parameter has no layer name."
+                        )
+                    if captured_layer_name not in attn_metadata:
+                        raise RuntimeError(
+                            "FULL_REPLAY_METADATA_KEY_NOT_FOUND: "
+                            f"{captured_layer_name!r} is absent from runtime metadata."
+                        )
+                    replay_keys.append(captured_layer_name)
+                attn_keys = replay_keys
             attn_count = 0
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -786,13 +804,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: We use a new variable `attn_keys` to ensure the loop count is
             # correct after get by `zip` because of the new structure of the attn_metadata
             # when running with the merged full eagle-graph. Should check it with Qwen3-next.
-            num_layers = len(attn_keys)
-            if num_layers == 0:
+            if not attn_keys:
                 return
             captured_attn_params = graph_params.attn_params[num_tokens]
             handles = graph_params.handles[num_tokens]
             events = graph_params.events[num_tokens]
             graph_param_count = len(captured_attn_params)
+            if graph_param_count != len(handles) or graph_param_count != len(events):
+                raise RuntimeError(
+                    "FULL_REPLAY_CAPTURE_LENGTH_MISMATCH: "
+                    f"params={graph_param_count}, handles={len(handles)}, "
+                    f"events={len(events)}"
+                )
             workspace = graph_params.workspaces.get(num_tokens)
             if _EXTRA_CTX.is_draft_model:
                 if graph_param_count > len(draft_attn_key_steps):
@@ -801,11 +824,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 else:
                     draft_attn_key_steps = draft_attn_key_steps[:graph_param_count]
                 attn_keys = [key for _, key in draft_attn_key_steps]
-            elif use_layer_aware_replay:
-                # Keep the replay loop length aligned with captured FIA ops;
-                # layer-specific metadata lookup below prevents global/sliding
-                # window layers from accidentally sharing the same metadata.
-                attn_keys = [attn_keys[index % num_layers] for index in range(graph_param_count)]
+            else:
+                replay_keys = []
+                for captured_param in captured_attn_params:
+                    captured_layer_name = (
+                        captured_param.layer_name
+                        if isinstance(captured_param, PagedAttentionGraphParam)
+                        else captured_param[-1]
+                    )
+                    if captured_layer_name is None:
+                        raise RuntimeError(
+                            "FULL_REPLAY_METADATA_KEY_MISSING: captured attention parameter has no layer name."
+                        )
+                    if captured_layer_name not in attn_metadata:
+                        raise RuntimeError(
+                            "FULL_REPLAY_METADATA_KEY_NOT_FOUND: "
+                            f"{captured_layer_name!r} is absent from runtime metadata."
+                        )
+                    replay_keys.append(captured_layer_name)
+                attn_keys = replay_keys
             attn_count = 0
             layer_count = 0
             with torch.npu.stream(update_stream):
@@ -1065,7 +1102,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
-        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
+        layer_name = self._graph_metadata_layer_name(layer)
         attn_params = attn_params + (layer_name,)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
@@ -1195,7 +1232,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.sinks,
                 weak_ref_tensors(output),
                 weak_ref_tensors(softmax_lse),
-                self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
+                self._graph_metadata_layer_name(),
             )
         )
         torch.npu.graph_task_group_begin(stream)
@@ -1268,7 +1305,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_metadata.seq_lens,
                         weak_ref_tensors(output),
                     ),
-                    self._graph_metadata_layer_name() if self._use_layer_aware_fia_graph_replay else None,
+                    self._graph_metadata_layer_name(),
                 )
             )
 
@@ -1760,8 +1797,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if self._use_layer_aware_fia_graph_replay:
-            self._layer_name = layer.layer_name
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
@@ -1830,8 +1866,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        if self._use_layer_aware_fia_graph_replay:
-            self._layer_name = layer.layer_name
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendC8AttentionBackendImpl")
