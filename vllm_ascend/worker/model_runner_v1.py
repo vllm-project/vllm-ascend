@@ -1013,7 +1013,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
-        query_start_loc.copy_to_gpu()
+        query_start_loc.gpu.copy_(query_start_loc.cpu.clone().pin_memory(), non_blocking=True)
 
         return num_reqs_padded
 
@@ -1343,7 +1343,8 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        self.query_start_loc.copy_to_gpu()
+        # Keep the H2D source independent of the reusable CPU buffer.
+        self.query_start_loc.gpu.copy_(self.query_start_loc.cpu.clone().pin_memory(), non_blocking=True)
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
@@ -1422,8 +1423,11 @@ class NPUModelRunner(GPUModelRunner):
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if self.use_async_spec_decode:
-            computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                device=self.device, non_blocking=True
+            computed_token_tensor_cpu = (
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+                .clone()
+                .pin_memory()
+                .to(device=self.device, non_blocking=True)
             )
         if (
             self.use_async_spec_decode
@@ -1443,7 +1447,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].clone().pin_memory(),
                 non_blocking=True,
             )
 
@@ -3817,7 +3821,7 @@ class NPUModelRunner(GPUModelRunner):
                 cum_num_tokens = self._get_cumsum_and_arange(
                 num_scheduled_tokens, self.query_pos.np)
                 self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
-                self.query_start_loc.copy_to_gpu()
+                self.query_start_loc.gpu.copy_(self.query_start_loc.cpu.clone().pin_memory(), non_blocking=True)
                 if self._has_gdn:
                     if skip_gdn_state_update:
                         self.gdn_query_start_loc.np.fill(0)

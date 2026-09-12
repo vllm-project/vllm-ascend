@@ -96,6 +96,31 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         self.assertTrue(call_kwargs["uniform_decode"])
 
 
+class TestQueryStartLocSnapshot(unittest.TestCase):
+    def test_padding_transfer_survives_cpu_buffer_reuse(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
+        runner.arange_np = np.arange(5, dtype=np.int32)
+        cpu = torch.tensor([0, 2, 5, 0, 0], dtype=torch.int32)
+        pending_sources = []
+        gpu = MagicMock()
+        gpu.copy_.side_effect = lambda source, **kwargs: pending_sources.append(source)
+        buffer = SimpleNamespace(cpu=cpu, np=cpu.numpy(), gpu=gpu)
+
+        # This test controls when the transfer reads its source. Pinning itself
+        # is covered by hardware validation, so CPU-only UT can omit it.
+        with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
+            padded_reqs = runner._pad_query_start_loc_for_fia(buffer, 8, 2, 2)
+            cpu.fill_(99)
+
+        self.assertEqual(padded_reqs, 3)
+        self.assertEqual(len(pending_sources), 1)
+        self.assertTrue(gpu.copy_.call_args.kwargs["non_blocking"])
+        self.assertNotEqual(pending_sources[0].data_ptr(), cpu.data_ptr())
+        torch.testing.assert_close(pending_sources[0], torch.tensor([0, 2, 5, 8, 0], dtype=torch.int32))
+
+
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -120,7 +145,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
         runner.seq_lens = MagicMock()
         runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
-        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), copy_to_gpu=MagicMock())
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), cpu=MagicMock(), gpu=MagicMock())
         runner.positions = MagicMock()
         runner._dsa_positions_cpu_buf = MagicMock()
 
