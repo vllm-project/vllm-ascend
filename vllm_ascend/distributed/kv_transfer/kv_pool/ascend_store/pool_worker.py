@@ -92,6 +92,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
@@ -659,7 +660,11 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        if vllm_version_is("0.28.0"):
+            retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        else:
+            # vLLM #55353 moved the retention interval from the env var onto CacheConfig.
+            retention_interval = vllm_config.cache_config.prefix_cache_retention_interval  # type: ignore[attr-defined]
         if not isinstance(retention_interval, int):
             retention_interval = None
         return AscendStoreCoordinator(

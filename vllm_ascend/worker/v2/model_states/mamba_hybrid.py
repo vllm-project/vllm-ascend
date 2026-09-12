@@ -50,6 +50,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
@@ -111,5 +112,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
             for_cudagraph_capture=for_capture,
+            ubatch_idx=ubatch_idx,
         )
         return self.attn_metadata

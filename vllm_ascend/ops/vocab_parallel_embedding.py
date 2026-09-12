@@ -58,9 +58,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
+        # main (vLLM #53677): VocabParallelEmbedding.forward reads this
+        # CUDA-only fused-kernel flag; AscendParallelLMHead inherits that
+        # forward, so the shared Ascend init must always define it.
+        self.use_fused_embedding = False
+        # main (#54371): VocabParallelEmbedding.forward reduces through this
+        # group when set; AscendParallelLMHead inherits that forward, so the
+        # shared Ascend init must always define it too.
+        self.parallel_group = None
         if lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
@@ -91,8 +101,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.tp_size,
         )
         self.embedding_dim = embedding_dim
-        quant_method = None
-        if quant_config is not None:
+        if quant_method is None and quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()

@@ -64,18 +64,32 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        if vllm_version_is("0.28.0"):
+            # main (#56107) removed req_states from PCPManager.__init__.
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                req_states=req_states,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
@@ -91,6 +105,16 @@ class AscendPCPManager(PCPManager):
             # normally reserves one additional FIA padding slot, but PCP never
             # uses that slot; expose the exact upstream-sized view here.
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+
+    @property
+    def input_buffers(self) -> AscendInputBuffers:
+        """Expose the PCP-local buffers on both lanes.
+
+        vLLM #53515 added this property on main; 0.28.0 keeps the buffers
+        private, so the override gives the same accessor on the release lane.
+        """
+        assert self._input_buffers is not None
+        return self._input_buffers
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -365,7 +389,13 @@ class AscendPCPManager(PCPManager):
     # adapt its PCP prepare_inputs_to_capture path to create AscendInputBatch
     # directly in persistent PCP buffers, then remove this method and the
     # NPUModelRunner.prepare_dummy_attn override after capture/idle replay validation.
-    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def prepare_dummy_attn(
+        self, input_batch: AscendInputBatch, valid_state_slots: bool = False
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        # `valid_state_slots` is a main-only parameter (vLLM #52506) used to
+        # seed Mamba/SSU state slots; Ascend capture builds its own PCP-local
+        # tables, so it is ignored here.
+        del valid_state_slots
         # Runtime dummy inputs use the runner buffers, whereas FULL graphs
         # capture PCP-local storage. Refresh that storage after a real batch.
         input_buffers = self.input_buffers

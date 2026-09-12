@@ -20,6 +20,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def _tensor_config(layer_names: list[str], **fields) -> SimpleNamespace:
+    """Build a KV-cache tensor config with the lane-specific layer field (#51718)."""
+    if vllm_version_is("0.28.0"):
+        return SimpleNamespace(shared_by=layer_names, **fields)
+    return SimpleNamespace(layers=layer_names, **fields)
 
 
 def test_as_kv_cache_tensors_normalizes_supported_inputs() -> None:
@@ -47,15 +55,15 @@ def test_collect_register_regions_deduplicates_shared_storage() -> None:
     backing = torch.empty(128, dtype=torch.uint8)
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
-                layers=["layer.0"],
+            _tensor_config(
+                ["layer.0"],
                 layer_stride=64,
                 block_stride=64,
                 offset=0,
                 size=backing.nbytes,
             ),
-            SimpleNamespace(
-                layers=["layer.1"],
+            _tensor_config(
+                ["layer.1"],
                 layer_stride=64,
                 block_stride=64,
                 offset=64,
@@ -79,8 +87,8 @@ def test_collect_register_regions_handles_independent_storages() -> None:
     second = torch.empty(48, dtype=torch.uint8)
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
-                layers=["layer.0", "layer.1"],
+            _tensor_config(
+                ["layer.0", "layer.1"],
                 layer_stride=40,
                 block_stride=40,
                 offset=0,
@@ -106,8 +114,8 @@ def test_collect_register_regions_recovers_aligned_backing_before_view() -> None
     logical_view = backing[alignment + 64 :]
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
-                layers=["layer.0"],
+            _tensor_config(
+                ["layer.0"],
                 layer_stride=backing_size,
                 block_stride=alignment,
                 offset=alignment,

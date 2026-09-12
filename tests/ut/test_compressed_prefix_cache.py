@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+# mypy: ignore-errors
 
 from types import SimpleNamespace
 
@@ -86,6 +87,15 @@ def _make_full_manager(
     return spec, block_pool, manager
 
 
+def _cache_block_kwargs(request: Request) -> dict:
+    # main (#53945, #54713) made ``replay_boundaries`` a required keyword-only
+    # argument of ``SingleTypeKVCacheManager.cache_blocks``; v0.28.0 computes
+    # the boundaries internally. No EAGLE groups here, so one boundary.
+    if vllm_version_is("0.28.0"):
+        return {}
+    return {"replay_boundaries": (request.num_prompt_tokens - 1,)}
+
+
 def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
     mla_spec, _, _ = _make_full_manager()
     mamba_spec = MambaSpec(
@@ -163,7 +173,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request_a, num_tokens=logical_block_size)
+    manager.cache_blocks(request_a, num_tokens=logical_block_size, **_cache_block_kwargs(request_a))
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
     expected_hash = BlockHashListWithBlockSize(
@@ -207,7 +217,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request, num_tokens=logical_block_size)
+    manager.cache_blocks(request, num_tokens=logical_block_size, **_cache_block_kwargs(request))
 
     logical_hashes = BlockHashListWithBlockSize(
         request.block_hashes,
@@ -278,7 +288,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             num_tokens=logical_block_size,
             num_tokens_main_model=logical_block_size,
         )
-        manager.cache_blocks(request_a, num_tokens=logical_block_size)
+        manager.cache_blocks(request_a, num_tokens=logical_block_size, **_cache_block_kwargs(request_a))
 
     per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
         request_a.block_hashes,

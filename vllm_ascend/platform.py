@@ -1318,9 +1318,11 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
     # Set "PYTORCH_NPU_ALLOC_CONF=expandable_segments:True" by default to optimize NPU memory management.
-    # Find more details at https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
+    # Find more details at
+    # https://docs.vllm.ai/projects/ascend/en/latest/faqs.html#how-to-handle-the-out-of-memory-issue
     # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
-    # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
+    # Find more details about how to configure this environment variable at
+    # https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
     if vllm_config.model_config and not vllm_config.model_config.enable_sleep_mode:
         npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
         # This environment variable may have more than one key-value pairs.
@@ -1497,6 +1499,10 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             "Please set --prefill-context-parallel-size to 1. "
             f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
         )
+    # main (#54523) moved the PCP+DP guard out of ParallelConfig into each
+    # platform; keep rejecting the combination Ascend does not support.
+    if parallel_config.prefill_context_parallel_size > 1 and parallel_config.data_parallel_size > 1:
+        raise ValueError("PCP (Prefill Context Parallelism) does not support data parallelism yet.")
 
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:

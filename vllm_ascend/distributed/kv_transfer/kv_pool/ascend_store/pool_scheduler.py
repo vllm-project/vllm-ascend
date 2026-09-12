@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class KVPoolScheduler:
@@ -106,7 +107,11 @@ class KVPoolScheduler:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        if vllm_version_is("0.28.0"):
+            retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        else:
+            # vLLM #55353 moved the retention interval from the env var onto CacheConfig.
+            retention_interval = vllm_config.cache_config.prefix_cache_retention_interval  # type: ignore[attr-defined]
         self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False

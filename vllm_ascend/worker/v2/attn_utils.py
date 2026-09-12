@@ -214,6 +214,7 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    ubatch_idx: int = 0,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -283,7 +284,7 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(0)
+            attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             attn_metadata_extra_kwargs = (
@@ -321,7 +322,9 @@ def build_attn_metadata(
             if is_dsa_builder:
                 # Preserve sharing even if a builder replaces one of the
                 # dictionaries while constructing its metadata.
-                common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+                common_ratio_to_sas_metadata = (
+                    attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
@@ -1043,10 +1046,14 @@ def _reshape_kv_cache_v2(
                 # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
                 # Spec properties already give the [B, H, N, C] layout that
                 # basic_cache writes as kv_cache[block, :, offset].
+                if vllm_version_is("0.28.0"):
+                    num_states = kv_cache_spec.storage_block_size
+                else:
+                    num_states = kv_cache_spec.num_states
                 kv_cache_shape = (
                     num_blocks,
                     kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
+                    num_states,
                     kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
                 )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)

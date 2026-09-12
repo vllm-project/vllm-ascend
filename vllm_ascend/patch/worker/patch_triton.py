@@ -11,7 +11,8 @@ from vllm_ascend.ops.causal_conv1d import (
 )
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_update as _npu_causal_conv1d_update_impl
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
-from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
+from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn, _layer_norm_fwd
+from vllm_ascend.utils import vllm_version_is
 
 triton.next_power_of_2 = next_power_of_2
 
@@ -58,6 +59,52 @@ _cc1d.causal_conv1d_update = _npu_causal_conv1d_update
 _cc1d.causal_conv1d_fn = _npu_causal_conv1d_fn
 
 fla_layernorm_guard.LayerNormFn = LayerNormFn
+
+
+def _ascend_layer_norm_fwd(
+    x,
+    weight,
+    bias,
+    eps,
+    z=None,
+    out=None,
+    group_size=None,
+    norm_before_gate=True,
+    is_rms_norm=False,
+    activation="swish",
+):
+    """NPU replacement for the FLA ``layer_norm_fwd`` dispatcher."""
+    del activation
+    out, mean, rstd = _layer_norm_fwd(
+        x,
+        weight,
+        bias,
+        eps,
+        z=z,
+        out=out,
+        group_size=group_size,
+        norm_before_gate=norm_before_gate,
+        is_rms_norm=is_rms_norm,
+    )
+    return out, mean, rstd
+
+
+if not vllm_version_is("0.28.0"):
+    # main (vLLM #54251) moved the FLA layer-norm dispatch into the
+    # LayerNormFwdKernel singleton, so `layer_norm_fwd` (and the
+    # `layernorm_fn` / `rmsnorm_fn` helpers that call it) no longer route
+    # through `LayerNormFn`. Rebind the module-level sink so NPU still runs
+    # the Ascend kernel.
+    fla_layernorm_guard.layer_norm_fwd = _ascend_layer_norm_fwd
+
+    def _skip_warmup_layer_norm_fwd(**kwargs):
+        # The Ascend layer norm uses its own Triton kernel (see
+        # `_ascend_layer_norm_fwd`); warming the upstream CUDA-oriented
+        # LayerNormFwdKernel on NPU is unnecessary.
+        return None
+
+    fla_layernorm_guard.warmup_layer_norm_fwd = _skip_warmup_layer_norm_fwd
+
 fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
 
 # GLM-5.3-Flash (and Kimi KDA) import fused_recurrent_kda / chunk_kda_with_fused_gate

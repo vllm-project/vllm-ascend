@@ -1,6 +1,9 @@
+from collections.abc import Sequence
+
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 
@@ -11,6 +14,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -27,7 +31,10 @@ def bind_kv_cache(
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
+        kv_cache_groups: Accepted for main compatibility (vLLM #52506); Ascend
+            binds caches directly and needs no ReplaySSM ring sharing here.
     """
+    del kv_cache_groups
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
 

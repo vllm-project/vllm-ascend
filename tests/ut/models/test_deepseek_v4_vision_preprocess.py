@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+# mypy: ignore-errors
 
 import threading
 import time
@@ -23,6 +24,11 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
 
 
 class _StubInfo:
+    def __init__(self):
+        # vLLM main's BaseMultiModalProcessor.__init__ reads info.ctx.tokenizer
+        # to enforce requires_tokenizer; the bare stub must expose it.
+        self.ctx = SimpleNamespace(tokenizer=object())
+
     def get_data_parser(self):
         return MultiModalDataParser()
 
@@ -60,6 +66,7 @@ class _NonThreadSafeTokenizer:
 class _ConcurrentStubInfo(_StubInfo):
     def __init__(self):
         self.tokenizer = _NonThreadSafeTokenizer()
+        self.ctx = SimpleNamespace(tokenizer=self.tokenizer)
 
     def get_hf_processor(self, **kwargs):
         return lambda **processor_kwargs: BatchFeature({})

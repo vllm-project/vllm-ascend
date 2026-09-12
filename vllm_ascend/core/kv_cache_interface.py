@@ -29,15 +29,30 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     return kv_cache_spec.tokens_per_state
 
 
+def _resolve_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
+    """Physical token rows for one scheduler block.
+
+    main (#53906) added ``MLAAttentionSpec.storage_block_size`` as an optional
+    field defaulting to ``None``; fall back to the compressed/scheduler width
+    when it is unset or absent.
+    """
+    storage_block_size = getattr(kv_cache_spec, "storage_block_size", None)
+    if storage_block_size is not None:
+        return storage_block_size
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        tokens_per_state = getattr(kv_cache_spec, "tokens_per_state", 1)
+        if tokens_per_state and tokens_per_state > 1:
+            return kv_cache_spec.block_size // tokens_per_state
+    return kv_cache_spec.block_size
+
+
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {_resolve_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+    return _resolve_storage_block_size(kv_cache_spec)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,17 +76,18 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
 
-    @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels.
-
-        vLLM #51718 replaced ``MLAAttentionSpec.compress_ratio`` with
-        ``AttentionSpec.tokens_per_state`` on main. Both express how many
-        logical tokens one physical stored state covers.
-        """
-        if vllm_version_is("0.28.0"):
-            return self.block_size // self.compress_ratio
-        return self.block_size // self.tokens_per_state
+    def __post_init__(self) -> None:
+        # main (#53906) turned ``MLAAttentionSpec.storage_block_size`` into a
+        # dataclass field (default ``None``). A same-named read-only property
+        # here would clash with the generated ``__init__``, so populate the
+        # field with the Ascend physical (compressed) view instead.
+        if not vllm_version_is("0.28.0") and self.storage_block_size is None:
+            object.__setattr__(
+                self,
+                "storage_block_size",
+                self.block_size // self.tokens_per_state,
+            )
+        super().__post_init__()
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -105,10 +121,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(ascend_layouts) == 1, (
             "All attention layers in the same KV cache group must use the same Ascend KV cache layout."
         )
-        non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
-        assert len(non_causal_multi_token_decode_set) == 1, (
-            "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
-        )
+        # main (#55234) ORs ``non_causal_multi_token_decode`` across a group
+        # instead of requiring uniformity; ``super().merge`` below does the OR.
         first_spec = specs[0]
         merged = super().merge(specs)
         return replace(

@@ -214,6 +214,13 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # vLLM #55353 removed the deprecated base-class `_seq_lens_cpu` /
+    # `_num_computed_tokens_cpu` fields (and the `seq_lens_cpu` /
+    # `num_computed_tokens_cpu` properties). The Ascend subclass owns them so
+    # NPU backends keep reading exact CPU sequence lengths on both lanes.
+    _seq_lens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+    _num_computed_tokens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1

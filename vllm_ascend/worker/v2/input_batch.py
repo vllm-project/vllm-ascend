@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 import numpy as np
 import torch
@@ -66,6 +66,10 @@ class AscendInputBuffers(InputBuffers):
 class AscendInputBatch(InputBatch):
     """Input batch for Ascend NPUs."""
 
+    # main (vLLM #54436) removed InputBatch.max_seq_len_np while the 0.28.0 pin
+    # still requires it. Own it here (kw_only + default) so both lanes accept
+    # the keyword the Ascend model runners pass by name.
+    max_seq_len_np: np.ndarray | None = field(default=None, kw_only=True)
     # Create seq_lens_np.
     # npu's attention backend still needs seq_lens on CPU side.
     # InputBatch gained max_query_len default field,

@@ -29,7 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -74,6 +73,13 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+# main (#55212) renamed ``prepare_dcp_local_seq_lens`` and moved DCP metadata
+# preparation into GPUModelRunner.prepare_attn; v0.28.0 still has the old name.
+if vllm_version_is("0.28.0"):
+    from vllm.v1.worker.gpu.cp_utils import (  # type: ignore[import-not-found]
+        prepare_dcp_local_seq_lens,  # type: ignore[attr-defined]  # type: ignore[import-not-found]
+    )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -269,6 +275,7 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
@@ -285,6 +292,7 @@ class NPUModelRunner(GPUModelRunner):
             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
             is_profile=is_profile,
             context_len=context_len,
+            valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
@@ -442,7 +450,9 @@ class NPUModelRunner(GPUModelRunner):
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
         dcp_local_seq_lens = None
-        if self.use_dcp:
+        # main (#55212) prepares DCP metadata in GPUModelRunner.prepare_attn,
+        # after PCP partitioning; v0.28.0 still prepares it here.
+        if vllm_version_is("0.28.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -546,10 +556,12 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
-    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def prepare_dummy_attn(
+        self, input_batch: AscendInputBatch, valid_state_slots: bool = False
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is None:
-            return super().prepare_dummy_attn(input_batch)
-        return self.pcp_manager.prepare_dummy_attn(input_batch)
+            return super().prepare_dummy_attn(input_batch, valid_state_slots)
+        return self.pcp_manager.prepare_dummy_attn(input_batch, valid_state_slots)
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.

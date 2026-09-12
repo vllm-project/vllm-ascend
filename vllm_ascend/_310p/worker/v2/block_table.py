@@ -28,6 +28,7 @@ class Ascend310PBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ) -> None:
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -35,6 +36,9 @@ class Ascend310PBlockTables(BlockTables):
             raise NotImplementedError("310P model runner v2 only supports tensor parallelism.")
         if len(max_num_blocks_per_group) != len(block_sizes):
             raise ValueError("max_num_blocks_per_group must match the number of KV cache groups.")
+        self._slot_mapping_enabled = (
+            slot_mapping_enabled if slot_mapping_enabled is not None else [True] * len(block_sizes)
+        )
 
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes

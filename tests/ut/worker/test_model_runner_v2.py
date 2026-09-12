@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import ast
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +55,7 @@ def test_execute_model_records_profiling_time():
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
         "context_len": 0,
+        "valid_dummy_state_slots": False,
     }
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
@@ -257,7 +259,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    parent.assert_called_once_with(dummy)
+    parent.assert_called_once_with(dummy, False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])

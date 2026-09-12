@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+# mypy: ignore-errors
 """vLLM v0.27.1 contract tests for native NPU KV offloading."""
 
 import inspect
@@ -20,6 +21,7 @@ import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnectorWorker,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_npu_worker_routes_store_and_load_by_direction() -> None:
@@ -157,7 +159,10 @@ def test_cpu_spec_uses_v027_blocks_per_chunk(
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", fake_worker)
     spec = npu_mod.NPUOffloadingSpec.__new__(npu_mod.NPUOffloadingSpec)
     spec.blocks_per_chunk = 4
-    spec.num_blocks = 17
+    if vllm_version_is("0.28.0"):
+        spec.num_blocks = 17
+    else:
+        spec.num_chunks = 17
 
     spec.create_worker(object())
 
@@ -217,7 +222,10 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     spec._engine_id = "engine-dp0"
     spec.replicated_layout = replicated_layout
     spec.cpu_page_size_per_worker = 64
-    spec.num_blocks = 10
+    if vllm_version_is("0.28.0"):
+        spec.num_blocks = 10
+    else:
+        spec.num_chunks = 10
     spec.blocks_per_chunk = 2
     spec.kv_bytes_per_chunk = 4096
     kv_caches = object()
@@ -226,9 +234,15 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
     assert result is sentinel_worker
     assert captured["engine_id"] == "engine-dp0"
-    assert captured["num_blocks"] == 10
+    if vllm_version_is("0.28.0"):
+        assert captured["num_blocks"] == 10
+    else:
+        assert captured["num_chunks"] == 10
     assert captured["rank"] == expected_rank
-    assert captured["kv_bytes_per_block"] == 4096
+    if vllm_version_is("0.28.0"):
+        assert captured["kv_bytes_per_block"] == 4096
+    else:
+        assert captured["kv_bytes_per_chunk"] == 4096
     assert captured["cpu_page_size"] == 64
     assert captured["worker_kwargs"] == {
         "kv_caches": kv_caches,

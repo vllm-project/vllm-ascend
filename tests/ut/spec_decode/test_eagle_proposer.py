@@ -1,4 +1,5 @@
 # ruff: noqa: E501
+# mypy: ignore-errors
 import inspect
 import unittest
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -1362,8 +1363,10 @@ class TestEagleProposerPropose:
             inspect.getattr_static(vllm.config.ModelConfig, "uses_mrope"),
             property
         )
+        # main (#56078) unified XD-RoPE into M-RoPE and exposed mrope_num_dims.
+        xdrope_attr = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
         assert isinstance(
-            inspect.getattr_static(vllm.config.ModelConfig, "uses_xdrope_dim"),
+            inspect.getattr_static(vllm.config.ModelConfig, xdrope_attr),
             property
         )
         assert isinstance(
@@ -1479,8 +1482,7 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
-            '_num_computed_tokens_cache'
+            'dcp_local_seq_lens_cpu', '_num_computed_tokens_cache'
         }
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)
@@ -1492,10 +1494,10 @@ class TestEagleProposerPropose:
         import vllm_ascend.attention.utils
         assert hasattr(vllm_ascend.attention.utils, 'AscendCommonAttentionMetadata')
         fields = {
-            'positions', 'seq_lens_cpu', 'decode_token_per_req', \
+            'positions', 'seq_lens_cpu', '_seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
-            'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'attn_state', 'num_computed_tokens_cpu', '_num_computed_tokens_cpu', \
+            'num_input_tokens', 'graph_pad_size'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -2173,7 +2175,9 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        for field in ("uses_mrope", "uses_xdrope_dim", "use_mla", "is_multimodal_model"):
+        prop_fields = ["uses_mrope", "use_mla", "is_multimodal_model"]
+        prop_fields.append("uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims")
+        for field in prop_fields:
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
             assert hasattr(vllm.config.ModelConfig, method)

@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendBlockTables(BlockTables):
@@ -40,20 +41,35 @@ class AscendBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
-        super().__init__(
-            block_sizes,
-            max_num_reqs,
-            max_num_batched_tokens,
-            max_num_blocks_per_group,
-            device,
-            kernel_block_sizes,
-            cp_size,
-            cp_rank,
-            cp_interleave,
-        )
+        if vllm_version_is("0.28.0"):
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+            )
+        else:
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+                slot_mapping_enabled=slot_mapping_enabled,  # type: ignore[call-arg]
+            )
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
         # touched by one token tile. Use the smallest kernel block size to form

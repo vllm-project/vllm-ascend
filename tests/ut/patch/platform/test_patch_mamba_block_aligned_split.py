@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# mypy: ignore-errors
 
 import inspect
 from types import SimpleNamespace
@@ -36,6 +37,12 @@ def _scheduler(
     scheduler_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
+        # main (vLLM #53388) replaced the `use_eagle` scheduler flag with
+        # `use_eagle_block_drop` for the trailing prefix-cache block drop.
+        scheduler_kwargs["use_eagle_block_drop"] = True
+        # main (vLLM #53945) reads `mamba_fine_grained_prefix_cache` in the
+        # Mamba boundary split; v0.28.0 does not define it.
+        scheduler_kwargs["mamba_fine_grained_prefix_cache"] = False
     indexer_config = {"index_topk": 2048, "index_kpool": 4} if uses_sparse_index_kpool else {}
     return SimpleNamespace(
         vllm_config=SimpleNamespace(

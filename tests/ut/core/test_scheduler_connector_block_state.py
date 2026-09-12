@@ -10,8 +10,13 @@ from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, m
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
+from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="KVCacheManager.take_boundary_state_offloads is main-only (#51358)",
+)
 @pytest.mark.parametrize(
     "scheduler_cls",
     [DyntraLBScheduler, AsyncDyntraLBScheduler, BalanceScheduler, ProfilingChunkScheduler],
@@ -57,11 +62,10 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     if with_connector:
         assert first_output.kv_connector_metadata is metadata
         assert second_output.kv_connector_metadata is metadata
-        assert seen_states[0].block_ids == {"cached": ([1, 9],), "boundary": ([42],)}
         assert seen_states[0].boundary_state_offloads is offers
-        assert seen_states[1].block_ids == {"cached": ([1, 9],)}
+        assert seen_states[0].get_block_ids("boundary") == ([42],)
         assert seen_states[1].boundary_state_offloads == {}
-        assert get_blocks.call_count == 3
+        assert seen_states[1].get_block_ids("boundary") is None
     else:
         assert seen_states == []
         get_blocks.assert_not_called()

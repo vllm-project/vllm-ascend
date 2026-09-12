@@ -459,6 +459,32 @@ def _get_llama_4_scaling(
     return scaling[..., None, None]
 
 
+def _resolve_dsv4_rope_parameters(config, compress_ratio: int) -> dict:
+    """Normalize DeepSeek-V4 rope parameters for a layer type.
+
+    Mirrors ``vllm.models.deepseek_v4.common.rope.build_deepseek_v4_rope``:
+    newer checkpoints nest per-layer-type rope dicts (``{"main", "compress"}``);
+    older ones ship a single flat dict. Sliding-window layers
+    (``compress_ratio == 1``) use plain RoPE (factor 1.0) while compressor
+    layers keep their YaRN scaling.
+    """
+    rope_parameters = config.rope_parameters
+    if isinstance(rope_parameters.get("main"), dict) and isinstance(rope_parameters.get("compress"), dict):
+        key = "compress" if compress_ratio > 1 else "main"
+        rope_parameters = dict(rope_parameters[key])
+    else:
+        rope_parameters = dict(rope_parameters)
+    rope_parameters["rope_theta"] = config.compress_rope_theta if compress_ratio > 1 else config.rope_theta
+    if compress_ratio > 1 and rope_parameters.get("rope_type", "default") != "default":
+        rope_parameters["rope_type"] = (
+            "deepseek_yarn" if rope_parameters.get("apply_yarn_scaling", True) else "deepseek_llama_scaling"
+        )
+    else:
+        rope_parameters["rope_type"] = "deepseek_yarn"
+        rope_parameters["factor"] = 1.0
+    return rope_parameters
+
+
 class DeepseekV4Attention(nn.Module):
     def __init__(
         self,
@@ -547,11 +573,13 @@ class DeepseekV4Attention(nn.Module):
         )
         self.compress_ratio = get_dsv4_compress_ratio(config, config_layer_idx)
 
+        rope_parameters = _resolve_dsv4_rope_parameters(config, self.compress_ratio)
         if self.compress_ratio > 1:
-            config.rope_parameters["rope_theta"] = config.compress_rope_theta
             rope_groups = ["default", f"c{self.compress_ratio}"]
+            max_position_embeddings = rope_parameters.get("original_max_position_embeddings", max_position_embeddings)
         else:
-            config.rope_parameters["rope_theta"] = config.rope_theta
+            # Sliding-window layers use plain RoPE over the full context.
+            max_position_embeddings = config.max_position_embeddings
             rope_groups = ["default"]
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
@@ -560,10 +588,10 @@ class DeepseekV4Attention(nn.Module):
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
             is_neox_style=False,
-            scaling_factor=config.rope_parameters["factor"],
-            base=config.rope_parameters["rope_theta"],
-            beta_fast=config.rope_parameters["beta_fast"],
-            beta_slow=config.rope_parameters["beta_slow"],
+            scaling_factor=rope_parameters["factor"],
+            base=rope_parameters["rope_theta"],
+            beta_fast=rope_parameters["beta_fast"],
+            beta_slow=rope_parameters["beta_slow"],
             rope_groups=rope_groups,
         )
 
@@ -689,7 +717,13 @@ class DeepseekV4DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
+        rope_parameters = config.rope_parameters
+        if isinstance(rope_parameters.get("main"), dict):
+            # Newer checkpoints nest per-layer-type rope dicts.
+            rope_parameters = rope_parameters["main"]
+        max_position_embeddings = rope_parameters.get(
+            "original_max_position_embeddings", config.max_position_embeddings
+        )
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
@@ -796,6 +830,9 @@ class DeepseekV4DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DeepseekV4Model(nn.Module, EagleModelMixin):
+    # main (#50514) gates dspark/eagle3+PP on this flag. Ascend relays aux
+    # hidden states over PP through its own transport in worker/v2/pp_utils.py.
+    supports_aux_hidden_states_over_pp = True
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

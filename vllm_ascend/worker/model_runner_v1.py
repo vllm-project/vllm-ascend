@@ -902,6 +902,17 @@ class NPUModelRunner(GPUModelRunner):
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
+    def _get_ascend_mamba_state_copy_funcs(self):
+        """Return per-Mamba-type state copy funcs for the installed vLLM lane.
+
+        vLLM main replaced the per-state tuple with a ``MambaStateCopyFuncsByType``
+        mapping exposed through the runner's ``_get_mamba_state_copy_funcs``;
+        the release lane still exposes the model's flat tuple.
+        """
+        if vllm_version_is("0.28.0"):
+            return self.model.get_mamba_state_copy_func()
+        return self._get_mamba_state_copy_funcs()  # type: ignore[attr-defined]
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
@@ -924,7 +935,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=self._get_ascend_mamba_state_copy_funcs(),
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
@@ -1372,13 +1383,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -1530,11 +1534,11 @@ class NPUModelRunner(GPUModelRunner):
             self.positions[:total_num_scheduled_tokens],
         )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
-            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
+            target = self.mrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1718,8 +1722,13 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
+        # Pinning is only needed for the async H2D copies; a CPU runner returns
+        # early from _copy_spec_decode_metadata_to_device, and calling
+        # Tensor.pin_memory() there requires a registered accelerator hooks
+        # interface (absent in CPU UT environments).
+        pin_cpu_metadata = self.device.type != "cpu"
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            torch.from_numpy(value).pin_memory() if pin_cpu_metadata else torch.from_numpy(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,
@@ -2332,7 +2341,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.input_batch,
                         self.requests,
                         self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
+                        self._get_ascend_mamba_state_copy_funcs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
@@ -3884,8 +3893,6 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
-                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 
@@ -5443,14 +5450,28 @@ class NPUModelRunner(GPUModelRunner):
             )
             max_num_blocks.append(max_num_blocks_per_req)
 
+        # main (vllm #50611): the interleave snapshot taken in __init__ must be
+        # refreshed here so a PD-driven adjustment (adjust_dcp_kv_cache_interleave_size)
+        # after __init__ forces the input batch to be rebuilt. The pinned release
+        # tree has no such snapshot, so the check is a no-op there.
+        cp_interleave_snapshot = getattr(self, "cp_kv_cache_interleave_size", None)
+        cp_interleave_changed = (
+            cp_interleave_snapshot is not None
+            and cp_interleave_snapshot != self.parallel_config.cp_kv_cache_interleave_size
+        )
         if (block_sizes != [self.cache_config.block_size]
                 or self.kernel_block_sizes != [[self.cache_config.block_size]]
-                or len(kv_cache_config.kv_cache_groups) > 1):
+                or len(kv_cache_config.kv_cache_groups) > 1
+                or cp_interleave_changed):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
+            if cp_interleave_snapshot is not None:
+                self.cp_kv_cache_interleave_size = (
+                    self.parallel_config.cp_kv_cache_interleave_size
+                )
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,

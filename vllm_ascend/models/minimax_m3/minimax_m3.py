@@ -970,6 +970,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
+    # main (#50514) gates eagle3+PP on this flag. Ascend relays aux hidden
+    # states over PP through its own transport in worker/v2/pp_utils.py.
+    supports_aux_hidden_states_over_pp = True
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

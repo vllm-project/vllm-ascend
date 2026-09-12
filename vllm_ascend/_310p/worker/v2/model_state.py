@@ -79,6 +79,7 @@ class _Ascend310PModelStateMixin:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         if for_capture:
             self._record_capture_seq_lens(input_batch.seq_lens)
@@ -96,6 +97,7 @@ class _Ascend310PModelStateMixin:
             attn_groups,
             kv_cache_config,
             for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
         )
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
@@ -239,10 +241,23 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         num_reqs: int,
     ) -> None:
         """Copy mamba state across block boundaries without Triton."""
-        from vllm_ascend.patch.worker.patch_mamba_utils import _tensor_view_from_data_ptr
+        from vllm_ascend.patch.worker.patch_mamba_utils import (
+            _mamba_spec_for_layer,
+            _resolve_state_copy_funcs,
+            _tensor_view_from_data_ptr,
+        )
+        from vllm_ascend.utils import vllm_version_is
 
         forward_context = self.vllm_config.compilation_config.static_forward_context
-        copy_funcs = self.model.get_mamba_state_copy_func()
+        if vllm_version_is("0.28.0"):
+            copy_funcs = self.model.get_mamba_state_copy_func()
+        else:
+            mamba_types = {
+                _mamba_spec_for_layer(kv_cache_config.kv_cache_groups[gid], name).mamba_type
+                for gid in mamba_group_ids
+                for name in kv_cache_config.kv_cache_groups[gid].layer_names
+            }
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)  # type: ignore[attr-defined]
         for batch_i in range(num_reqs):
             req_idx = int(input_batch.idx_mapping[batch_i].item())
             if req_idx < 0:
@@ -264,7 +279,10 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                 for layer_name in layer_names:
                     attention = forward_context[layer_name]
                     kv_caches = attention.kv_cache
-                    for state, state_copy_func in zip(kv_caches, copy_funcs):
+                    state_copy_funcs = _resolve_state_copy_funcs(
+                        copy_funcs, kv_cache_config.kv_cache_groups[group_id], layer_name
+                    )
+                    for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                         copy_spec = state_copy_func(state, block_ids, src_col, token_bias + 1)
                         src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
                         dst_state = _tensor_view_from_data_ptr(

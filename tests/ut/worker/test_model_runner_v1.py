@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import unittest
 from collections import deque
 from contextlib import nullcontext
@@ -257,6 +258,9 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
             num_accepted_tokens_cpu_tensor=batch_counts,
         )
         runner.num_accepted_tokens_event = MagicMock()
+        # main exposes Mamba copy funcs through the runner (bare __new__ object
+        # has no __init__-set cache); the postprocess kernel is mocked below.
+        runner._mamba_state_copy_funcs = {}
         return runner
 
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):

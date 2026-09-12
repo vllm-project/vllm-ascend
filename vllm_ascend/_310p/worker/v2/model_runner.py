@@ -396,6 +396,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._force_eager_pc_batch = False
         if not dummy_run:
@@ -408,6 +409,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
                 context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
             )
         finally:
             self._force_eager_pc_batch = False

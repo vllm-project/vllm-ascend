@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -238,16 +239,18 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     local_attn_state = object()
 
     with (
-        # This Triton helper is unrelated to PCP partitioning and has no CPU
-        # implementation. Stub only it; AscendPCPManager.partition_batch and
-        # PCPManager.partition_batch both execute unmocked below.
+        # 0.28.0's PCPManager.partition_batch still calls these Triton helpers,
+        # which have no CPU implementation; main moved them out of pcp_manager,
+        # so create=True keeps the patch valid there too.
         patch(
             "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
             return_value=None,
+            create=True,
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
             return_value=torch.zeros(2, dtype=torch.int64),
+            create=True,
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
@@ -554,13 +557,18 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     input_buffers.seq_lens[0] = 11
 
     with (
+        # 0.28.0's PCPManager.partition_batch still calls these Triton helpers,
+        # which have no CPU implementation; main moved them out of pcp_manager,
+        # so create=True keeps the patch valid there too.
         patch(
             "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
             return_value=None,
+            create=True,
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
             return_value=torch.zeros(1, dtype=torch.int64),
+            create=True,
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
@@ -911,10 +919,12 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    # vLLM main added the `dp_sync` field to ExecuteModelState; v0.28.0 lacks it.
+    # vLLM main added the `dp_sync` and `cudagraph_stats` fields to
+    # ExecuteModelState; v0.28.0 lacks them.
     state_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         state_kwargs["dp_sync"] = None
+        state_kwargs["cudagraph_stats"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,

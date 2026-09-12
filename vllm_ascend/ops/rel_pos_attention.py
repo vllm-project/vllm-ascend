@@ -10,6 +10,7 @@ class AscendRelPosAttention(RelPosAttention):
         num_heads: int = 8,
         qkv_bias: bool = True,
         use_rel_pos: bool = False,
+        use_triton_attention: bool = False,
         rel_pos_zero_init: bool = True,
         input_size: tuple[int, int] | None = None,
     ) -> None:
@@ -18,11 +19,24 @@ class AscendRelPosAttention(RelPosAttention):
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads.
             qkv_bias (bool):  If True, add a learnable bias to query, key, value.
+            use_rel_pos (bool): If True, use relative positional encoding.
+            use_triton_attention (bool): Accepted for parity with main's
+                ``RelPosAttention``; the NPU ``forward`` below does not use it.
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
         """
-        super().__init__(dim, num_heads, qkv_bias, use_rel_pos, rel_pos_zero_init, input_size)
+        # Keyword args keep this working on both lanes: main inserts
+        # ``use_triton_attention`` before ``rel_pos_zero_init``, but Ascend's
+        # NPU forward never uses it (default False).
+        super().__init__(
+            dim=dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            use_rel_pos=use_rel_pos,
+            rel_pos_zero_init=rel_pos_zero_init,
+            input_size=input_size,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, H, W, _ = x.shape

@@ -21,6 +21,7 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.utils import vllm_version_is
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -35,29 +36,70 @@ def _can_launch_triton_batch_memcpy() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
-def _get_mamba_groups(
-    kv_cache_config: KVCacheConfig,
-) -> tuple[list[int], MambaSpec]:
-    """Find Mamba groups, including uniform worker-side group wrappers."""
-    mamba_group_ids: list[int] = []
-    mamba_specs: list[MambaSpec] = []
+def _mamba_spec_for_layer(kv_cache_group, layer_name: str) -> MambaSpec:
+    """Resolve a layer's MambaSpec, unwrapping a UniformType group wrapper."""
+    group_spec = kv_cache_group.kv_cache_spec
+    if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        group_spec = group_spec.kv_cache_specs[layer_name]
+    assert isinstance(group_spec, MambaSpec)
+    return group_spec
+
+
+def _resolve_state_copy_funcs(mamba_state_copy_funcs, kv_cache_group, layer_name: str):
+    """Return the copy funcs for one layer under either upstream contract.
+
+    ``vllm_version_is("0.28.0")`` lanes pass a per-state tuple; main passes a
+    ``MambaStateCopyFuncsByType`` mapping keyed by ``MambaAttentionBackendEnum``.
+    """
+    if isinstance(mamba_state_copy_funcs, dict):
+        return mamba_state_copy_funcs[_mamba_spec_for_layer(kv_cache_group, layer_name).mamba_type]
+    return mamba_state_copy_funcs
+
+
+def _get_mamba_groups(kv_cache_config: KVCacheConfig):
+    """Find Mamba groups, including uniform worker-side group wrappers.
+
+    The release lane expects ``(group_ids, representative_spec)``; main
+    expects ``dict[MambaSpec, list[int]]`` (one key per distinct spec, with a
+    group id appearing under each of its per-layer specs).
+    """
+    if vllm_version_is("0.28.0"):
+        mamba_group_ids: list[int] = []
+        mamba_specs: list[MambaSpec] = []
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, MambaSpec):
+                mamba_group_ids.append(group_id)
+                mamba_specs.append(group_spec)
+                continue
+            if not isinstance(group_spec, UniformTypeKVCacheSpecs):
+                continue
+
+            inner_specs = list(group_spec.kv_cache_specs.values())
+            if inner_specs and all(isinstance(spec, MambaSpec) for spec in inner_specs):
+                mamba_group_ids.append(group_id)
+                mamba_specs.append(inner_specs[0])
+
+        assert mamba_group_ids, "no mamba layers in the model"
+        assert all(mamba_specs[0] == spec for spec in mamba_specs)
+        return mamba_group_ids, mamba_specs[0]
+
+    mamba_groups: dict[MambaSpec, set[int]] = {}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         group_spec = group.kv_cache_spec
-        if isinstance(group_spec, MambaSpec):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(group_spec)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            layer_specs = group_spec.kv_cache_specs
+        elif isinstance(group_spec, MambaSpec):
+            layer_specs = {name: group_spec for name in group.layer_names}
+        else:
             continue
-        if not isinstance(group_spec, UniformTypeKVCacheSpecs):
+        if not layer_specs or not all(isinstance(spec, MambaSpec) for spec in layer_specs.values()):
             continue
+        for spec in layer_specs.values():
+            mamba_groups.setdefault(spec, set()).add(group_id)
 
-        inner_specs = list(group_spec.kv_cache_specs.values())
-        if inner_specs and all(isinstance(spec, MambaSpec) for spec in inner_specs):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(inner_specs[0])
-
-    assert mamba_group_ids, "no mamba layers in the model"
-    assert all(mamba_specs[0] == spec for spec in mamba_specs)
-    return mamba_group_ids, mamba_specs[0]
+    assert mamba_groups, "no mamba layers in the model"
+    return {spec: sorted(ids) for spec, ids in mamba_groups.items()}
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
@@ -143,11 +185,13 @@ def _collect_mamba_copy_meta_torch(
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
-        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        layer_names = kv_cache_group.layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
-            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+            state_copy_funcs = _resolve_state_copy_funcs(mamba_state_copy_funcs, kv_cache_group, layer_name)
+            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                 copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
                 src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
                 dst_state = _tensor_view_from_data_ptr(state, state[dest_block_id].data_ptr(), copy_spec.num_elements)
@@ -234,11 +278,13 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
         for mamba_group_id in ctx.mamba_group_ids:
             block_ids = input_batch.block_table[mamba_group_id].get_numpy_array()[i]
             dest_block_id = block_ids[dest_block_idx]
-            layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+            kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+            layer_names = kv_cache_group.layer_names
             for layer_name in layer_names:
                 attention = forward_context[layer_name]
                 kv_caches: list[torch.Tensor] = attention.kv_cache
-                for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+                state_copy_funcs = _resolve_state_copy_funcs(mamba_state_copy_funcs, kv_cache_group, layer_name)
+                for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                     copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
                     src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
                     dst_state = _tensor_view_from_data_ptr(
@@ -291,12 +337,14 @@ def _collect_mamba_copy_meta_with_layers(
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
-        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        layer_names = kv_cache_group.layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
             layer_meta = layer_copy_metadata.setdefault(layer_name, ([], [], []))
-            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+            state_copy_funcs = _resolve_state_copy_funcs(mamba_state_copy_funcs, kv_cache_group, layer_name)
+            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                 copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
                 src_ptr = copy_spec.start_addr
                 dst_ptr = state[dest_block_id].data_ptr()
@@ -426,13 +474,19 @@ def preprocess_mamba(
     input_batch: GPUInputBatch,
     requests: dict[str, CachedRequestState],
     forward_context: dict[str, Any],
-    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+    mamba_state_copy_funcs: Any,
     copy_bufs: MambaCopyBuffers,
+    align_ctx: Any = None,
 ):
     """
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
+
+    ``align_ctx`` mirrors main's ``MambaSpecDecodeGPUContext | None`` parameter so
+    upstream callers can pass it; the Ascend path performs the copy with its own
+    pointer/tensor staging instead of the fused precopy kernel.
     """
+    del align_ctx
     mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks

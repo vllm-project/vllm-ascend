@@ -72,6 +72,17 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
 
 
+def _max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
+    """Max layers per page size across a uniform group.
+
+    ``get_num_layer_tuples`` on the 0.28.0 lane; renamed to
+    ``get_max_layers_per_page_size`` on main (vLLM #53896).
+    """
+    if vllm_version_is("0.28.0"):
+        return spec.get_num_layer_tuples()  # type: ignore[attr-defined]
+    return spec.get_max_layers_per_page_size()  # type: ignore[attr-defined]
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -278,7 +289,7 @@ def _get_kv_cache_groups_uniform_groups(
     # The other uniform KV cache specs will be similarly partitioned into layer tuples.
     # Say we have 21 SWA layers, all with the same page size, then we will have "21"
     # layer tuples.
-    num_layer_tuples_per_group: list[int] = [g_spec.get_num_layer_tuples() for g_spec in grouped_specs]
+    num_layer_tuples_per_group: list[int] = [_max_layers_per_page_size(g_spec) for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
@@ -530,7 +541,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        _max_layers_per_page_size(group.kv_cache_spec)
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

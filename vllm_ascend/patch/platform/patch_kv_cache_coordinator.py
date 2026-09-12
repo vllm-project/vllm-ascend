@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
@@ -90,6 +92,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -107,7 +110,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
         self.max_in_flight_tokens = token_budget
         self.max_num_batched_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        if vllm_version_is("0.28.0"):
+            self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+        else:
+            # vLLM #55353 moved the retention interval from the env var onto KVCacheConfig.
+            self.retention_interval = kv_cache_config.prefix_cache_retention_interval  # type: ignore[attr-defined]
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
             "_validate_prefix_cache_retention_interval",
@@ -151,6 +158,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        # main (#54736) exposes each manager's block size for SimpleCPU offload's
+        # fine-grained hybrid prefix lookups; the upstream __init__ sets this and
+        # this replica must mirror it.
+        self.group_block_sizes = tuple(manager.block_size for manager in self.single_type_managers)
 
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
@@ -166,11 +177,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if getattr(g.kv_cache_spec, "participates_in_prefix_caching", True)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+        self.enable_partial_hash_hits = (
+            allow_partial_hash_hits
+            and dcp_world_size == 1
+            and any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and g.kv_cache_spec.block_size > hash_block_size
+                for g in kv_cache_config.kv_cache_groups
+            )
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -182,6 +197,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         for mgr in self.single_type_managers:
             if isinstance(mgr, SlidingWindowManager):
                 mgr.scheduler_block_size = self.lcm_block_size
+
+        # main (vLLM #53598): reachable_block_mask (write path) now reads each
+        # manager's `cache_hit_alignment_tokens` instead of `scheduler_block_size`.
+        # Propagate the coordinator's read-path alignment so cache_blocks keeps
+        # matching find_longest_cache_hit.
+        cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+        for mgr in self.single_type_managers:
+            mgr.cache_hit_alignment_tokens = cache_hit_alignment_tokens  # type: ignore[attr-defined]
 
         self.use_eagle = use_eagle
 
@@ -407,6 +430,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     metrics_collector: KVCacheMetricsCollector | None = None,
     max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
@@ -428,6 +452,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
             num_prefill_lookahead=num_prefill_lookahead,
+            allow_partial_hash_hits=allow_partial_hash_hits,
         )
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
@@ -462,6 +487,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
         num_prefill_lookahead=num_prefill_lookahead,
+        allow_partial_hash_hits=allow_partial_hash_hits,
     )
 
 

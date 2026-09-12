@@ -573,6 +573,11 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
     imported -- that ordering is enforced by the platform patch system and is
     integration-level, not asserted here.)
     """
+    # A sibling test file may import ``patch_profiling_chunk``, which wraps
+    # ``EngineCoreProc.run_engine_core`` on top of the DyntraLB wrapper. Re-install
+    # the DyntraLB-over-balance chain this test describes so the assertion does not
+    # depend on shared-process import order.
+    _UpstreamEngineCoreProc.run_engine_core = staticmethod(_dyntra_patch._dyntra_lb_run_engine_core)
     assert _upstream_sched_mod.Scheduler is BalanceScheduler, (
         "patch did not rebind vllm.v1.core.sched.scheduler.Scheduler"
     )
