@@ -18,11 +18,11 @@ from vllm_ascend.attention.context_parallel.mla_cp import (
 )
 from vllm_ascend.attention.mla_v1 import (
     AscendMLADecodeMetadata,
-    DecodeMLAPreprocessResult,
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
     AscendMLAPrefillMetadata,
+    DecodeMLAPreprocessResult,
 )
 
 
@@ -193,7 +193,10 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     metadata.causal = False
     impl._forward_decode(
         DecodeMLAPreprocessResult(
-            q_nope, q_pe, k_nope, k_pe,
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
         ),
         2,
         metadata,
@@ -269,7 +272,10 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     metadata.causal = False
     impl._forward_decode(
         DecodeMLAPreprocessResult(
-            q_nope, q_pe, k_nope, k_pe,
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
         ),
         2,
         metadata,
@@ -284,31 +290,18 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert merged["softmax_lse_shape"] == (4, 96, 1)
 
 
-@patch(
-    "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
-    SimpleNamespace(is_draft_model=False, capturing=False),
+@pytest.mark.parametrize(
+    "dcp_size,dcp_rank,workspace_sizes,cached_size",
+    [
+        (1, 0, None, None),
+        (2, 0, None, None),
+        (2, 1, None, None),
+        (16, 15, None, None),
+        (2, 1, (64, 128), None),
+        (2, 1, (128, 64), None),
+        (2, 1, (64, 128), 256),
+    ],
 )
-def test_cp_decode_dispatches_split_attention_directly() -> None:
-    result = DecodeMLAPreprocessResult(
-        ql_nope=object(), q_pe=object(), k_nope=object(), k_pe=object(),
-        current_k_nope=object(), current_k_pe=object(),
-    )
-    metadata = SimpleNamespace(causal=True)
-    base = AscendMLAImpl.__new__(AscendMLAImpl)
-    assert not base._decode_requires_current_kv(metadata)
-    cp = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
-    cp._forward_decode_split_attention = Mock(return_value=torch.tensor([3.0]))
-    actual = cp._forward_decode(result, 384, metadata)
-    assert cp._decode_requires_current_kv(metadata)
-    torch.testing.assert_close(actual, torch.tensor([3.0]))
-    cp._forward_decode_split_attention.assert_called_once_with(
-        result.ql_nope, result.q_pe, result.k_nope, result.k_pe,
-        result.current_k_nope, result.current_k_pe, 384, metadata,
-    )
-
-
-@pytest.mark.parametrize("dcp_size,dcp_rank", [(1, 0), (2, 0), (2, 1), (16, 15)])
-@pytest.mark.parametrize("workspace_sizes,cached_size", [(None, None), ((64, 128), None), ((128, 64), None), ((64, 128), 256)])
 def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspace_sizes, cached_size):
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
@@ -329,8 +322,11 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     decode = AscendMLADCPDecodeMetadata(
         input_positions=torch.arange(2),
         block_table=torch.zeros(1, 1, dtype=torch.int32),
-        seq_lens=torch.tensor([4]), max_seq_lens=4, seq_lens_list=[4],
-        actual_seq_lengths_q=[2], cp_history_seq_len=[2],
+        seq_lens=torch.tensor([4]),
+        max_seq_lens=4,
+        seq_lens_list=[4],
+        actual_seq_lengths_q=[2],
+        cp_history_seq_len=[2],
     )
     decode.attn_mask = torch.zeros(2, 2, dtype=torch.bool)
     history_output = torch.ones(2, 2 * dcp_size, 4)
@@ -362,7 +358,9 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         active[0] = "main"
 
     graph_params = SimpleNamespace(workspaces={2: torch.empty(cached_size, dtype=torch.uint8) if cached_size else None})
-    workspace_query = Mock(side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes] if workspace_sizes else [])
+    workspace_query = Mock(
+        side_effect=[torch.empty(n, dtype=torch.uint8) for n in workspace_sizes] if workspace_sizes else []
+    )
 
     def attention(q, q_rope, k, k_rope, **kwargs):
         if workspace_sizes is not None:
@@ -381,8 +379,8 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
             assert kwargs["sparse_mode"] == 0
             return history_output, history_lse
         start = dcp_rank * impl.num_heads
-        torch.testing.assert_close(q, q_nope[:, start:start + impl.num_heads])
-        torch.testing.assert_close(q_rope, q_pe[:, start:start + impl.num_heads])
+        torch.testing.assert_close(q, q_nope[:, start : start + impl.num_heads])
+        torch.testing.assert_close(q_rope, q_pe[:, start : start + impl.num_heads])
         torch.testing.assert_close(k, current_k)
         torch.testing.assert_close(k_rope, current_pe)
         assert kwargs["actual_seq_lengths"] == [2]
@@ -422,7 +420,9 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     impl._run_dcp_mtp_split_attention_op = attention
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
     with (
-        patch.object(mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)),
+        patch.object(
+            mla_cp, "_EXTRA_CTX", SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False)
+        ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
         patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
         patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=comm),
@@ -433,9 +433,20 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         patch.object(mla_cp, "fused_sfa_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
-        actual = impl._forward_decode_split_attention(
-            q_nope, q_pe, torch.zeros(1, 1, 2, 4), torch.zeros(1, 1, 2, 2),
-            current_k, current_pe, 2, SimpleNamespace(decode=decode),
+        metadata = SimpleNamespace(decode=decode, causal=True)
+        assert impl._decode_requires_current_kv(metadata)
+        assert not AscendMLAImpl.__new__(AscendMLAImpl)._decode_requires_current_kv(metadata)
+        actual = impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                ql_nope=q_nope,
+                q_pe=q_pe,
+                k_nope=torch.zeros(1, 1, 2, 4),
+                k_pe=torch.zeros(1, 1, 2, 2),
+                current_k_nope=current_k,
+                current_k_pe=current_pe,
+            ),
+            2,
+            metadata,
         )
     torch.testing.assert_close(actual, expected)
     assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
@@ -443,7 +454,12 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     update.assert_called_once()
     assert record_stream.call_count == 3
     assert events == [
-        MLASplitAttentionKind.HISTORY, "history_ready", ("comm_wait", "ready"),
-        "history_collective", "comm_done", MLASplitAttentionKind.CURRENT,
-        ("main_wait", "done"), "merge",
+        MLASplitAttentionKind.HISTORY,
+        "history_ready",
+        ("comm_wait", "ready"),
+        "history_collective",
+        "comm_done",
+        MLASplitAttentionKind.CURRENT,
+        ("main_wait", "done"),
+        "merge",
     ]
