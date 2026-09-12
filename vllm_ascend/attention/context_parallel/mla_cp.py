@@ -194,15 +194,16 @@ class AscendMlaDCPMetadataBuilder(
         # include padded requests. Compute real histories before padding.
         query_lens = self.query_lens[: local_lengths.shape[0]]
         history_lens = (local_lengths.sum(dim=-1) - query_lens).clamp(min=0)
-        decode_metadata.cp_history_seq_len = get_dcp_local_seq_lens(
+        cp_history_seq_len: list[int] = get_dcp_local_seq_lens(
             history_lens,
             self.dcp_size,
             self.cp_local_block_size,
         )[:, self.dcp_rank].tolist()
         # Preserve the base builder's cumulative TND query boundaries,
         # including graph padding; the old BSND path used per-request lengths.
-        num_padded = len(decode_metadata.actual_seq_lengths_q) - len(decode_metadata.cp_history_seq_len)
-        decode_metadata.cp_history_seq_len += [0] * num_padded
+        assert decode_metadata.actual_seq_lengths_q is not None
+        num_padded = len(decode_metadata.actual_seq_lengths_q) - len(cp_history_seq_len)
+        decode_metadata.cp_history_seq_len = cp_history_seq_len + [0] * num_padded
         decode_metadata.dcp_mtp_attn_mask = None
         return decode_metadata
 
@@ -480,6 +481,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         assert decode_meta is not None
         assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)
         assert decode_meta.cp_history_seq_len is not None
+        assert decode_meta.actual_seq_lengths_q is not None
         assert current_k_nope is not None and current_k_pe is not None
 
         num_tokens = q_nope.size(0)
@@ -635,6 +637,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         q_pe = decode_preprocess_res.q_pe
         k_nope = decode_preprocess_res.k_nope
         k_pe = decode_preprocess_res.k_pe
+        assert q_nope is not None and q_pe is not None
+        assert k_nope is not None and k_pe is not None
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
         assert isinstance(decode_meta, AscendMLADCPDecodeMetadata)

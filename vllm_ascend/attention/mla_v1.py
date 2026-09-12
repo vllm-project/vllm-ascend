@@ -1590,6 +1590,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_pe = decode_preprocess_res.q_pe
         k_nope = decode_preprocess_res.k_nope
         k_pe = decode_preprocess_res.k_pe
+        assert q_nope is not None and q_pe is not None
+        assert k_nope is not None and k_pe is not None
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
@@ -1665,6 +1667,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
@@ -1677,6 +1680,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
                 attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
@@ -1686,6 +1690,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
