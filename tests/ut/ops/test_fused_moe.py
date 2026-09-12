@@ -1853,16 +1853,14 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     )
 
 
-def test_runner_casts_weight_fp32_then_sets_precast(monkeypatch):
-    """Init sets precast, then seeds weight_fp32 from gate.weight."""
-    weight = torch.randn(8, 4, dtype=torch.float16)
-    gate = SimpleNamespace(weight=weight)
+def test_runner_sets_precast_fp32_weight(monkeypatch):
+    """Init sets precast so load materializes weight_fp32."""
+    gate = SimpleNamespace(weight=torch.randn(8, 4, dtype=torch.float16))
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
     assert gate.precast_fp32_weight is True
-    assert gate.weight_fp32.dtype == torch.float32
-    torch.testing.assert_close(gate.weight_fp32, weight.to(torch.float32))
+    assert not hasattr(gate, "weight_fp32")
 
 
 def test_runner_skips_precast_when_weight_fp32_already_exists(monkeypatch):

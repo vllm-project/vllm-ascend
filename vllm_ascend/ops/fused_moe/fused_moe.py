@@ -116,11 +116,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router: seed weight_fp32 + precast for load refresh (avoid hot-path Cast).
+        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
         # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
         if gate is not None and not hasattr(gate, "weight_fp32"):
             gate.precast_fp32_weight = True
-            gate.weight_fp32 = gate.weight.to(torch.float32)
 
         self.ascend_shared_experts = None
         if shared_experts is not None:
