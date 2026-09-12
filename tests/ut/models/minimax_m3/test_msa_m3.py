@@ -540,21 +540,19 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
+def test_index_score_uses_ascendc_prefill_and_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
-        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
-    )
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
         return_value=AscendDeviceType.A5,
@@ -1005,6 +1003,25 @@ def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
     assert "AdvanceStageWindow" in epilogue
     assert "FlushStageToStrideEnd" in epilogue
     assert "L0-fp8-wide-table-257" in example
+
+
+def test_bundled_ascendc_index_score_splits_long_kv_decode() -> None:
+    repo_root = Path(msa_m3_module.__file__).parents[3]
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
+    tiling = (op_root / "op_host" / "msa_index_score_tiling.cpp").read_text(encoding="utf-8")
+    tiling_data = (op_root / "op_host" / "msa_index_score_tiling.h").read_text(encoding="utf-8")
+    task = (op_root / "op_kernel" / "arch22" / "msa_index_score_task.h").read_text(encoding="utf-8")
+    a2_epilogue = (op_root / "op_kernel" / "arch22" / "msa_index_score_epilogue.h").read_text(encoding="utf-8")
+    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
+
+    assert "ValidateKeyInnerAxesContiguous" in tiling
+    assert "EstKvChunks" in tiling
+    assert "tilingData.set_kvChunks(kvChunks)" in tiling
+    assert "TILING_DATA_FIELD_DEF(uint32_t, kvChunks)" in tiling_data
+    assert "AssignSRange" in task
+    assert "strideOutToken_ <= MSA_STAGE_BLOCKS" in a2_epilogue
+    assert "L0-decode-q4-kv275" in example
+    assert "L0-fp8-e5m2-decode-q4-kv275" in example
 
 
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:

@@ -60,7 +60,7 @@ __aicore__ inline int32_t MsaClampI32(int32_t v, int32_t lo, int32_t hi)
     return v;
 }
 
-/// 一个任务 = 一个请求内的一个 M-tile。
+/// 一个任务 = 一个请求内的一个 M-tile，可选再沿 KV stile 切开（950 短 decode）。
 /// M 维 = 请求内 (token, head) 扁平行索引，head 为低位。
 struct MsaTask {
     uint32_t batchIdx;
@@ -77,8 +77,13 @@ struct MsaTask {
     uint32_t localBlocks;
     uint32_t fullEndBlk;
     uint32_t visibleEndBlk;
+    uint32_t sBlkBegin; // 本 chunk 计算的 page 半开区间
+    uint32_t sBlkEnd;
+    uint32_t sStileBegin; // GM 路径 stile 循环
+    uint32_t sStileEnd;
     uint32_t numSTiles;        // 含不可见尾，必须写 -inf 的 S-tile 数
     uint32_t numComputeSTiles; // AIC 真正做 QKᵀ 的 S-tile 数（<= numSTiles）
+    bool writeTailFill;        // 本 M-tile 的最后 chunk 负责 [visible, stride) 填 -inf
 };
 
 class MsaTaskScheduler {
@@ -87,7 +92,7 @@ public:
 
     __aicore__ inline void Init(uint32_t batch, uint32_t numQHeads, uint32_t maxBlocksPerBatch,
                                 uint32_t scoreBlockStride, uint32_t sparseMode, uint32_t initBlocks,
-                                uint32_t localBlocks, uint32_t keyLayout,
+                                uint32_t localBlocks, uint32_t keyLayout, uint32_t kvChunks,
                                 const AscendC::GlobalTensor<int32_t> &actualSeqQlen,
                                 const AscendC::GlobalTensor<int32_t> &actualSeqKlen,
                                 const AscendC::GlobalTensor<int32_t> &startLoc)
@@ -100,14 +105,15 @@ public:
         initBlocks_ = initBlocks;
         localBlocks_ = localBlocks;
         keyLayout_ = keyLayout;
+        kvChunks_ = (kvChunks < 1U) ? 1U : kvChunks;
         gActualSeqQlen_ = actualSeqQlen;
         gActualSeqKlen_ = actualSeqKlen;
         gStartLoc_ = startLoc;
 
         totalTasks_ = 0;
         for (uint32_t b = 0; b < batch_; ++b) {
-            const uint32_t qLen = static_cast<uint32_t>(gActualSeqQlen_.GetValue(b + 1) - gActualSeqQlen_.GetValue(b));
-            totalTasks_ += MsaCeilDiv(qLen * numQHeads_, MSA_ROW_TILE_M);
+            LoadBatch(b);
+            totalTasks_ += curTasks_;
         }
         Reset();
     }
@@ -143,6 +149,99 @@ public:
             LoadBatch(curBatch_);
         }
 
+        const uint32_t local = taskIdx - taskBase_;
+        uint32_t mStart = 0;
+        uint32_t mActual = 0;
+        uint32_t sChunkIdx = 0;
+        uint32_t sChunks = 1;
+        if (kvChunks_ <= 1U) {
+            GetMTile(local, mStart, mActual);
+        } else {
+            uint32_t acc = 0;
+            const uint32_t mTiles = MsaCeilDiv(curRows_, MSA_ROW_TILE_M);
+            for (uint32_t t = 0; t < mTiles; ++t) {
+                GetMTile(t, mStart, mActual);
+                const uint32_t vis = VisibleEndBlkOf(mStart, mActual);
+                sChunks = KvChunksOf(vis);
+                if (local < acc + sChunks) {
+                    sChunkIdx = local - acc;
+                    break;
+                }
+                acc += sChunks;
+            }
+        }
+        FillTask(task, mStart, mActual, sChunkIdx, sChunks);
+    }
+
+private:
+    __aicore__ inline void GetMTile(uint32_t tileIdx, uint32_t &mStart, uint32_t &mActual) const
+    {
+        mStart = tileIdx * MSA_ROW_TILE_M;
+        mActual = MsaMinU32(MSA_ROW_TILE_M, (curRows_ > mStart) ? (curRows_ - mStart) : 0U);
+        if (mActual > 0U && mActual < MSA_M_ALIGN && mStart >= MSA_M_ALIGN) {
+            mStart -= (MSA_M_ALIGN - mActual);
+            mActual = MSA_M_ALIGN;
+        }
+    }
+
+    __aicore__ inline uint32_t VisibleEndBlkOf(uint32_t mStart, uint32_t mActual) const
+    {
+        if (mActual == 0U) {
+            return 0U;
+        }
+        const uint32_t tokenHigh = (mStart + mActual - 1U) / numQHeads_;
+        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tokenHigh));
+        uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
+        return MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);
+    }
+
+    __aicore__ inline uint32_t KvChunksOf(uint32_t visibleEndBlk) const
+    {
+        if (kvChunks_ <= 1U) {
+            return 1U;
+        }
+        const uint32_t nStiles = MsaCeilDiv(visibleEndBlk, MSA_BLOCKS_PER_STILE);
+        if (nStiles <= 1U) {
+            return 1U;
+        }
+        return MsaMinU32(kvChunks_, nStiles);
+    }
+
+    __aicore__ inline void AssignSRange(uint32_t visibleEndBlk, uint32_t sChunkIdx, uint32_t sChunks,
+                                        MsaTask &task) const
+    {
+        const uint32_t nStiles = MsaCeilDiv(visibleEndBlk, MSA_BLOCKS_PER_STILE);
+        if (sChunks <= 1U || nStiles == 0U) {
+            task.sBlkBegin = 0;
+            task.sBlkEnd = visibleEndBlk;
+            task.writeTailFill = true;
+        } else {
+            uint32_t sc = sChunks;
+            if (sc > nStiles) {
+                sc = nStiles;
+            }
+            const uint32_t base = nStiles / sc;
+            const uint32_t extra = nStiles % sc;
+            uint32_t st0 = 0;
+            uint32_t nst = 0;
+            if (sChunkIdx < extra) {
+                st0 = sChunkIdx * (base + 1U);
+                nst = base + 1U;
+            } else {
+                st0 = extra * (base + 1U) + (sChunkIdx - extra) * base;
+                nst = base;
+            }
+            task.sBlkBegin = st0 * MSA_BLOCKS_PER_STILE;
+            task.sBlkEnd = MsaMinU32((st0 + nst) * MSA_BLOCKS_PER_STILE, visibleEndBlk);
+            task.writeTailFill = (sChunkIdx + 1U == sc);
+        }
+        task.sStileBegin = task.sBlkBegin / MSA_BLOCKS_PER_STILE;
+        task.sStileEnd = MsaCeilDiv(task.sBlkEnd, MSA_BLOCKS_PER_STILE);
+    }
+
+    __aicore__ inline void FillTask(MsaTask &task, uint32_t mStart, uint32_t mActual, uint32_t sChunkIdx,
+                                    uint32_t sChunks) const
+    {
         task.batchIdx = curBatch_;
         task.cuQStart = cuQStart_;
         task.startLoc = startLoc_;
@@ -152,23 +251,13 @@ public:
         task.sparseMode = sparseMode_;
         task.initBlocks = initBlocks_;
         task.localBlocks = localBlocks_;
-        task.mStart = (taskIdx - taskBase_) * MSA_ROW_TILE_M;
-        task.mActual = MsaMinU32(MSA_ROW_TILE_M, curRows_ - task.mStart);
-        // Cube L0A fractal 为 MSA_M_ALIGN 行。整请求不足对齐宽度时保持原样（L0 已覆盖）；
-        // 否则把末尾短 tile 向前重叠到 MSA_M_ALIGN 行，避免 mActual ∈ (0,16) 的 int8 路径出错。
-        if (task.mActual > 0U && task.mActual < MSA_M_ALIGN && task.mStart >= MSA_M_ALIGN) {
-            task.mStart -= (MSA_M_ALIGN - task.mActual);
-            task.mActual = MSA_M_ALIGN;
-        }
+        task.mStart = mStart;
+        task.mActual = mActual;
         task.globalRowBase = cuQStart_ * numQHeads_ + task.mStart;
 
-        const uint32_t tokenLo = task.mStart / numQHeads_;
-        const uint32_t tokenHi = (task.mStart + task.mActual - 1) / numQHeads_;
-        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tokenHi));
-        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tokenLo));
-
-        uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
-        visibleEndBlk = MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);
+        const uint32_t tLo = (mActual == 0U) ? 0U : (task.mStart / numQHeads_);
+        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tLo));
+        uint32_t visibleEndBlk = VisibleEndBlkOf(mStart, mActual);
 
         const uint32_t causalFull = static_cast<uint32_t>(visibleKeyEndLo) / MSA_BLOCK_SIZE;
         const uint32_t seqFull = (kvLen_ < 0 ? 0U : static_cast<uint32_t>(kvLen_)) / MSA_BLOCK_SIZE;
@@ -176,16 +265,29 @@ public:
 
         task.visibleEndBlk = visibleEndBlk;
         task.fullEndBlk = MsaMinU32(fullEndBlk, visibleEndBlk);
-
-        // 不可见尾一律写 -inf，末维对齐到 scoreBlockStride
         task.numSTiles = MsaCeilDiv(scoreBlockStride_, MSA_BLOCKS_PER_STILE);
         task.numComputeSTiles = MsaCeilDiv(task.visibleEndBlk, MSA_BLOCKS_PER_STILE);
         if (task.numComputeSTiles > task.numSTiles) {
             task.numComputeSTiles = task.numSTiles;
         }
+        AssignSRange(visibleEndBlk, sChunkIdx, sChunks, task);
     }
 
-private:
+    __aicore__ inline uint32_t CountBatchTasks() const
+    {
+        const uint32_t mTiles = MsaCeilDiv(curRows_, MSA_ROW_TILE_M);
+        if (kvChunks_ <= 1U) {
+            return mTiles;
+        }
+        uint32_t n = 0;
+        uint32_t mStart = 0;
+        uint32_t mActual = 0;
+        for (uint32_t t = 0; t < mTiles; ++t) {
+            GetMTile(t, mStart, mActual);
+            n += KvChunksOf(VisibleEndBlkOf(mStart, mActual));
+        }
+        return n;
+    }
     __aicore__ inline void LoadBatch(uint32_t b)
     {
         if (b >= batch_) {
@@ -204,7 +306,6 @@ private:
             qLen_ = 0;
         }
         curRows_ = static_cast<uint32_t>(qLen_) * numQHeads_;
-        curTasks_ = MsaCeilDiv(curRows_, MSA_ROW_TILE_M);
         if (keyLayout_ == MSA_KEY_LAYOUT_TND) {
             cuKStart_ = static_cast<uint32_t>(gActualSeqKlen_.GetValue(b));
             kvLen_ = static_cast<int32_t>(gActualSeqKlen_.GetValue(b + 1)) - static_cast<int32_t>(cuKStart_);
@@ -216,6 +317,7 @@ private:
             kvLen_ = gActualSeqKlen_.GetValue(b);
         }
         startLoc_ = gStartLoc_.GetValue(b);
+        curTasks_ = CountBatchTasks();
     }
 
     AscendC::GlobalTensor<int32_t> gActualSeqQlen_;
@@ -230,6 +332,7 @@ private:
     uint32_t initBlocks_ = MSA_DEFAULT_INIT_BLOCKS;
     uint32_t localBlocks_ = MSA_DEFAULT_LOCAL_BLOCKS;
     uint32_t keyLayout_ = MSA_KEY_LAYOUT_BBND;
+    uint32_t kvChunks_ = 1;
 
     uint32_t totalTasks_ = 0;
     uint32_t curBatch_ = 0;
