@@ -4583,27 +4583,41 @@ class NPUModelRunner(GPUModelRunner):
                     start : start + layer_size
                 ]
 
-        # The standardized main descriptors all refer to one backing. Keep the
-        # per-layer raw regions intact here; MLA reshape turns its regions into
-        # component-major strided views, while other backends continue to use
-        # their legacy contiguous state/tensor views.
+        # Validate the final layout before allocation. Pure-MLA component caches
+        # are allocated in the regular attention path below; hybrid models still
+        # materialize the standardized shared backing first.
         static_forward_context = self.compilation_config.static_forward_context
-        component_mla_requested = self._use_mla_component_cache and any(
-            layer_name in static_forward_context
-            and isinstance((layer := static_forward_context[layer_name]), MLAAttention)
-            and is_component_mla_spec(layer, spec)
-            for layer_name, spec in layer_kv_cache_spec.items()
+        component_mla_layers = (
+            {
+                layer_name in static_forward_context
+                and isinstance((layer := static_forward_context[layer_name]), MLAAttention)
+                and is_component_mla_spec(layer, spec)
+                for layer_name, spec in layer_kv_cache_spec.items()
+            }
+            if self._use_mla_component_cache
+            else set()
         )
-        if component_mla_requested and kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
-            raise ValueError(
-                "MLA component cache requires the final LBNHC layout, got "
-                f"{kv_cache_config.kv_cache_layout!r}"
-            )
+        if component_mla_layers:
+            if use_legacy_shared_by_layout:
+                raise ValueError(
+                    "MLA component cache requires vLLM main standardized KV cache tensors"
+                )
+            if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+                raise ValueError(
+                    "MLA component cache requires the final LBNHC layout, got "
+                    f"{kv_cache_config.kv_cache_layout!r}"
+                )
+
+        # The standardized main descriptors all refer to one backing. Hybrid
+        # attention/Mamba models materialize it first so attention and linear
+        # state layers keep the planner's overlay semantics.
         if (
             not use_legacy_shared_by_layout
             and not is_dsv4_main
             and not is_glm5_next
-            and (self.hybrid_with_attn_and_mamba or component_mla_requested)
+            and self.hybrid_with_attn_and_mamba
+            and not self.use_sparse
+            and not self.use_compress
             and supports_shared_backing_with_kv_transfer
             and kv_cache_config.kv_cache_tensors
         ):
@@ -4627,10 +4641,6 @@ class NPUModelRunner(GPUModelRunner):
                     backing = self._allocate_int8_cache_tensor(backing_size, alignment)
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
-                elif component_mla_requested:
-                    raise ValueError(
-                        "MLA component cache requires a valid standardized shared backing plan"
-                    )
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
@@ -4792,15 +4802,6 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
-                    if (
-                        self._use_mla_component_cache
-                        and isinstance(static_forward_context.get(layer_name), MLAAttention)
-                        and is_component_mla_spec(static_forward_context[layer_name], current_kv_cache_spec)
-                        and layer_name not in kv_cache_raw_tensors
-                    ):
-                        raise ValueError(
-                            f"MLA component cache for {layer_name} has no standardized raw backing"
-                        )
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
@@ -4818,7 +4819,7 @@ class NPUModelRunner(GPUModelRunner):
                     if current_sparse_sfa_c8:
                         k_tensor_size = kv_cache_tensor_size
                         v_tensor_size = None
-                    else:
+                    elif layer_name not in component_mla_layers:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
                         kv_head_dim_list = [
@@ -4889,6 +4890,17 @@ class NPUModelRunner(GPUModelRunner):
                         # private (k, v) so block indices don't collide across layers.
                         for layer_name_inner in shared_layers:
                             if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                if layer_name_inner in component_mla_layers:
+                                    # component MLA keeps one contiguous raw
+                                    # backing; reshape derives nope/rope views.
+                                    kv_cache_raw_tensors[layer_name_inner] = (
+                                        self._allocate_int8_cache_tensor(
+                                            kv_cache_config.num_blocks
+                                            * layer_kv_cache_spec[layer_name_inner].page_size_bytes,
+                                            alignment,
+                                        )
+                                    )
+                                    continue
                                 k_tensor = self._allocate_int8_cache_tensor(
                                     k_tensor_size,
                                     alignment,
@@ -4973,25 +4985,6 @@ class NPUModelRunner(GPUModelRunner):
                     continue
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                 attn_layer = self.compilation_config.static_forward_context[layer_name]
-                if (
-                    self._use_mla_component_cache
-                    and isinstance(attn_layer, MLAAttention)
-                    and is_component_mla_spec(attn_layer, current_kv_cache_spec)
-                ):
-                    if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
-                        raise ValueError(
-                            "MLA component cache requires the final LBNHC layout, got "
-                            f"{kv_cache_config.kv_cache_layout!r}"
-                        )
-                    kv_caches[layer_name] = build_mla_component_cache(
-                        kv_cache_raw_tensors[layer_name],
-                        layer=attn_layer,
-                        spec=current_kv_cache_spec,
-                        kernel_block_size=self.kernel_block_sizes[group.kv_cache_group_id],
-                        num_blocks=kv_cache_config.num_blocks,
-                    )
-                    continue
-
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
@@ -5127,6 +5120,26 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
+                        continue
+                    if (
+                        self._use_mla_component_cache
+                        and isinstance(attn_layer, MLAAttention)
+                        and is_component_mla_spec(attn_layer, current_kv_cache_spec)
+                    ):
+                        # Component MLA is still a regular AttentionSpec reshape;
+                        # derive both logical components from its single raw page.
+                        if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+                            raise ValueError(
+                                "MLA component cache requires the final LBNHC layout, got "
+                                f"{kv_cache_config.kv_cache_layout!r}"
+                            )
+                        kv_caches[layer_name] = build_mla_component_cache(
+                            kv_cache_raw_tensors[layer_name],
+                            layer=attn_layer,
+                            spec=current_kv_cache_spec,
+                            kernel_block_size=self.kernel_block_sizes[group.kv_cache_group_id],
+                            num_blocks=kv_cache_config.num_blocks,
+                        )
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:

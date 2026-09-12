@@ -153,6 +153,52 @@ def test_component_cache_is_v1_only():
     assert not use_mla_component_cache(_make_vllm_config({}, use_v2_model_runner=True))
 
 
+def test_component_cache_allocates_raw_backing_in_regular_attention_path(monkeypatch):
+    logical_spec = _make_spec(block_size=384)
+    spec = replace(logical_spec, page_size_padded=488448)
+    layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
+    layer_name = "model.layers.0.self_attn.attn"
+    num_blocks = 3
+    layer_size = num_blocks * spec.page_size_bytes
+    descriptor = KVCacheTensor(
+        size=layer_size,
+        layers=[layer_name],
+        layer_stride=layer_size,
+        block_stride=spec.page_size_bytes,
+        offset=0,
+    )
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[descriptor],
+        kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
+        kv_cache_layout=KVCacheLayout.LBNHC.name,
+    )
+
+    allocations = []
+    runner = model_runner_v1.NPUModelRunner.__new__(model_runner_v1.NPUModelRunner)
+    runner.vllm_config = _make_vllm_config({layer_name: layer})
+    runner._use_mla_component_cache = True
+    runner.hybrid_with_attn_and_mamba = False
+    runner.use_sparse = False
+    runner.use_compress = False
+    runner.sparse_kv_offload_enabled = False
+    runner.runner_only_attn_layers = set()
+    runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: layer})
+    runner._get_layer_kv_cache_specs = lambda _config: {layer_name: spec}
+
+    def allocate(numel, alignment):
+        allocations.append((numel, alignment))
+        return torch.zeros(numel, dtype=torch.int8)
+
+    runner._allocate_int8_cache_tensor = allocate
+    monkeypatch.setattr(model_runner_v1, "vllm_version_is", lambda _version: False)
+
+    raw_tensors = runner._allocate_kv_cache_tensors(config)
+    assert allocations == [(layer_size, 2 * 1024 * 1024)]
+    assert isinstance(raw_tensors[layer_name], torch.Tensor)
+    assert raw_tensors[layer_name].numel() == layer_size
+
+
 def test_model_runner_keeps_exact_mla_spec_for_all_mla_models(monkeypatch):
     spec = _make_spec(block_size=128)
     layer = _FakeMLAAttention(spec=spec, nope_dim=512, rope_dim=64)
