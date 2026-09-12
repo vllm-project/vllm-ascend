@@ -59,13 +59,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         draft_hf_config = self.draft_model_config.hf_config
         rotation_path = get_rotation_path(self.vllm_config)
         draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
-        try:
-            model = super().load_draft_model(target_model, target_attn_layer_names)
-        finally:
-            delattr(draft_hf_config, "_ascend_target_rotation_path")
-        configure_aux_hidden_capture = getattr(model, "configure_target_aux_hidden_capture", None)
-        if configure_aux_hidden_capture is not None:
-            configure_aux_hidden_capture(target_model)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
 
         return model
 

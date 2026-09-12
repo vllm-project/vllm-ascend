@@ -102,7 +102,7 @@ def test_draft_without_hook_preserves_target_capture(monkeypatch):
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
     target.set_dspark_aux_capture_materialized.assert_not_called()
-    assert not hasattr(config, "_ascend_target_rotation_path")
+    assert config._ascend_target_rotation_path is not None
 
 
 def test_qwen3_class_selects_materialized_target_capture():
@@ -167,10 +167,10 @@ def test_injects_rotation_before_draft_construction(monkeypatch):
     spec = _spec(_vllm_config(quarot=True), draft_config)
 
     assert spec.load_draft_model(target, set()) is draft
-    assert not hasattr(draft_config, "_ascend_target_rotation_path")
+    assert draft_config._ascend_target_rotation_path == "/rotation"
 
 
-def test_injected_rotation_path_is_removed_when_loading_fails(monkeypatch):
+def test_draft_loading_failure_propagates(monkeypatch):
     draft_config = _gqa_config()
     target = _target()
 
@@ -186,25 +186,22 @@ def test_injected_rotation_path_is_removed_when_loading_fails(monkeypatch):
 
     with pytest.raises(ValueError, match="checkpoint load failed"):
         spec.load_draft_model(target, set())
-    assert not hasattr(draft_config, "_ascend_target_rotation_path")
+    target.set_dspark_aux_capture_materialized.assert_not_called()
 
 
-@pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("quarot", [False, True])
-def test_temporary_rotation_path_is_removed(monkeypatch, fail, quarot):
+def test_target_rotation_path_is_retained(monkeypatch, quarot):
     config = _gqa_config()
 
     def load(*args):
         expected = str(Path("/target") / "rotation.safetensors") if quarot else None
         assert config._ascend_target_rotation_path == expected
-        if fail:
-            raise ValueError("load failed")
         return object()
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
-    with pytest.raises(ValueError, match="load failed") if fail else nullcontext():
-        _spec(_vllm_config(quarot=quarot), config).load_draft_model(_target(), set())
-    assert not hasattr(config, "_ascend_target_rotation_path")
+    _spec(_vllm_config(quarot=quarot), config).load_draft_model(_target(), set())
+    expected = str(Path("/target") / "rotation.safetensors") if quarot else None
+    assert config._ascend_target_rotation_path == expected
 
 
 @pytest.mark.parametrize("initial_path", [None, Path("/draft-rotation")])
