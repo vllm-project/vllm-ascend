@@ -65,10 +65,7 @@ class AscendDeepseekV41ForConditionalGeneration(
         self.multimodal_config = model_config.multimodal_config
         assert self.multimodal_config is not None
 
-        image_enabled = (
-            config.vision_n_layers > 0
-            and self.multimodal_config.get_limit_per_prompt("image") > 0
-        )
+        image_enabled = config.vision_n_layers > 0 and self.multimodal_config.get_limit_per_prompt("image") > 0
         with self._mark_tower_model(vllm_config, {"image"}):
             self.vision: DeepseekV4ViT | None = None
             self.aligner: DeepseekV4Aligner | None = None
@@ -82,9 +79,7 @@ class AscendDeepseekV41ForConditionalGeneration(
                     setattr(
                         self,
                         name,
-                        nn.Parameter(
-                            torch.empty(config.hidden_size, dtype=torch.float32)
-                        ),
+                        nn.Parameter(torch.empty(config.hidden_size, dtype=torch.float32)),
                     )
                 self.vision.to(dtype=model_config.dtype)
                 self.aligner.to(dtype=model_config.dtype)
@@ -94,9 +89,7 @@ class AscendDeepseekV41ForConditionalGeneration(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)
@@ -106,10 +99,7 @@ class AscendDeepseekV41ForConditionalGeneration(
         llm_grid = kwargs.pop("llm_grid", None)
         types = kwargs.pop("types", None)
         if vit_grid is None or llm_grid is None or types is None:
-            raise ValueError(
-                "DeepSeek V4.1 vision input requires patches, vit_grid, "
-                "llm_grid, and types."
-            )
+            raise ValueError("DeepSeek V4.1 vision input requires patches, vit_grid, llm_grid, and types.")
         return {
             "patches": patches,
             "vit_grid": vit_grid,
@@ -210,9 +200,7 @@ class AscendDeepseekV41ForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
         if is_multimodal is None:
-            raise ValueError(
-                "is_multimodal is required when merging image embeddings."
-            )
+            raise ValueError("is_multimodal is required when merging image embeddings.")
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,

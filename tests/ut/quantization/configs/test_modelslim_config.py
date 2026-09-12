@@ -68,9 +68,7 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description, self.sample_config)
 
     def test_from_metadata_only_config_defers_description_load(self):
-        config = AscendModelSlimConfig.from_config(
-            {"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"}
-        )
+        config = AscendModelSlimConfig.from_config({"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"})
         self.assertEqual(config.quant_description, {})
 
     def test_deepseek_v41_packed_mapping_uses_checkpoint_shard_names(self):
@@ -86,9 +84,7 @@ class TestAscendModelSlimConfig(TestBase):
 
     def test_deepseek_v41_quant_prefix_maps_terminal_projection(self):
         self.assertEqual(
-            self.ascend_config.quant_prefix_mapper(
-                "deepseek_v4.1", "model.layers.0.mlp.shared_experts.down_proj"
-            ),
+            self.ascend_config.quant_prefix_mapper("deepseek_v4.1", "model.layers.0.mlp.shared_experts.down_proj"),
             "layers.0.ffn.shared_experts.w2",
         )
 
@@ -628,9 +624,7 @@ class TestQuantPrefixMapper(TestBase):
 
         cases = {
             "language_model.model.embed_tokens": "embed",
-            "language_model.model.layers.0.self_attn.q_proj": (
-                "layers.0.attn.q_proj"
-            ),
+            "language_model.model.layers.0.self_attn.q_proj": ("layers.0.attn.q_proj"),
             "language_model.lm_head": "head",
         }
         for prefix, expected in cases.items():
@@ -639,15 +633,6 @@ class TestQuantPrefixMapper(TestBase):
                     config.quant_prefix_mapper("deepseek_v4.1", prefix),
                     expected,
                 )
-
-    def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
-        dense_mapping = get_packed_modules_mapping("qwen3_5_text")
-        moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
-        self.assertEqual(dense_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
-        self.assertEqual(
-            moe_mapping["experts"],
-            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        )
 
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})

@@ -24,18 +24,18 @@ from vllm_ascend.core.deepseek_v41 import (
     DeepseekV41SWASpec,
     validate_cache_runtime,
 )
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.deepseek_v4.model import (
     AscendDeepseekV4ForCausalLM,
     AscendDeepseekV4SWACache,
     DeepseekV2DecoderLayer,
     DeepseekV4Attention,
     DeepseekV4Model,
-)
-from vllm_ascend.models.common.ops.sequence_parallel import (
-    sp_all_gather,
-    sp_padding_mask,
-    sp_reduce_scatter,
-    sp_shard,
 )
 
 from .compressor import DeepseekV41Compressor, _read, text_config_of
@@ -360,9 +360,7 @@ class DeepseekV41DecoderLayer(DeepseekV2DecoderLayer):
 
     def __init__(self, vllm_config, prefix, **kwargs):
         super().__init__(vllm_config, prefix, **kwargs)
-        self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
-        )
+        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
@@ -468,9 +466,7 @@ class DeepseekV41Model(DeepseekV4Model):
         ):
             raise ValueError("Engram HBM shards require --safetensors-load-strategy lazy")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.use_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
-        )
+        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         # V4.1 collapses with the last block's ffn_pre; it has no hc_head
         # projection in the checkpoint.
         del self.hc_head_fn, self.hc_head_base, self.hc_head_scale, self.hc_norm
@@ -615,10 +611,7 @@ class DeepseekV41Model(DeepseekV4Model):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
             token_mask = sp_shard(token_mask)
-            lookups = {
-                layer_idx: sp_shard(lookup)
-                for layer_idx, lookup in lookups.items()
-            }
+            lookups = {layer_idx: sp_shard(lookup) for layer_idx, lookup in lookups.items()}
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0

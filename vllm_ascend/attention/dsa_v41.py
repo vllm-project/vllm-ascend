@@ -639,9 +639,7 @@ class DeepseekV41EagerAttentionImpl:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
             q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
-            compressed_indices = self._select_sparse_indices(
-                attn, hidden_states, qr, positions, cos, sin, metadata
-            )
+            compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
             attention_output = self._attention(attn, q, metadata, compressed_indices)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 attention_output.unsqueeze(1),
@@ -659,8 +657,14 @@ class DeepseekV41EagerAttentionImpl:
 
 class DeepseekV41MetadataBuilder(AttentionMetadataBuilder[DeepseekV41Metadata]):
     def __init__(
-        self, kv_cache_spec, layer_names, vllm_config, device, *,
-        build_query_metadata=True, build_compressor_metadata=True,
+        self,
+        kv_cache_spec,
+        layer_names,
+        vllm_config,
+        device,
+        *,
+        build_query_metadata=True,
+        build_compressor_metadata=True,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
@@ -692,7 +696,9 @@ class DeepseekV41MetadataBuilder(AttentionMetadataBuilder[DeepseekV41Metadata]):
             )
         )
         c2_rope_rows = (
-            compressor_tokens if self._supports_device_ops and isinstance(kv_cache_spec, DeepseekV41CompressorStateSpec) else 0
+            compressor_tokens
+            if self._supports_device_ops and isinstance(kv_cache_spec, DeepseekV41CompressorStateSpec)
+            else 0
         )
         self._c2_source_cos = torch.ones(
             (c2_rope_rows, 1, 1, rope_dim),
@@ -813,11 +819,7 @@ class DeepseekV41MetadataBuilder(AttentionMetadataBuilder[DeepseekV41Metadata]):
         spec = self.kv_cache_spec
         common = common_attn_metadata
         is_compressor_state = isinstance(spec, DeepseekV41CompressorStateSpec)
-        ratio = (
-            spec.compress_ratio
-            if is_compressor_state
-            else get_kv_cache_compression_ratio(spec)
-        )
+        ratio = spec.compress_ratio if is_compressor_state else get_kv_cache_compression_ratio(spec)
         if isinstance(spec, (DeepseekV41SWASpec, DeepseekV41DraftSWASpec)):
             cache_kind = "swa"
         elif isinstance(spec, DeepseekV41FullSpec):
@@ -941,14 +943,15 @@ class DeepseekV41MetadataBuilder(AttentionMetadataBuilder[DeepseekV41Metadata]):
                 self.vllm_config.speculative_config.num_speculative_tokens,
                 window_size,
                 spec.storage_block_size,
-                common.query_start_loc[:num_reqs + 1],
+                common.query_start_loc[: num_reqs + 1],
                 seq_lens,
                 num_actual_tokens,
                 use_logical_indices=True,
             )
         ori_topk_length = (
             (ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-            if ori_sparse_indices is not None and noncausal else None
+            if ori_sparse_indices is not None and noncausal
+            else None
         )
         ori_mask_mode = 0 if noncausal else 4
         ori_win_left = max(0, window_size - 1)

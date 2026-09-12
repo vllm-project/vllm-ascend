@@ -48,6 +48,8 @@ def test_model_prepares_routing_ids_once_per_forward(monkeypatch, model_cls, inp
     prepare_engram = MagicMock(return_value=({}, torch.empty(0, dtype=torch.bool)))
     model = SimpleNamespace(
         needs_moe_input_ids=needs_moe_input_ids,
+        use_sequence_parallel_moe=False,
+        use_sequence_parallel=False,
         hc_mult=4,
         layers={str(i): layer for i, layer in enumerate(layers)} if is_draft else layers,
         start_layer=0,

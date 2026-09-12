@@ -26,11 +26,21 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.circular_buffer import prefix_cacheable
 from vllm_ascend.core.deepseek_v41 import (
     allocate_cache_config as allocate_v41_cache_config,
+)
+from vllm_ascend.core.deepseek_v41 import (
     group_cache_specs as group_v41_cache_specs,
+)
+from vllm_ascend.core.deepseek_v41 import (
     has_v41_groups,
     is_v41_spec,
+)
+from vllm_ascend.core.deepseek_v41 import (
     make_cache_groups as make_v41_cache_groups,
+)
+from vllm_ascend.core.deepseek_v41 import (
     pool_bytes_per_block as v41_pool_bytes_per_block,
+)
+from vllm_ascend.core.deepseek_v41 import (
     request_blocks as v41_request_blocks,
 )
 from vllm_ascend.models.glm5next.cache_config import (
@@ -636,16 +646,12 @@ def _ascend_get_kv_cache_config_from_groups(
 ) -> KVCacheConfig:
     """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
     if has_v41_groups(kv_cache_groups):
-        num_blocks, kv_cache_tensors = allocate_v41_cache_config(
-            vllm_config, kv_cache_groups, available_memory
-        )
+        num_blocks, kv_cache_tensors = allocate_v41_cache_config(vllm_config, kv_cache_groups, available_memory)
         return KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=kv_cache_tensors,
             kv_cache_groups=kv_cache_groups,
-            prefix_cache_retention_interval=(
-                vllm_config.cache_config.prefix_cache_retention_interval
-            ),
+            prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
         )
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)

@@ -117,9 +117,7 @@ def select_candidate_blocks(logits, compress_lens, topk_blocks, block_size):
         torch.inf,
     )
     top = scores.topk(min(topk_blocks, num_blocks), dim=-1)
-    keep = torch.zeros_like(scores, dtype=torch.bool).scatter_(
-        -1, top.indices, top.values > -torch.inf
-    )
+    keep = torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, top.indices, top.values > -torch.inf)
     return keep.repeat_interleave(block_size, dim=-1)[..., :width]
 
 
@@ -127,9 +125,7 @@ def select_index_topk(logits, compress_lens, index_topk):
     """PyTorch reference for chronological level-two position TopK."""
     width = logits.shape[-1]
     if width == 0:
-        return torch.empty(
-            (*logits.shape[:-1], 0), dtype=torch.int32, device=logits.device
-        )
+        return torch.empty((*logits.shape[:-1], 0), dtype=torch.int32, device=logits.device)
     topk = min(index_topk, width)
     indices = logits.topk(topk, dim=-1, sorted=False).indices.sort(-1).values
     return torch.where(indices < compress_lens, indices, -1).int()
@@ -154,9 +150,7 @@ def small_op_attention(
     query_starts = swa_metadata.query_start_loc.tolist()
     seq_lens = swa_metadata.seq_lens.tolist()
     outputs = []
-    for req_idx, (q_start, q_end) in enumerate(
-        zip(query_starts[:-1], query_starts[1:])
-    ):
+    for req_idx, (q_start, q_end) in enumerate(zip(query_starts[:-1], query_starts[1:])):
         seq_len = int(seq_lens[req_idx])
         local = paged_prefix(
             swa_cache,
@@ -197,9 +191,7 @@ def small_op_attention(
     return torch.stack(outputs).to(q.dtype)
 
 
-def compressor_ratio2_reference(
-    compressor, x, start_pos: int, state_cache, state_block_table
-):
+def compressor_ratio2_reference(compressor, x, start_pos: int, state_cache, state_block_table):
     """Reference ratio-2 compressor over one request's private FP32 ring."""
     if start_pos < 0 or x.ndim != 2:
         raise ValueError("Expected nonnegative start_pos and [tokens, hidden] input")
@@ -209,9 +201,7 @@ def compressor_ratio2_reference(
         or state_cache.shape[-1] != 2 * compressor.width
         or state_cache.dtype != torch.float32
     ):
-        raise ValueError(
-            "Ratio2 requires paged FP32 [pages, block_size, 2*head_dim] state"
-        )
+        raise ValueError("Ratio2 requires paged FP32 [pages, block_size, 2*head_dim] state")
     if not isinstance(state_block_table, (list, tuple)):
         raise ValueError("Reference compressor requires a host list/tuple state_block_table")
     block_size = state_cache.shape[1]
@@ -221,10 +211,7 @@ def compressor_ratio2_reference(
     def state_row(position):
         offset = position % block_size
         physical_block = state_block_table[0]
-        if (
-            not isinstance(physical_block, int)
-            or not 0 < physical_block < state_cache.shape[0]
-        ):
+        if not isinstance(physical_block, int) or not 0 < physical_block < state_cache.shape[0]:
             raise ValueError("Compressor state refers to an absent/null/out-of-range page")
         return state_cache[physical_block, offset]
 
@@ -242,16 +229,9 @@ def compressor_ratio2_reference(
         row[compressor.width :] = score[token]
         if (position + 1) % compressor.ratio == 0:
             group = torch.stack([state_row(position - 1), row])
-            pooled = (
-                group[:, : compressor.width]
-                * group[:, compressor.width :].softmax(dim=0)
-            ).sum(dim=0)
+            pooled = (group[:, : compressor.width] * group[:, compressor.width :].softmax(dim=0)).sum(dim=0)
             completed.append(pooled)
-    latent = (
-        torch.stack(completed).to(x.dtype)
-        if completed
-        else x.new_empty((0, compressor.width))
-    )
+    latent = torch.stack(completed).to(x.dtype) if completed else x.new_empty((0, compressor.width))
     return compressor.norm(latent)
 
 
@@ -261,17 +241,11 @@ def hc_mixes_reference(layer, x, hc_fn, hc_scale, hc_base):
     flat = x_float.flatten(-2)
     mixes = F.linear(flat, hc_fn)
     mixes *= torch.rsqrt(flat.square().mean(-1, keepdim=True) + layer.norm_eps)
-    pre, post, comb = mixes.split(
-        [layer.hc_mult, layer.hc_mult, layer.hc_mult * layer.hc_mult], -1
-    )
+    pre, post, comb = mixes.split([layer.hc_mult, layer.hc_mult, layer.hc_mult * layer.hc_mult], -1)
     pre = torch.sigmoid(pre * hc_scale[0] + hc_base[: layer.hc_mult]) + layer.hc_eps
-    post = 2 * torch.sigmoid(
-        post * hc_scale[1] + hc_base[layer.hc_mult : 2 * layer.hc_mult]
-    )
+    post = 2 * torch.sigmoid(post * hc_scale[1] + hc_base[layer.hc_mult : 2 * layer.hc_mult])
     comb = comb.unflatten(-1, (layer.hc_mult, layer.hc_mult))
-    comb = comb * hc_scale[2] + hc_base[2 * layer.hc_mult :].view(
-        layer.hc_mult, layer.hc_mult
-    )
+    comb = comb * hc_scale[2] + hc_base[2 * layer.hc_mult :].view(layer.hc_mult, layer.hc_mult)
     comb = comb.softmax(-1) + layer.hc_eps
     comb = comb / (comb.sum(-2, keepdim=True) + layer.hc_eps)
     for _ in range(layer.hc_sinkhorn_iters - 1):

@@ -173,7 +173,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             assert all(
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
-                    if prefix_cacheable(g.kv_cache_spec)
+                if prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
         self.enable_partial_hash_hits = dcp_world_size == 1 and any(
             isinstance(g.kv_cache_spec, MambaSpec)

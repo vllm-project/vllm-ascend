@@ -238,12 +238,8 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
 
 # The released config renamed the V4.1 model type without changing its
 # ModelSlim module namespace. Keep pre-release checkpoints compatible.
-QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v41"] = QUANT_MODEL_PREFIX_MAPPINGS[
-    "deepseek_v4.1"
-]
-QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v41"] = QUANT_MODEL_SUBSTR_MAPPINGS[
-    "deepseek_v4.1"
-]
+QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v41"] = QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v4.1"]
+QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v41"] = QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v4.1"]
 
 
 def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bool:

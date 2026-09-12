@@ -193,11 +193,11 @@ def test_native_qli_candidate(ratio, length, mode):
         assert candidates.numel() == 0
 
 
-@pytest.mark.skipif(is_950(), reason="A5 QLI retains BSND query support")
-def test_native_qli_a2a3_rejects_uncompiled_query_layout():
-    # Fail in host validation instead of looking up a pruned BSND binary.
-    with pytest.raises(RuntimeError):
-        _invoke(_data(513), "BSND", 1, 3)
+def test_native_qli_supports_bsnd_query_layout():
+    data = _data(513)
+    score, _ = _scores(*data[:5], 1, 0)
+    output, _ = _invoke(data, "BSND", 1, 3)
+    _check_topk(score, output, 128)
 
 
 @pytest.mark.parametrize(
@@ -282,6 +282,26 @@ def test_model_indexer_mixed_batch(ratio, zero_first):
         cache_seq_lens=torch.tensor(lengths, dtype=torch.int32, device="npu"),
         seq_lens=torch.tensor(original, dtype=torch.int32, device="npu"),
         block_table=table,
+    )
+    metadata.cmp_residual = (
+        torch.tensor([value % ratio for value in original], dtype=torch.int32, device="npu") if ratio != 1 else None
+    )
+    metadata.qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+        HEADS,
+        1,
+        WIDTH,
+        128,
+        2,
+        cu_seqlens_q=metadata.query_start_loc,
+        seqused_k=metadata.cache_seq_lens,
+        cmp_residual_k=metadata.cmp_residual,
+        batch_size=2,
+        max_seqlen_q=metadata.max_query_len,
+        max_seqlen_k=metadata.max_cache_seq_len,
+        layout_q="TND",
+        layout_k="PA_BBND",
+        mask_mode=3,
+        cmp_ratio=ratio,
     )
     obj = _indexer(ratio)
     options = dict(candidate_topk_blocks=64, candidate_block_size=8)

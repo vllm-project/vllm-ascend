@@ -80,9 +80,7 @@ class DeepseekV41Indexer(nn.Module):
                     head_size=self.width,
                     dtype=torch.int8,
                     tokens_per_state=compress_ratio,
-                    storage_block_size=(
-                        vllm_config.cache_config.block_size // compress_ratio
-                    ),
+                    storage_block_size=(vllm_config.cache_config.block_size // compress_ratio),
                     scale_dim=1,
                     scale_dtype=torch.float16,
                 ),
@@ -106,9 +104,7 @@ class DeepseekV41Indexer(nn.Module):
             partial_slice=[self.width - self.rope_width, self.width],
         )
         key = key.squeeze(1)
-        quantized, scale = torch_npu.npu_dynamic_quant(
-            key, dst_type=torch.int8
-        )
+        quantized, scale = torch_npu.npu_dynamic_quant(key, dst_type=torch.int8)
         k_cache, scale_cache = self.k_cache.kv_cache[0]
         scatter_cache_sk(k_cache, slots, quantized)
         scatter_cache_sk(
@@ -198,9 +194,12 @@ class DeepseekV41Indexer(nn.Module):
             raise ValueError("Candidate consumer requires INT32 block IDs with matching query rows")
         topk = self.index_topk
         if query.shape[0] == 0:
-            selected = torch.full(
-                (0, topk), -1, dtype=torch.int32, device=query.device
-            )
+            selected = torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
+            if is_candidate_source:
+                candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
+            return selected, candidates
+        if source_metadata.max_cache_seq_len == 0:
+            selected = torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
             if is_candidate_source:
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates

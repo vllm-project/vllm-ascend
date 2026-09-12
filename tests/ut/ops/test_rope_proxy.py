@@ -30,9 +30,7 @@ def test_full_rope_lookup_resolves_exact_layer_config(monkeypatch):
         {"base": first, "compressed": second},
     )
 
-    actual = get_full_cos_and_sin_dsa_for_layer(
-        "model.layers.2.self_attn.attn"
-    )
+    actual = get_full_cos_and_sin_dsa_for_layer("model.layers.2.self_attn.attn")
 
     assert actual[0] is second[0]
     assert actual[1] is second[1]
@@ -52,10 +50,9 @@ def test_zero_original_length_disables_yarn():
         beta_fast=32,
         beta_slow=1,
     )
-    expected = 1.0 / (
-        base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
-    )
+    expected = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
     torch.testing.assert_close(actual, expected)
+
 
 # ──────────────────────────────────────────────
 # Equivalence: pad_to + slice  vs  pad-positions + gather + slice

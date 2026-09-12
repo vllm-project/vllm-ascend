@@ -33,9 +33,7 @@ class _ReplicatedCacheMetadataBuilder(DeepseekV41MetadataBuilder):
     """Keep global cache metadata independent from local query buffers."""
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device, build_compressor_metadata=False
-        )
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, build_compressor_metadata=False)
         self._global_builder = DeepseekV41MetadataBuilder(
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
@@ -185,8 +183,12 @@ class DeepseekV41CPImpl(DeepseekV41EagerAttentionImpl):
         # Both streams have joined before compressor/indexer cache reads.
         if self.role.is_kv_source:
             self._write_compressed_source(
-                attn, kv_hidden_states, global_metadata.positions[: kv_hidden_states.shape[0]],
-                kv_cos, kv_sin, global_metadata,
+                attn,
+                kv_hidden_states,
+                global_metadata.positions[: kv_hidden_states.shape[0]],
+                kv_cos,
+                kv_sin,
+                global_metadata,
             )
         return q.to(hidden_states.dtype), qr
 

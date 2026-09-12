@@ -445,7 +445,7 @@ class DeepseekV4MoE(nn.Module):
             final_hidden_states = fused_moe_out
 
         if self.is_sequence_parallel and not already_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
+            final_hidden_states = sp_all_gather(final_hidden_states)
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1 and fused_moe_out_is_tuple:
             # Legacy tuple outputs are reduced here. Tensor outputs from the
@@ -687,6 +687,7 @@ class DeepseekV4Attention(nn.Module):
 
 class DeepseekV2DecoderLayer(nn.Module):
     attention_cls = DeepseekV4Attention
+
     def __init__(
         self,
         vllm_config: VllmConfig,

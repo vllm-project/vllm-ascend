@@ -154,9 +154,11 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
         attn.rotary_emb = SimpleNamespace(layername="layer")
         metadata.num_actual_tokens = num_tokens
         global_metadata = SimpleNamespace(swa=metadata, rope=lambda *args: (cos, sin))
-        metadata = SimpleNamespace(swa=SimpleNamespace(
-            num_actual_tokens=num_tokens - start, cp_token_range=(start, num_tokens, num_tokens - start, num_tokens)
-        ))
+        metadata = SimpleNamespace(
+            swa=SimpleNamespace(
+                num_actual_tokens=num_tokens - start, cp_token_range=(start, num_tokens, num_tokens - start, num_tokens)
+            )
+        )
         impl._global_layer_metadata = Mock(return_value=global_metadata)
         monkeypatch.setattr(dsa_v41_cp, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
         metadata = metadata.swa

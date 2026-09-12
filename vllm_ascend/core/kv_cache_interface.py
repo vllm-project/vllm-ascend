@@ -19,8 +19,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.core.circular_buffer import AscendCircularBufferManager, AscendCircularBufferSpec
+from vllm_ascend.utils import vllm_version_is
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:

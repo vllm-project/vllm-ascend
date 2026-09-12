@@ -176,11 +176,14 @@ def test_mixed_prefill_first_residual_uses_ring_at_projection_boundary(graph_mod
         initial[block] = torch.randn(32, 1024)
     state = initial.npu()
     controls = torch.tensor(
-        [[1301, 1301, 1366, 0, 0, 0],
-         [6, 6, 15, 1338, 1300, 1303],
-         [0, 6, 12, 27, 1365, 2665],
-         [0, 6, 12, 27, 1365, 2665],
-         blocks], dtype=torch.int32,
+        [
+            [1301, 1301, 1366, 0, 0, 0],
+            [6, 6, 15, 1338, 1300, 1303],
+            [0, 6, 12, 27, 1365, 2665],
+            [0, 6, 12, 27, 1365, 2665],
+            blocks,
+        ],
+        dtype=torch.int32,
     )
     meta = controls.npu()
     out = torch.empty_like(kv, dtype=torch.bfloat16)

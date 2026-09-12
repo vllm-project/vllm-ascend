@@ -86,21 +86,14 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
         draft_hf_config.update(
             {
                 "n_routed_experts": draft_hf_config.dspark_n_routed_experts,
-                "num_experts_per_tok": getattr(
-                    draft_hf_config, "dspark_num_experts_per_tok", None
-                )
-                or getattr(draft_hf_config, "dspark_n_activated_experts"),
+                "num_experts_per_tok": getattr(draft_hf_config, "dspark_num_experts_per_tok", None)
+                or draft_hf_config.dspark_n_activated_experts,
                 "n_mtp_layers": getattr(draft_hf_config, "num_nextn_predict_layers", 3),
             }
         )
     if is_v41:
-        uses_released_name = (
-            root_model_type == "deepseek_v41"
-            or text_model_type == "deepseek_v41_text"
-        )
-        normalized_model_type = (
-            "deepseek_v41" if uses_released_name else "deepseek_v4.1"
-        )
+        uses_released_name = root_model_type == "deepseek_v41" or text_model_type == "deepseek_v41_text"
+        normalized_model_type = "deepseek_v41" if uses_released_name else "deepseek_v4.1"
     else:
         normalized_model_type = root_model_type
     hf_config.update(

@@ -820,6 +820,8 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.device = torch.device("cpu")
         proposer.runner = SimpleNamespace(device_metadata_executor=None)
         proposer.dcp_size = 1
+        proposer._per_group_block_tables = {}
+        proposer._per_group_slot_mappings = {}
         return proposer
 
     def test_aurora_draft_uses_only_group_twelve(self, monkeypatch):

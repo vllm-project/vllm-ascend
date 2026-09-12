@@ -174,6 +174,8 @@ def test_non_dcp_dspark_config_is_not_replaced_during_validation(
 
     patch_speculative_config._dspark_post_init(config)
     assert config.target_parallel_config is original_parallel_config
+
+
 def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape():
     text_config = SimpleNamespace(
         model_type="deepseek_v4.1_text",

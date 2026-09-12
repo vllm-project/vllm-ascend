@@ -1261,9 +1261,7 @@ def test_v41_cp_metadata_preserves_global_compression_and_local_causality(
     )
     spec = collect_specs(runtime)["model.layers.2.self_attn.long_kv_cache"]
     builder = DeepseekV41CPMetadataBuilder(spec, [], runtime, torch.device("cpu"))
-    metadata = builder.build(
-        0, _cp_common(), common_v41_metadata={}, common_v41_batch_metadata={}
-    )
+    metadata = builder.build(0, _cp_common(), common_v41_metadata={}, common_v41_batch_metadata={})
     assert metadata.query_start_loc.tolist() == query_offsets
     assert metadata.query_start_loc.dtype == torch.int32
     pointer = metadata.query_start_loc.data_ptr()
@@ -1316,9 +1314,7 @@ def test_v41_cp_rope_preserves_global_rows_across_builds(runtime, monkeypatch, r
     state = rope.RopeGlobalState()
     full = torch.arange(128, dtype=torch.float32).reshape(128, 1, 1, 1)
     state.full_rope_cache["test"] = (full, full + 1000)
-    state.runtime_buffer["test"] = {
-        "default": (torch.zeros(8, 1, 1, 1), torch.zeros(8, 1, 1, 1))
-    }
+    state.runtime_buffer["test"] = {"default": (torch.zeros(8, 1, 1, 1), torch.zeros(8, 1, 1, 1))}
     state.registry_summary["test"] = {"default"}
     state.layer_info["test.layer"] = ("test", ["default"])
     monkeypatch.setattr(rope, "_ROPE_STATE", state)
@@ -1336,9 +1332,13 @@ def test_v41_cp_rope_preserves_global_rows_across_builds(runtime, monkeypatch, r
         positions = torch.tensor([10, 20, 30, 40]) + step
         offsets = torch.arange(5, dtype=torch.int32)
         common = _cp_common().replace(
-            positions=positions, num_reqs=4, query_start_loc=offsets,
-            query_start_loc_cpu=offsets, seq_lens=(positions + 1).int(),
-            seq_lens_cpu=(positions + 1).int(), max_query_len=1,
+            positions=positions,
+            num_reqs=4,
+            query_start_loc=offsets,
+            query_start_loc_cpu=offsets,
+            seq_lens=(positions + 1).int(),
+            seq_lens_cpu=(positions + 1).int(),
+            max_query_len=1,
             max_seq_len=int(positions.max()) + 1,
             block_table_tensor=torch.zeros(4, 2, dtype=torch.int32),
             is_prefilling=torch.full((4,), prefill),
@@ -1347,7 +1347,7 @@ def test_v41_cp_rope_preserves_global_rows_across_builds(runtime, monkeypatch, r
         global_cos = metadata.global_metadata.cos["test.layer"]
         local_cos = metadata.cos["test.layer"]
         local_sin = metadata.sin["test.layer"]
-        expected = positions[rank:rank + 1].float()
+        expected = positions[rank : rank + 1].float()
         torch.testing.assert_close(global_cos.flatten(), positions.float())
         torch.testing.assert_close(local_cos.flatten(), expected)
         torch.testing.assert_close(local_sin.flatten(), expected + 1000)
@@ -1477,8 +1477,10 @@ def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, pcp, cp
 def test_v41_cp_accepts_async_seq_lens_mirror(runtime, monkeypatch):
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import DeepseekV41CPMetadataBuilder
 
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
-                        lambda: SimpleNamespace(world_size=2, rank_in_group=1))
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
+    )
     common = _cp_common()
     common._seq_lens_cpu = common.seq_lens_cpu
     common.seq_lens_cpu = None
@@ -1519,6 +1521,7 @@ def test_v41_runtime_rejects_pcp_and_mrv2(runtime, v2, pcp):
 @pytest.mark.parametrize("overlap", [False, True])
 def test_v41_query_preparation_keeps_mainline_preprocess(overlap):
     from unittest.mock import Mock
+
     from vllm_ascend.attention.dsa_v41 import DeepseekV41EagerAttentionImpl
 
     impl = DeepseekV41EagerAttentionImpl.__new__(DeepseekV41EagerAttentionImpl)
@@ -1526,8 +1529,9 @@ def test_v41_query_preparation_keeps_mainline_preprocess(overlap):
     impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(
-        impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))))
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+    )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
     selected = impl.multistream_preprocess if overlap else impl.preprocess
@@ -1540,18 +1544,18 @@ def test_v41_query_preparation_keeps_mainline_preprocess(overlap):
 @pytest.mark.parametrize("overlap", [False, True])
 def test_v41_cp_query_preparation_uses_full_inputs_only_for_overlap(overlap):
     from unittest.mock import Mock
+
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import DeepseekV41CPImpl
 
     impl = DeepseekV41CPImpl.__new__(DeepseekV41CPImpl)
     impl._project_q = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(
-        impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))))
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+    )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=2, cp_token_range=(2, 4, 2, 6)))
-    assert impl._prepare_queries(
-        attn, "abcdef", "positions", "cos", "sin", metadata
-    ) == ("q", "qr")
+    assert impl._prepare_queries(attn, "abcdef", "positions", "cos", "sin", metadata) == ("q", "qr")
     if overlap:
         impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
         impl._project_q.assert_not_called()
@@ -1565,6 +1569,7 @@ def test_v41_cp_query_preparation_uses_full_inputs_only_for_overlap(overlap):
 @pytest.mark.parametrize("local_tokens", [0, 2])
 def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens):
     from unittest.mock import Mock
+
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import DeepseekV41CPImpl
 
     impl = DeepseekV41CPImpl.__new__(DeepseekV41CPImpl)
@@ -1572,8 +1577,9 @@ def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens
     global_metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=5))
     impl._global_layer_metadata = Mock(return_value=global_metadata)
     impl._update_caches = Mock()
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(
-        impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))))
+    attn = SimpleNamespace(
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+    )
     metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(3, 6, 3, 6), num_actual_tokens=local_tokens))
     assert impl._prepare_inputs_and_caches(attn, full, metadata, {}) is None
     if not overlap or local_tokens == 0:
@@ -1585,8 +1591,8 @@ def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens
 
 
 def test_v41_cp_inherits_forward():
-    from vllm_ascend.attention.dsa_v41 import DeepseekV41EagerAttentionImpl
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import DeepseekV41CPImpl
+    from vllm_ascend.attention.dsa_v41 import DeepseekV41EagerAttentionImpl
 
     assert DeepseekV41CPImpl.forward is DeepseekV41EagerAttentionImpl.forward
 
@@ -1599,8 +1605,13 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
 
     runtime.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     spec = DeepseekV41DraftSWASpec(
-        block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16,
-        sliding_window=128, cache_dtype_str="bfloat16", model_version="deepseek_v4",
+        block_size=128,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        cache_dtype_str="bfloat16",
+        model_version="deepseek_v4",
     )
     common = _cp_common().replace(
         causal=False,
@@ -1627,8 +1638,8 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
     # Every query of the first request can see its complete draft block.
     torch.testing.assert_close(full.ori_sparse_indices[0], full.ori_sparse_indices[2])
     expected = list(range(max(0, first_seq_len - 3 - 128), first_seq_len))
-    assert full.ori_sparse_indices[0, 0, :len(expected)].tolist() == expected
-    assert torch.all(full.ori_sparse_indices[0, 0, len(expected):] == -1)
+    assert full.ori_sparse_indices[0, 0, : len(expected)].tolist() == expected
+    assert torch.all(full.ori_sparse_indices[0, 0, len(expected) :] == -1)
     assert full.ori_sparse_indices[3, 0, :5].tolist() == list(range(5))
     assert full.ori_topk_length[:, 0].tolist() == [len(expected)] * 3 + [5]
     if rank is None:
@@ -1650,6 +1661,6 @@ def test_dspark_v41_noncausal_metadata_preserves_full_visible_block(runtime, mon
             native.call_args.kwargs["ori_topk_length"],
             (local.ori_sparse_indices >= 0).sum(-1, dtype=torch.int32),
         )
-    torch.testing.assert_close(local.ori_sparse_indices, full.ori_sparse_indices[rank:rank + 1])
+    torch.testing.assert_close(local.ori_sparse_indices, full.ori_sparse_indices[rank : rank + 1])
     assert local.seq_lens.tolist() == ([first_seq_len, 0] if rank < 3 else [0, 0])
     assert local.ori_mask_mode == 0

@@ -50,7 +50,7 @@ def test_deepseek_v4_moe_reuses_fp32_input_on_matching_token_shard(
     gate = SimpleNamespace(tid2eid=torch.zeros(32, 2), weight=torch.randn(3, 8))
     moe = SimpleNamespace(gate=gate, experts=experts, is_sequence_parallel=is_sequence_parallel, tp_size=1)
     monkeypatch.setattr(deepseek_v4_module, "sequence_parallel_chunk", lambda x: x[2:])
-    monkeypatch.setattr(deepseek_v4_module, "tensor_model_parallel_all_gather", lambda x, _dim: torch.cat([x, x]))
+    monkeypatch.setattr(deepseek_v4_module, "sp_all_gather", lambda x: torch.cat([x, x]))
     linear = MagicMock(wraps=torch.nn.functional.linear)
     monkeypatch.setattr(deepseek_v4_module.F, "linear", linear)
 

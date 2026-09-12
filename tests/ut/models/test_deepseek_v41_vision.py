@@ -18,8 +18,8 @@ from vllm_ascend.models.deepseek_v41.mm_preprocess import (
     IMAGE_PAD_ID,
     IMAGE_START,
     IMAGE_TOKEN_ID,
-    DeepseekV41VLProcessor,
     DeepseekV41VLProcessingInfo,
+    DeepseekV41VLProcessor,
     image_sentinel_mask,
     image_token_types,
     leading_compressor_pad,
@@ -32,10 +32,7 @@ from vllm_ascend.models.deepseek_v41.vl_model import (
 
 def test_v41_vision_wrapper_uses_v41_language_backbone():
     assert supports_multimodal(AscendDeepseekV41ForConditionalGeneration)
-    assert (
-        AscendDeepseekV41ForConditionalGeneration.language_model_cls
-        is AscendDeepseekV41ForCausalLM
-    )
+    assert AscendDeepseekV41ForConditionalGeneration.language_model_cls is AscendDeepseekV41ForCausalLM
     assert "_processor_factory" in AscendDeepseekV41ForConditionalGeneration.__dict__
 
 
@@ -93,9 +90,7 @@ def test_v41_processor_emits_types_without_v4_perm():
             "max_wh_ratio": None,
         },
     )
-    result = DeepseekV41VLProcessor(config)(
-        images=[Image.new("RGB", (84, 42))]
-    )
+    result = DeepseekV41VLProcessor(config)(images=[Image.new("RGB", (84, 42))])
 
     assert result["vit_grid"].tolist() == [[3, 6]]
     assert result["llm_grid"].tolist() == [[1, 2]]
@@ -157,7 +152,5 @@ def test_v41_alignment_pad_uses_plain_image_token_embedding():
     nn.Module.__init__(wrapper)
     wrapper.language_model = LanguageModel()
 
-    embeddings = wrapper.embed_input_ids(
-        torch.tensor([7, IMAGE_PAD_ID, IMAGE_TOKEN_ID])
-    )
+    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_TOKEN_ID]))
     assert embeddings.squeeze(-1).tolist() == [7, IMAGE_TOKEN_ID, IMAGE_TOKEN_ID]

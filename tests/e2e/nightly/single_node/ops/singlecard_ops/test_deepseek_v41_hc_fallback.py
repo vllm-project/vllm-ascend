@@ -26,9 +26,7 @@ def _layer() -> DeepseekV41DecoderLayer:
 def _reference(x, hc_fn, hc_scale, hc_base, pre_mix):
     x_float = x.float()
     x_flat = x_float.flatten(-2)
-    mixes = F.linear(x_flat, hc_fn) * torch.rsqrt(
-        x_flat.square().mean(-1, keepdim=True) + NORM_EPS
-    )
+    mixes = F.linear(x_flat, hc_fn) * torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + NORM_EPS)
     pre, post, comb = mixes.split([HC_MULT, HC_MULT, HC_MULT * HC_MULT], dim=-1)
     comb = comb.unflatten(-1, (HC_MULT, HC_MULT))
     pre = torch.sigmoid(pre * hc_scale[0] + hc_base[:HC_MULT]) + HC_EPS
@@ -52,9 +50,7 @@ def test_v41_hc_pre_handoff_5120_on_npu():
     pre_mix = torch.rand(2, HC_MULT, dtype=torch.float32)
     expected = _reference(x, hc_fn, hc_scale, hc_base, pre_mix)
 
-    actual = _layer().hc_pre(
-        x.npu(), hc_fn.npu(), hc_scale.npu(), hc_base.npu(), pre_mix.npu()
-    )
+    actual = _layer().hc_pre(x.npu(), hc_fn.npu(), hc_scale.npu(), hc_base.npu(), pre_mix.npu())
 
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(
@@ -66,6 +62,4 @@ def test_v41_hc_pre_handoff_5120_on_npu():
 
     expected_post = hc_post_reference(expected[0], x, expected[1], expected[2])
     actual_post = _layer().hc_post(actual[0], x.npu(), actual[1], actual[2])
-    torch.testing.assert_close(
-        actual_post.cpu().float(), expected_post.float(), atol=2e-2, rtol=2e-2
-    )
+    torch.testing.assert_close(actual_post.cpu().float(), expected_post.float(), atol=2e-2, rtol=2e-2)

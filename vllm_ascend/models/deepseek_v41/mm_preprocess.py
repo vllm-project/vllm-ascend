@@ -68,16 +68,10 @@ def image_sentinel_mask(token_ids: torch.Tensor) -> torch.Tensor:
 def validate_image_sentinel_ids(tokenizer) -> None:
     image_id = tokenizer.convert_tokens_to_ids(IMAGE_PLACEHOLDER)
     if image_id != IMAGE_TOKEN_ID:
-        raise ValueError(
-            f"Image placeholder {IMAGE_PLACEHOLDER!r} has id {image_id}, "
-            f"expected {IMAGE_TOKEN_ID}."
-        )
+        raise ValueError(f"Image placeholder {IMAGE_PLACEHOLDER!r} has id {image_id}, expected {IMAGE_TOKEN_ID}.")
     pad_id = tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN_NAME)
     if pad_id != IMAGE_PAD_ID:
-        raise ValueError(
-            f"Image pad token {IMAGE_PAD_TOKEN_NAME!r} has id {pad_id}, "
-            f"expected {IMAGE_PAD_ID}."
-        )
+        raise ValueError(f"Image pad token {IMAGE_PAD_TOKEN_NAME!r} has id {pad_id}, expected {IMAGE_PAD_ID}.")
 
 
 def llm_grid(best_height, best_width, patch_size, downsample_ratio):
@@ -126,9 +120,7 @@ def safe_resize(
 ):
     # Reserve the maximum one-token leading pad injected after tokenization.
     max_n_token -= COMPRESS_PAD_TO - 1
-    n_llm_h, n_llm_w = llm_grid(
-        best_height, best_width, patch_size, downsample_ratio
-    )
+    n_llm_h, n_llm_w = llm_grid(best_height, best_width, patch_size, downsample_ratio)
     if num_image_tokens(n_llm_h, n_llm_w) > max_n_token:
         best_height, best_width = solve_resize_ratio(
             height,
@@ -137,9 +129,7 @@ def safe_resize(
             downsample_ratio,
             max_n_token,
         )
-        n_llm_h, n_llm_w = llm_grid(
-            best_height, best_width, patch_size, downsample_ratio
-        )
+        n_llm_h, n_llm_w = llm_grid(best_height, best_width, patch_size, downsample_ratio)
         assert num_image_tokens(n_llm_h, n_llm_w) <= max_n_token
     return n_llm_h, n_llm_w, best_height, best_width
 
@@ -184,11 +174,7 @@ def load_image(
         )
     x = torch.from_numpy(np.asarray(image, dtype=np.float32)).permute(2, 0, 1) / 255
     x = ((x - 0.5) / 0.5).to(torch.bfloat16)
-    patches = (
-        x.reshape(3, n_vit_h, p, n_vit_w, p)
-        .permute(1, 3, 0, 2, 4)
-        .reshape(n_vit_h * n_vit_w, 3, p, p)
-    )
+    patches = x.reshape(3, n_vit_h, p, n_vit_w, p).permute(1, 3, 0, 2, 4).reshape(n_vit_h * n_vit_w, 3, p, p)
     return patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w
 
 
@@ -237,9 +223,7 @@ class DeepseekV41VLProcessor:
         llm_grid_list = []
         types_list = []
         for image in images or []:
-            patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = (
-                self.image_processor(image)
-            )
+            patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = self.image_processor(image)
             patches_list.append(patches)
             vit_grid.append((n_vit_h, n_vit_w))
             llm_grid_list.append((n_llm_h, n_llm_w))
@@ -276,11 +260,7 @@ class DeepseekV41VLProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         del seq_len, mm_counts
-        return {
-            "image": self.get_hf_config().vision_max_n_token
-            + COMPRESS_PAD_TO
-            - 1
-        }
+        return {"image": self.get_hf_config().vision_max_n_token + COMPRESS_PAD_TO - 1}
 
     def get_image_placeholder_token_id(self) -> int:
         token_id = self.get_tokenizer().convert_tokens_to_ids(IMAGE_PLACEHOLDER)
@@ -302,9 +282,7 @@ class DeepseekV41VLProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=best_w, height=best_h)
 
 
-class DeepseekV41VLDummyInputsBuilder(
-    BaseDummyInputsBuilder[DeepseekV41VLProcessingInfo]
-):
+class DeepseekV41VLDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekV41VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return IMAGE_PLACEHOLDER * mm_counts.get("image", 0)
 
@@ -329,9 +307,7 @@ class DeepseekV41VLDummyInputsBuilder(
         }
 
 
-class DeepseekV41VLMultiModalProcessor(
-    BaseMultiModalProcessor[DeepseekV41VLProcessingInfo]
-):
+class DeepseekV41VLMultiModalProcessor(BaseMultiModalProcessor[DeepseekV41VLProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -381,18 +357,10 @@ class DeepseekV41VLMultiModalProcessor(
             n_llm_h, n_llm_w = llm_grid[:, 0], llm_grid[:, 1]
             types_sizes = n_llm_h * (n_llm_w + 1) + 2
         return {
-            "patches": MultiModalFieldConfig.flat_from_sizes(
-                "image", patch_sizes
-            ),
-            "vit_grid": MultiModalFieldConfig.batched(
-                "image", keep_on_cpu=True
-            ),
-            "llm_grid": MultiModalFieldConfig.batched(
-                "image", keep_on_cpu=True
-            ),
-            "types": MultiModalFieldConfig.flat_from_sizes(
-                "image", types_sizes, keep_on_cpu=True
-            ),
+            "patches": MultiModalFieldConfig.flat_from_sizes("image", patch_sizes),
+            "vit_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            "llm_grid": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            "types": MultiModalFieldConfig.flat_from_sizes("image", types_sizes, keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
@@ -431,9 +399,7 @@ class DeepseekV41VLMultiModalProcessor(
             token_ids,
             mm_prompt_updates,
         )
-        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
-            modality: [] for modality in base_placeholders
-        }
+        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {modality: [] for modality in base_placeholders}
         ordered = sorted(
             (
                 placeholder.start_idx,
@@ -453,9 +419,7 @@ class DeepseekV41VLMultiModalProcessor(
                 new_token_ids[start_idx:start_idx] = [IMAGE_PAD_ID] * compress_pad
                 tokens = [IMAGE_PAD_ID] * compress_pad + tokens
                 original_mask = (
-                    is_embed
-                    if is_embed is not None
-                    else torch.ones(len(placeholder.tokens), dtype=torch.bool)
+                    is_embed if is_embed is not None else torch.ones(len(placeholder.tokens), dtype=torch.bool)
                 )
                 is_embed = torch.cat(
                     [

@@ -14,18 +14,18 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.core.deepseek_v41 import DeepseekV41DraftSWASpec
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.models.deepseek_v4.model import AscendDeepseekV4SWACache
+from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41.dspark import (
     DeepseekV41DSparkAttention,
     DeepseekV41DSparkDecoderLayer,
     DeepseekV41DSparkModel,
     DeepseekV41DSparkSWACache,
 )
-from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def test_draft_cache_uses_v41_backend_and_explicit_aurora_spec():
+def test_draft_cache_uses_v41_backend_and_explicit_aurora_spec(monkeypatch):
     spec = AscendSlidingWindowMLASpec(
         block_size=128,
         num_kv_heads=1,
@@ -45,8 +45,14 @@ def test_draft_cache_uses_v41_backend_and_explicit_aurora_spec():
     assert draft.page_size_bytes == 131072
     assert DeepseekV41DSparkDecoderLayer.attention_cls is DeepseekV41DSparkAttention
     assert DeepseekV41DSparkAttention.swa_cache_cls is DeepseekV41DSparkSWACache
+    registrations = {}
+
+    def record(kvcache_spec_cls, manager_class, uniform_type_base_spec):
+        registrations[kvcache_spec_cls] = manager_class
+
+    monkeypatch.setattr(KVCacheSpecRegistry, "register", record)
     register_ascend_kv_cache_specs()
-    assert KVCacheSpecRegistry.get_manager_class(draft) is SlidingWindowManager
+    assert registrations[type(draft)] is SlidingWindowManager
 
 
 def test_composite_config_selects_checkpoint_aux_layers():
@@ -172,9 +178,7 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkModel
 
     cache = torch.empty(3, 128, 1, 8)
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(
-        swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])
-    ))
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])))
     values = torch.randn(3, 1, 8)
     with patch("vllm_ascend.models.deepseek_v41.dspark.scatter_cache_sk") as store:
         DeepseekV41DSparkModel._store_standard_swa_kv(None, values, torch.tensor([129, -1, 258]), attn)

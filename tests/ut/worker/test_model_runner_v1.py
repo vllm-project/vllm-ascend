@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
-from vllm.config import CUDAGraphMode, CompilationConfig
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
@@ -151,7 +151,13 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
 
                 get_cumsum = runner._get_cumsum_and_arange
 
-                def check_padded_schedule(schedule, arange, num_tokens=num_tokens, padded_reqs=padded_reqs):
+                def check_padded_schedule(
+                    schedule,
+                    arange,
+                    num_tokens=num_tokens,
+                    padded_reqs=padded_reqs,
+                    get_cumsum=get_cumsum,
+                ):
                     num_reqs = num_tokens // 6
                     expected = np.concatenate((np.full(num_reqs, 6), np.zeros(padded_reqs - num_reqs)))
                     np.testing.assert_array_equal(schedule, expected)
@@ -672,6 +678,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     raw = runner._allocate_kv_cache_tensors(cache_config)
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
+
     def test_v41_layer_outer_buffers_allocate_and_reshape(self):
         runner = self._build_runner()
         config = make_cache_config(4)
@@ -955,8 +962,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
         cases = (
-            (True, 8, 6, False), (True, 16, 6, False), (True, 8, 6, True), (True, 8, 1, False),
-            (False, 8, 6, True), (False, 16, 6, True), (False, 8, 1, True),
+            (True, 8, 6, False),
+            (True, 16, 6, False),
+            (True, 8, 6, True),
+            (True, 8, 1, False),
+            (False, 8, 6, True),
+            (False, 16, 6, True),
+            (False, 8, 1, True),
         )
         for cp_enabled, tp_size, query_len, enable_sp in cases:
             with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):

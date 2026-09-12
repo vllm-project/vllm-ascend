@@ -278,10 +278,15 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
     ids = torch.tensor([0, 1])
-    with patch("vllm_ascend.models.deepseek_v41.model.get_pp_group",
-               return_value=MagicMock(is_first_rank=True, is_last_rank=True)):
+    with patch(
+        "vllm_ascend.models.deepseek_v41.model.get_pp_group",
+        return_value=MagicMock(is_first_rank=True, is_last_rank=True),
+    ):
         output, aux = model.forward(
-            ids, torch.tensor([0, 1]), None, engram_lookups={},
+            ids,
+            torch.tensor([0, 1]),
+            None,
+            engram_lookups={},
             engram_mask=torch.empty(0, dtype=torch.bool),
         )
     embedded = model.embed_tokens(ids)
@@ -299,10 +304,17 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
     from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkModel
 
     draft = SimpleNamespace(
-        hc_mult=4, hidden_size=8, dspark_block_size=5, num_nextn_predict_layers=3,
-        dspark_target_layer_ids=[37, 38, 39], num_hidden_layers=40,
-        vocab_size=16, rms_norm_eps=1e-6, hc_eps=1e-6,
-        n_routed_experts=128, num_experts_per_tok=3,
+        hc_mult=4,
+        hidden_size=8,
+        dspark_block_size=5,
+        num_nextn_predict_layers=3,
+        dspark_target_layer_ids=[37, 38, 39],
+        num_hidden_layers=40,
+        vocab_size=16,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+        n_routed_experts=128,
+        num_experts_per_tok=3,
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(n_routed_experts=384)),
@@ -310,6 +322,7 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_text_config=draft)),
         quant_config=None,
     )
+
     def make_layer(*args, **kwargs):
         layer = torch.nn.Module()
         layer.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
@@ -317,7 +330,13 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
 
     factory = MagicMock(side_effect=make_layer)
     with ExitStack() as stack:
-        for name in ("VocabParallelEmbedding", "ColumnParallelLinear", "RMSNorm", "DSparkMarkovHead", "DSparkConfidenceHead"):
+        for name in (
+            "VocabParallelEmbedding",
+            "ColumnParallelLinear",
+            "RMSNorm",
+            "DSparkMarkovHead",
+            "DSparkConfidenceHead",
+        ):
             stack.enter_context(patch.object(shared, name, side_effect=lambda *args, **kwargs: torch.nn.Identity()))
         stack.enter_context(patch.object(shared, "DeepseekV41DSparkDecoderLayer", factory))
         stack.enter_context(patch.object(shared, "validate_cache_runtime"))

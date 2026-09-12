@@ -1524,18 +1524,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        # In async spec decode mode, optimistic_seq_lens_cpu assumes all
-        # tokens from the previous speculative step were accepted. Correct it
-        # on CPU using the valid-sampled-token counts that are already copied
-        # asynchronously for scheduler bookkeeping. This avoids an extra
-        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
-        # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
-        async_spec_decode_active = (
-            self.use_async_spec_decode
-            and valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        )
-
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
             self.query_start_loc.gpu[: num_reqs + 1],

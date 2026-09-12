@@ -17,8 +17,7 @@ def _mirror_config_aliases(
         released = values.get(released_name)
         if legacy is not None and released is not None and legacy != released:
             raise ValueError(
-                f"Conflicting DeepSeek V4.1 config fields: {legacy_name}="
-                f"{legacy!r}, {released_name}={released!r}"
+                f"Conflicting DeepSeek V4.1 config fields: {legacy_name}={legacy!r}, {released_name}={released!r}"
             )
         value = released if released is not None else legacy
         if value is not None:
@@ -175,8 +174,5 @@ class DeepseekV41Config(PretrainedConfig):
             "runtime_delta_rotation": False,
         }
         if any(rotation.get(name) != value for name, value in supported_rotation.items()):
-            raise ValueError(
-                "Unsupported DeepSeek V4.1 Engram rotation contract: "
-                f"{rotation!r}"
-            )
+            raise ValueError(f"Unsupported DeepSeek V4.1 Engram rotation contract: {rotation!r}")
         self.engram_rotation_config = dict(rotation)

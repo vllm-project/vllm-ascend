@@ -65,6 +65,11 @@ def test_slot_backed_attention_matches_block_outermost(ratio, query_lens):
             block_table=torch.tensor(ori_ids, dtype=torch.int32, device="npu"),
             max_query_len=max(query_lens),
             max_seq_len=max(lengths),
+            ori_sparse_indices=None,
+            ori_topk_length=None,
+            ori_mask_mode=4,
+            ori_win_left=127,
+            ori_win_right=0,
         ),
         attention=SimpleNamespace(
             block_table=torch.tensor(cmp_ids, dtype=torch.int32, device="npu"),
@@ -83,6 +88,35 @@ def test_slot_backed_attention_matches_block_outermost(ratio, query_lens):
                 visible = (position + 1) // ratio
                 indices[row, :visible] = torch.arange(visible, dtype=torch.int32, device="npu")
                 row += 1
+    operator_metadata = metadata.attention if ratio else metadata.swa
+    cmp_residual = torch.remainder(seq_lens, ratio) if ratio else None
+    if ratio:
+        operator_metadata.cmp_residual = cmp_residual
+    operator_metadata.smla_metadata = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
+        HEADS,
+        1,
+        WIDTH,
+        cu_seqlens_q=cu,
+        seqused_ori_kv=seq_lens,
+        seqused_cmp_kv=cmp_lens,
+        cmp_residual_kv=cmp_residual,
+        batch_size=len(lengths),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_ori_kv=max(lengths),
+        max_seqlen_cmp_kv=max(lengths) // ratio if ratio else 0,
+        ori_topk=0,
+        ori_topk_length=None,
+        cmp_topk=512 if ratio else 0,
+        cmp_ratio=ratio,
+        ori_mask_mode=4,
+        cmp_mask_mode=3 if ratio else 0,
+        ori_win_left=127,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=bool(ratio),
+    )
     impl = DeepseekV41EagerAttentionImpl.__new__(DeepseekV41EagerAttentionImpl)
     impl.role = SimpleNamespace(compress_ratio=ratio)
     impl.topology = SimpleNamespace(index_topk=512)
