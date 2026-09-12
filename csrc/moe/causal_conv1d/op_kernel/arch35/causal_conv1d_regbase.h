@@ -25,11 +25,12 @@ constexpr uint16_t V_LENGTH = VECTOR_REG_WIDTH / sizeof(float);
 constexpr CastTrait castTraitB16ToB32 = {
     RegLayout::ZERO, SatMode::UNKNOWN, MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
 
-template <typename T, bool hasActivation>
-__aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalTensor<float> currF, 
+
+template <bool hasActivation>
+__aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<float> ring, LocalTensor<float> currF, 
     LocalTensor<float> state0F, LocalTensor<float> weightF, uint32_t dataCount) 
 {
-    __ubuf__ T* ringAddr = (__ubuf__ T*)ring.GetPhyAddr();
+    __ubuf__ float* ringAddr = (__ubuf__ float*)ring.GetPhyAddr();
     __ubuf__ float* currFAddr = (__ubuf__ float*)currF.GetPhyAddr();
     __ubuf__ float* state0FAddr = (__ubuf__ float*)state0F.GetPhyAddr();
     __ubuf__ float* weightFAddr = (__ubuf__ float*)weightF.GetPhyAddr();
@@ -37,7 +38,6 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
     uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(dataCount, V_LENGTH));
     __VEC_SCOPE__
     {
-        RegTensor<T> ring;
         RegTensor<float> currF;
         RegTensor<float> state0F;
         RegTensor<float> weightF;
@@ -45,10 +45,9 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
         MaskReg pregLoop;
         for (uint16_t j = 0; j < colLoopTimes; j++) {
             pregLoop = UpdateMask<float>(dataCount);
-            DataCopy<T, LoadDist::DIST_UNPACK_B16>(ring, ringAddr + j * V_LENGTH);
+            DataCopy(currF, ringAddr + j * V_LENGTH);
             DataCopy(state0F, state0FAddr + j * V_LENGTH);
             DataCopy(weightF, weightFAddr + j * V_LENGTH);
-            Cast<float, T, castTraitB16ToB32>(currF, ring, pregLoop);
             Mul(currF, currF, weightF, pregLoop);
             Add(state0F, state0F, currF, pregLoop);
             if constexpr (hasActivation) {
@@ -64,31 +63,26 @@ __aicore__ inline void ComputeFnRollingOutputRegbase(LocalTensor<T> ring, LocalT
     }
 }
 
-template <typename T>
-static __simd_vf__ inline void AdvanceFnLocalPartialsWidthTwo(__ubuf__ T* ringAddr, __ubuf__ float* weight0FAddr, 
+static __simd_vf__ inline void AdvanceFnLocalPartialsWidthTwo(__ubuf__ float* ringAddr, __ubuf__ float* weight0FAddr,
     __ubuf__ float* state0FAddr, uint32_t dataCount, uint16_t colLoopTimes)
 {
-    RegTensor<T> ring;
     RegTensor<float> currF;
     RegTensor<float> weight0F;
     RegTensor<float> state0F;
     MaskReg pregLoop;
     for (uint16_t j = 0; j < colLoopTimes; j++) {
         pregLoop = UpdateMask<float>(dataCount);
-        DataCopy<T, LoadDist::DIST_UNPACK_B16>(ring, ringAddr + j * V_LENGTH);
+        DataCopy(currF, ringAddr + j * V_LENGTH);
         DataCopy(weight0F, weight0FAddr + j * V_LENGTH);
-        Cast<float, T, castTraitB16ToB32>(currF, ring, pregLoop);
         Mul(state0F, currF, weight0F, pregLoop);
         DataCopy(state0FAddr + j * V_LENGTH, state0F, pregLoop);
     }
 }
 
-template <typename T>
-static __simd_vf__ inline void AdvanceFnLocalPartialsWidthThree(__ubuf__ T* ringAddr, __ubuf__ float* weight0FAddr, 
-    __ubuf__ float* weight1FAddr, __ubuf__ float* state0FAddr, __ubuf__ float* state1FAddr, uint32_t dataCount, 
+static __simd_vf__ inline void AdvanceFnLocalPartialsWidthThree(__ubuf__ float* ringAddr, __ubuf__ float* weight0FAddr,
+    __ubuf__ float* weight1FAddr, __ubuf__ float* state0FAddr, __ubuf__ float* state1FAddr, uint32_t dataCount,
     uint16_t colLoopTimes)
 {
-    RegTensor<T> ring;
     RegTensor<float> currF;
     RegTensor<float> weight0F;
     RegTensor<float> weight1F;
@@ -97,9 +91,8 @@ static __simd_vf__ inline void AdvanceFnLocalPartialsWidthThree(__ubuf__ T* ring
     MaskReg pregLoop;
     for (uint16_t j = 0; j < colLoopTimes; j++) {
         pregLoop = UpdateMask<float>(dataCount);
-        DataCopy<T, LoadDist::DIST_UNPACK_B16>(ring, ringAddr + j * V_LENGTH);
+        DataCopy(currF, ringAddr + j * V_LENGTH);
         DataCopy(state1F, state1FAddr + j * V_LENGTH);
-        Cast<float, T, castTraitB16ToB32>(currF, ring, pregLoop);
         DataCopy(weight1F, weight1FAddr + j * V_LENGTH);
         Mul(state0F, currF, weight1F, pregLoop);
         DataCopy(weight0F, weight0FAddr + j * V_LENGTH);
@@ -110,12 +103,10 @@ static __simd_vf__ inline void AdvanceFnLocalPartialsWidthThree(__ubuf__ T* ring
     }
 }
 
-template <typename T>
-static __simd_vf__ inline void AdvanceFnLocalPartialsWidthFour(__ubuf__ T* ringAddr, __ubuf__ float* weight0FAddr, 
-    __ubuf__ float* weight1FAddr, __ubuf__ float* weight2FAddr, __ubuf__ float* state0FAddr, __ubuf__ float* state1FAddr, 
+static __simd_vf__ inline void AdvanceFnLocalPartialsWidthFour(__ubuf__ float* ringAddr, __ubuf__ float* weight0FAddr,
+    __ubuf__ float* weight1FAddr, __ubuf__ float* weight2FAddr, __ubuf__ float* state0FAddr, __ubuf__ float* state1FAddr,
     __ubuf__ float* state2FAddr, uint32_t dataCount, uint16_t colLoopTimes)
 {
-    RegTensor<T> ring;
     RegTensor<float> currF;
     RegTensor<float> weight0F;
     RegTensor<float> weight1F;
@@ -126,10 +117,9 @@ static __simd_vf__ inline void AdvanceFnLocalPartialsWidthFour(__ubuf__ T* ringA
     MaskReg pregLoop;
     for (uint16_t j = 0; j < colLoopTimes; j++) {
         pregLoop = UpdateMask<float>(dataCount);
-        DataCopy<T, LoadDist::DIST_UNPACK_B16>(ring, ringAddr + j * V_LENGTH);
+        DataCopy(currF, ringAddr + j * V_LENGTH);
         DataCopy(state1F, state1FAddr + j * V_LENGTH);
         DataCopy(state2F, state2FAddr + j * V_LENGTH);
-        Cast<float, T, castTraitB16ToB32>(currF, ring, pregLoop);
         DataCopy(weight2F, weight2FAddr + j * V_LENGTH);
         Mul(state0F, currF, weight2F, pregLoop);
         DataCopy(weight1F, weight1FAddr + j * V_LENGTH);
@@ -144,29 +134,29 @@ static __simd_vf__ inline void AdvanceFnLocalPartialsWidthFour(__ubuf__ T* ringA
     }
 }
 
-template <typename T, int32_t kTemplateWidth>
-__aicore__ inline void AdvanceFnLocalPartialsRegbase(LocalTensor<T> ring, LocalTensor<float> weightF, 
-    LocalTensor<float> state0F, LocalTensor<float> state1F, LocalTensor<float> state2F, uint32_t dataCount, 
+template <int32_t kTemplateWidth>
+__aicore__ inline void AdvanceFnLocalPartialsRegbase(LocalTensor<float> ring, LocalTensor<float> weightF,
+    LocalTensor<float> state0F, LocalTensor<float> state1F, LocalTensor<float> state2F, uint32_t dataCount,
     uint32_t weightStep)
 {
     uint16_t colLoopTimes = static_cast<uint16_t>(Ceil(dataCount, V_LENGTH));
 
-    __ubuf__ T* ringAddr = (__ubuf__ T*)ring.GetPhyAddr();
+    __ubuf__ float* ringAddr = (__ubuf__ float*)ring.GetPhyAddr();
     __ubuf__ float* weight0FAddr = (__ubuf__ float*)weightF.GetPhyAddr();
     __ubuf__ float* state0FAddr = (__ubuf__ float*)state0F.GetPhyAddr();
     if constexpr (kTemplateWidth == 2) {
-        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthTwo<T>>(ringAddr, weight0FAddr, state0FAddr, dataCount, colLoopTimes);
+        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthTwo>(ringAddr, weight0FAddr, state0FAddr, dataCount, colLoopTimes);
     } else if constexpr (kTemplateWidth == 3) {
         __ubuf__ float* weight1FAddr = weight0FAddr + weightStep;
         __ubuf__ float* state1FAddr = (__ubuf__ float*)state1F.GetPhyAddr();
-        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthThree<T>>(ringAddr, weight0FAddr, weight1FAddr, state0FAddr, 
+        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthThree>(ringAddr, weight0FAddr, weight1FAddr, state0FAddr,
             state1FAddr, dataCount, colLoopTimes);
     } else if constexpr (kTemplateWidth == 4) {
         __ubuf__ float* weight1FAddr = weight0FAddr + weightStep;
         __ubuf__ float* weight2FAddr = weight1FAddr + weightStep;
         __ubuf__ float* state1FAddr = (__ubuf__ float*)state1F.GetPhyAddr();
         __ubuf__ float* state2FAddr = (__ubuf__ float*)state2F.GetPhyAddr();
-        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthFour<T>>(ringAddr, weight0FAddr, weight1FAddr, weight2FAddr, 
+        AscendC::VF_CALL<AdvanceFnLocalPartialsWidthFour>(ringAddr, weight0FAddr, weight1FAddr, weight2FAddr,
             state0FAddr, state1FAddr, state2FAddr, dataCount, colLoopTimes);
     }
 }
