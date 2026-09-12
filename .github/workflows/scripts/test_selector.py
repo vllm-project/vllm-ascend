@@ -495,7 +495,6 @@ class CoverageSelector:
         return self.test_case_map
 
 
-
 _HUNK_RE = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _DEF_RE = re.compile(r"(async\s+def|def|class)\s")
 
