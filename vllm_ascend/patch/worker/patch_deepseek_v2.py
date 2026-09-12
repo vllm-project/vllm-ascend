@@ -32,6 +32,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.worker.v2 import pp_utils
+
 
 def _should_skip_indexer_init(
     config: DeepseekV2Config | DeepseekV3Config,
@@ -298,6 +300,21 @@ def _deepseek_v2_mla_attention_init(
 DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 
 
+# TODO: Remove this PP aux-state patch after the next main2main.
+_original_deepseek_v2_model_init = DeepseekV2Model.__init__
+
+
+def _patched_deepseek_v2_model_init(self, *args, **kwargs):
+    _original_deepseek_v2_model_init(self, *args, **kwargs)
+    self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
+        self,
+        self.make_empty_intermediate_tensors,
+    )
+
+
+DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
+
+
 def _patched_forward(
     self,
     input_ids: torch.Tensor | None,
@@ -305,7 +322,8 @@ def _patched_forward(
     intermediate_tensors: IntermediateTensors | None,
     inputs_embeds: torch.Tensor | None = None,
 ) -> torch.Tensor | IntermediateTensors:
-    if get_pp_group().is_first_rank:
+    pp_group = get_pp_group()
+    if pp_group.is_first_rank:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
@@ -313,10 +331,15 @@ def _patched_forward(
                 raise ValueError("Either input_ids or inputs_embeds must be provided to DeepseekV2Model.forward")
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
+        aux_hidden_states: list[torch.Tensor] = []
     else:
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
+        aux_hidden_states = pp_utils.get_pp_transport_tensors(
+            intermediate_tensors,
+            pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
+        )
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
@@ -329,7 +352,6 @@ def _patched_forward(
     else:
         llama_4_scaling = None
 
-    aux_hidden_states = []
     for idx, layer in enumerate(
         islice(self.layers, self.start_layer, self.end_layer),
         start=self.start_layer,
@@ -342,8 +364,12 @@ def _patched_forward(
             aux_hidden_states.append(aux_hidden_state)
         hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
-    if not get_pp_group().is_last_rank:
-        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+    if not pp_group.is_last_rank:
+        return pp_utils.add_pp_transport_tensors(
+            IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+            pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
+            aux_hidden_states,
+        )
 
     if hidden_states.shape[0] != positions.shape[0]:
         combined_states = torch.cat([hidden_states, residual], dim=-1)

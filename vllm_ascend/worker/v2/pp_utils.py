@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
+from unittest.mock import patch
 
 import torch
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
@@ -51,7 +53,7 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
             unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
         "dspark": SpecPPSupport(
-            architectures=frozenset({"DeepseekV4ForCausalLM"}),
+            architectures=frozenset({"DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}),
             needs_aux_hidden_states=True,
             bypass_upstream_pp_guard=True,
         ),
@@ -92,7 +94,9 @@ def bypass_upstream_spec_pp_guard(
     original_pp_size = parallel_config.pipeline_parallel_size
     parallel_config.pipeline_parallel_size = 1
     try:
-        yield True
+        # The unsharded draft must not inherit the target's manual PP split.
+        with patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None):
+            yield True
     finally:
         parallel_config.pipeline_parallel_size = original_pp_size
 
