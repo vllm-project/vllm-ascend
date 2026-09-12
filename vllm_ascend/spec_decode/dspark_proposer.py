@@ -157,12 +157,47 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_input_tokens: int,
         context_slot_mapping_buffers: torch.Tensor | list[torch.Tensor] | None,
     ) -> None:
-        # DSpark context length is dynamic, so it must never become part of the
-        # captured query-block callable.
-        return None
+        if not getattr(self, "_context_kv_graph_active", False):
+            return
+
+        graph_num_context = self._context_kv_graph_num_tokens
+        assert graph_num_context > 0
+        assert num_input_tokens % self.num_query_per_req == 0
+        assert context_slot_mapping_buffers is not None
+        self._precompute_context_kv(graph_num_context, context_slot_mapping_buffers)
 
     def _prepare_inputs_outside_draft_runnable(self, num_input_tokens: int) -> None:
+        if getattr(self, "_context_kv_graph_active", False):
+            num_context = self._dflash_num_context
+            graph_num_context = self._context_kv_graph_num_tokens
+            assert num_context <= graph_num_context <= self.max_num_tokens
+            self._dflash_hidden_states[num_context:graph_num_context].zero_()
+            self._context_positions_buffer[num_context:graph_num_context].zero_()
+            assert self._context_slot_mapping_buffers is not None
+            for slots in self._context_slot_mapping_buffers:
+                if slots is not None:
+                    slots[num_context:graph_num_context].fill_(-1)
+            return
+
         self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+
+    def _precompute_context_kv(
+        self,
+        num_context: int,
+        context_slot_mapping_buffers: torch.Tensor | list[torch.Tensor] | None,
+    ) -> None:
+        if context_slot_mapping_buffers is None:
+            context_slots = None
+        elif isinstance(context_slot_mapping_buffers, list):
+            context_slots = [None if slots is None else slots[:num_context] for slots in context_slot_mapping_buffers]
+        else:
+            context_slots = context_slot_mapping_buffers[:num_context]
+
+        self.model.precompute_and_store_context_kv(
+            self._dflash_hidden_states[:num_context],
+            self._context_positions_buffer[:num_context],
+            context_slots,
+        )
 
     def _dispatch_draft_graph(
         self,
@@ -175,6 +210,27 @@ class AscendDSparkProposer(AscendDflashProposer):
         has_lora: bool,
     ) -> tuple[CUDAGraphMode, BatchDescriptor | None, int, torch.Tensor | None]:
         mapped_mode, mapped_desc = self.build_draft_graph_descriptor(target_mode, target_desc)
+        self._context_kv_graph_active = False
+        self._context_kv_graph_num_tokens = 0
+        if (
+            mapped_mode == CUDAGraphMode.FULL
+            and mapped_desc is not None
+            and mapped_desc.num_reqs is not None
+            and target_desc is not None
+        ):
+            graph_num_reqs = mapped_desc.num_reqs
+            assert target_desc.num_reqs == graph_num_reqs
+            assert target_desc.num_tokens % graph_num_reqs == 0
+            context_tokens_per_req = target_desc.num_tokens // graph_num_reqs
+            expected_num_context = num_actual_reqs * context_tokens_per_req
+            assert self._dflash_num_context == expected_num_context, (
+                "DSpark context graph requires C == B * target_width: "
+                f"C={self._dflash_num_context}, B={num_actual_reqs}, "
+                f"target_width={context_tokens_per_req}, target_desc={target_desc}"
+            )
+            assert target_desc.num_tokens <= self.max_num_tokens
+            self._context_kv_graph_active = True
+            self._context_kv_graph_num_tokens = target_desc.num_tokens
         if mapped_mode == CUDAGraphMode.FULL:
             assert mapped_desc is not None and mapped_desc.num_reqs is not None
             logger.debug_once(
@@ -216,6 +272,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         runner=None,
     ):
         super().__init__(vllm_config, device, runner=runner)
+        self._context_kv_graph_active = False
+        self._context_kv_graph_num_tokens = 0
         assert vllm_config.speculative_config is not None
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
@@ -325,7 +383,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
+        draft_attn_layer_names = list(self.model.get_draft_kv_cache_layer_names())
+        self._draft_layer_causal = self._resolve_draft_layer_causal(draft_attn_layer_names)
+        self._draft_attn_layer_names = set(draft_attn_layer_names)
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         self._per_group_kernel_block_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
@@ -342,7 +402,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
+                key = (attn_backend.full_cls_name(), layer_kv_cache_spec, self._draft_layer_causal[layer_name])
 
                 if key not in attention_groups:
                     kernel_block_size = int(
@@ -350,6 +410,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                         if kernel_block_sizes is not None and kv_cache_gid < len(kernel_block_sizes)
                         else layer_kv_cache_spec.block_size
                     )
+                    existing_block_size = self._per_group_kernel_block_sizes.get(kv_cache_gid)
+                    if existing_block_size is not None and existing_block_size != kernel_block_size:
+                        raise ValueError(f"DSpark cache group {kv_cache_gid} has inconsistent kernel block sizes")
                     attn_group = AttentionGroup(
                         attn_backend,
                         [layer_name],
@@ -388,6 +451,20 @@ class AscendDSparkProposer(AscendDflashProposer):
             attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
             for attn_group in self.draft_attn_groups
         }
+
+    def _resolve_draft_layer_causal(self, layer_names: list[str]) -> dict[str, bool]:
+        if len(set(layer_names)) != len(layer_names):
+            raise ValueError("DSpark draft attention layer names must be unique")
+        causal_flags = (
+            list(self.model.get_draft_attn_causal())
+            if hasattr(self.model, "get_draft_attn_causal")
+            else [False] * len(layer_names)
+        )
+        if len(causal_flags) != len(layer_names):
+            raise ValueError(
+                f"DSpark model reports {len(layer_names)} draft layers but {len(causal_flags)} causal flags"
+            )
+        return dict(zip(layer_names, causal_flags))
 
     def set_per_group_attn_metadata(
         self,
@@ -438,9 +515,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # Query block: reuse the DFlash inputs kernel logic (host-side ref)
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices.
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            gid_block_table = self._per_group_block_table_buffers[gid]
+        for gid, gid_block_table in self._per_group_block_table_buffers.items():
             kernel_block_size = self._per_group_kernel_block_sizes[gid]
             copy_and_expand_dflash_and_dspark_inputs_kernel[
                 (_compute_num_programs(self._dflash_num_context, num_query_total),)
@@ -510,13 +585,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
-        if hasattr(self.model, "get_draft_attn_causal"):
-            # Currently, attention causality across draft layers are uniform.
-            cad.causal = self.model.get_draft_attn_causal()[0]
-        else:
-            cad.causal = False
+        causal_flags = set(getattr(self, "_draft_layer_causal", {}).values())
+        if not causal_flags and hasattr(self.model, "get_draft_attn_causal"):
+            causal_flags.update(self.model.get_draft_attn_causal())
+        cad.causal = causal_flags.pop() if len(causal_flags) == 1 else False
         cad.attn_mask = None
-        cad.attn_state = AscendAttentionState.ChunkedPrefill
+        cad.attn_state = AscendAttentionState.SpecDecoding
 
         return num_query_total, token_indices_to_sample, cad, None
 
@@ -539,23 +613,40 @@ class AscendDSparkProposer(AscendDflashProposer):
         )
         if mapped_mode == CUDAGraphMode.FULL:
             assert mapped_desc is not None and mapped_desc.num_reqs is not None
+            assert target_batch_descriptor is not None
+            assert target_batch_descriptor.num_reqs == mapped_desc.num_reqs
             batch_descriptor = mapped_desc
             num_reqs = mapped_desc.num_reqs
             num_query_total = mapped_desc.num_tokens
             num_input_tokens = mapped_desc.num_tokens
             assert num_input_tokens <= self.max_query_tokens
+            self._context_kv_graph_active = True
+            self._context_kv_graph_num_tokens = target_batch_descriptor.num_tokens
+            graph_num_context = self._context_kv_graph_num_tokens
+            assert graph_num_context <= self.max_num_tokens
+            self._dflash_num_context = graph_num_context
+            self._dflash_hidden_states[:graph_num_context].zero_()
+            self._context_positions_buffer[:graph_num_context].zero_()
+            for slots in self._per_group_context_slot_mapping_buffers.values():
+                slots[:graph_num_context].fill_(-1)
+            self._context_slot_mapping_buffers = [
+                self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
+            ]
             num_tokens_across_dp = self._mapped_num_tokens_across_dp(num_input_tokens)
             aclgraph_runtime_mode = CUDAGraphMode.FULL
             logger.debug_once(
-                "DSpark mapped ACLGraph capture: R=%s, Q=%s, context_tokens=0, "
+                "DSpark mapped ACLGraph capture: R=%s, Q=%s, context_tokens=%s, "
                 "target_desc=%s, draft_desc=%s, capture_key=%s",
                 num_reqs,
                 self.num_query_per_req,
+                self._context_kv_graph_num_tokens,
                 target_batch_descriptor,
                 mapped_desc,
                 num_input_tokens,
             )
         else:
+            self._context_kv_graph_active = False
+            self._context_kv_graph_num_tokens = 0
             num_query_total = num_reqs * self.num_query_per_req
             num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
             (
@@ -583,9 +674,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 for group in self.draft_attn_groups
             }
             per_layer_attn_metadata: dict[str, Any] = {}
-            causal = self.model.get_draft_attn_causal()[0]
             for attn_group in self.draft_attn_groups:
                 gid = attn_group.kv_cache_group_id
+                causal = getattr(self, "_draft_layer_causal", {}).get(attn_group.layer_names[0], False)
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=query_start_loc,
                     query_start_loc_cpu=query_start_loc_cpu,
@@ -599,18 +690,18 @@ class AscendDSparkProposer(AscendDflashProposer):
                     max_seq_len=0,
                     slot_mapping=self._per_group_query_slot_mapping_buffers[gid][:num_input_tokens],
                     positions=self.positions,
-                    attn_state=AscendAttentionState.ChunkedPrefill,
+                    attn_state=AscendAttentionState.SpecDecoding,
                     causal=causal,
                     is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
                     block_table_tensor=self._per_group_block_table_buffers[gid][:num_reqs],
                 )
                 metadata = attn_group.get_metadata_builder().build_for_graph_capture(
                     common_attn_metadata,
-                    AscendAttentionState.ChunkedPrefill,
+                    AscendAttentionState.SpecDecoding,
                 )
                 if hasattr(metadata, "attn_mask") and not causal:
                     metadata.attn_mask = None
-                metadata.attn_state = AscendAttentionState.ChunkedPrefill
+                metadata.attn_state = AscendAttentionState.SpecDecoding
                 for layer_name in attn_group.layer_names:
                     per_layer_attn_metadata[layer_name] = metadata
             multi_steps_attn_metadata.append(per_layer_attn_metadata)

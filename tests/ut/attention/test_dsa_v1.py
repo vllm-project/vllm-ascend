@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPImpl,
     AscendDSAPCPMetadata,
@@ -93,6 +94,20 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+def test_draft_graph_capture_supplies_dsa_build_context():
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder.build = MagicMock(return_value=SimpleNamespace(attn_state=None))
+
+    metadata = builder.build_for_graph_capture(
+        SimpleNamespace(num_reqs=4),
+        AscendAttentionState.SpecDecoding,
+    )
+
+    assert builder.build.call_args.kwargs["common_ratio_to_sas_metadata"] == {}
+    assert builder.build.call_args.kwargs["num_actual_reqs"] == 4
+    assert metadata.attn_state == AscendAttentionState.SpecDecoding
 
 
 @pytest.mark.parametrize(

@@ -2,8 +2,20 @@
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl, AscendDSACPMetadataBuilder
+
+
+def test_draft_graph_capture_supplies_dsa_cp_build_context():
+    builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
+    builder.build = MagicMock(return_value=SimpleNamespace())
+
+    builder.build_for_graph_capture(SimpleNamespace(num_reqs=4), AscendAttentionState.SpecDecoding)
+
+    assert builder.build.call_args.kwargs["common_ratio_to_sas_metadata"] == {}
+    assert builder.build.call_args.kwargs["num_actual_reqs"] == 4
 
 
 class TestAscendDSACPLayerMetadata:

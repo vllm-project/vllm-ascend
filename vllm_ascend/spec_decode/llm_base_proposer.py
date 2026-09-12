@@ -2375,16 +2375,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         assert len(self.draft_attn_groups) > 0
-        attn_backend = self.draft_attn_groups[0].backend
-        update_full_graph_params(
-            attn_backend,
-            self.update_stream,
-            forward_context,
-            num_tokens,
-            self.vllm_config,
-            self.vllm_config.speculative_config,
-            draft_attn_metadatas=draft_attn_metadatas,
-        )
+        for attn_backend in dict.fromkeys(group.backend for group in self.draft_attn_groups):
+            update_full_graph_params(
+                attn_backend,
+                self.update_stream,
+                forward_context,
+                num_tokens,
+                self.vllm_config,
+                self.vllm_config.speculative_config,
+                draft_attn_metadatas=draft_attn_metadatas,
+            )
 
     # adjusting tensor into desired size
     def _adjust_tensor(self, tensor, desired_size):
@@ -2479,6 +2479,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
+        base_common_attn_metadata = common_attn_metadata
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
             extra_attn_metadata_args: dict = {}
@@ -2487,8 +2488,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_ratio_to_sas_metadata=dict(),
                 )
             if self.method == "dspark":
+                common_attn_metadata = copy.copy(base_common_attn_metadata)
+                common_attn_metadata.causal = self._draft_layer_causal[attn_group.layer_names[0]]
                 gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
                     common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
@@ -2511,9 +2513,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
                 )
-            if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
-                attn_metadata.attn_mask = None
-
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         multi_steps_attn_metadata = [per_layer_attn_metadata]
