@@ -83,24 +83,25 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     def _make_profile_result(free_memory_after: int, non_kv_cache_memory: int):
         """Return a mock profile_result compatible with memory_profiling output.
 
-        The worker code recomputes non_kv_cache_memory as:
-            non_torch_increase + torch_peak_increase + weights_memory
-        We set non_torch_increase=0, before_profile.torch_peak=0 (so
-        torch_peak_increase = peak - 0 = 0 since memory_stats is mocked to
-        return peak=0), and weights_memory=non_kv_cache_memory, ensuring the
-        recomputed value equals the requested non_kv_cache_memory.
+        The worker consumes the upstream-computed values directly. Default the
+        persistent consumption to the full non-KV amount and leave no transient
+        peak headroom; individual tests override these fields when needed.
         """
         profile_result = MagicMock()
         profile_result.after_profile.free_memory = free_memory_after
         profile_result.non_kv_cache_memory = non_kv_cache_memory
-        profile_result.non_torch_increase = 0
+        profile_result.total_consumed = non_kv_cache_memory
+        profile_result.transient_peak_headroom = 0
+        # Keep deliberately unrelated legacy values so tests catch any worker
+        # regression that reconstructs non_kv_cache_memory from them.
+        profile_result.non_torch_increase = non_kv_cache_memory + 1
         profile_result.before_profile.torch_peak = 0
-        profile_result.weights_memory = non_kv_cache_memory
+        profile_result.weights_memory = non_kv_cache_memory + 2
         return profile_result
 
     @staticmethod
     def _patch_memory_profiling(profile_result):
-        """Return a context manager mocking `memory_profiling` and `torch.npu.memory_stats`."""
+        """Return a context manager mocking `memory_profiling`."""
         from contextlib import contextmanager
 
         mock_ctx = MagicMock()
@@ -110,13 +111,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         @contextmanager
         def combined():
-            with (
-                patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling),
-                patch(
-                    "vllm_ascend.worker.worker.torch.npu.memory_stats",
-                    return_value={"allocated_bytes.all.peak": 0},
-                ),
-            ):
+            with patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling):
                 yield
 
         return combined()
@@ -207,6 +202,8 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             free_memory_after=init_free - non_kv_cache,
             non_kv_cache_memory=non_kv_cache,
         )
+        profile_result.total_consumed = int(0.75 * GiB_bytes)
+        profile_result.transient_peak_headroom = int(0.25 * GiB_bytes)
 
         with (
             self._patch_memory_profiling(profile_result),
@@ -219,9 +216,74 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         worker.model_runner.profile_cudagraph_memory.assert_called_once_with()
         self.assertEqual(worker.npugraph_memory_estimate, npugraph_memory)
+        self.assertEqual(worker.total_consumed, int(0.75 * GiB_bytes))
+        self.assertEqual(
+            worker.peak_activation_memory,
+            int(0.25 * GiB_bytes) + npugraph_memory,
+        )
         self.assertEqual(
             result,
             requested_memory - non_kv_cache - npugraph_memory,
+        )
+
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_npugraph_memory_profile_runs_after_memory_profiling(self, mock_logger):
+        """Graph allocation must not contaminate the free-memory snapshot."""
+        from contextlib import contextmanager
+
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(1 * GiB_bytes)
+        npugraph_memory = int(2 * GiB_bytes)
+        events = []
+
+        worker = self._make_worker(requested_memory, init_free, total)
+        worker.vllm_config.compilation_config.cudagraph_mode = (
+            CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        worker.model_runner.profile_run.side_effect = lambda: events.append(
+            "profile_run"
+        )
+
+        def profile_npugraph_memory():
+            events.append("profile_npugraph_memory")
+            return npugraph_memory
+
+        worker.model_runner.profile_cudagraph_memory.side_effect = (
+            profile_npugraph_memory
+        )
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free - non_kv_cache,
+            non_kv_cache_memory=non_kv_cache,
+        )
+
+        @contextmanager
+        def profiling_context(*args, **kwargs):
+            events.append("memory_profiling_enter")
+            yield profile_result
+            events.append("memory_profiling_exit")
+
+        with (
+            patch(
+                "vllm_ascend.worker.worker.memory_profiling",
+                side_effect=profiling_context,
+            ),
+            patch(
+                "vllm_ascend.worker.worker.envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+                True,
+            ),
+        ):
+            worker.determine_available_memory()
+
+        self.assertEqual(
+            events,
+            [
+                "memory_profiling_enter",
+                "profile_run",
+                "memory_profiling_exit",
+                "profile_npugraph_memory",
+            ],
         )
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
