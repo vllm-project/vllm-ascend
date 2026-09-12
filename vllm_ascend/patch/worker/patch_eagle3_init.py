@@ -34,23 +34,16 @@ Currently patches:
 - Eagle3LlamaForCausalLM (Qwen, LLaMA-based Eagle3 targets)
 - Eagle3DeepseekV2ForCausalLM / Eagle3DeepseekV3ForCausalLM (DeepSeek-V2/V3,
   Kimi K2/K2.6)
+
+Constructor dependencies are resolved through their upstream modules at call
+time so that vLLM overrides and test patch points remain effective.
 """
 
 import logging
 
 import torch
 import torch.nn as nn
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.deepseek_eagle3 import (
-    DeepseekV2Eagle3Model,
-    Eagle3DeepseekV2ForCausalLM,
-)
-from vllm.model_executor.models.llama_eagle3 import (
-    Eagle3LlamaForCausalLM,
-    LlamaModel,
-    get_draft_quant_config,
-)
+from vllm.model_executor.models import deepseek_eagle3, llama_eagle3
 from vllm.model_executor.models.utils import maybe_prefix
 
 logger = logging.getLogger(__name__)
@@ -65,16 +58,20 @@ def _patched_eagle3_llama_init(self, *, vllm_config, prefix: str = ""):
     target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
     self.config.target_layer_count = target_layer_num
-    self.model = LlamaModel(vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num)
+    self.model = llama_eagle3.LlamaModel(
+        vllm_config=vllm_config,
+        prefix=maybe_prefix(prefix, "model"),
+        start_layer_id=target_layer_num,
+    )
 
     logit_scale = getattr(self.config, "logit_scale", 1.0)
-    self.lm_head = ParallelLMHead(
+    self.lm_head = llama_eagle3.ParallelLMHead(
         self.config.draft_vocab_size,
         self.config.hidden_size,
-        quant_config=get_draft_quant_config(vllm_config),
+        quant_config=llama_eagle3.get_draft_quant_config(vllm_config),
         prefix=maybe_prefix(prefix, "lm_head"),
     )
-    self.logits_processor = LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
+    self.logits_processor = llama_eagle3.LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
     self.draft_id_to_target_id = nn.Parameter(
         torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
         requires_grad=False,
@@ -85,10 +82,7 @@ def _patched_eagle3_llama_init(self, *, vllm_config, prefix: str = ""):
     if self.use_parallel_drafting:
         self.register_buffer(
             "mask_hidden",
-            torch.zeros(
-                1,
-                (3 if self.model.use_aux_hidden_state else 1) * self.config.hidden_size,
-            ),
+            torch.zeros(1, self.model.fc_input_size),
             persistent=False,
         )
 
@@ -105,23 +99,27 @@ def _patched_eagle3_deepseek_v2_init(self, *, vllm_config, prefix: str = ""):
 
     self.config.target_layer_count = target_layer_num
 
-    self.model = DeepseekV2Eagle3Model(vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num)
+    self.model = deepseek_eagle3.DeepseekV2Eagle3Model(
+        vllm_config=vllm_config,
+        prefix=maybe_prefix(prefix, "model"),
+        start_layer_id=target_layer_num,
+    )
 
     logit_scale = getattr(self.config, "logit_scale", 1.0)
-    self.lm_head = ParallelLMHead(
+    self.lm_head = deepseek_eagle3.ParallelLMHead(
         self.config.draft_vocab_size,
         self.config.hidden_size,
         prefix=maybe_prefix(prefix, "lm_head"),
     )
-    self.logits_processor = LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
+    self.logits_processor = deepseek_eagle3.LogitsProcessor(self.config.draft_vocab_size, scale=logit_scale)
     self.draft_id_to_target_id = nn.Parameter(
         torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
         requires_grad=False,
     )
 
 
-Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_llama_init
-Eagle3DeepseekV2ForCausalLM.__init__ = _patched_eagle3_deepseek_v2_init
+llama_eagle3.Eagle3LlamaForCausalLM.__init__ = _patched_eagle3_llama_init
+deepseek_eagle3.Eagle3DeepseekV2ForCausalLM.__init__ = _patched_eagle3_deepseek_v2_init
 
 logger.info(
     "Patched Eagle3LlamaForCausalLM and Eagle3DeepseekV2ForCausalLM "
