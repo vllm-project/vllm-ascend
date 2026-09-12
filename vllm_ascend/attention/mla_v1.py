@@ -53,6 +53,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     vllm_version_is,
     weak_ref_tensors,
@@ -467,9 +468,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=not (
-                    parallel_config.prefill_context_parallel_size > 1
-                    or parallel_config.decode_context_parallel_size > 1
+                # Metadata building can run outside the current-config context.
+                # Use the builder's config for the PD last-token recompute step.
+                treat_short_extends_as_decodes=(
+                    is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                    or not (
+                        parallel_config.prefill_context_parallel_size > 1
+                        or parallel_config.decode_context_parallel_size > 1
+                    )
                 ),
             )
         )

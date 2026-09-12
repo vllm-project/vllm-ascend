@@ -924,6 +924,23 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
+        # PD recomputes the last prompt token (N-1 computed). Metadata building
+        # runs outside set_current_vllm_config, unlike DCP manager initialization.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 16
+        self.mock_vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+        common_attn_metadata.is_prefilling = torch.ones(3, dtype=torch.bool)
+        ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=True))
+        with (
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+            patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 3)
+        self.assertEqual(metadata.num_prefills, 0)
+        self.assertEqual(metadata.num_decode_tokens, 3)
+        self.assertIsNone(metadata.prefill)
+        self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
+
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
         common_attn_metadata = MagicMock()
