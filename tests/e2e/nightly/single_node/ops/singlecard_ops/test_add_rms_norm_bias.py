@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.utils import AscendDeviceType, bootstrap_custom_op_env, get_ascend_device_type
+
 seed = 45
 random.seed(seed)
 np.random.seed(seed)
@@ -70,6 +72,10 @@ def npu_add_rms_norm_bias_golden(input_x1, input_x2, input_gamma, input_beta, ke
     return yOut, rstdOut, xOut
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() == AscendDeviceType.A5,
+    reason="A5 has a separate aligned-width kernel and FP32 affine reference below.",
+)
 @pytest.mark.parametrize(
     "row",
     [1, 16, 64, 77, 128, 255, 1000],
@@ -137,3 +143,30 @@ def test_quant_fpx_linear(row: int, col: int, dtype, atol, rtol, kernelType):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(get_ascend_device_type() != AscendDeviceType.A5, reason="Requires Ascend A5")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("width", [16, 128, 1024, 6144])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_a5_add_rms_norm_bias_outputs(dtype, width, with_bias):
+    bootstrap_custom_op_env(include_vendor_lib=True)
+    import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+    generator = torch.Generator().manual_seed(45)
+    x = torch.randn(3, width, dtype=dtype, generator=generator)
+    residual = torch.randn(3, width, dtype=dtype, generator=generator)
+    weight = torch.randn(width, dtype=dtype, generator=generator)
+    bias = torch.randn(width, dtype=dtype, generator=generator) if with_bias else None
+    y, rstd, summed = torch.ops._C_ascend.npu_add_rms_norm_bias(
+        x.npu(), residual.npu(), weight.npu(), bias.npu() if bias is not None else None, 1e-6
+    )
+    rounded_sum = (x.float() + residual.float()).to(dtype).float()
+    expected_rstd = torch.rsqrt(rounded_sum.square().mean(-1, keepdim=True) + 1e-6)
+    expected = rounded_sum * expected_rstd * weight.float()
+    if bias is not None:
+        expected += bias.float()
+    tolerance = {torch.bfloat16: 0.008, torch.float16: 0.001, torch.float32: 2e-5}[dtype]
+    torch.testing.assert_close(summed.cpu(), rounded_sum.to(dtype), atol=0, rtol=0)
+    torch.testing.assert_close(rstd.cpu(), expected_rstd, atol=2e-6, rtol=2e-5)
+    torch.testing.assert_close(y.cpu(), expected.to(dtype), atol=tolerance, rtol=tolerance)

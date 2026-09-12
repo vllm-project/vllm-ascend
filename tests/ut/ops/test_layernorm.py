@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,11 +7,67 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.ops.layernorm import (
+    AscendFusedRMSNormGated,
+    AscendRMSNorm,
+    _add_bias_with_axpy,
+    _enable_a5_add_rms_norm_bias,
+)
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
+
+
+@pytest.mark.parametrize("width", [16, 128, 1024, 6144])
+def test_a5_add_rms_norm_bias_loads_extension_only_when_supported(width):
+    tensor = MagicMock(shape=(3, width))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": MagicMock()}),
+    ):
+        assert _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_called_once_with(include_vendor_lib=True)
+
+
+@pytest.mark.parametrize(
+    "enabled, device, invariant, width",
+    [
+        (False, AscendDeviceType.A5, False, 6144),
+        (True, AscendDeviceType.A2, False, 6144),
+        (True, AscendDeviceType.A5, True, 6144),
+        (True, AscendDeviceType.A5, False, 0),
+        (True, AscendDeviceType.A5, False, 15),
+        (True, AscendDeviceType.A5, False, 6145),
+        (True, AscendDeviceType.A5, False, 8192),
+    ],
+)
+def test_a5_add_rms_norm_bias_keeps_existing_path(enabled, device, invariant, width):
+    tensor = MagicMock(shape=(3, width))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", enabled),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=device),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", invariant),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+    ):
+        assert not _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_not_called()
+
+
+def test_a5_add_rms_norm_bias_reports_missing_extension():
+    tensor = MagicMock(shape=(3, 6144))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env"),
+        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": None}),
+        pytest.raises(ImportError),
+    ):
+        _enable_a5_add_rms_norm_bias(tensor)
 
 
 @pytest.fixture
@@ -31,6 +88,29 @@ def mock_add_rms_norm_bias(x, residual, weight, bias, eps):
         return 2 * x, None, 2 * residual
     else:
         return 2 * x + bias, None, 2 * residual
+
+
+def test_add_bias_with_axpy_is_exact_and_uses_negative_alpha():
+    x = torch.randn(4, 8, dtype=torch.float16)
+    bias = torch.randn(8, dtype=torch.float16)
+    torch.testing.assert_close(_add_bias_with_axpy(x.clone(), -bias), x + bias, atol=0, rtol=0)
+
+    target = MagicMock()
+    negative_bias = MagicMock()
+    _add_bias_with_axpy(target, negative_bias)
+    target.add_.assert_called_once_with(negative_bias, alpha=-1.0)
+
+
+def test_bias_weight_loader_caches_negative_bias():
+    layer = MagicMock()
+    param = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    loaded_weight = torch.randn(8)
+
+    AscendRMSNorm._bias_weight_loader(layer, param, loaded_weight)
+
+    torch.testing.assert_close(param, loaded_weight)
+    torch.testing.assert_close(layer._negative_bias, -loaded_weight)
+    assert layer.bias_loaded is True
 
 
 @pytest.fixture(autouse=True)
