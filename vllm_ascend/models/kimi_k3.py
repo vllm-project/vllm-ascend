@@ -100,6 +100,18 @@ def _apply_ascend_attn_res(
     if num_valid_blocks <= 0:
         return prefix_sum
 
+    if prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
+        native_attn_res = getattr(torch.ops._C_ascend, "attn_res_fwd", None)
+        if native_attn_res is not None:
+            valid_block_residual = block_residual[:, :num_valid_blocks, :].contiguous()
+            return native_attn_res(
+                prefix_sum.contiguous(),
+                valid_block_residual,
+                proj.weight.contiguous(),
+                norm.weight.contiguous(),
+                norm.variance_epsilon,
+            )
+
     if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
         return apply_attn_res(
             prefix_sum,
