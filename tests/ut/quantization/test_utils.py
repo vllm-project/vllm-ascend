@@ -199,6 +199,51 @@ class TestMaybeAutoDetectQuantization(TestBase):
         self.assertIn(ASCEND_QUANTIZATION_METHOD, call_args)
         self.assertIn("/fake/quant_model", call_args)
 
+    @patch("vllm.config.VllmConfig._get_quantization_config", return_value=MagicMock())
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_auto_detect_sets_quantization_on_same_checkpoint_mtp(self, mock_detect, mock_get_quant_config):
+        vllm_config = self._make_vllm_config(model_path="/fake/glm5", quantization=None)
+        draft_model_config = SimpleNamespace(model="/fake/glm5", quantization=None)
+        vllm_config.speculative_config = SimpleNamespace(
+            method="mtp",
+            draft_model_config=draft_model_config,
+        )
+
+        maybe_auto_detect_quantization(vllm_config)
+
+        self.assertEqual(draft_model_config.quantization, ASCEND_QUANTIZATION_METHOD)
+
+    @patch("vllm.config.VllmConfig._get_quantization_config", return_value=MagicMock())
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_auto_detect_does_not_update_independent_mtp(self, mock_detect, mock_get_quant_config):
+        vllm_config = self._make_vllm_config(model_path="/fake/glm5", quantization=None)
+        draft_model_config = SimpleNamespace(model="/fake/speculator", quantization=None)
+        vllm_config.speculative_config = SimpleNamespace(
+            method="mtp",
+            draft_model_config=draft_model_config,
+        )
+
+        maybe_auto_detect_quantization(vllm_config)
+
+        self.assertIsNone(draft_model_config.quantization)
+
+    @patch("vllm.config.VllmConfig._get_quantization_config", return_value=MagicMock())
+    @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=ASCEND_QUANTIZATION_METHOD)
+    def test_auto_detect_preserves_explicit_mtp_quantization(self, mock_detect, mock_get_quant_config):
+        vllm_config = self._make_vllm_config(model_path="/fake/glm5", quantization=None)
+        draft_model_config = SimpleNamespace(
+            model="/fake/glm5",
+            quantization=COMPRESSED_TENSORS_METHOD,
+        )
+        vllm_config.speculative_config = SimpleNamespace(
+            method="mtp",
+            draft_model_config=draft_model_config,
+        )
+
+        maybe_auto_detect_quantization(vllm_config)
+
+        self.assertEqual(draft_model_config.quantization, COMPRESSED_TENSORS_METHOD)
+
     @patch("vllm_ascend.quantization.utils.detect_quantization_method", return_value=ASCEND_QUANTIZATION_METHOD)
     def test_user_mismatch_logs_warning(self, mock_detect):
         """When user specifies a different method than auto-detected,
