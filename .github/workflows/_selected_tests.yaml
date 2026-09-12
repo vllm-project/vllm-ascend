@@ -101,7 +101,6 @@ jobs:
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
-        UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check NPU availability
@@ -157,6 +156,51 @@ jobs:
           git rebase "$BASE_SHA"
           git submodule sync --recursive
           git submodule update --init --recursive
+
+      - name: Get requirements hash
+        id: get_req_hash
+        # MUST run after "Rebase on ${{ inputs.base_ref }} snapshot" so
+        # that requirements-dev.txt, requirements.txt, and pyproject.toml
+        # are present on disk. The hash is consumed by both the restore
+        # (below) and the save (at the end of the job).
+        run: |
+          # hashFiles() resolves against the runner agent's view of the
+          # workspace and returns "" for files checked out inside the job
+          # container, so compute the key hash in bash instead (same
+          # approach as get_csrc_hash below). Fail closed so a missing
+          # file cannot be converted into sha256(empty) and then appear
+          # to be a legitimate cache miss.
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          for f in requirements-dev.txt requirements.txt pyproject.toml; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f not found; refusing to build an empty cache key."
+              exit 1
+            fi
+          done
+          REQ_HASH=$(sha256sum requirements-dev.txt requirements.txt pyproject.toml \
+            | sha256sum | awk '{print $1}')
+          echo "REQ_HASH=$REQ_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Restore uv wheel cache
+        id: uv-cache
+        # Positioned immediately after the vllm-ascend checkout so that
+        # the cache is warm before the "Install vllm-ascend" steps that
+        # actually consume it. The "Install vllm-project/vllm from
+        # source" step (vllm-empty) is intentionally placed before this
+        # restore because the runner has no access to the
+        # vllm-ascend requirements file at that point; that step pays
+        # the cold-install cost on the first run only.
+        uses: runs-on/cache/restore@v5
+        with:
+          # Use an explicit absolute path: `~` resolves to the runner
+          # agent's home, not the job container's, so the cache would
+          # otherwise land in a directory the container cannot see.
+          path: /root/.cache/uv
+          key: uv-wheels-v1-${{ matrix.group.image_tag }}-${{ inputs.vllm }}-${{ steps.get_req_hash.outputs.REQ_HASH }}
+          restore-keys: |
+            uv-wheels-v1-${{ matrix.group.image_tag }}-${{ inputs.vllm }}-
+            uv-wheels-v1-${{ matrix.group.image_tag }}-
 
       - name: Get csrc hash
         id: get_csrc_hash
@@ -272,6 +316,18 @@ jobs:
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
+
+      - name: Save uv wheel cache
+        # Always save: matrix shards that install the same wheel set in
+        # parallel race to write the same key, and the previous
+        # `cache-hit != 'true'` guard only suppressed re-saves within
+        # one shard. `runs-on/cache/save@v5` is idempotent for identical
+        # key+path payloads, so unconditional save removes the race
+        # without any correctness cost.
+        uses: runs-on/cache/save@v5
+        with:
+          path: /root/.cache/uv
+          key: uv-wheels-v1-${{ matrix.group.image_tag }}-${{ inputs.vllm }}-${{ steps.get_req_hash.outputs.REQ_HASH }}
 
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
