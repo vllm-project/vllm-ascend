@@ -240,4 +240,6 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         worker.wait_for_layer_send(layer_idx)
 
     def wait_for_layer_reuse(self, layer_idx: int) -> None:
-        self.wait_for_layer_send(layer_idx)
+        worker = self.connector_worker
+        if worker is not None:
+            worker.wait_for_layer_reuse(layer_idx)

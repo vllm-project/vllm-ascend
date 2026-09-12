@@ -16,9 +16,11 @@ from vllm.utils.network_utils import make_zmq_path
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     MF_META,
+    MF_META_ACK,
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    SFAPD_PROTOCOL_VERSION,
     LayerMetadata,
     SendTask,
     get_external_request_id,
@@ -36,6 +38,8 @@ class ProducerSendState:
     indexer_group_idx: int
     block_sizes: tuple[int, ...]
     layer_storage_slots: dict[int, tuple[int, ...]]
+    producer_pp_rank: int = 0
+    producer_pp_size: int = 1
 
 
 class MembPullSendingThread(threading.Thread):
@@ -293,17 +297,37 @@ class MembPullSendingThread(threading.Thread):
                 "main_tensor_count": meta.main_tensor_count,
                 "has_indexer": meta.has_indexer,
             }
-        dealer.send(encoder.encode((MF_META, self._state.p_session, encoder.encode(p_meta_dict))))
+        dealer.send(
+            encoder.encode(
+                (
+                    MF_META,
+                    self._state.p_session,
+                    encoder.encode(p_meta_dict),
+                    SFAPD_PROTOCOL_VERSION,
+                    self._state.producer_pp_rank,
+                    self._state.producer_pp_size,
+                )
+            )
+        )
         if dealer.poll(timeout=int(self.timeout * 1000)):
             frames = dealer.recv_multipart()
             payload = [f for f in frames if f != b""]
-            if payload != [b"ACK"]:
+            if payload == [b"ACK"]:
+                if self._state.producer_pp_size > 1:
+                    raise RuntimeError("SFAPD producer PP>1 requires a PP-aware D; received a legacy MF_META ACK")
+            elif len(payload) == 1:
+                reply = msgspec.msgpack.Decoder(type=tuple).decode(payload[0])
+                if reply != (MF_META_ACK, SFAPD_PROTOCOL_VERSION):
+                    raise RuntimeError(f"MembPull P MF_META got unexpected reply: {reply!r}")
+            else:
                 raise RuntimeError(f"MembPull P MF_META got unexpected reply: {payload!r}")
             self._mf_meta_sent_paths.add(path)
             logger.info(
-                "MembPull P sent MF_META: session=%s, layers=%d",
+                "MembPull P sent MF_META: session=%s, layers=%d, pp_rank=%d/%d",
                 self._state.p_session,
                 len(p_meta_dict),
+                self._state.producer_pp_rank,
+                self._state.producer_pp_size,
             )
         else:
             raise RuntimeError("MembPull P MF_META timed out (no reply from D)")
