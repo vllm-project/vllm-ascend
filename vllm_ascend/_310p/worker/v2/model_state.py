@@ -201,6 +201,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         """310P hybrid FULL: correct actual/padded token counts + uniform SpecDecoding pads.
 
@@ -211,6 +212,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         graph. Mirror AscendModelState's actual/padded split and keep pad rows on
         the SpecDecoding path (draft=K, accepted=1), matching MRv1 pad accepted=1.
         """
+        assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if for_capture:
             self._record_capture_seq_lens(input_batch.seq_lens)
         elif cudagraph_mode == CUDAGraphMode.FULL:
