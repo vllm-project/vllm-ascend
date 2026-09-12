@@ -290,7 +290,11 @@ class AdaptiveDraftKController:
             estimate = self._cost_model.get(self._cost_key(batch_size, k))
             if estimate is not None and estimate.samples:
                 scores.append((k, estimate.samples, round(estimate.ema_score, 4)))
-        logger.info(
+        # Use warning level for the sparse decision records so they remain
+        # visible in vLLM worker logs even when module-level INFO logging is
+        # disabled.  This is intentionally emitted only on K changes or
+        # periodic cost-model decisions, not for every request.
+        logger.warning(
             "ASCEND_AUTO_K mode=%s batch_bucket=%s selected_k=%s elapsed_ms=%.3f "
             "candidates=%s reason=%s",
             self.graph_mode,
