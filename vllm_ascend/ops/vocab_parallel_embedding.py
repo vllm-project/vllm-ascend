@@ -58,10 +58,17 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        parallel_group: GroupCoordinator | None = None,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
+        # vLLM main added parallel_group for Engram/ETP sharding; when supplied
+        # it takes precedence over the Ascend lmhead/embedding TP group choice.
+        self.parallel_group = parallel_group
+        if parallel_group is not None:
+            self.comm_group = parallel_group
+        elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
@@ -244,8 +251,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        tp_group = get_tp_group()
+        # Reduce across all the model parallel GPUs. An explicit parallel_group
+        # (ETP) overrides the ambient TP group, matching upstream semantics.
+        tp_group = self.parallel_group if self.parallel_group is not None else get_tp_group()
         if tp_group.world_size == 1:
             return output_parallel
         # vLLM 0.26 model forwards expect the first decoder layer to receive

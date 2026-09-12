@@ -955,6 +955,28 @@ def _reshape_mamba_kv_cache(
     return state_tensors
 
 
+class _AscendKVCacheTuple(tuple):
+    """Ascend KV-cache tuple exposing ``device`` for vLLM's per-device filter.
+
+    vLLM main's ``GPUModelRunner.initialize_kv_cache`` filters
+    ``kv_caches_dict.values()`` by ``cache.device``. Ascend reshapes some
+    layers into a tuple of per-part tensors (e.g. K + scale, K + V), so surface
+    the first part's device instead of failing on ``AttributeError``.
+    """
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+class _AscendKVCacheList(list):
+    """Ascend Mamba KV-cache list exposing ``device`` (see the tuple variant)."""
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
@@ -1173,7 +1195,14 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
-    return kv_caches
+    return {
+        layer_name: _AscendKVCacheTuple(cache)
+        if isinstance(cache, tuple)
+        else _AscendKVCacheList(cache)
+        if isinstance(cache, list)
+        else cache
+        for layer_name, cache in kv_caches.items()
+    }
 
 
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator

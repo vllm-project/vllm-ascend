@@ -226,7 +226,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     positions,
                     batch_desc.num_tokens,
                 )
-                attn_metadata = self._build_draft_attn_metadata(
+                attn_metadata = self._build_draft_attn_metadata(  # type: ignore[attr-defined]
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,

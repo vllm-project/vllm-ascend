@@ -178,7 +178,7 @@ def _make_local_pcp_batch():
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([101, 102], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state="global-attn-state",  # type: ignore[arg-type]
     )
 
 
@@ -214,7 +214,7 @@ def _make_global_pcp_batch():
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([18], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state="global-attn-state",  # type: ignore[arg-type]
     )
 
 
@@ -244,10 +244,12 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         patch(
             "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
             return_value=None,
+            create=True,  # removed from PCPManager on vLLM main (#56107)
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
             return_value=torch.zeros(2, dtype=torch.int64),
+            create=True,  # removed from PCPManager on vLLM main (#56107)
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
@@ -259,7 +261,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         ) as build_attn_state,
     ):
         if vllm_version_is("0.28.0"):
-            result = manager.partition_batch(global_batch)
+            result = manager.partition_batch(global_batch)  # type: ignore[arg-type]
         else:
             result = manager.partition_batch(global_batch, padded_num_tokens=12)
 
@@ -301,14 +303,14 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
 
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
-    assert manager._full_decode_requests_are_token_sized(decode_batch) is True
+    assert manager._full_decode_requests_are_token_sized(decode_batch) is True  # type: ignore[arg-type]
     # Speculative (MTP/Eagle3) decode slots carry more than one token, so
     # request metadata must stay at the request extent (not the token extent).
-    assert manager._full_decode_requests_are_token_sized(draft_decode_batch) is False
-    assert manager._full_decode_requests_are_token_sized(prefill_batch) is False
+    assert manager._full_decode_requests_are_token_sized(draft_decode_batch) is False  # type: ignore[arg-type]
+    assert manager._full_decode_requests_are_token_sized(prefill_batch) is False  # type: ignore[arg-type]
 
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
-    assert manager._full_decode_requests_are_token_sized(decode_batch) is False
+    assert manager._full_decode_requests_are_token_sized(decode_batch) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
@@ -328,7 +330,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     local_batch = AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
-        attn_state="local-attn-state",
+        attn_state="local-attn-state",  # type: ignore[arg-type]
     )
     local_batch.is_dummy = False
     local_batch.num_reqs = 3
@@ -355,7 +357,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     global_batch = AscendInputBatch(
         **global_base_batch.__dict__,
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state="global-attn-state",  # type: ignore[arg-type]
     )
     global_batch.num_reqs_after_padding = 4
     global_batch.num_tokens_after_padding = 4
@@ -427,7 +429,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     batch.query_start_loc_np = np.array([0, 1, 2], dtype=np.int32)
 
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._input_buffers = None
+    manager._input_buffers = None  # type: ignore[assignment]
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
 
     with (
@@ -488,7 +490,7 @@ def test_attention_context_collects_global_pcp_data():
 def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = 2
-    manager._global_batch = SimpleNamespace(
+    manager._global_batch = SimpleNamespace(  # type: ignore[assignment]
         num_tokens_after_padding=8,
         num_tokens=4,
         is_prefilling_np=np.array([False, False, False, False]),
@@ -557,10 +559,12 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
         patch(
             "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
             return_value=None,
+            create=True,  # removed from PCPManager on vLLM main (#56107)
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
             return_value=torch.zeros(1, dtype=torch.int64),
+            create=True,  # removed from PCPManager on vLLM main (#56107)
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
@@ -707,7 +711,7 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = 2
     manager._padded_gather_idx = torch.empty(6, dtype=torch.int64)
-    manager._global_batch = SimpleNamespace(
+    manager._global_batch = SimpleNamespace(  # type: ignore[assignment]
         num_tokens=3,
         num_tokens_after_padding=4,
     )
@@ -985,7 +989,7 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
             side_effect=_mock_async_copy_to_cpu,
         ),
     ):
-        result = manager.partition_batch(global_batch)
+        result = manager.partition_batch(global_batch)  # type: ignore[arg-type]
 
     assert result.dcp_local_seq_lens is not None
     torch.testing.assert_close(

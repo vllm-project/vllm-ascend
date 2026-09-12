@@ -27,6 +27,13 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
+# Captured before any test leaks a ``patch("vllm_ascend.utils.enable_sp")``
+# patcher (e.g. test_eagle_proposer's runtime fixtures). A global
+# ``mock.patch.stopall()`` in the test below would also tear down unrelated
+# module-level mocks (the distributed-group getters mocked in
+# test_mooncake_connector), making the shared batch order-dependent.
+_REAL_ENABLE_SP = utils.enable_sp
+
 
 class TestUtils(TestBase):
     def setUp(self):
@@ -156,15 +163,16 @@ class TestUtils(TestBase):
         pcp_switch.assert_not_called()
 
     def test_enable_sp_uses_upstream_parallel_config(self):
-        # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
-        mock.patch.stopall()
+        # Call the captured real implementation instead of a global
+        # mock.patch.stopall(): that tears down unrelated module-level mocks and
+        # makes the shared batch order-dependent.
         sequence_parallel_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,
                 enable_expert_parallel=False,
             )
         )
-        self.assertTrue(utils.enable_sp(sequence_parallel_config))
+        self.assertTrue(_REAL_ENABLE_SP(sequence_parallel_config))
 
         shared_expert_dp_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
@@ -172,7 +180,7 @@ class TestUtils(TestBase):
                 enable_expert_parallel=True,
             )
         )
-        self.assertFalse(utils.enable_sp(shared_expert_dp_config))
+        self.assertFalse(_REAL_ENABLE_SP(shared_expert_dp_config))
 
         no_sequence_parallel_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
@@ -180,7 +188,7 @@ class TestUtils(TestBase):
                 enable_expert_parallel=False,
             )
         )
-        self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+        self.assertFalse(_REAL_ENABLE_SP(no_sequence_parallel_config))
 
     def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
         ascend_config = SimpleNamespace(enable_dsa_cp=True)
