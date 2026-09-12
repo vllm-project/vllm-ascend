@@ -261,7 +261,7 @@ a3:
         size: 2
       - name: GLM5_3-W8A8-A3-dual-nodes
         config_file_path: GLM5_3-W8A8-A3-dual-nodes.yaml
-        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
         size: 2
   single_node:
     test_config:
