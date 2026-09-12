@@ -31,6 +31,7 @@ from torch.nn.functional import pad
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
 
+from vllm_ascend.overlap.streams import get_stream_registry
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
@@ -60,6 +61,19 @@ _QUANT_SETTING_MAP: dict[QuantType, tuple[int, int | None, int | None]] = {
 }
 
 
+def _moe_comm_stream() -> torch_npu.npu.Stream:
+    """Lazily fetch the MoE communication stream from the stream registry.
+
+    Keeps the module-level ``COMM_STREAM`` mirror in sync so external readers
+    (and tests) that reference ``moe_utils.COMM_STREAM`` observe the same
+    stream object the registry owns.
+    """
+    global COMM_STREAM
+    stream = get_stream_registry().get_stream("moe_comm")
+    COMM_STREAM = stream
+    return stream
+
+
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
     if output_split_sizes is None:
         # Equal split (all2all)
@@ -74,10 +88,8 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
 
     if event:
         # multi stream wait event
-        global COMM_STREAM
-        if COMM_STREAM is None:
-            COMM_STREAM = torch_npu.npu.Stream(device=torch.npu.current_device())
-        with torch_npu.npu.stream(COMM_STREAM):
+        comm_stream = _moe_comm_stream()
+        with torch_npu.npu.stream(comm_stream):
             event.wait()
             handle = dist.all_to_all_single(
                 a2a_out,

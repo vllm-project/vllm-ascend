@@ -46,6 +46,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
+from vllm_ascend.overlap.streams import get_stream_registry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -614,7 +615,7 @@ def current_stream() -> torch.npu.Stream:
     if _CURRENT_STREAM is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _CURRENT_STREAM = torch.npu.current_stream()
+        _CURRENT_STREAM = get_stream_registry().get_stream("current_computation")
     return _CURRENT_STREAM
 
 
@@ -623,7 +624,7 @@ def global_stream() -> torch.npu.Stream:
     if _GLOBAL_STREAM is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _GLOBAL_STREAM = torch_npu.npu.Stream()
+        _GLOBAL_STREAM = get_stream_registry().get_stream("global_computation")
     return _GLOBAL_STREAM
 
 
@@ -632,18 +633,21 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
     if _SHARED_EXPERTS_CALCULATION_STREAM is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+        _SHARED_EXPERTS_CALCULATION_STREAM = get_stream_registry().get_stream("shared_experts")
     return _SHARED_EXPERTS_CALCULATION_STREAM
 
 
 def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     global _CP_CHUNKEDPREFILL_COMM_STREAM
     if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
-        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+        _CP_CHUNKEDPREFILL_COMM_STREAM = get_stream_registry().get_stream("cp_chunked_prefill")
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
 def attention_calculation_stream() -> torch.npu.Stream:
+    # No in-tree consumer; kept for backward compatibility of the module API.
+    # This accessor is deliberately NOT routed through the stream registry
+    # (see the note in vllm_ascend/overlap/streams.py).
     global _ATNN_CALCULATION_STREAM
     if _ATNN_CALCULATION_STREAM is None:
         _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
