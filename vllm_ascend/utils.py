@@ -474,6 +474,59 @@ def enable_custom_op():
     return _CUSTOM_OP_ENABLED
 
 
+@lru_cache(maxsize=1)
+@torch.compiler.assume_constant_result
+def enable_a5_add_rms_norm_bias() -> bool:
+    """Lazily enable AddRmsNormBias on A5 without enabling other custom ops."""
+    # Availability is fixed for this worker, like the cache above. Dynamo must
+    # not trace package reads or extension imports when capturing forward_oot.
+    import vllm.envs as envs
+
+    if not is_950() or envs.VLLM_BATCH_INVARIANT:
+        return False
+
+    # A Torch schema alone does not establish that this OPP supports A5.
+    config_path = (
+        Path(_CUSTOM_OP_BASE_DIR)
+        / "_cann_ops_custom"
+        / "vendors"
+        / _CUSTOM_OP_VENDOR_DIR
+        / "op_impl/ai_core/tbe/config/ascend950/aic-ascend950-ops-info.json"
+    )
+    try:
+        op_config = json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(op_config, dict) or "AddRmsNormBias" not in op_config:
+        return False
+
+    bootstrap_custom_op_env()
+    try:
+        # This operator already has C++ Meta and PrivateUse1 implementations.
+        # The general Python Meta registrations also require non-A5 schemas.
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+    except ImportError as e:
+        if "libcust_opapi.so" not in str(e):
+            logger.warning("Failed to enable A5 AddRmsNormBias: %s", e)
+            return False
+        try:
+            bootstrap_custom_op_env(include_vendor_lib=True)
+            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+        except ImportError as retry_error:
+            logger.warning("Failed to enable A5 AddRmsNormBias: %s", retry_error)
+            return False
+
+    if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
+        return False
+    try:
+        return all(
+            torch._C._dispatch_has_kernel_for_dispatch_key("_C_ascend::npu_add_rms_norm_bias", dispatch_key)
+            for dispatch_key in ("Meta", "PrivateUse1")
+        )
+    except RuntimeError:
+        return False
+
+
 def find_hccl_library() -> str:
     """
     We either use the library file specified by the `HCCL_SO_PATH`
