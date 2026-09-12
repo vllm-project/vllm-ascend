@@ -37,6 +37,7 @@
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
+#include "qbmm/quant_batch_matmul_v3_x/quant_batch_matmul_v3_x_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
@@ -2742,6 +2743,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
     );
     ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
+
+    ops.def(
+        "quant_batch_matmul_v3_x(Tensor x1, "
+        "                       Tensor x2, "
+        "                       Tensor scale, "
+        "                       Tensor? offset=None, "
+        "                       Tensor? pertoken_scale=None, "
+        "                       Tensor? bias=None, "
+        "                       bool transpose_x1=False, "
+        "                       bool transpose_x2=False, "
+        "                       int group_size=0) -> Tensor");
+    ops.impl("quant_batch_matmul_v3_x", torch::kPrivateUse1, &vllm_ascend::quant_batch_matmul_v3_x);
 }
 #else
 // Pybind on other platform

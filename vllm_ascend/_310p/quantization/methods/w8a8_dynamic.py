@@ -29,6 +29,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.methods.base import AscendMoEScheme, QuantType
 from vllm_ascend.utils import maybe_trans_nz
 
+from .qbmm_custom import custom_qbmm_enabled, ensure_registered, qbmm
 from .registry import register_scheme
 from .w8a8_base import AscendW8A8Linear310pScheme
 
@@ -223,19 +224,33 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
         # NOTE(310P):
         # - Currently, W8A8 dynamic quantization supports only symmetric quantization.
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight.data,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
+        if custom_qbmm_enabled():
+            # Custom kernel's bias slot is an int32 accumulator; vLLM's linear
+            # bias is a float addend, applied after dequant instead.
+            output = qbmm(
+                quantized_x,
+                layer.weight.data,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                output_dtype=x.dtype,
+            )
+            if bias is not None:
+                output = output + bias.to(output.dtype)
+        else:
+            output = torch_npu.npu_quant_matmul(
+                quantized_x,
+                layer.weight.data,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias,
+                output_dtype=x.dtype,
+            )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        ensure_registered()
         # cast quantized weight tensors in NZ format for higher inference speed
         layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
