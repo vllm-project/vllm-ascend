@@ -10,6 +10,7 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2 import model_runner as model_runner_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -26,6 +27,172 @@ def _make_runner(need_timing: bool = True):
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
+
+
+class _CountingDraftTokens(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.get_calls = []
+
+    def get(self, key, default=None):
+        self.get_calls.append(key)
+        return super().get(key, default)
+
+
+def _make_prepare_inputs_runner(num_bonus_tokens: int = 1):
+    max_num_reqs = 8
+    max_num_tokens = 32
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = max_num_reqs
+    runner.decode_query_len = 4
+    runner.vllm_config = SimpleNamespace()
+    runner.model_config = SimpleNamespace(rswa_window=None)
+    runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=num_bonus_tokens)
+    runner.use_dcp = False
+    runner.use_pp = False
+    runner.pcp_manager = None
+    runner.eplb = SimpleNamespace(set_batch_phase=lambda _has_prefill: None)
+    runner._update_seq_lens_cpu = lambda _scheduler_output, _req_ids: None
+    runner.input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(max_num_tokens, dtype=torch.int64),
+        positions=torch.zeros(max_num_tokens, dtype=torch.int64),
+        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool),
+        query_start_loc=torch.zeros(max_num_reqs + 2, dtype=torch.int32),
+        seq_lens=torch.zeros(max_num_reqs, dtype=torch.int32),
+        seq_lens_np=np.zeros(max_num_reqs, dtype=np.int32),
+    )
+    runner.req_states = SimpleNamespace(
+        last_sampled_tokens=torch.zeros(max_num_reqs, dtype=torch.int64),
+        draft_tokens=torch.zeros(max_num_tokens, dtype=torch.int64),
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(max_num_tokens, dtype=torch.int64)),
+        prefill_len=SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.int32)),
+        num_computed_tokens_np=np.arange(max_num_reqs, dtype=np.int32),
+        prompt_len=SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.int32)),
+        max_seq_len=np.zeros(max_num_reqs, dtype=np.int32),
+    )
+    return runner
+
+
+def _patch_prepare_inputs_dependencies(monkeypatch):
+    captures = {}
+
+    def fake_async_copy_to_gpu(src, device=None, out=None):
+        tensor = torch.as_tensor(src, device=device)
+        if out is not None:
+            out[: tensor.numel()].copy_(tensor.reshape(-1))
+            return out
+        return tensor
+
+    def fake_build_attn_state(_config, _seq_lens_np, _num_reqs, _scheduled, num_valid_tokens):
+        captures["num_valid_tokens"] = num_valid_tokens
+        return "attn-state"
+
+    def fake_expand_idx_mapping(idx_mapping, total_num_logits, cu_num_logits, decode_query_len):
+        captures["expand_total_num_logits"] = total_num_logits
+        captures["expand_cu_num_logits"] = cu_num_logits.clone()
+        captures["expand_decode_query_len"] = decode_query_len
+        return idx_mapping.repeat_interleave(1), torch.zeros(total_num_logits, dtype=torch.int32)
+
+    def fake_combine_sampled_and_draft_tokens(*args):
+        total_num_logits = args[8]
+        captures["combine_total_num_logits"] = total_num_logits
+        return torch.arange(total_num_logits, dtype=torch.int64)
+
+    monkeypatch.setattr(model_runner_module, "async_copy_to_gpu", fake_async_copy_to_gpu)
+    monkeypatch.setattr(model_runner_module, "build_attn_state", fake_build_attn_state)
+    monkeypatch.setattr(model_runner_module, "expand_idx_mapping", fake_expand_idx_mapping)
+    monkeypatch.setattr(model_runner_module, "combine_sampled_and_draft_tokens", fake_combine_sampled_and_draft_tokens)
+    monkeypatch.setattr(model_runner_module, "prepare_pos_seq_lens", lambda *args: None)
+    monkeypatch.setattr(model_runner_module, "update_cos_sin", lambda *_args: None)
+    monkeypatch.setattr(
+        model_runner_module.vllm_model_runner.pcp, "maybe_partition_pcp_batch", lambda *args, **kwargs: args[1]
+    )
+    monkeypatch.setattr(model_runner_module, "vllm_version_is", lambda _version: False)
+    return captures
+
+
+def _make_prepare_inputs_args(req_ids, scheduled_tokens, draft_tokens):
+    num_scheduled_tokens = np.array(scheduled_tokens, dtype=np.int32)
+    batch_req_state = SimpleNamespace(
+        num_tokens=int(num_scheduled_tokens.sum()),
+        req_ids=req_ids,
+        num_scheduled_tokens=num_scheduled_tokens,
+        idx_mapping_np=np.arange(len(req_ids), dtype=np.int64),
+        has_prefill=False,
+        prefill_len_np=np.zeros(len(req_ids), dtype=np.int32),
+        num_computed_prefill_tokens_np=np.zeros(len(req_ids), dtype=np.int32),
+        is_prefilling_np=np.zeros(len(req_ids), dtype=bool),
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens=draft_tokens,
+        has_structured_output_requests=False,
+    )
+    batch_desc = SimpleNamespace(
+        num_tokens=0,
+        num_reqs=0,
+        cg_mode=CUDAGraphMode.NONE,
+    )
+    return scheduler_output, batch_req_state, batch_desc
+
+
+def test_prepare_inputs_reuses_draft_counts_for_valid_tokens_and_logits(monkeypatch):
+    runner = _make_prepare_inputs_runner(num_bonus_tokens=2)
+    captures = _patch_prepare_inputs_dependencies(monkeypatch)
+    req_ids = ["req2", "req0", "missing", "req1"]
+    draft_tokens = _CountingDraftTokens(
+        {
+            "req0": [10],
+            "req1": [20, 21],
+            "req2": [],
+        }
+    )
+    scheduler_output, batch_req_state, batch_desc = _make_prepare_inputs_args(
+        req_ids,
+        [5, 4, 3, 5],
+        draft_tokens,
+    )
+
+    input_batch = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+
+    expected_draft_counts = np.array([0, 1, 0, 2], dtype=np.int32)
+    np.testing.assert_array_equal(input_batch.num_draft_tokens_per_req, expected_draft_counts)
+    assert input_batch.num_draft_tokens_per_req.dtype == np.int32
+    assert input_batch.num_draft_tokens_per_req.shape == (len(req_ids),)
+    assert draft_tokens.get_calls == req_ids
+    np.testing.assert_array_equal(
+        captures["num_valid_tokens"],
+        np.array([5, 3, 3, 3], dtype=np.int32),
+    )
+    assert input_batch.num_draft_tokens == 3
+    np.testing.assert_array_equal(input_batch.cu_num_logits_np, np.array([0, 2, 5, 7, 11], dtype=np.int32))
+    assert captures["combine_total_num_logits"] == 11
+    assert captures["expand_total_num_logits"] == 11
+    torch.testing.assert_close(captures["expand_cu_num_logits"], torch.tensor([0, 2, 5, 7, 11], dtype=torch.int32))
+
+
+def test_prepare_inputs_no_draft_keeps_valid_alias_and_skips_count_materialization(monkeypatch):
+    runner = _make_prepare_inputs_runner()
+    captures = _patch_prepare_inputs_dependencies(monkeypatch)
+
+    def fail_fromiter(*_args, **_kwargs):
+        raise AssertionError("no-draft path must not materialize draft counts")
+
+    monkeypatch.setattr(model_runner_module.np, "fromiter", fail_fromiter)
+    scheduler_output, batch_req_state, batch_desc = _make_prepare_inputs_args(
+        ["req0", "req1"],
+        [3, 2],
+        {},
+    )
+
+    input_batch = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+
+    assert captures["num_valid_tokens"] is batch_req_state.num_scheduled_tokens
+    assert input_batch.num_draft_tokens_per_req is None
+    assert input_batch.num_draft_tokens == 0
+    np.testing.assert_array_equal(input_batch.cu_num_logits_np, np.array([0, 1, 2], dtype=np.int32))
+    assert input_batch.expanded_idx_mapping.data_ptr() == input_batch.idx_mapping.data_ptr()
 
 
 def test_execute_model_records_profiling_time():
