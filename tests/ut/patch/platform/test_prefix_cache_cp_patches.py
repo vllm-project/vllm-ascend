@@ -229,7 +229,6 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
 
 
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
-    legacy_layout_kwargs = {}
     spec = AscendMLAAttentionSpec(
         block_size=512,
         num_kv_heads=1,
@@ -241,7 +240,6 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         scale_dim=1,
         scale_dtype=torch.float16,
         **_ratio_kwargs(4),
-        **legacy_layout_kwargs,
     )
 
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
