@@ -179,6 +179,10 @@ a3:
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
+      - name: Qwen3.8-27B-Dflash2-A3
+        config_file_path: Qwen3.8_27B_dflash2_A3.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
@@ -265,6 +269,9 @@ a3:
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
+      - name: Qwen3_8B_dflash_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_8B_dflash_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
