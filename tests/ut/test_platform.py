@@ -1,4 +1,5 @@
 import importlib
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -97,6 +98,23 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_cudagraph_memory_profiling_is_opt_in(self):
+        from vllm import envs
+
+        from vllm_ascend import platform
+
+        self.addCleanup(envs.disable_envs_cache)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", None)
+            importlib.reload(platform)
+            envs.disable_envs_cache()
+            self.assertFalse(envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS)
+
+            os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] = "1"
+            importlib.reload(platform)
+            envs.disable_envs_cache()
+            self.assertTrue(envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS)
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)

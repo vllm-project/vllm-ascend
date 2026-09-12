@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -1046,18 +1046,10 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
-    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
     def test_determine_available_memory_normal_case(
         self,
         mock_logger,
-        mock_torch_mem_get_info,
-        mock_torch_memory_stats,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
         mock_memory_profiling,
         mock_get_ascend_config,
     ):
@@ -1069,8 +1061,9 @@ class TestNPUWorker(TestBase):
         mock_profile_result.non_torch_increase = 1000
         mock_profile_result.torch_peak_increase = 2000
         mock_profile_result.weights_memory = 500
-        mock_profile_result.before_profile = MagicMock()
-        mock_profile_result.before_profile.torch_peak = 0
+        mock_profile_result.total_consumed = 3000
+        mock_profile_result.transient_peak_headroom = 500
+        mock_profile_result.non_kv_cache_memory = 3500
         mock_profile_result.after_profile = MagicMock()
         mock_profile_result.after_profile.free_memory = 6500
 
@@ -1094,6 +1087,8 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1102,18 +1097,16 @@ class TestNPUWorker(TestBase):
                 wraps=worker._apply_kv_offload_decode_memory_constraints
             )
 
-            # Mock torch.npu.memory_stats for profile_torch_peak
-            # profile_torch_peak = memory_stats()["allocated_bytes.all.peak"] = 2000
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 2000}
-
             result = worker.determine_available_memory()
 
             worker.model_runner.profile_run.assert_called_once()
 
-            # non_kv_cache_memory = non_torch_increase(1000) + torch_peak_increase(2000-0) + weights_memory(500) = 3500
+            # non_kv_cache_memory = total_consumed(3000) + transient_peak_headroom(500) = 3500
             # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
             expected_result = int(10000 * 0.8 - 3500)
             self.assertEqual(result, expected_result)
+            self.assertEqual(worker.total_consumed, 3000)
+            self.assertEqual(worker.peak_activation_memory, 500)
             worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
     @patch("vllm_ascend.worker.worker.maybe_apply_startup_plan")
@@ -1154,16 +1147,8 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
-    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     def test_determine_available_memory_with_non_torch_allocations(
         self,
-        mock_torch_mem_get_info,
-        mock_torch_memory_stats,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
         mock_memory_profiling,
         mock_get_ascend_config,
     ):
@@ -1175,8 +1160,9 @@ class TestNPUWorker(TestBase):
         mock_profile_result.non_torch_increase = 4000
         mock_profile_result.torch_peak_increase = 1500
         mock_profile_result.weights_memory = 500
-        mock_profile_result.before_profile = MagicMock()
-        mock_profile_result.before_profile.torch_peak = 0
+        mock_profile_result.total_consumed = 5500
+        mock_profile_result.transient_peak_headroom = 500
+        mock_profile_result.non_kv_cache_memory = 6000
         mock_profile_result.after_profile = MagicMock()
         mock_profile_result.after_profile.free_memory = 4000
 
@@ -1200,26 +1186,24 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.9
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = "npu:0"
 
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 1500}
-
             result = worker.determine_available_memory()
 
-            # non_kv_cache_memory = non_torch_increase(4000) + torch_peak_increase(1500-0) + weights_memory(500) = 6000
+            # non_kv_cache_memory = total_consumed(5500) + transient_peak_headroom(500) = 6000
             # result = requested_memory(9000) - non_kv_cache_memory(6000) = 3000
             expected_result = int(10000 * 0.9 - 6000)
             self.assertEqual(result, expected_result)
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("torch.npu.mem_get_info")
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.empty_cache")
     def test_determine_available_memory_memory_profiling_error(
-        self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
+        self,
+        mock_memory_profiling,
     ):
         """Test determine_available_memory throws exception on memory profiling error"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -1232,6 +1216,8 @@ class TestNPUWorker(TestBase):
         mock_profile_result.non_torch_increase = 0
         mock_profile_result.torch_peak_increase = 0
         mock_profile_result.weights_memory = 0
+        mock_profile_result.total_consumed = 0
+        mock_profile_result.transient_peak_headroom = 0
 
         mock_context = MagicMock()
         mock_context.__enter__ = MagicMock(return_value=mock_profile_result)
@@ -1249,6 +1235,9 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.model_runner.model_memory_usage = 0
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1262,20 +1251,12 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
-    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
-    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     def test_determine_available_memory_negative_result(
         self,
-        mock_torch_mem_get_info,
-        mock_torch_memory_stats,
-        mock_torch_empty_cache,
-        mock_torch_reset_peak_memory_stats,
         mock_memory_profiling,
         mock_get_ascend_config,
     ):
-        """Test determine_available_memory returns 0 when result is negative"""
+        """Test determine_available_memory returns a negative result without clamping."""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Mock memory_profiling where non_kv_cache_memory > requested_memory
@@ -1283,8 +1264,9 @@ class TestNPUWorker(TestBase):
         mock_profile_result.non_torch_increase = 1000
         mock_profile_result.torch_peak_increase = 9000
         mock_profile_result.weights_memory = 500
-        mock_profile_result.before_profile = MagicMock()
-        mock_profile_result.before_profile.torch_peak = 0
+        mock_profile_result.total_consumed = 9000
+        mock_profile_result.transient_peak_headroom = 1500
+        mock_profile_result.non_kv_cache_memory = 10500
         mock_profile_result.after_profile = MagicMock()
         mock_profile_result.after_profile.free_memory = 2000
 
@@ -1308,16 +1290,16 @@ class TestNPUWorker(TestBase):
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
             worker.model_runner.model_memory_usage = 500
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = "npu:0"
 
-            mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 9000}
-
             result = worker.determine_available_memory()
 
-            # non_kv_cache_memory = 1000 + 9000 + 500 = 10500
+            # non_kv_cache_memory = total_consumed(9000) + transient_peak_headroom(1500) = 10500
             # available = requested(8000) - non_kv_cache(10500) = -2500
             # upstream no longer clamps to 0, returns int(negative)
             self.assertEqual(result, int(8000 - 10500))
@@ -1725,11 +1707,12 @@ class TestNPUWorker(TestBase):
         model_memory = 2 << 30
         peak_activation_memory = 1 << 30
         non_torch_memory = 512 << 20
+        total_consumed = model_memory + non_torch_memory
         npugraph_memory = 256 << 20
         redundancy_buffer = 150 << 20
         expected_kv_cache_memory = (
             requested_memory
-            - (model_memory + peak_activation_memory + non_torch_memory + npugraph_memory)
+            - (total_consumed + peak_activation_memory + npugraph_memory)
             - redundancy_buffer
         )
 
@@ -1760,8 +1743,8 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = MagicMock(free_memory=12 << 30, total_memory=16 << 30)
             worker.requested_memory = requested_memory
             worker.available_kv_cache_memory_bytes = requested_memory - model_memory
+            worker.total_consumed = total_consumed
             worker.peak_activation_memory = peak_activation_memory
-            worker.non_torch_memory = non_torch_memory
 
             worker.compile_or_warm_up_model()
 

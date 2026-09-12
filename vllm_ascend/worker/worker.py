@@ -27,6 +27,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
@@ -599,22 +600,28 @@ class NPUWorker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            # Record torch peak INSIDE the context and BEFORE graph capture,
-            # so that graph pool allocations don't inflate the activation peak.
-            # The memory_profiling context will also compute torch_peak_increase
-            # on exit, but we override it below with this pre-graph value.
-            profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
+        # Profile ACL graph memory after memory_profiling has measured the
+        # model-profile run, so graph allocations are accounted for only by the
+        # explicit estimate below.
+        npugraph_memory_estimate = 0
+        should_profile_npugraph_memory = (
+            envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            and self.vllm_config.compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE
+        )
+        if should_profile_npugraph_memory:
+            npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
-        # Override torch_peak_increase with the pre-graph-capture value to
-        # avoid double-counting graph pool memory as activation memory.
-        profile_result.torch_peak_increase = profile_torch_peak - profile_result.before_profile.torch_peak
-        profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase + profile_result.torch_peak_increase + profile_result.weights_memory
+        npugraph_memory_estimate_applied = (
+            npugraph_memory_estimate if envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS else 0
         )
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
-        self.peak_activation_memory = profile_result.torch_peak_increase
-        self.non_torch_memory = profile_result.non_torch_increase
+        self.total_consumed = profile_result.total_consumed
+        self.peak_activation_memory = (
+            profile_result.transient_peak_headroom + npugraph_memory_estimate_applied
+        )
+        self.npugraph_memory_estimate = npugraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
         assert self.init_snapshot.free_memory > free_gpu_memory, (
@@ -626,7 +633,9 @@ class NPUWorker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        self.available_kv_cache_memory_bytes = (
+            self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate_applied
+        )
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,
         )
@@ -653,11 +662,48 @@ class NPUWorker(WorkerBase):
 
         logger.debug(profile_result)
         logger.info_once(
-            "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
+            "Available KV cache memory: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
+
+        if npugraph_memory_estimate > 0:
+            total_mem = self.init_snapshot.total_memory
+            current_util = self.cache_config.gpu_memory_utilization
+            ng_util_delta = npugraph_memory_estimate / total_mem
+            suggested_util = min(
+                round(current_util + ng_util_delta, 4),
+                1.0,
+            )
+            if envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                equiv_util = round(current_util - ng_util_delta, 4)
+                logger.info(
+                    "ACL graph memory profiling is enabled. The current "
+                    "--gpu-memory-utilization=%.4f is "
+                    "equivalent to --gpu-memory-utilization=%.4f without "
+                    "ACL graph memory profiling. To maintain the same "
+                    "effective KV cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f. To disable, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                    current_util,
+                    equiv_util,
+                    suggested_util,
+                )
+            else:
+                logger.warning(
+                    "ACL graph memory profiling is disabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                    "Without it, ACL graph memory is not accounted for "
+                    "during KV cache allocation, which may require lowering "
+                    "--gpu-memory-utilization to avoid OOM. Consider "
+                    "enabling it and increasing "
+                    "--gpu-memory-utilization from %.4f to %.4f.",
+                    current_util,
+                    suggested_util,
+                )
         return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
@@ -896,19 +942,28 @@ class NPUWorker(WorkerBase):
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()
 
+        # Compare actual vs estimated ACL graph memory (if we did profiling)
+        if hasattr(self, "npugraph_memory_estimate") and self.npugraph_memory_estimate > 0:
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            diff = abs(npugraph_memory_bytes - self.npugraph_memory_estimate)
+            logger.info(
+                "ACL graph pool memory: %s GiB (actual), %s GiB (estimated), difference: %s GiB (%.1f%%).",
+                GiB(npugraph_memory_bytes),
+                GiB(self.npugraph_memory_estimate),
+                GiB(diff),
+                100 * diff / max(npugraph_memory_bytes, 1),
+            )
+
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
         # pre-specified) so that peak_activation_memory etc. are available.
-        # non_kv_memory already includes NPU graph memory, so the suggestion
-        # accounts for all measured memory categories. A 150 MiB buffer is kept
-        # because memory_profiling may slightly underestimate non-torch
-        # allocations (ACL context, HCCL buffers, driver layer, etc.).
+        # A 150 MiB buffer is kept because memory_profiling may slightly
+        # underestimate memory consumption.
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(self, "peak_activation_memory"):
             redundancy_buffer = 150 * (1 << 20)  # 150 MiB safety margin
             non_kv_memory = (
-                self.model_runner.model_memory_usage
+                self.total_consumed
                 + self.peak_activation_memory
-                + self.non_torch_memory
                 + npugraph_memory_bytes
             )
             self.npugraph_memory_bytes = npugraph_memory_bytes
@@ -921,10 +976,11 @@ class NPUWorker(WorkerBase):
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
-                f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
-                f"activation, {format_gib(self.non_torch_memory)} GiB for non-torch "
-                f"memory, {format_gib(npugraph_memory_bytes)} GiB for NPU graph memory. "
+                f"Actual usage is {format_gib(self.total_consumed)} GiB for "
+                f"consumed memory (weights + non-torch), "
+                f"{format_gib(self.peak_activation_memory)} GiB for peak "
+                f"activation, and {format_gib(npugraph_memory_bytes)} GiB for "
+                f"NPU graph memory. "
                 f"Replace gpu_memory_utilization with "
                 f"`--kv-cache-memory={suggested_to_requested}` "
                 f"({format_gib(suggested_to_requested)} GiB) to fit into requested "
