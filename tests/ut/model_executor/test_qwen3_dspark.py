@@ -23,6 +23,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -50,7 +51,7 @@ class TestQwen3DSparkWeightLoading:
         head_before = model.lm_head.weight.detach().clone()
         config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
         with (
-            patch.object(qwen3_dspark, "get_rotation_path", return_value="quarot.safetensors"),
+            patch.object(qwen3_dspark, "get_dspark_rotation_path", return_value="quarot.safetensors"),
             patch.object(qwen3_dspark, "get_rotation_matrix", return_value=rotation_matrix) as rotation_loader,
         ):
             model.post_process(config)
@@ -99,7 +100,7 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path) -> None:
         model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
     )
     with (
-        patch.object(qwen3_dspark, "get_rotation_path", return_value=rotation_path),
+        patch.object(qwen3_dspark, "get_dspark_rotation_path", return_value=rotation_path),
         patch.object(qwen3_dspark, "VocabParallelEmbedding", side_effect=vocab_layer),
         patch.object(qwen3_dspark, "ParallelLMHead", side_effect=vocab_layer),
     ):
@@ -114,3 +115,36 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path) -> None:
         torch.testing.assert_close(layer.weight, expected)
     assert model.has_own_embed_tokens
     assert model.has_own_lm_head
+
+
+class TestQwen3DSparkRotationPath:
+    def test_uses_legacy_quarot_path_when_metadata_is_incomplete(self, tmp_path) -> None:
+        """Honor ModelSlim's is_rot_used marker for legacy A5 checkpoints."""
+        target_path = tmp_path / "target"
+        rotation_path = target_path / "optional" / "quarot.safetensors"
+        rotation_path.parent.mkdir(parents=True)
+        rotation_path.touch()
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"is_rot_used": True, "optional": {}}),
+            model_config=SimpleNamespace(model=str(target_path)),
+        )
+
+        assert qwen3_dspark.get_dspark_rotation_path(vllm_config) == rotation_path
+
+    def test_fails_fast_when_rotated_target_has_no_dspark_matrix(self, tmp_path) -> None:
+        """Do not silently run an unrotated DSpark draft against a rotated target."""
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"is_rot_used": True, "optional": {}}),
+            model_config=SimpleNamespace(model=str(tmp_path / "target")),
+        )
+
+        with pytest.raises(FileNotFoundError, match="is_rot_used=true"):
+            qwen3_dspark.get_dspark_rotation_path(vllm_config)
+
+    def test_ignores_missing_quant_description(self) -> None:
+        """Treat an explicit null quantization description as unrotated."""
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description=None),
+        )
+
+        assert qwen3_dspark.get_dspark_rotation_path(vllm_config) is None
