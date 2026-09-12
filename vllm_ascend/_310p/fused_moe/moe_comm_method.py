@@ -40,7 +40,7 @@ class AllGatherCommImpl310(AllGatherCommImpl):
         self.use_fusion_ops = False
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> Any:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input), None
+        return unified_apply_mlp(mlp_compute_input=mlp_compute_input), None, None
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather310(
