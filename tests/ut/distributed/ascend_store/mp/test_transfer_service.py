@@ -126,11 +126,7 @@ def run_transfer(runtime, parent, operation, req):
 
 def layerwise_worker(db, *, use_gva, use_key_major_ranges=False, num_layers=1):
     group_ids = sorted(db.group_kv_caches_base_addr)
-    save_events = []
-    for layer in range(num_layers):
-        event = MagicMock()
-        event.ipc_handle.return_value = f"layer-{layer}-event".encode()
-        save_events.append(event)
+    save_events = [MagicMock() for _ in range(num_layers)]
     return SimpleNamespace(
         token_database=db,
         group_kv_caches_base_addr=db.group_kv_caches_base_addr,
