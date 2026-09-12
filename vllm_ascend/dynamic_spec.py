@@ -67,7 +67,7 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
     if dynamic_config.get("policy") != "hardware_aware" or dynamic_config.get("method") not in ("dspark", "dflash"):
         raise ValueError("physical_k requires hardware_aware policy and dspark/dflash method")
 
-    unknown = set(physical) - set(_PHYSICAL_DEFAULTS) - {"capture_k", "hybrid"}
+    unknown = set(physical) - set(_PHYSICAL_DEFAULTS) - {"capture_k", "hybrid", "auto_tune"}
     if unknown:
         raise ValueError(f"Unknown physical_k fields: {sorted(unknown)}")
 
