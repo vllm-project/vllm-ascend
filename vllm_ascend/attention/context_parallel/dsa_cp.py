@@ -1952,10 +1952,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         num_tokens = local_attn_output.shape[0]
-        
+
         negate_sin = get_ascend_device_type() != AscendDeviceType.A5
         sin = cp_metadata.local_sin[layer_name]
-        
+
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
