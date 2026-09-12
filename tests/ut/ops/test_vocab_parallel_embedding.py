@@ -295,3 +295,51 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+
+    def _make_lmhead(self):
+        lmhead = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings, embedding_dim=self.embedding_dim, prefix="lm_head"
+        )
+        lmhead.quant_method = self.mock_quant_method
+        lmhead.quant_method.apply = self.mock_quant_method.apply
+        return lmhead
+
+    def test_get_logits_skip_gather_keeps_the_untouched_local_shard(self):
+        # org_vocab_size < vocab_size makes the de-padding truncation observable,
+        # so skipping it is not confused with a no-op.
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size, org_vocab_size=self.org_num_embeddings)
+        hidden_state = torch.randn(1, self.org_num_embeddings)
+
+        logits = processor._get_logits(hidden_state, self._make_lmhead(), None, True)
+
+        self.mock_all_to_all_single.assert_not_called()
+        self.assertEqual(logits.shape, (2, self.vocab_size))
+
+    def test_get_logits_skip_gather_without_lmhead_tp(self):
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size, org_vocab_size=self.org_num_embeddings)
+        hidden_state = torch.randn(1, self.org_num_embeddings)
+        # Built before the patch below, because the constructor picks its
+        # communication group by the same flag: with lmhead TP off it reaches
+        # for the plain TP group, which a unit test has no distributed
+        # environment to provide. What is under test here is _get_logits.
+        lmhead = self._make_lmhead()
+
+        with (
+            patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=False),
+            patch.object(AscendLogitsProcessor, "_gather_logits") as mock_gather,
+        ):
+            logits = processor._get_logits(hidden_state, lmhead, None, True)
+
+        mock_gather.assert_not_called()
+        self.assertEqual(logits.shape, (2, self.vocab_size))
+
+    def test_forward_passes_the_installed_vllm_argument_list(self):
+        # Guards against upstream growing `_get_logits` parameters (e.g. the
+        # `skip_gather` flag) that this override would then reject with a
+        # TypeError at the first `compute_logits` call.
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        hidden_state = torch.randn(1, self.org_num_embeddings)
+
+        logits = processor.forward(self._make_lmhead(), hidden_state)
+
+        self.assertEqual(logits.shape, (1, self.vocab_size))

@@ -712,6 +712,13 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.use_dflash():
+                    # DFlash/DFlash2 draft from the target's intermediate layers
+                    # (dflash_config.target_layer_ids), concatenated into the
+                    # drafter's `fc`. Must be checked after use_dspark(), whose
+                    # proposer derives from the DFlash one.
+                    assert isinstance(self.drafter, AscendDflashProposer)
+                    self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(
                     self.sampler, self.speculative_config, self.device
                 )

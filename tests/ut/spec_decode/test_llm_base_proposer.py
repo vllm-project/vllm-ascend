@@ -29,6 +29,7 @@ from vllm.config import CUDAGraphMode
 from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
+    _glm_draft_requires_eager,
 )
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
@@ -390,3 +391,32 @@ class TestDraftEmbedMmSupport:
             fake_inspect.signature.side_effect = error
 
             assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+
+class TestGlmDraftEagerFallback:
+    """The eager-mode fallback for GLM speculative decoding exists because the
+    GLM decoder layer (KDA state, mHC hyper-connection ops) cannot be captured
+    into a graph. It therefore has to key off the *draft* architecture: an MTP
+    head reuses those layers, whereas the Qwen3-shaped DFlash2 head published
+    for GLM-5.3-Flash does not and keeps graph mode.
+    """
+
+    @staticmethod
+    def _config(model_type: str | None):
+        if model_type is None:
+            return None
+        return SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type))
+
+    @pytest.mark.parametrize("draft_model_type", ["glm5_next", "glm5_next_text"])
+    def test_mtp_draft_derived_from_target_falls_back_to_eager(self, draft_model_type: str):
+        assert _glm_draft_requires_eager(self._config("glm5_next"), self._config(draft_model_type)) is True
+
+    def test_qwen3_shaped_dflash2_draft_keeps_graph_mode(self):
+        assert _glm_draft_requires_eager(self._config("glm5_next"), self._config("qwen3")) is False
+
+    def test_non_glm_target_keeps_graph_mode(self):
+        assert _glm_draft_requires_eager(self._config("deepseek_v3"), self._config("deepseek_v3")) is False
+
+    def test_absent_draft_config_keeps_graph_mode(self):
+        """n-gram and other drafter-less methods have no draft model to capture."""
+        assert _glm_draft_requires_eager(self._config("glm5_next"), None) is False
