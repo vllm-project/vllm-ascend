@@ -172,6 +172,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.c8_k_cache_dtype = torch.int8
                 self.c8_k_scale_cache_dtype = torch.float16
 
+        self.enable_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(self.k_cache.prefix)
+        if self.enable_sparse_li_c4:
+            self.c4_k_cache_dtype, self.c4_k_scale_cache_dtype = torch.uint8, torch.float8_e8m0fnu
+            self.c4_k_op_dtype = torch_npu.float4_e2m1fn_x2
+
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
         self.use_torch_npu_lightning_indexer = model_type in ["glm_moe_dsa"]
@@ -183,11 +188,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._dsa_cp_active = enable_dsa_cp()
 
+    @property
+    def enable_sparse_li_quant(self) -> bool:
+        return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
     def process_weights_after_loading(self) -> None:
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
+        if self.enable_sparse_li_quant  and AscendSFAIndexerBackend.q_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
             AscendSFAIndexerBackend.q_hadamard = hadamard / (128**0.5)
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.k_hadamard is None:
+        if self.enable_sparse_li_quant  and AscendSFAIndexerBackend.k_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
             AscendSFAIndexerBackend.k_hadamard = hadamard / (128**0.5)
 
@@ -195,7 +204,19 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def num_cache_tensors(self) -> int:
         """Number of tensors this indexer's cache occupies in the composed
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
-        return 2 if self.enable_sparse_li_c8 else 1
+        return 2 if self.enable_sparse_li_quant  else 1
+
+    def _quantize_li_tensor(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply Hadamard transform and quantize for LI C8 or C4 path."""
+        x = x @ AscendSFAIndexerBackend.q_hadamard
+        shape_ori = x.shape
+        x = x.view(-1, self.head_dim)
+        if self.enable_sparse_li_c4:
+            x, scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=self.c4_k_op_dtype)
+            scale = scale.view(*shape_ori[:-1], *scale.shape[-2:])
+            return x, scale.view(self.c4_k_scale_cache_dtype)
+        x, scale = torch_npu.npu_dynamic_quant(x, dst_type=self.c8_k_cache_dtype)
+        return x, scale.to(self.c8_k_scale_cache_dtype)
 
     def write_cache(
         self,
@@ -216,30 +237,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         """
         indexer_k_cache = self.k_cache.kv_cache[INDEXER_K_CACHE_SLOT]
         use_reshape_optim = self._use_c8_reshape_optim()
-        if use_reshape_optim:
-            assert indexer_attn_metadata is not None
-            torch.ops._C_ascend.store_kv_block(
-                k_li,
-                indexer_k_cache,
-                indexer_attn_metadata.group_len,
-                indexer_attn_metadata.group_key_idx,
-                indexer_attn_metadata.group_key_cache_idx,
-                indexer_attn_metadata.block_size,
-            )
-        else:
-            torch_npu.npu_scatter_nd_update_(
-                indexer_k_cache.view(-1, k_li.shape[-1]),
-                slot_mapping.view(-1, 1),
-                k_li.view(-1, k_li.shape[-1]),
-            )
-        if self.enable_sparse_li_c8:
-            assert k_li_scale is not None
-            indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+
+        def _store_kv(tensor: torch.Tensor, cache: torch.Tensor) -> None:
             if use_reshape_optim:
                 assert indexer_attn_metadata is not None
                 torch.ops._C_ascend.store_kv_block(
-                    k_li_scale,
-                    indexer_scale_cache,
+                    tensor,
+                    cache,
                     indexer_attn_metadata.group_len,
                     indexer_attn_metadata.group_key_idx,
                     indexer_attn_metadata.group_key_cache_idx,
@@ -247,10 +251,21 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 )
             else:
                 torch_npu.npu_scatter_nd_update_(
-                    indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
+                    cache.view(-1, tensor.shape[-1]),
                     slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
+                    tensor.view(-1, tensor.shape[-1]),
                 )
+
+        _store_kv(k_li, indexer_k_cache)
+        if self.enable_sparse_li_quant:
+            assert k_li_scale is not None
+            indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
+            # C4 scale is stored as float8_e8m0fnu; npu_scatter_nd_update_
+            # requires uint8 view for non-standard dtypes.
+            if self.enable_sparse_li_c4:
+                k_li_scale = k_li_scale.view(torch.uint8)
+                indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
+            _store_kv(k_li_scale, indexer_scale_cache)
 
     def _use_c8_reshape_optim(self) -> bool:
         """Whether this indexer can use the LI C8 cache-write operator."""
@@ -295,11 +310,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
-        if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAIndexerBackend.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
+        if self.enable_sparse_li_quant:
+            k_li, k_li_scale = self._quantize_li_tensor(k_li)
         else:
             k_li_scale = None
 
@@ -341,7 +353,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             # throughput becomes a concern.
             k_li, k_handle = all_gather_async(k_li, get_tp_group(), async_op=True)
             scale_handle = None
-            if self.enable_sparse_li_c8:
+            if self.enable_sparse_li_quant:
                 assert k_li_scale is not None
                 k_li_scale, scale_handle = all_gather_async(k_li_scale, get_tp_group(), async_op=True)
             if k_handle is not None:
@@ -427,11 +439,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         q_li_scale = None
         q_li_shape_ori = None
-        if self.enable_sparse_li_c8:
+        if self.enable_sparse_li_quant:
             q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAIndexerBackend.q_hadamard
-            q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            q_li, q_li_scale = self._quantize_li_tensor(q_li)
 
         return DeviceOperator.indexer_select_post_process(
             q_li,
@@ -445,6 +455,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             indexer_metadata.actual_seq_lengths_query,
             indexer_metadata.actual_seq_lengths_key,
             self.enable_sparse_li_c8,
+            self.enable_sparse_li_c4,
             self.use_torch_npu_lightning_indexer,
         )
 

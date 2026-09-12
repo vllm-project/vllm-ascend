@@ -432,6 +432,7 @@ class NPUModelRunner(GPUModelRunner):
         # dsa c8
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
+        self.enable_sparse_li_c4 = self.ascend_config.enable_sparse_li_c4
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
@@ -439,6 +440,9 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 self.c8_k_cache_dtype = torch.int8
                 self.c8_k_scale_cache_dtype = torch.float16
+        if self.enable_sparse_li_c4:
+            self.c4_k_cache_dtype = torch.uint8
+            self.c4_k_scale_cache_dtype = torch.float8_e8m0fnu
 
         self.attn_backend = get_attn_backend(
             0,
@@ -5113,6 +5117,9 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.scale_dim,
                         )
+                        if current_kv_cache_spec.li_quant_mode == "cache_sparse_li_c4":
+                            indexer_scale_cache_shape = (*indexer_scale_cache_shape[:-1],
+                                current_kv_cache_spec.head_size * 2 // 64, 2)
                         indexer_scale_cache = (
                             raw_scale_tensor
                             .view(current_kv_cache_spec.scale_dtype)
@@ -5723,15 +5730,21 @@ class NPUModelRunner(GPUModelRunner):
                 # Remove this special case once the generic vLLM spec/backend
                 # path can describe the Ascend SFA indexer layout directly.
                 cache_sparse_li_c8 = self.ascend_config.is_sparse_li_c8_layer(layer_name)
+                cache_sparse_li_c4 = self.ascend_config.is_sparse_li_c4_layer(layer_name)
+                head_dim = self.model_config.hf_text_config.index_head_dim
                 kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                     block_size=self.block_size,
                     num_kv_heads=1,
-                    head_size=self.model_config.hf_text_config.index_head_dim,
-                    dtype=self.c8_k_cache_dtype if cache_sparse_li_c8 else self.kv_cache_dtype,
+                    head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
+                    dtype=self.c4_k_cache_dtype if cache_sparse_li_c4
+                    else self.c8_k_cache_dtype if cache_sparse_li_c8
+                    else self.kv_cache_dtype,
                     cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
-                    scale_dim=1 if cache_sparse_li_c8 else 0,
-                    scale_dtype=self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
-                    cache_sparse_li_c8=cache_sparse_li_c8,
+                    scale_dim=head_dim // 64 * 2 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                    scale_dtype=self.c4_k_scale_cache_dtype if cache_sparse_li_c4
+                    else self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                    li_quant_mode="cache_sparse_li_c4" if cache_sparse_li_c4
+                    else "cache_sparse_li_c8" if cache_sparse_li_c8 else "",
                     sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
                 )
 
