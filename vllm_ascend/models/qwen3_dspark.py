@@ -46,7 +46,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+        self.rotation_path = get_rotation_path(vllm_config)
         self.target_model_path = Path(vllm_config.model_config.model)
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
@@ -56,11 +56,27 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
+    def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
+        """Select draft auxiliary inputs, without changing target Eager/Graph mode."""
+        set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
+        if set_capture_mode is not None:
+            set_capture_mode(True)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         all_weights = list(weights)
         includes_embed_tokens = any("embed_tokens" in name for name, _ in all_weights)
         includes_lm_head = any("lm_head" in name for name, _ in all_weights)
         rotation_weight = None
+        injected_rotation_path = getattr(self.config, "_ascend_target_rotation_path", None)
+        # FC consumes target-space hidden states, so the target rotation takes
+        # precedence over any path inferred from the draft's own quant config.
+        if injected_rotation_path is not None:
+            self.rotation_path = Path(injected_rotation_path)
+
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
             rotation_weight = get_rotation_matrix(self.rotation_path)

@@ -72,6 +72,24 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Do not mutate the scheduler/connector copy of the cache configuration.
+    return replace(kv_cache_config, kv_cache_groups=groups)
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -1192,11 +1210,12 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them. Attention state is left to the
+    caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
