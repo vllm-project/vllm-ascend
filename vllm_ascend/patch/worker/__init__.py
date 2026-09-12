@@ -77,3 +77,4 @@ if not vllm_version_is("0.25.1"):
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+

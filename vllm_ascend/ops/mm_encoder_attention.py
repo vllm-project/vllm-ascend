@@ -249,16 +249,12 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         ``None`` so that the vLLM model keeps its existing implementation.
         """
         del sequence_lengths  # The existing FIA eager path also consumes cu_seqlens.
-        if not self._can_use_fused_qkv_rope_pad_fia(
-            qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens
-        ):
+        if not self._can_use_fused_qkv_rope_pad_fia(qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens):
             return None
 
         from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
 
-        q_pad, k_pad, v_pad = vision_qkv_rope_pad(
-            qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin
-        )
+        q_pad, k_pad, v_pad = vision_qkv_rope_pad(qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin)
         token_count = qkv_proj.shape[0]
         actual_q, actual_kv = maybe_compute_actual_seq_lengths(
             self._maybe_compute_cu_seqlens(1, token_count, cu_seqlens),
@@ -424,3 +420,4 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             bsz=bsz,
             q_len=q_len,
         )
+

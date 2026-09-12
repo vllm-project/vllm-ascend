@@ -1,7 +1,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-
 _NUM_VECTOR_CORES_910B3 = 40
 
 
@@ -245,3 +244,4 @@ def vision_qkv_rope_pad(
         NUM_CORES=_NUM_VECTOR_CORES_910B3,
     )
     return q_out, k_out, v_out
+

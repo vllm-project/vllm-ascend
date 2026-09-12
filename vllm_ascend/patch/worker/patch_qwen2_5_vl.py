@@ -21,6 +21,7 @@ import einops
 import torch
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention
 
+
 def qwen2_5_vision_attention_forward(
     self: Qwen2_5_VisionAttention,
     x: torch.Tensor,
@@ -100,3 +101,4 @@ def qwen2_5_vision_attention_forward(
 
 
 Qwen2_5_VisionAttention.forward = qwen2_5_vision_attention_forward  # type: ignore[method-assign]
+
