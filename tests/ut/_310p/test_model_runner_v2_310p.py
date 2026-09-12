@@ -390,27 +390,31 @@ def test_sampler_rejects_random_sampling_parameters() -> None:
 
 
 @pytest.mark.parametrize(
-    ("sampling_kwargs", "message"),
+    ("sampling_kwargs", "message", "temperature"),
     [
-        ({"top_p": 0.9}, "top_p"),
-        ({"top_k": 10}, "top_k"),
-        ({"min_p": 0.1}, "min_p"),
-        ({"repetition_penalty": 1.1}, "repetition_penalty"),
-        ({"presence_penalty": 0.1}, "presence/frequency penalty"),
-        ({"frequency_penalty": 0.1}, "presence/frequency penalty"),
+        # vLLM normalizes top_p/top_k/min_p to greedy defaults when
+        # temperature=0, so those cases must use temperature=1.0 to reach
+        # the sampler guard.
+        ({"top_p": 0.9}, "top_p", 1.0),
+        ({"top_k": 10}, "top_k", 1.0),
+        ({"min_p": 0.1}, "min_p", 1.0),
+        ({"repetition_penalty": 1.1}, "repetition_penalty", 0),
+        ({"presence_penalty": 0.1}, "presence/frequency penalty", 0),
+        ({"frequency_penalty": 0.1}, "presence/frequency penalty", 0),
         (
             {"presence_penalty": 0.1, "frequency_penalty": 0.1},
             "presence/frequency penalty",
+            0,
         ),
-        ({"logprobs": 1}, "logprobs"),
-        ({"prompt_logprobs": 1}, "logprobs"),
-        ({"logit_bias": {1: 0.1}}, "logits processors"),
+        ({"logprobs": 1}, "logprobs", 0),
+        ({"prompt_logprobs": 1}, "logprobs", 0),
+        ({"logit_bias": {1: 0.1}}, "logits processors", 0),
     ],
 )
-def test_sampler_rejects_unsupported_sampling_parameters(sampling_kwargs, message) -> None:
+def test_sampler_rejects_unsupported_sampling_parameters(sampling_kwargs, message, temperature) -> None:
     sampler = Ascend310PSampler()
     with pytest.raises(NotImplementedError, match=message):
-        sampler.add_request(0, 4, SamplingParams(temperature=0, **sampling_kwargs))
+        sampler.add_request(0, 4, SamplingParams(temperature=temperature, **sampling_kwargs))
 
 
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
