@@ -36,6 +36,8 @@ from dataclasses import dataclass
 
 from fastapi import APIRouter, FastAPI, Request, Response, status
 
+DEFAULT_LEASE_TTL_SEC = 60
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -45,6 +47,7 @@ class Settings:
     heartbeat_sweep_sec: int = 5
     default_resource_points: int = 1
     alloc_policy: str = "fifo"
+    lease_ttl_sec: int = DEFAULT_LEASE_TTL_SEC
 
     def __post_init__(self) -> None:
         if self.port <= 0:
@@ -53,6 +56,8 @@ class Settings:
             raise ValueError("heartbeat_ttl_sec must be > 0")
         if self.heartbeat_sweep_sec <= 0:
             raise ValueError("heartbeat_sweep_sec must be > 0")
+        if self.lease_ttl_sec <= 0:
+            raise ValueError("lease_ttl_sec must be > 0")
         if self.default_resource_points <= 0:
             raise ValueError("default_resource_points must be > 0")
         if self.alloc_policy not in {"fifo", "lru"}:
@@ -65,6 +70,7 @@ class Settings:
             port=int(os.getenv("RFORK_MOCK_PORT", "1223")),
             heartbeat_ttl_sec=int(os.getenv("RFORK_MOCK_HEARTBEAT_TTL_SEC", "60")),
             heartbeat_sweep_sec=int(os.getenv("RFORK_MOCK_HEARTBEAT_SWEEP_SEC", "5")),
+            lease_ttl_sec=int(os.getenv("RFORK_MOCK_LEASE_TTL_SEC", str(DEFAULT_LEASE_TTL_SEC))),
             default_resource_points=int(os.getenv("RFORK_MOCK_DEFAULT_RESOURCE_POINTS", "1")),
             alloc_policy=os.getenv("RFORK_MOCK_ALLOC_POLICY", "fifo").lower(),
         )
@@ -79,6 +85,8 @@ class SeedRecord:
     last_heartbeat_ts: float
     resource_total: int
     resource_used: int = 0
+    # Track allocation recency separately so heartbeats do not affect LRU order.
+    last_used_ts: float = 0.0
 
     @property
     def identity(self) -> str:
@@ -112,7 +120,8 @@ class Scheduler:
         if self.alloc_policy == "fifo":
             return min(candidates, key=lambda s: (s.last_heartbeat_ts, s.identity))
 
-        return max(candidates, key=lambda s: (s.last_heartbeat_ts, s.identity))
+        # LRU uses allocation recency because heartbeats only describe liveness.
+        return min(candidates, key=lambda s: (getattr(s, "last_used_ts", s.last_heartbeat_ts), s.identity))
 
 
 class Store:
@@ -120,6 +129,7 @@ class Store:
         self,
         *,
         heartbeat_ttl_sec: int,
+        lease_ttl_sec: int = DEFAULT_LEASE_TTL_SEC,
         default_resource_points: int,
         scheduler: Scheduler,
         time_fn: Callable[[], float] | None = None,
@@ -129,6 +139,7 @@ class Store:
         self._seeds_by_key: dict[str, set[str]] = defaultdict(set)
         self._leases: dict[str, LeaseRecord] = {}
         self._heartbeat_ttl_sec = heartbeat_ttl_sec
+        self._lease_ttl_sec = lease_ttl_sec
         self._default_resource_points = default_resource_points
         self._scheduler = scheduler
         self._time = time_fn or time.time
@@ -161,6 +172,7 @@ class Store:
                     last_heartbeat_ts=now,
                     resource_total=total,
                     resource_used=0,
+                    last_used_ts=now,
                 )
                 self._seeds[identity] = current
                 self._seeds_by_key[seed_key].add(identity)
@@ -180,6 +192,7 @@ class Store:
     def get_seed(self, *, seed_key: str) -> tuple[SeedRecord, LeaseRecord] | None:
         with self._lock:
             self.gc_stale_seeds_locked()
+            self.gc_expired_leases_locked()
             seed_identities = self._seeds_by_key.get(seed_key, set())
             seeds = [self._seeds[sid] for sid in seed_identities if sid in self._seeds]
             selected = self._scheduler.choose_seed(seeds)
@@ -187,6 +200,7 @@ class Store:
                 return None
 
             selected.resource_used += 1
+            selected.last_used_ts = self._time()
             user_id = uuid.uuid4().hex
             lease = LeaseRecord(
                 user_id=user_id,
@@ -201,6 +215,7 @@ class Store:
     def put_seed(self, *, seed_ip: str, seed_port: int, seed_rank: int, user_id: str) -> bool:
         identity = self._seed_identity(seed_ip, seed_port, seed_rank)
         with self._lock:
+            self.gc_expired_leases_locked()
             lease = self._leases.get(user_id)
             if lease is None:
                 return False
@@ -213,6 +228,22 @@ class Store:
             del self._leases[user_id]
             return True
 
+    def remove_seed(self, *, seed_key: str, seed_ip: str, seed_port: int, seed_rank: int) -> bool:
+        """Remove one advertised seed and reclaim all of its leases."""
+        identity = self._seed_identity(seed_ip, seed_port, seed_rank)
+        with self._lock:
+            seed = self._seeds.get(identity)
+            if seed is None or seed.seed_key != seed_key:
+                return False
+            del self._seeds[identity]
+            self._seeds_by_key[seed.seed_key].discard(identity)
+            if not self._seeds_by_key[seed.seed_key]:
+                del self._seeds_by_key[seed.seed_key]
+            lease_ids = [user_id for user_id, lease in self._leases.items() if lease.seed_identity == identity]
+            for user_id in lease_ids:
+                del self._leases[user_id]
+            return True
+
     def gc_stale_seeds(self) -> int:
         with self._lock:
             return self.gc_stale_seeds_locked()
@@ -220,7 +251,7 @@ class Store:
     def gc_stale_seeds_locked(self) -> int:
         now = self._time()
         stale_ids = [
-            sid for sid, seed in self._seeds.items() if (now - seed.last_heartbeat_ts) > self._heartbeat_ttl_sec
+            sid for sid, seed in self._seeds.items() if (now - seed.last_heartbeat_ts) >= self._heartbeat_ttl_sec
         ]
         if not stale_ids:
             return 0
@@ -238,6 +269,28 @@ class Store:
 
         return len(stale_ids)
 
+    def gc_expired_leases(self) -> int:
+        with self._lock:
+            return self.gc_expired_leases_locked()
+
+    def gc_expired_leases_locked(self) -> int:
+        now = self._time()
+        expired_ids = [
+            user_id for user_id, lease in self._leases.items() if now - lease.leased_at >= self._lease_ttl_sec
+        ]
+        for user_id in expired_ids:
+            lease = self._leases.pop(user_id)
+            seed = self._seeds.get(lease.seed_identity)
+            if seed is not None:
+                seed.resource_used = max(0, seed.resource_used - lease.allocated_points)
+        return len(expired_ids)
+
+    def gc(self) -> tuple[int, int]:
+        with self._lock:
+            stale_count = self.gc_stale_seeds_locked()
+            lease_count = self.gc_expired_leases_locked()
+            return stale_count, lease_count
+
     def debug_snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
@@ -249,6 +302,7 @@ class Store:
                         "resource_total": s.resource_total,
                         "resource_used": s.resource_used,
                         "last_heartbeat_ts": s.last_heartbeat_ts,
+                        "last_used_ts": s.last_used_ts,
                     }
                     for sid, s in self._seeds.items()
                 },
@@ -284,8 +338,8 @@ class HeartbeatGc:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self._store.gc_stale_seeds()
-            time.sleep(self._sweep_interval_sec)
+            self._store.gc()
+            self._stop.wait(self._sweep_interval_sec)
 
 
 class HeaderError(ValueError):
@@ -312,6 +366,14 @@ class PutSeedHeaders:
     seed_port: int
     seed_rank: int
     user_id: str
+
+
+@dataclass(frozen=True)
+class RemoveSeedHeaders:
+    seed_key: str
+    seed_ip: str
+    seed_port: int
+    seed_rank: int
 
 
 def _required(headers: Mapping[str, str], key: str) -> str:
@@ -351,6 +413,15 @@ def parse_put_seed_headers(headers: Mapping[str, str]) -> PutSeedHeaders:
         seed_port=_parse_int(_required(headers, "SEED_PORT"), "SEED_PORT", minimum=1),
         seed_rank=_parse_int(_required(headers, "SEED_RANK"), "SEED_RANK", minimum=0),
         user_id=_required(headers, "USER_ID"),
+    )
+
+
+def parse_remove_seed_headers(headers: Mapping[str, str]) -> RemoveSeedHeaders:
+    return RemoveSeedHeaders(
+        seed_key=_required(headers, "SEED_KEY"),
+        seed_ip=_required(headers, "SEED_IP"),
+        seed_port=_parse_int(_required(headers, "SEED_PORT"), "SEED_PORT", minimum=1),
+        seed_rank=_parse_int(_required(headers, "SEED_RANK"), "SEED_RANK", minimum=0),
     )
 
 
@@ -412,6 +483,24 @@ def build_router(store: Store):
 
         return Response(status_code=status.HTTP_200_OK)
 
+    @router.post("/remove_seed")
+    def remove_seed(request: Request) -> Response:
+        try:
+            parsed = parse_remove_seed_headers(request.headers)
+        except HeaderError as err:
+            return Response(content=str(err), status_code=status.HTTP_400_BAD_REQUEST)
+
+        removed = store.remove_seed(
+            seed_key=parsed.seed_key,
+            seed_ip=parsed.seed_ip,
+            seed_port=parsed.seed_port,
+            seed_rank=parsed.seed_rank,
+        )
+        # Treat an already GC'd seed as successfully removed.
+        if not removed:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+        return Response(status_code=status.HTTP_200_OK)
+
     @router.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -427,6 +516,7 @@ def create_app(settings: Settings):
     scheduler = Scheduler(settings.alloc_policy)
     store = Store(
         heartbeat_ttl_sec=settings.heartbeat_ttl_sec,
+        lease_ttl_sec=settings.lease_ttl_sec,
         default_resource_points=settings.default_resource_points,
         scheduler=scheduler,
     )
@@ -472,6 +562,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="gc sweep interval in seconds (default: env RFORK_MOCK_HEARTBEAT_SWEEP_SEC or 5)",
     )
     parser.add_argument(
+        "--lease-ttl-sec",
+        type=int,
+        default=defaults.lease_ttl_sec,
+        help=f"independent lease ttl in seconds (default: env RFORK_MOCK_LEASE_TTL_SEC or {DEFAULT_LEASE_TTL_SEC})",
+    )
+    parser.add_argument(
         "--default-resource-points",
         type=int,
         default=defaults.default_resource_points,
@@ -494,6 +590,7 @@ def main() -> None:
         port=args.port,
         heartbeat_ttl_sec=args.heartbeat_ttl_sec,
         heartbeat_sweep_sec=args.heartbeat_sweep_sec,
+        lease_ttl_sec=args.lease_ttl_sec,
         default_resource_points=args.default_resource_points,
         alloc_policy=args.alloc_policy,
     )
