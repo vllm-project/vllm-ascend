@@ -21,6 +21,8 @@ import torch
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.ops.linear import AscendReplicatedLinear
+
 
 class AscendGateLinear(GateLinear):
     """Ascend GateLinear: FP32 router weight/compute on NPU.
@@ -39,7 +41,7 @@ class AscendGateLinear(GateLinear):
         force_fp32_compute: bool = False,  # noqa: ARG002
         prefix: str = "",
     ):
-        ReplicatedLinear.__init__(
+        AscendReplicatedLinear.__init__(
             self,
             input_size,
             output_size,
