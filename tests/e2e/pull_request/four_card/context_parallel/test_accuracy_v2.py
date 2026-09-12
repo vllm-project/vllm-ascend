@@ -199,6 +199,21 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
     },
 )
 
+DSV3_2_SFA_PCP_MTP_CASE = AccuracyCase(
+    name="dsv3_2_sfa_pcp_mtp_mrv2_full_decode_only",
+    model=DSV3_2_MODEL,
+    prompts=DSV3_2_PROMPTS,
+    expected_outputs=DSV3_2_SFA_PCP_GOLDENS,
+    max_tokens=5,
+    runner_kwargs={
+        **DSV3_2_SFA_PCP_CASE.runner_kwargs,
+        "speculative_config": {
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
+    },
+)
+
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
@@ -250,6 +265,32 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
 def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP+DCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="sfa_pcp,mtp",
+    parallel="TP,EP,PCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_mtp_model_runner_v2_graph_accuracy() -> None:
+    """Guard MRV2 SFA PCP MTP full-decode-only graph accuracy."""
+    _run_accuracy_case(DSV3_2_SFA_PCP_MTP_CASE)
 
 
 def _run_pcp_spec_decode(

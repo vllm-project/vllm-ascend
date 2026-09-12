@@ -420,6 +420,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # A replicated MTP draft may inherit a PCP target's non-trivial interleave
+    # value. With DCP disabled it does not change the draft KV-cache layout.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
