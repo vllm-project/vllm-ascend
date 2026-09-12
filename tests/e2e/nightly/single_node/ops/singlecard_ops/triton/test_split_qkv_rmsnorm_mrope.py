@@ -128,8 +128,8 @@ def naive_split_qkv_rmsnorm_mrope(
         q_reshaped[token_idx, :, :rotary_dim] = torch.cat([new_q1, new_q2], dim=1)
         k_reshaped[token_idx, :, :rotary_dim] = torch.cat([new_k1, new_k2], dim=1)
 
-    q_result = q_reshaped.view(num_tokens, -1)
-    k_result = k_reshaped.view(num_tokens, -1)
+    q_result = q_reshaped.reshape(num_tokens, n_q_head * head_size)
+    k_result = k_reshaped.reshape(num_tokens, n_kv_head * head_size)
 
     q = q_result.to(qkv.dtype)
     k = k_result.to(qkv.dtype)
@@ -199,8 +199,8 @@ def naive_split_qkv_rmsnorm_mrope_interleaved(
         q_reshaped[token_idx, :, :rotary_dim] = torch.cat([new_q1, new_q2], dim=1)
         k_reshaped[token_idx, :, :rotary_dim] = torch.cat([new_k1, new_k2], dim=1)
 
-    q_result = q_reshaped.view(num_tokens, -1)
-    k_result = k_reshaped.view(num_tokens, -1)
+    q_result = q_reshaped.reshape(num_tokens, n_q_head * head_size)
+    k_result = k_reshaped.reshape(num_tokens, n_kv_head * head_size)
 
     q = q_result.to(qkv.dtype)
     k = k_result.to(qkv.dtype)
@@ -315,6 +315,131 @@ def test_split_qkv_rmsnorm_mrope(
 
     torch.testing.assert_close(real_k.cpu(), golden_k.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
+    torch.testing.assert_close(real_v.cpu(), golden_v.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    if has_gate:
+        torch.testing.assert_close(real_gate.cpu(), golden_gate.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+INLINE_MODEL_CASES = [
+    pytest.param(
+        {
+            "num_q_heads": 8,
+            "num_kv_heads": 1,
+            "head_size": 128,
+            "mrope_section": [24, 20, 20],
+            "has_gate": False,
+            "rms_weight_offset": 0.0,
+            "positions_capacity": 4099,
+        },
+        id="qwen3_vl_235b_tp8",
+    ),
+    pytest.param(
+        {
+            "num_q_heads": 8,
+            "num_kv_heads": 1,
+            "head_size": 256,
+            "mrope_section": [11, 11, 10],
+            "has_gate": True,
+            "rms_weight_offset": 1.0,
+            "positions_capacity": 8241,
+        },
+        id="qwen3_5_35b_tp2",
+    ),
+]
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 2, 8, 32, 39, 40, 41, 80, 2060, 2062, 4096])
+@pytest.mark.parametrize("model_case", INLINE_MODEL_CASES)
+@pytest.mark.parametrize("is_interleaved", IS_INTERLEAVED)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
+    num_tokens: int,
+    model_case: dict,
+    is_interleaved: bool,
+    dtype: torch.dtype,
+):
+    """Cover both profiled models, strided positions, and the core boundary."""
+    device = "npu:0"
+    eps = 1e-6
+    torch.set_default_device(device)
+
+    num_q_heads = model_case["num_q_heads"]
+    num_kv_heads = model_case["num_kv_heads"]
+    head_size = model_case["head_size"]
+    mrope_section = model_case["mrope_section"]
+    has_gate = model_case["has_gate"]
+    rms_weight_offset = model_case["rms_weight_offset"]
+    positions_capacity = model_case["positions_capacity"]
+    rope_dim = 2 * sum(mrope_section)
+    q_size = num_q_heads * head_size
+    kv_size = num_kv_heads * head_size
+
+    qkv_width = q_size + 2 * kv_size + (q_size if has_gate else 0)
+    qkv = torch.randn(num_tokens, qkv_width, dtype=dtype, device=device)
+    q_weight = torch.randn(head_size, dtype=dtype, device=device) * 0.02
+    k_weight = torch.randn(head_size, dtype=dtype, device=device) * 0.02
+
+    positions_storage = torch.randint(0, 4096, (3, positions_capacity), dtype=torch.int64, device=device)
+    positions = positions_storage[:, 3 : 3 + num_tokens]
+    if num_tokens > 0:
+        assert not positions.is_contiguous()
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, rope_dim, 2, dtype=torch.float32, device=device) / rope_dim))
+    freqs = positions.to(torch.float32).unsqueeze(-1) * inv_freq
+    cos = freqs.cos()
+    sin = freqs.sin()
+
+    if has_gate:
+        q_gate_data = qkv[:, : q_size * 2].view(-1, num_q_heads, head_size * 2)
+        q_data, golden_gate = torch.chunk(q_gate_data, 2, dim=-1)
+        q_data = q_data.reshape(-1, q_size)
+        golden_gate = golden_gate.reshape(-1, q_size)
+        k_data = qkv[:, 2 * q_size : 2 * q_size + kv_size]
+        v_data = qkv[:, 2 * q_size + kv_size :]
+        qkv_for_ref = torch.cat([q_data, k_data, v_data], dim=-1)
+    else:
+        qkv_for_ref = qkv
+
+    reference = naive_split_qkv_rmsnorm_mrope_interleaved if is_interleaved else naive_split_qkv_rmsnorm_mrope
+    golden_q, golden_k, golden_v = reference(
+        qkv_for_ref.cpu(),
+        q_weight.cpu().to(torch.float32) + rms_weight_offset,
+        None,
+        k_weight.cpu().to(torch.float32) + rms_weight_offset,
+        None,
+        cos.cpu(),
+        sin.cpu(),
+        num_q_heads,
+        num_kv_heads,
+        head_size,
+        eps,
+        mrope_section,
+        rope_dim,
+    )
+
+    real_q, real_k, real_v, real_gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+        qkv=qkv,
+        q_weight=q_weight,
+        k_weight=k_weight,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        eps=eps,
+        mrope_section=mrope_section,
+        is_interleaved=is_interleaved,
+        rope_dim=rope_dim,
+        has_gate=has_gate,
+        positions=positions,
+        inv_freq=inv_freq,
+        rms_weight_offset=rms_weight_offset,
+    )
+
+    torch.testing.assert_close(real_q.cpu(), golden_q.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(real_k.cpu(), golden_k.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     torch.testing.assert_close(real_v.cpu(), golden_v.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
     if has_gate:
         torch.testing.assert_close(real_gate.cpu(), golden_gate.cpu(), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
