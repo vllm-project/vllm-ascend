@@ -470,7 +470,37 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: non-310P NZ mode skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 7b: 310P also skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType._310P),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 1
         with (

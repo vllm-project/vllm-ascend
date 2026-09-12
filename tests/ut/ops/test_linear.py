@@ -58,6 +58,10 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         type(self.layer.weight.data).dtype = mock_dtype
         mock_is_meta = mock.PropertyMock(return_value=False)
         type(self.layer.weight.data).is_meta = mock_is_meta
+        # maybe_trans_nz reads ndim/shape to screen out k=1/n=1 weights, so the
+        # mock must expose a realistic 2D (non-singleton) shape, not a MagicMock.
+        type(self.layer.weight.data).ndim = mock.PropertyMock(return_value=2)
+        type(self.layer.weight.data).shape = mock.PropertyMock(return_value=torch.Size([64, 32]))
         self.layer.precast_fp32_weight = False
         self.layer.skip_weight_nz_conversion = False
 
