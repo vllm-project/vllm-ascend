@@ -918,9 +918,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 
-    Covers the scheduler extension policies (enable_balance_scheduling / short_request_first_config /
-    dyntra_lb_config / recompute_scheduler_enable). Reads from the AscendConfig singleton
-    initialized from vllm_config; env fallbacks are handled inside AscendConfig.
+    Covers the scheduler extension policies (enable_balance_scheduling /
+    preflow_config / short_request_first_config / dyntra_lb_config /
+    recompute_scheduler_enable). Reads from the AscendConfig singleton initialized
+    from vllm_config; env fallbacks are handled inside AscendConfig.
     """
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
@@ -943,6 +944,42 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
 
     _validate_kv_load_failure_policy(vllm_config)
+
+    preflow_config = scheduler_extension_config.preflow_config
+    kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
+    if preflow_config.enabled and kv_role == "kv_producer":
+        if vllm_config.scheduler_config.policy != "fcfs":
+            raise ValueError(
+                "PREFLOW scheduling requires scheduler_config.policy='fcfs', "
+                f"but got {vllm_config.scheduler_config.policy!r}."
+            )
+        if scheduler_extension_config.enable_balance_scheduling:
+            raise ValueError(
+                "PREFLOW scheduling cannot be enabled with balance scheduling. Please disable one of them."
+            )
+        if scheduler_extension_config.short_request_first_config.enabled:
+            raise ValueError(
+                "PREFLOW scheduling cannot be enabled with short_request_first_config. Please disable one of them."
+            )
+        if scheduler_extension_config.recompute_scheduler_enable:
+            raise ValueError(
+                "PREFLOW scheduling cannot be enabled with recompute_scheduler_enable. Please disable one of them."
+            )
+        if scheduler_extension_config.profiling_chunk_config.enabled:
+            raise ValueError(
+                "PREFLOW scheduling cannot be enabled with profiling_chunk_config. Please disable one of them."
+            )
+        if scheduler_extension_config.batch_job_sched_config.enabled:
+            raise ValueError(
+                "PREFLOW scheduling cannot be enabled with batch_job_sched_config. Please disable one of them."
+            )
+    elif preflow_config.enabled:
+        logger.info(
+            "PREFLOW scheduler is enabled but not selected for kv_role=%r; "
+            "it is used only on PD-disaggregated prefill nodes "
+            "(kv_role='kv_producer').",
+            kv_role,
+        )
 
     # short_request_first_config requires FCFS, excludes batch-job and
     # kv-consumer paths, and only supports profiling-chunk synchronously.
@@ -1257,6 +1294,13 @@ def _setup_worker_and_scheduler(
 
     # Select specialized scheduler class
     scheduler_config = ascend_config.scheduler_config
+    kv_role = getattr(vllm_config.kv_transfer_config, "kv_role", None)
+    if scheduler_config.preflow_config.enabled and kv_role == "kv_producer":
+        scheduler_name = (
+            "AsyncPREFLOWScheduler" if vllm_config.scheduler_config.async_scheduling else "PREFLOWScheduler"
+        )
+        vllm_config.scheduler_config.scheduler_cls = f"vllm_ascend.core.preflow_scheduler.{scheduler_name}"
+
     if scheduler_config.dyntra_lb_config.enabled and not scheduler_config.recompute_scheduler_enable:
         vllm_config.scheduler_config.scheduler_cls = _get_dyntra_lb_scheduler_cls(
             async_scheduling=vllm_config.scheduler_config.async_scheduling
