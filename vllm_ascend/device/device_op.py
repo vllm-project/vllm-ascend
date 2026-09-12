@@ -1398,11 +1398,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return Ad
 
     @staticmethod
-    def npu_gemma_rms_norm(x, weight, variance_epsilon):
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
-        return x
-
-    @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
