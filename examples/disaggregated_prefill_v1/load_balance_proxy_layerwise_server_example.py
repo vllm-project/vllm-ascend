@@ -638,6 +638,38 @@ async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
 
 
+async def _handle_get_models(request: Request):
+    """Forward the /models request to a backend server.
+
+    Both prefiller and decoder servers serve the same model list,
+    so we pick the first available prefiller (fallback to decoder)
+    to answer the model listing request.
+    """
+    # Prefer prefiller, fallback to decoder when no prefiller is available.
+    # Both roles expose the same /v1/models endpoint in vLLM.
+    if proxy_state.prefillers:
+        backend = proxy_state.prefillers[0]
+    elif proxy_state.decoders:
+        backend = proxy_state.decoders[0]
+    else:
+        raise RuntimeError("No backend servers available")
+
+    auth = request.headers.get("Authorization")
+    headers = {"Authorization": auth} if auth else {}
+    try:
+        response = await backend.client.get("/models", headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        logger.error("Failed to fetch models from %s: %s", backend.url, e)
+        raise
+
+
+@app.get("/v1/models")
+async def handle_get_models(request: Request):
+    return await _handle_get_models(request)
+
+
 @app.get("/healthcheck")
 async def healthcheck():
     return {
