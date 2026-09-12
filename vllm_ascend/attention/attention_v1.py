@@ -617,6 +617,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
 
+        use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_WORKSPACE_KEY,
             lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
@@ -637,6 +638,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=sparse_mode,
                 **extra_args,
             ),
+            use_max_workspace,
         )
         register_task(
             torch_npu.npu_fused_infer_attention_score.out,
@@ -677,6 +679,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         output_view = output[: attn_metadata.num_actual_tokens]
+        use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = get_capture_resource(
             _FIA_V2_WORKSPACE_KEY,
             lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
@@ -697,6 +700,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 next_tokens=0,
                 learnable_sink=self.sinks,
             ),
+            use_max_workspace,
         )
         register_task(
             torch_npu.npu_fused_infer_attention_score_v2.out,

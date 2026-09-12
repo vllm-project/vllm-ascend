@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import torch
+import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.utils import weak_ref_tensors
@@ -50,7 +51,7 @@ class SharedSource:
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class GraphUpdateTask:
     operation: Callable[..., Any]
     kwargs: dict[str, Any]
@@ -63,7 +64,32 @@ class GraphUpdateTask:
         runtime_kwargs = {**self.kwargs, **params}
         return replace(self, kwargs=runtime_kwargs)
 
-    def apply(self, update_stream) -> None:
+    def apply(self, update_stream, workspace_buffer) -> None:
+        if self.operation == torch_npu._npu_paged_attention:
+            ws_key = (
+                self.kwargs["context_lens"].data_ptr(),
+                tuple(self.kwargs["context_lens"].shape),
+                self.kwargs["query"].shape,
+                self.kwargs["query"].dtype,
+                self.kwargs["key_cache"].shape,
+                self.kwargs["key_cache"].dtype,
+                self.kwargs["value_cache"].shape,
+                self.kwargs["value_cache"].dtype,
+                self.kwargs["block_table"].shape if self.kwargs["block_table"] is not None else None,
+                self.kwargs["block_table"].dtype if self.kwargs["block_table"] is not None else None,
+                self.kwargs["out"].shape,
+                self.kwargs["out"].dtype,
+                self.kwargs["num_kv_heads"],
+                self.kwargs["num_heads"],
+                self.kwargs["scale_value"],
+            )
+            if workspace_buffer.get(ws_key) is None:
+                workspace_kwargs = self.kwargs.copy()
+                workspace_kwargs.pop("workspace")
+                workspace = torch_npu._npu_paged_attention_get_workspace(**workspace_kwargs)
+                workspace_buffer[ws_key] = workspace
+            self.kwargs["workspace"] = workspace_buffer[ws_key]
+
         torch.npu.graph_task_update_begin(update_stream, self.handle)
         self.operation(**self.kwargs)
         torch.npu.graph_task_update_end(update_stream)
@@ -96,9 +122,20 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         key: Hashable,
         factory: Callable[[], Any],
+        use_max_workspace: bool = False,
     ) -> Any:
+        if use_max_workspace:
+            # Some models mix attention layer shapes under the same graph size.
+            # During capture, keep the largest required workspace for that size.
+            candidate_workspace = factory()
         if key not in self.capture_resources:
             self.capture_resources[key] = factory()
+        if (
+            use_max_workspace
+            and candidate_workspace.numel() * candidate_workspace.element_size()
+            > self.capture_resources[key].numel() * self.capture_resources[key].element_size()
+        ):
+            self.capture_resources[key] = candidate_workspace
         return self.capture_resources[key]
 
     def register_task(
@@ -144,8 +181,10 @@ class UpdatableGraph(torch.npu.NPUGraph):
     ) -> None:
         logger.debug_once("Updating host-side attention metadata with UpdatableGraph.")
         with torch.npu.stream(update_stream):
+            # This is specially designed for PA.
+            workspace_buffer = {}
             for task in resolved_tasks:
-                task.apply(update_stream)
+                task.apply(update_stream, workspace_buffer)
 
 
 def register_task(
@@ -163,8 +202,9 @@ def register_task(
 def get_capture_resource(
     key: Hashable,
     factory: Callable[[], Any],
+    use_max_workspace: bool = False,
 ) -> Any:
     graph = _ACTIVE_GRAPH.get()
     if graph is None:
         return factory()
-    return graph.get_capture_resource(key, factory)
+    return graph.get_capture_resource(key, factory, use_max_workspace)
