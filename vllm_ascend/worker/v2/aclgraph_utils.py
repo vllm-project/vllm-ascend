@@ -155,7 +155,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
-        attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        with set_current_vllm_config(self.vllm_config):
+            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
         if use_updatable_graph(attn_backend, num_tokens, self.vllm_config):

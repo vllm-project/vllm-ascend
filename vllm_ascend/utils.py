@@ -1005,7 +1005,7 @@ def weak_ref_tensors(tensors: Any) -> Any:
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensors(tensor) for tensor in tensors)
     if isinstance(tensors, dict):
-        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
+        return {key: (weak_ref_tensors(tensor) if key != "context_lens" else tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
         return IntermediateTensors(weak_ref_tensors(tensors.tensors))
     return tensors
@@ -1660,11 +1660,5 @@ def use_updatable_graph(
     vllm_config,
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-    from vllm_ascend.attention.utils import using_paged_attention
 
-    head_size = vllm_config.model_config.get_head_size()
-    return (
-        attn_backend is not None
-        and issubclass(attn_backend, AscendAttentionBackend)
-        and not using_paged_attention(num_tokens, vllm_config, head_size)
-    )
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

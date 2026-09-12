@@ -65,7 +65,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -619,7 +619,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def set_update_stream(self, update_stream):
-        self._runnable.set_update_stream(update_stream)  # type: ignore
+        update_stream_setter = getattr(self._runnable, "set_update_stream", None)
+        if callable(update_stream_setter):
+            update_stream_setter(update_stream)
 
     def _build_draft_attn_metadata_updates(self, multi_steps_attn_metadata):
         update_params = []
@@ -828,7 +830,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.token_indices_to_sample.fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
+            self.draft_attn_groups[0].backend, num_tokens, self.vllm_config
+        ):
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
             self._runnable.set_attn_backend(self.draft_attn_groups[0].backend)  # type: ignore
@@ -1163,7 +1167,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
+            self.draft_attn_groups[0].backend, num_tokens, self.vllm_config
+        ):
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
             self._runnable.set_attn_backend(self.draft_attn_groups[0].backend)  # type: ignore
