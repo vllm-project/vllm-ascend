@@ -82,6 +82,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
+| `enable_sfa_fia_shared_prefill`     | bool | `False` | Whether to enable experimental SFA shared-prefill grouped FIA. Experimental and currently limited to shared/index-cache consumer paths. |
 
 The details of each configuration option are as follows:
 
@@ -209,6 +210,20 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
 | `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
 | `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
+
+**enable_sfa_fia_shared_prefill**
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enable_sfa_fia_shared_prefill` | bool | `False` | Experimental grouped FIA fast path for the shared/index-cache SFA consumer. |
+
+- Enable with `--additional-config '{"enable_sfa_fia_shared_prefill": true}'`.
+- Admission is intentionally narrow: the packed full-visible rows must total exactly `2048` (the current TopK width) and at least one sparse-tail row must remain.
+- Current fixed geometry is local query heads `4`, KV heads `1`, `kv_lora_rank=512`, `qk_rope_head_dim=64`, block size `128`, and TopK width `2048`.
+- The path is eager-only, requires the base `AscendSFAImpl` shared/index-cache consumer, no speculative decoding, no DSA-CP, no sparse KV offload, no sparse SFA/LI C8, and no PP/DP/DCP/PCP token sharding. Ordinary tensor parallelism may still shard heads.
+- Supported prefill states are `PrefillNoCache` and `PrefillCacheHit`; an all-prefill `ChunkedPrefill` batch is also eligible only when every request contributes more than one query token and it contains no decode tokens.
+- The bound split-RoPE FIA runtime ABI currently accepts the explicitly supported torch-npu versions in source. Any unsupported state, runtime ABI, tensor/cache/block-table geometry, or profitability geometry fails closed to the existing sparse consumer.
+- This option does not enable generic FIA and does not imply a production performance claim.
 
 **scheduler_config.short_request_first_config**
 

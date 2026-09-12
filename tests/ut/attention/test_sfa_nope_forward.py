@@ -145,7 +145,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     indexer.head_dim = latent_dim
     indexer.enable_sparse_li_c8 = False
     config = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_mlapo=False)
+    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_sfa_fia_shared_prefill=False, enable_mlapo=False)
     with (
         patch.object(sparse_mla, "get_current_vllm_config", return_value=config),
         patch.object(sparse_mla, "get_ascend_config", return_value=ascend_config),
