@@ -22,6 +22,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
@@ -56,13 +57,24 @@ class AscendRejectionSampler(RejectionSampler):
             return logits
 
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
+        # Triton-Ascend penalty kernels are not supported on 310P. Keep the
+        # vLLM implementation for this device even when Triton is installed.
+        if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.TRITON_PENALTIES):
             logger.warning_once(
-                "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
+                "[sample/rejection_sampler] Triton unavailable or unsupported on "
+                "310P, falling back to vLLM default "
                 "penalty implementation in rejection sampler. Rejection sampling performance "
                 "may be degraded on NPU. "
             )
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+            assert sampling_metadata.prompt_token_ids is not None
+            repeated_sampling_metadata = replace(
+                sampling_metadata,
+                prompt_token_ids=sampling_metadata.prompt_token_ids[repeat_indices],
+                presence_penalties=sampling_metadata.presence_penalties[repeat_indices],
+                frequency_penalties=sampling_metadata.frequency_penalties[repeat_indices],
+                repetition_penalties=sampling_metadata.repetition_penalties[repeat_indices],
+            )
+            return Sampler.apply_penalties(logits, repeated_sampling_metadata, output_token_ids)
 
         assert sampling_metadata.prompt_token_ids is not None
         prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]

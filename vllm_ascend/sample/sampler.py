@@ -53,15 +53,18 @@ class AscendSampler(Sampler):
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
+        # Triton-Ascend penalty kernels are not supported on 310P. Keep the
+        # vLLM implementation for this device even when Triton is installed.
+        if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.TRITON_PENALTIES):
             logger.warning_once(
-                "[sample/sampler] Triton not available, falling back to vLLM default "
+                "[sample/sampler] Triton unavailable or unsupported on 310P, falling back to vLLM default "
                 "penalty implementation. Penalty performance may be degraded on NPU. "
             )
             return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
 
         if sampling_metadata.no_penalties:
             return logits
+
         assert sampling_metadata.prompt_token_ids is not None
         return apply_all_penalties(
             logits,

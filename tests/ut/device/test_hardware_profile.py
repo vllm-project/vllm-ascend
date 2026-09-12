@@ -41,6 +41,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TRITON_PENALTIES,
     }
 )
 
@@ -90,6 +91,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
             HardwareCapability.TRITON_BATCH_MEMCPY,
+            HardwareCapability.TRITON_PENALTIES,
             HardwareCapability.UNRESTRICTED_MLAPO,
         }
     ),
