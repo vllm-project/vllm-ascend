@@ -598,10 +598,13 @@ __aicore__ inline void LIQVector<LIQT>::ProcessLD()
                 params.repeatTimes = 1;
 
                 AscendC::MrgSortSrcList<float> srcList;
-                srcList.src1 = curValueIdxUb[0];
-                srcList.src2 = curValueIdxUb[BASE_TOPK_VALUE_IDX_SIZE];
-                srcList.src3 = curValueIdxUb[2 * BASE_TOPK_VALUE_IDX_SIZE];
-                srcList.src4 = curValueIdxUb[3 * BASE_TOPK_VALUE_IDX_SIZE];
+                // With exhausted suspension, equal values prefer the later
+                // source. Reverse the S2-ordered lists so ties consistently
+                // prefer the earlier absolute key positions.
+                srcList.src1 = curValueIdxUb[3 * BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src2 = curValueIdxUb[2 * BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src3 = curValueIdxUb[BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src4 = curValueIdxUb[0];
                 SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
                 MrgSort(tmpUb, srcList, params);
                 PipeBarrier<PIPE_V>();
@@ -638,10 +641,14 @@ __aicore__ inline void LIQVector<LIQT>::ProcessLD()
             params.repeatTimes = 1;
 
             AscendC::MrgSortSrcList<float> srcList;
-            srcList.src1 = curValueIdxUb[0];
-            srcList.src2 = curValueIdxUb[BASE_TOPK_VALUE_IDX_SIZE];
-            srcList.src3 = curValueIdxUb[2 * BASE_TOPK_VALUE_IDX_SIZE];
-            srcList.src4 = curValueIdxUb[3 * BASE_TOPK_VALUE_IDX_SIZE];
+            if (acc_list_num == 2) {
+                srcList.src1 = curValueIdxUb[BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src2 = curValueIdxUb[0];
+            } else {
+                srcList.src1 = curValueIdxUb[2 * BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src2 = curValueIdxUb[BASE_TOPK_VALUE_IDX_SIZE];
+                srcList.src3 = curValueIdxUb[0];
+            }
             SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
