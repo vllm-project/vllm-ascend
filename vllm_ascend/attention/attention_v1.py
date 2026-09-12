@@ -551,7 +551,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._decode_sink_actual_seq_qlen: torch.Tensor | None = None
         if self.sinks is not None:
             max_decode_reqs = self.vllm_config.scheduler_config.max_num_seqs + 1
-            self._decode_sink_actual_seq_qlen = torch.arange(1, max_decode_reqs + 1, dtype=torch.int64)
+            self._decode_sink_actual_seq_qlen = torch.arange(
+                1, max_decode_reqs + 1, dtype=torch.int64, device="cpu"
+            )
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
