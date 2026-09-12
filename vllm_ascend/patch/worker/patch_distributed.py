@@ -130,6 +130,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_cpu_custom_send_recv = False
         self.group_name = group_name
         self.group_ranks = group_ranks
+        self.dead_dp_ranks: set[int] = set()
 
         try:
             self._init_device_groups(create_cpu_group=True)
