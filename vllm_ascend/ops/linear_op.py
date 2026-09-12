@@ -41,10 +41,12 @@ from types import SimpleNamespace
 import regex as re
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_group,
@@ -147,6 +149,43 @@ class CustomReplicatedOp(CustomLinearOp):
         output_bias = self.bias if self.skip_bias_add else None
 
         return output, output_bias
+
+
+class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
+    """Return the token shard of Kimi's BF16 TP output projection."""
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        if layer.custom_op is not None:
+            raise ValueError("Kimi O-projection MM ReduceScatter requires the original TP group.")
+        if not isinstance(layer.quant_method, UnquantizedLinearMethod) or layer.weight.dtype != torch.bfloat16:
+            raise ValueError("Kimi O-projection MM ReduceScatter requires unquantized BF16 O-projection weights.")
+        if layer.bias is not None:
+            raise ValueError("Kimi O-projection MM ReduceScatter requires bias-free O projections.")
+        self.update_attrs()
+        device_group = self.comm_group.device_group
+        backend = device_group._get_backend(torch.device("npu"))
+        self.hcom = backend.get_hccl_comm_name(self.tp_rank)
+        self.world_size = self.tp_size
+
+    def apply_impl(self, input_: torch.Tensor) -> tuple[torch.Tensor, None]:
+        input_parallel = self.get_input_parallel(input_).contiguous()
+        # sp_reduce_scatter pads the GEMM result. With bias-free O projections,
+        # padding the input before the fused GEMM gives the same zero rows.
+        sp_pad = (-input_parallel.shape[0]) % self.world_size
+        if sp_pad:
+            input_parallel = torch.nn.functional.pad(input_parallel, (0, 0, 0, sp_pad))
+        # The V2 interface supports BF16 inference without quantization scales.
+        # Keep TP communication on AI CPU, independently of the MoE EP engine.
+        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+            input_parallel,
+            self.layer.weight.t(),
+            self.hcom,
+            self.world_size,
+            reduce_op="sum",
+            comm_mode="ai_cpu",
+        )
+        return output, None
 
 
 class MLPColumnParallelOp(CustomColumnParallelOp):

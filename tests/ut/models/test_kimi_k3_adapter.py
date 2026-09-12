@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -173,15 +174,20 @@ def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
     torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
 
 
-def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
+@pytest.mark.parametrize("fuse_o_proj", [False, True])
+def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fuse_o_proj):
     class IdentityAttention(nn.Module):
         def forward(self, *, hidden_states, positions):
             del positions
+            if fuse_o_proj:
+                collective_shapes.append(("mm_reduce_scatter", hidden_states.shape))
+                return hidden_states.chunk(2, dim=0)[0]
             return hidden_states
 
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
+    layer.fuse_o_proj_mm_reduce_scatter = fuse_o_proj
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
     layer.input_layernorm = nn.Identity()
@@ -221,10 +227,69 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
-        ("reduce_scatter", torch.Size([3, 2])),
+        ("mm_reduce_scatter" if fuse_o_proj else "reduce_scatter", torch.Size([3, 2])),
     ]
     assert output.shape == torch.Size([2, 2])
+    torch.testing.assert_close(output, hidden_states * 4)
     assert returned_residual.shape == torch.Size([2, 1, 2])
+
+
+@pytest.mark.parametrize("is_mla", [False, True])
+def test_kimi_fused_o_proj_preserves_projection_and_sets_mla_output_shard(monkeypatch, is_mla):
+    layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_sequence_parallel = True
+    layer.use_attn_residuals = True
+    if is_mla:
+        attention = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+        nn.Module.__init__(attention)
+        attention.mla_attn = nn.Module()
+        attention.mla_attn.output_token_shard_size = 1
+    else:
+        attention = nn.Module()
+    attention.o_proj = nn.Linear(256, 8, bias=False, dtype=torch.bfloat16)
+    attention.o_proj.tp_size = 8
+    layer.self_attn = attention
+    original_weight = attention.o_proj.weight
+    original_keys = list(layer.state_dict())
+    fused_op = object()
+    monkeypatch.setattr(kimi_k3, "KimiOProjMMReduceScatterOp", lambda _layer: fused_op)
+    monkeypatch.setattr(kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=1))
+
+    layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None))
+
+    assert attention.o_proj.custom_op is fused_op
+    assert attention.o_proj.weight is original_weight
+    assert list(layer.state_dict()) == original_keys
+    if is_mla:
+        assert attention.mla_attn.output_token_shard_size == 8
+
+
+@pytest.mark.parametrize(
+    "sequence_parallel,attn_residuals,hardware_supported,nz_mode,lora_config,error",
+    [
+        (False, True, True, 1, None, "sequence parallel"),
+        (True, False, True, 1, None, "attention residuals"),
+        (True, True, False, 1, None, "Ascend A5"),
+        (True, True, True, 2, None, "ND weights"),
+        (True, True, True, 1, object(), "LoRA"),
+    ],
+)
+def test_kimi_fused_o_proj_rejects_unsupported_configuration(
+    monkeypatch, sequence_parallel, attn_residuals, hardware_supported, nz_mode, lora_config, error
+):
+    layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_sequence_parallel = sequence_parallel
+    layer.use_attn_residuals = attn_residuals
+    monkeypatch.setattr(
+        kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: hardware_supported)
+    )
+    monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=nz_mode))
+
+    with pytest.raises(ValueError, match=error):
+        layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=lora_config))
 
 
 def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
