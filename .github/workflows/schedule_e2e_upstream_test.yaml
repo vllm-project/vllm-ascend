@@ -20,6 +20,11 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -61,7 +66,7 @@ jobs:
           target_ids: '["a2-arm64-ubuntu"]'
 
     e2e-upstream_singlecard:
-        runs-on: linux-aarch64-a2b3-1
+        runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -329,7 +334,7 @@ jobs:
                 --continue-on-error
               
     e2e-upstream_online:
-        runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        runs-on: linux-aarch64-a2b3-0
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
