@@ -215,7 +215,8 @@ def test_fused_bfg_projection_preserves_staged_outputs():
     torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
 
 
-def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
+@pytest.mark.parametrize("output_tokens", [2, 4])
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(output_tokens):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
@@ -227,7 +228,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     beta = torch.rand(1, 4, 2, dtype=torch.float32)
     raw_gate = torch.randn(1, 4, 2, 3)
     output_gate = torch.randn(4, 2, 3)
-    projected = torch.randn(4, 6)
+    projected = torch.randn(output_tokens, 6)
     attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate))
     attention._forward = MagicMock()
     attention.o_proj = _RecordingLinear(projected)
@@ -237,6 +238,26 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     assert actual is projected
     assert attention._forward.call_args.kwargs["beta"] is beta
     assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
+
+
+def test_unquantized_kda_forward_accepts_fused_o_proj_token_shard():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.uses_mixed_projection = False
+    attention.local_num_heads = 2
+    attention.head_dim = 3
+    attention.local_projection_size = 6
+    attention.in_proj_padding = 0
+    attention.in_proj_qkvgfab = _RecordingLinear(torch.randn(4, 29))
+    attention.f_b_proj = _RecordingLinear(torch.randn(4, 6))
+    attention._forward = MagicMock()
+    projected = torch.randn(2, 6)
+    attention.o_proj = _RecordingLinear(projected)
+
+    actual = attention.forward(torch.randn(4, 6), torch.arange(4))
+
+    assert actual is projected
+    assert attention._forward.call_args.kwargs["core_attn_out"].shape == (1, 4, 2, 3)
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():

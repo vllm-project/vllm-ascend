@@ -66,6 +66,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
+| `enable_kimi_o_proj_mm_reduce_scatter` | bool | `False` | Fuse Kimi K3 BF16 O-projection GEMM and TP ReduceScatter on A5. Requires sequence parallel attention residuals, the original TP group, ND O weights (`weight_nz_mode` 0 or 1), and no LoRA. Uses `npu_quant_mm_reduce_scatter` without quantization scales and with `comm_mode="ai_cpu"`. See [Kimi O-projection fusion](#kimi-o-projection-fusion). |
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
@@ -322,4 +323,55 @@ An example of additional configuration is as follows:
     },
     "refresh": False
 }
+```
+
+## Kimi O-projection fusion
+
+Add `"enable_kimi_o_proj_mm_reduce_scatter": true` to the existing
+`--additional-config` JSON to enable the fused path. The default is `false`.
+The option applies to the main Kimi K3 model's KDA and MLA O projections;
+DSpark draft projections retain their existing communication.
+
+The supported Kimi path uses attention residuals and sequence parallelism
+(`TP > 1`, `PP = 1`, and expert parallelism enabled). O weights must be
+unquantized BF16, even when the other model weights use MXFP quantization.
+Fine-grained O-projection TP, BF16 NZ weights (`weight_nz_mode=2`), and LoRA
+are not supported by this path.
+
+Enabling the option selects fusion only for supported layers. Unsupported
+configurations, including pipeline parallelism (`PP > 1`), retain the original
+O projection and communication path instead of failing model initialization.
+Sequence-parallel layers keep their separate ReduceScatter; layers without
+sequence parallelism retain their original full-token output layout. Existing
+  custom projection operators, quantized or non-BF16 O weights, and projections
+with bias also keep their original implementation.
+
+Selection also requires the V2 Python interface, a TP size in
+`{2, 4, 8, 16, 32, 64}`, and nonempty 2D weights with local `K` in
+`[256, 65535)`. At execution, unsupported activation dtype/shape, weight
+strides, empty batches, or padded communication payloads at or above 4 GiB
+use the original GEMM followed by `sp_reduce_scatter`. This fallback still
+returns the token shard expected by the MLA buffer and decoder. Branches
+depend on tensor metadata shared by the TP ranks, not tensor values or
+rank-local resource availability. The payload ceiling is an upper bound;
+kernel support below it still depends on the installed CANN version and shape.
+
+Each rank keeps its existing TP weight shard. Token padding moves before the
+fused GEMM, the MLA output buffer holds `ceil(num_tokens / TP)` rows, and the
+decoder skips its separate ReduceScatter. Output gates, KDA normalization,
+and residual additions retain their existing order. TP communication uses
+AI CPU; this option does not select the MoE EP communication engine.
+
+The installed `torch_npu.npu_quant_mm_reduce_scatter` must support BF16 inputs
+and the `comm_mode` argument. Kernel errors are propagated. Compare accuracy,
+prefill latency, and decode latency against the default path before enabling
+it for a deployment.
+
+The following test checks rank-distinct BF16 results for padded and unpadded
+batches in eager mode and NPU graph replay, then prints baseline/fused latency
+for each shape. Run it on reserved A5 devices before model-level validation:
+
+```bash
+torchrun --standalone --nproc-per-node=8 -m pytest --noconftest -s \
+  tests/e2e/nightly/single_node/ops/multicard_ops_a5/test_kimi_o_proj_mm_reduce_scatter.py
 ```
