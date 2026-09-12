@@ -545,9 +545,7 @@ def _parse_diff_base_lines(
             # base_no is the next unprocessed base line = the line below the insertion
             a = base_no - 1
             indent = min(((len(t) - len(t.lstrip())) for t in group_add if t.strip()), default=0)
-            introduces_def = any(
-                t.strip().startswith("@") or _DEF_RE.match(t.strip()) for t in group_add if t.strip()
-            )
+            introduces_def = any(t.strip().startswith("@") or _DEF_RE.match(t.strip()) for t in group_add if t.strip())
             adds_all_comment = all(t.strip().startswith("#") for t in group_add if t.strip())
             pending[current].append((a, a + 1, "insert", indent, introduces_def, adds_all_comment, hunk_base_end))
 
@@ -657,11 +655,7 @@ def _looks_like_code(texts: list) -> bool:
     except (SyntaxError, ValueError):
         return False
     return any(
-        not (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and isinstance(stmt.value.value, str)
-        )
+        not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
         for stmt in tree.body
     )
 
@@ -1679,7 +1673,9 @@ def main():
                     print(f"  {old_path} -> {new_path}")
 
             if deleted_files:
-                print(f"\n=== Detected {len(deleted_files)} Product Code Deleted File(s) - Using File-Level Matching ===")
+                print(
+                    f"\n=== Detected {len(deleted_files)} Product Code Deleted File(s) - Using File-Level Matching ==="
+                )
                 for path in deleted_files:
                     print(f"  {path}")
 
