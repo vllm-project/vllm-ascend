@@ -2134,7 +2134,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             block_size,
             metadata,
@@ -2357,7 +2360,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2433,7 +2439,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2519,7 +2528,10 @@ class TestAscendMLAImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
             ),
             BS,
             attn_metadata,
@@ -2571,7 +2583,10 @@ class TestAscendMLAImpl(TestBase):
         dequant_scale_q_nope = torch.randn(B, N)  # shape is [B, num_heads]
         result = self.impl._forward_decode(
             DecodeMLAPreprocessResult(
-                q_nope, q_pe, k_nope, k_pe,
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
                 dequant_scale_q_nope=dequant_scale_q_nope,
             ),
             BS,
@@ -2583,6 +2598,4 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], HD)
         fia_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
         self.assertEqual(fia_kwargs["query_quant_mode"], 3)
-        torch.testing.assert_close(
-            fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope
-        )
+        torch.testing.assert_close(fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope)

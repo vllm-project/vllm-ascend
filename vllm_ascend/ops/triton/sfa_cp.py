@@ -378,9 +378,7 @@ def sfa_dcp_a2a_fused_combine(
         dist.all_to_all_single(recv, send, group=group)
     else:
         recv = send
-    return fused_sfa_dcp_lse_combine(
-        recv, sfa_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse
-    )
+    return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim=scatter_dim, return_lse=return_lse)
 
 
 def sfa_dcp_a2a_fused(

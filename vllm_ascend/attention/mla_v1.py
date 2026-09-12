@@ -1513,6 +1513,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_pe = decode_preprocess_res.q_pe
         k_nope = decode_preprocess_res.k_nope
         k_pe = decode_preprocess_res.k_pe
+        assert q_nope is not None and q_pe is not None
+        assert k_nope is not None and k_pe is not None
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
@@ -1572,6 +1574,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
@@ -1581,12 +1584,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
                 attn_output_shape = (num_tokens, self.num_heads, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1).contiguous()
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
                 attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
         else:
@@ -1986,9 +1991,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
-            output_decode = self._forward_decode(
-                decode_preprocess_res, kv_cache[0].shape[1], attn_metadata
-            )
+            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
 
