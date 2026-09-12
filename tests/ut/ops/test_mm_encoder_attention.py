@@ -245,4 +245,3 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
             layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
 
         self.assertEqual(captured_lengths[-1], [7, 14, 21])
-

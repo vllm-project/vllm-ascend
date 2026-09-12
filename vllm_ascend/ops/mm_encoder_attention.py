@@ -420,4 +420,3 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             bsz=bsz,
             q_len=q_len,
         )
-

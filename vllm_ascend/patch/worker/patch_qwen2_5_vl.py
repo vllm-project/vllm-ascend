@@ -101,4 +101,3 @@ def qwen2_5_vision_attention_forward(
 
 
 Qwen2_5_VisionAttention.forward = qwen2_5_vision_attention_forward  # type: ignore[method-assign]
-
