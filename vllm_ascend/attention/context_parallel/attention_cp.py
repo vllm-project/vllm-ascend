@@ -124,11 +124,11 @@ class AscendAttentionDCPMetadataBuilder(
         prefill_metadata = None
         if num_prefills > 0:
             # Parallel drafting keeps seq_lens on the accelerator, while
-            # query_lens is derived from query_start_loc_cpu. Copy query_lens
+            # query_lens_cpu is derived from query_start_loc_cpu. Copy it
             # asynchronously and keep the metadata arithmetic on device.
-            num_prefill_tokens = int(query_lens[num_decodes:].sum().item())
-            query_lens = query_lens.to(seq_lens.device, non_blocking=True)
-            prefill_query_lens = query_lens[num_decodes:]
+            query_lens_cpu = query_lens
+            num_prefill_tokens = int(query_lens_cpu[num_decodes:].sum().item())
+            prefill_query_lens = query_lens_cpu[num_decodes:].to(seq_lens.device, non_blocking=True)
             chunked_context_metadata = None
             local_context_lens_allranks_cpu = self._get_dcp_context_lens(
                 common_attn_metadata,
@@ -401,7 +401,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         return self._merge_dcp_attention_output(
             attn_out,
             attn_lse,
-            self.head_size,
         )
 
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(

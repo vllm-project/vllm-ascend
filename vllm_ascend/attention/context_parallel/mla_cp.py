@@ -71,7 +71,9 @@ class AscendMlaDCPMetadataBuilder(
         metadata_cls: type[AscendMLAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, True)
+        # Fixed-width speculative verification does not imply support for
+        # arbitrary ragged decode queries. Preserve the caller capability.
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -444,7 +446,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         attn_output = self._merge_dcp_attention_output(
             attn_output,
             softmax_lse,
-            self.kv_lora_rank,
         )
         return self._v_up_proj_batch_major(attn_output)
 

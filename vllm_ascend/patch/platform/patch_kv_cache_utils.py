@@ -88,6 +88,8 @@ def _ascend_resolve_kv_cache_block_sizes(
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
 
+    # DCP=1 also occurs on either side of an asymmetric PD deployment.
+    # Its aligned Mamba/attention groups still need a compatible hash unit.
     resolved = _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
     mamba_specs = [g.kv_cache_spec for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
     group_block_sizes = [g.kv_cache_spec.block_size for g in groups]

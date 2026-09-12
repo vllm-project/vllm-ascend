@@ -81,6 +81,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 config=config,
                 prefix=maybe_prefix(model_prefix, "confidence_head"),
             )
+        # The drafter receives its own ModelConfig, but FC rotation and
+        # fallback embeddings/lm_head must use the target model's basis.
         target_model_config = vllm_config.speculative_config.target_model_config or vllm_config.model_config
         target_vllm_config = replace(vllm_config, model_config=target_model_config)
         self.rotation_path = get_rotation_path(target_vllm_config) if vllm_config.quant_config is not None else None

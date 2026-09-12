@@ -123,9 +123,7 @@ class DCPImplMixin:
         self,
         attn_output: torch.Tensor,
         softmax_lse: torch.Tensor,
-        head_size: int,
     ) -> torch.Tensor:
-        del head_size
         return torch.ops.vllm.sfa_dcp_a2a_fused(
             attn_output.to(torch.float32),
             softmax_lse.to(torch.float32),
