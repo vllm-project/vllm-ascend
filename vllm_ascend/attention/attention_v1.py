@@ -925,6 +925,38 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
 
+    def _resolve_fia_graph_workspace(self, graph_params, num_tokens: int, workspace_fn, **workspace_kwargs):
+        """Resolve the ACL-graph workspace for a FIA call.
+
+        Shared by ``full_graph_fia`` and ``full_graph_fia_v2``: when
+        ``use_max_workspace`` is enabled, keep the largest required
+        workspace across layer variants sharing the same graph size
+        (some models mix attention layer shapes under the same graph
+        size); otherwise compute the workspace lazily on first capture
+        and cache it in ``graph_params.workspaces``.
+        """
+        use_max_workspace = self._use_max_workspace_for_fia_graph
+        workspace = graph_params.workspaces.get(num_tokens)
+        should_update_workspace_cache = False
+        if use_max_workspace:
+            candidate_workspace = workspace_fn(**workspace_kwargs)
+            workspace = cache_graph_workspace(
+                graph_params,
+                num_tokens,
+                candidate_workspace,
+                use_max_workspace=use_max_workspace,
+            )
+            should_update_workspace_cache = True
+        elif workspace is None:
+            workspace = workspace_fn(**workspace_kwargs)
+            should_update_workspace_cache = True
+        if should_update_workspace_cache:
+            if _EXTRA_CTX.is_draft_model:
+                update_draft_graph_params_workspaces(num_tokens, workspace)
+            else:
+                update_graph_params_workspaces(num_tokens, workspace)
+        return workspace
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -973,62 +1005,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
-        use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
-        should_update_workspace_cache = False
-        if use_max_workspace:
-            # Some models mix attention layer shapes under the same graph size.
-            # During capture, keep the largest required workspace for that size.
-            candidate_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_mask,
-                block_table=block_table,
-                input_layout=input_layout,
-                block_size=block_size,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                scale=self.scale,
-                **extra_args,
-            )
-            workspace = cache_graph_workspace(
-                graph_params,
-                num_tokens,
-                candidate_workspace,
-                use_max_workspace=use_max_workspace,
-            )
-            should_update_workspace_cache = True
-        elif workspace is None:
-            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_mask,
-                block_table=block_table,
-                input_layout=input_layout,
-                block_size=block_size,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                scale=self.scale,
-                **extra_args,
-            )
-            should_update_workspace_cache = True
-        if should_update_workspace_cache:
-            if _EXTRA_CTX.is_draft_model:
-                update_draft_graph_params_workspaces(num_tokens, workspace)
-            else:
-                update_graph_params_workspaces(num_tokens, workspace)
+        workspace = self._resolve_fia_graph_workspace(
+            graph_params,
+            num_tokens,
+            torch_npu._npu_fused_infer_attention_score_get_max_workspace,
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=attn_mask,
+            block_table=block_table,
+            input_layout=input_layout,
+            block_size=block_size,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            sparse_mode=sparse_mode,
+            pre_tokens=pre_tokens,
+            next_tokens=next_tokens,
+            scale=self.scale,
+            **extra_args,
+        )
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -1115,62 +1112,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
-        should_update_workspace_cache = False
-        if use_max_workspace:
-            # See full_graph_fia: this path needs the max workspace across layer
-            # variants sharing the same graph size.
-            candidate_workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=block_table,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths_q,
-                actual_seq_kvlen=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                softmax_scale=self.scale,
-                num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
-                learnable_sink=self.sinks,
-            )
-            workspace = cache_graph_workspace(
-                graph_params,
-                num_tokens,
-                candidate_workspace,
-                use_max_workspace=use_max_workspace,
-            )
-            should_update_workspace_cache = True
-        elif workspace is None:
-            workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=block_table,
-                input_layout="TND",
-                block_size=block_size,
-                actual_seq_qlen=actual_seq_lengths_q,
-                actual_seq_kvlen=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                softmax_scale=self.scale,
-                num_query_heads=self.num_heads,
-                sparse_mode=4 if self.sliding_window is not None else 3,
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
-                learnable_sink=self.sinks,
-            )
-            should_update_workspace_cache = True
-        if should_update_workspace_cache:
-            if _EXTRA_CTX.is_draft_model:
-                update_draft_graph_params_workspaces(num_tokens, workspace)
-            else:
-                update_graph_params_workspaces(num_tokens, workspace)
+        workspace = self._resolve_fia_graph_workspace(
+            graph_params,
+            num_tokens,
+            torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace,
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=attn_metadata.attn_mask,
+            block_table=block_table,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_qlen=actual_seq_lengths_q,
+            actual_seq_kvlen=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            softmax_scale=self.scale,
+            num_query_heads=self.num_heads,
+            sparse_mode=4 if self.sliding_window is not None else 3,
+            pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+            next_tokens=0,
+            learnable_sink=self.sinks,
+        )
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
