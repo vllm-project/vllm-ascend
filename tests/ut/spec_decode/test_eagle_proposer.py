@@ -458,14 +458,26 @@ class TestEagleProposerLoadModel(TestBase):
         mock_model.model.embed_tokens = MagicMock()
         mock_model.model.embed_tokens.weight = weight
 
-        mock_get_model.return_value = MagicMock()
-        mock_get_model.return_value.model.embed_tokens.weight = weight
+        draft_model = MagicMock()
+        draft_model.model.embed_tokens.weight = weight
+        mock_get_model.return_value = draft_model
+        if not vllm_version_is("0.28.0"):
+            self.proposer.supports_mm_inputs = True
+            draft_model.has_own_embed_tokens = False
+
+            def embed_after_sharing(input_ids, multimodal_embeddings=None):
+                self.assertIs(draft_model.model.embed_tokens, mock_model.model.embed_tokens)
+                return torch.zeros((*input_ids.shape, 1))
+
+            draft_model.embed_input_ids.side_effect = embed_after_sharing
 
         with set_current_vllm_config(self.vllm_config):
             self.proposer.load_model(mock_model)
             mock_get_model.assert_called_once()
             self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
             self.assertIs(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
+            if not vllm_version_is("0.28.0"):
+                draft_model.embed_input_ids.assert_called_once()
 
     @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
