@@ -3085,7 +3085,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kPrivateUse1,
              &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu);
     ops.def(
-        "npu_quant_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, "
+        "npu_quant_lightning_indexer_v3(Tensor query, Tensor key, Tensor weights, "
         "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
         "Tensor? candidate_topk_index=None, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, "
         "Tensor? seqused_q=None, Tensor? seqused_k=None, Tensor? cmp_residual_k=None, "
@@ -3094,9 +3094,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "int cmp_ratio=1, int candidate_mode=3, int candidate_topk_blocks=2048, "
         "int candidate_block_size=8) -> (Tensor, Tensor, Tensor)"
     );
-    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1,
+    ops.impl("npu_quant_lightning_indexer_v3", torch::kPrivateUse1,
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);
-    ops.impl("npu_quant_lightning_indexer_v2", torch::kMeta,
+    ops.impl("npu_quant_lightning_indexer_v3", torch::kMeta,
              &vllm_ascend::qli_v2::QuantLightningIndexerCandidate);
 
     ops.def(
@@ -3296,6 +3296,26 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
     ops.impl("npu_vllm_quant_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_npu);
+
+    ops.def(
+        "npu_quant_lightning_indexer_v2("
+            "Tensor query, Tensor key, Tensor weights, "
+            "Tensor query_dequant_scale, Tensor key_dequant_scale, "
+            "int topk, int quant_mode, *, "
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_k=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_k=None, "
+            "Tensor? cmp_residual_k=None, "
+            "Tensor? block_table=None, "
+            "Tensor? output_idx_offset=None, "
+            "Tensor? metadata=None, "
+            "int max_seqlen_q=-1, "
+            "str layout_q=\"TND\", str layout_k=\"PA_BBND\", "
+            "int mask_mode=3, int cmp_ratio=4, int return_value=0"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
+        );
+    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
 
     ops.def(
         "npu_sparse_attn_sharedkv("

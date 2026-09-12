@@ -53,7 +53,7 @@ def test_candidate_consumer_preserves_each_query_mask(ratio, query_count):
         device=str(query.device),
         **common,
     )
-    selected, _, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+    selected, _, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         query,
         key,
         weights,
