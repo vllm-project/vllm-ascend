@@ -227,10 +227,6 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="Temporary v0.28.0 SFA PCP accuracy skip; root cause is under separate investigation (PR #16009).",
-)
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="sfa_pcp",
