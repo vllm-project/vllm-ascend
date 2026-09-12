@@ -11,10 +11,50 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as _sample_for_version
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
+
+
+def gumbel_sample(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    *,
+    is_drafting: bool = False,
+) -> torch.Tensor:
+    """Run the existing target-sampling assertions through each lane's API."""
+    if vllm_version_is("0.28.0"):
+        return _sample_for_version(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature=apply_temperature,
+            logits_cache=logits_cache,
+            logits_cache_col=logits_cache_col,
+            is_drafting=is_drafting,
+        )
+    return _sample_for_version(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
+        apply_temperature=apply_temperature,
+        is_drafting=is_drafting,
+        logits_cache=logits_cache,
+        logits_cache_col=logits_cache_col,
+    )
 
 
 def _ref_apply_temperature(
@@ -590,7 +630,8 @@ class TestGumbelSampling:
 
     def test_dspark_uses_ascend_gumbel(self):
         """Exercise the inherited DSpark entry point with real NPU sampling."""
-        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is gumbel_sample
+        # Check the installed implementation, not this test module's API wrapper.
+        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is _sample_for_version
         speculator = DSparkSpeculator.__new__(DSparkSpeculator)
         speculator._d2t_scatter_index = None
         speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)

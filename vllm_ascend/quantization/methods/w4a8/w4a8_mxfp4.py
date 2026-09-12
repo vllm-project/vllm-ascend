@@ -204,35 +204,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         assert layer is not None
-        if mlp_compute_input.activation == MoEActivation.SITU:
-            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
-            # activation with MXFP output quantization (Kimi K3 SITU activation).
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=[layer.w13_weight],
-                scale=None,
-                antiquant_scale=[layer.w13_weight_scale],
-                scale_dtype=None,
-                per_token_scale=[pertoken_scale],
-                per_token_scale_dtype=torch_npu.float8_e8m0fnu,
-                split_item=2,
-                group_type=0,
-                group_list=mlp_compute_input.group_list,
-                group_list_type=mlp_compute_input.group_list_type,
-                x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch_npu.float4_e2m1fn_x2,
-                output_dtype=torch.bfloat16,
-            )[0]
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
-                x=hidden_states,
-                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                activate_left=True,
-                dst_type=SITU_MX_DST_TYPE_E4M3FN,
-            )
-            dispose_tensor(mlp_compute_input.hidden_states)
-            return hidden_states, maybe_normalize_mxfp_scale_layout(swiglu_out_scale)
-
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=[layer.w13_weight],
@@ -243,16 +214,39 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             per_token_scale_dtype=torch_npu.float8_e8m0fnu,
             split_item=2,
             group_type=0,
-            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
             x_dtype=torch.float8_e4m3fn,
             weight_dtype=torch_npu.float4_e2m1fn_x2,
             output_dtype=torch.bfloat16,
         )[0]
         dispose_tensor(mlp_compute_input.hidden_states)
+        if mlp_compute_input.activation == MoEActivation.SITU:
+            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
+            # activation with MXFP output quantization (Kimi K3 SITU activation).
+
+            hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+                x=hidden_states,
+                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
+                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
+                activate_left=True,
+                dst_type=SITU_MX_DST_TYPE_E4M3FN,
+            )
+            return hidden_states, maybe_normalize_mxfp_scale_layout(swiglu_out_scale)
+
+        # The `group_index` input for the `npu_swiglu_group_quant` operator
+        # currently only supports the `count` type. In the current version, the
+        # `npu_swiglu_group_quant` operator performs a summation calculation on
+        # `group_index`. Therefore, under the cumsum type, the last value is directly taken
+        # and Avoid executing two small operators.
+        if mlp_compute_input.group_list_type == 0:
+            group_index = mlp_compute_input.group_list[-1:]
+        else:
+            group_index = cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1)
         hidden_states, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
             hidden_states,
             topk_weight=None,
-            group_index=None,
+            group_index=group_index,
             dst_type=torch.float8_e4m3fn,
             quant_mode=2,
             clamp_value=mlp_compute_input.swiglu_limit,

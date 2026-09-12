@@ -1,5 +1,6 @@
 import importlib
 import math
+from collections.abc import Sequence
 from typing import Any, cast
 
 import vllm.envs as envs
@@ -27,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_protocol,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -137,6 +139,7 @@ class KVPoolScheduler:
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.kv_cache_group_ids
         )
+        self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
@@ -331,6 +334,20 @@ class KVPoolScheduler:
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
 
+    def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
+        """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
+        if self.kv_cache_config is None or not self.use_hybrid:
+            return None
+        return AscendStoreCoordinator(
+            self.kv_cache_config.kv_cache_groups,
+            scheduler_block_size=self.cache_transfer_granularity,
+            hash_block_size=self.hash_block_size,
+            group_block_sizes=self.grouped_block_size,
+            group_cache_families=self.kv_cache_group_families,
+            use_eagle=self.use_eagle,
+            retention_interval=self.retention_interval,
+        )
+
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
         """All-rank keys for scheduler-side hit check, built by the
         backend's protocol module.
@@ -354,12 +371,78 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
+        self._get_or_create_request_tracker(request.request_id)
+        if self.cache_coordinator is not None:
+            return self._lookup_layerwise_with_coordinator(request, token_len)
+        return self._lookup_layerwise_contiguous(request, token_len, num_computed_tokens)
+
+    def _lookup_layerwise_with_coordinator(
+        self,
+        request: "Request",
+        token_len: int,
+    ) -> int:
+        """Reachability-aware hit check for hybrid models.
+
+        Only the blocks the KV cache managers consider reachable (sliding-
+        window / compressor-state tails) are queried for reachability-limited
+        groups — those groups are stored sparsely by the layerwise save path —
+        and the hit length is derived by the coordinator lookup shared with
+        the non-layerwise path, so it matches the store-side mask semantics.
+        """
+        coordinator = self.cache_coordinator
+        assert coordinator is not None
+
+        def query_group_hits(
+            group_id: int,
+            group_block_hashes: Sequence[BlockHash | str],
+            lookup_mask: Sequence[bool] | None,
+        ) -> list[BlockHash]:
+            keys_by_block: list[list[str]] = []
+            allowed_hashes: list[BlockHash] = []
+            for block_idx, block_hash in enumerate(group_block_hashes):
+                if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
+                    continue
+                keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+                allowed_hashes.append(block_hash)
+            all_keys = [key for block_keys in keys_by_block for key in block_keys]
+            if not all_keys:
+                return []
+            key_infos = self.store_scheduler.batch_get_key_info(all_keys)
+            if len(key_infos) != len(all_keys):
+                logger.error(
+                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
+                    len(all_keys),
+                    len(key_infos),
+                )
+                return []
+            # A block is hit only when ALL ranks' keys return valid GVA
+            hits: list[BlockHash] = []
+            offset = 0
+            for block_hash, block_keys in zip(allowed_hashes, keys_by_block):
+                block_infos = key_infos[offset : offset + len(block_keys)]
+                offset += len(block_keys)
+                if all(ki.size() and ki.size() > 0 for ki in block_infos):
+                    hits.append(block_hash)
+            return hits
+
+        return coordinator.find_reachable_hit_tokens(
+            request.block_hashes,
+            token_len,
+            query_group_hits,
+            log_context=f"hit_check: req={request.request_id}",
+        )
+
+    def _lookup_layerwise_contiguous(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
         hits_per_group: list[int] = []
-        self._get_or_create_request_tracker(request.request_id)
 
         for group_id in range(len(self.grouped_block_size)):
             effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
@@ -562,13 +645,6 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
-        if (
-            self.retention_interval is not None
-            and not self.use_layerwise
-            and prompt_token_len < 2 * self.retention_interval
-        ):
-            return 0, False
-
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:
@@ -616,7 +692,12 @@ class KVPoolScheduler:
             # rewrite during MTP draft/verify steps. Partial hits that stop on
             # an interior block boundary carry a valid mamba state snapshot
             # at that boundary and can be loaded as-is.
-            hit_reaches_final_block = num_external_hit_tokens > (request.num_tokens - self.lcm_block_size)
+            # The final granularity block starts at the lcm-aligned boundary
+            # containing the last token; num_tokens - lcm_block_size equals
+            # that boundary only for lcm-aligned prompts and over-trims
+            # unaligned prompts whose hit stops exactly on the boundary.
+            final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            hit_reaches_final_block = num_external_hit_tokens > final_block_start
             if hit_reaches_final_block:
                 num_external_hit_tokens = max(
                     num_computed_tokens,

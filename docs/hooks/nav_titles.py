@@ -46,6 +46,7 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
+    "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
     "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
         "en": "Model Runner V1 EPLB Architecture",
         "zh": "Model Runner V1 EPLB 架构",
@@ -114,6 +115,10 @@ TITLES = {
     "tutorials/models/DeepSeek-V4-Flash-Vision.md": {
         "en": "DeepSeek-V4-Flash-Vision-Exp (Experimental)",
         "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
+    },
+    "tutorials/models/DeepSeek-V4.1-Flash.md": {
+        "en": "DeepSeek-V4.1-Flash",
+        "zh": "DeepSeek-V4.1-Flash",
     },
     "tutorials/models/DeepSeek-V4-Pro.md": {"en": "DeepSeek-V4-Pro", "zh": "DeepSeek-V4-Pro"},
     "tutorials/models/DeepSeekOCR2.md": {"en": "DeepSeek-OCR-2", "zh": "DeepSeek-OCR-2"},
@@ -213,6 +218,7 @@ TITLES = {
         "en": "Mooncake Layerwise Adaptation and Optimization",
         "zh": "Mooncake Layerwise 适配与优化",
     },
+    "user_guide/feature_guide/kvpp.md": {"en": "KVPP User Guide", "zh": "KVPP 使用指南"},
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",

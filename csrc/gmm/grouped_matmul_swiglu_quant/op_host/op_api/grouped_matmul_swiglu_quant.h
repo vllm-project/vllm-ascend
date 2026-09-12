@@ -15,7 +15,7 @@
 namespace l0op {
 const std::tuple<aclTensor *, aclTensor *>
 GroupedMatmulSwigluQuant(const aclTensor *x, const aclTensor *weight, const aclTensor *perChannelScale,
-                         const aclTensor *perTokenScale, const aclTensor *groupList, double limited,
+                         const aclTensor *perTokenScale, const aclTensor *groupList, float limited,
                          const aclTensor *weightAssistanceMatrix, bool isEnableWeightAssistanceMatrix, int dequantMode,
                          aclOpExecutor *executor);
 }

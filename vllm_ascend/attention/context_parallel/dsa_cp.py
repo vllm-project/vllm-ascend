@@ -34,7 +34,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -209,7 +209,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = kv_cache_spec.storage_block_size
+        self.storage_block_size = get_storage_block_size(kv_cache_spec)
         scheduler_config = vllm_config.scheduler_config
 
         self.num_decodes = 0
@@ -1294,7 +1294,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,
                 topk=self.model_config.hf_config.index_topk,
-                quant_mode=2,
+                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
                 cu_seqlens_q=qli_cu_seqlens_q,
                 seqused_k=qli_seqused_k,
                 cmp_residual_k=qli_cmp_residual_k,
@@ -1953,9 +1953,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
-            -cp_metadata.local_sin[layer_name],
+            cp_metadata.local_sin[layer_name],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
+            negate_sin=True,
         )
 
         if self.tp_size == 1 or skip_all_to_all:
@@ -2084,7 +2085,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
             key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
             topk=self.index_topk,
-            quant_mode=2,
+            quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
             cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
             seqused_k=dsa_meta.qli_seqused_k,
             cmp_residual_k=dsa_meta.qli_cmp_residual_k,

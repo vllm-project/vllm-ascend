@@ -724,34 +724,6 @@ at::Tensor recurrent_kda_meta(
     return at::empty_symint(value.sym_sizes(), value.options());
 }
 
-std::vector<at::Tensor> moe_grouped_matmul_meta(
-    at::Tensor x,
-    at::Tensor weight,
-    const at::Tensor& group_list,
-    int64_t split_item,
-    int64_t group_type,
-    int64_t group_list_type
-)
-{
-    bool transpose_weight = false;
-    bool weight_nz = true;
-
-    at::TensorList x_list = at::TensorList(x);
-    at::TensorList weight_list = at::TensorList(weight);
-    std::vector<at::Tensor> y;
-    c10::TensorOptions options = x[0].options().dtype(x[0].scalar_type());
-    auto m = x[0].sym_size(0);
-    auto n = weight[0].sym_size(1);
-    if (!transpose_weight) {
-        n = weight[0].sym_size(2);
-    }
-    at::Tensor y_0 = at::empty_symint(c10::SymDimVector{m, n}, options);
-    y.emplace_back(y_0);
-    at::TensorList result = at::TensorList(y);
-
-    return y;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     const at::Tensor& x,
     int64_t k,
@@ -1213,7 +1185,8 @@ void inplace_partial_rotary_mul_meta(
     const at::Tensor &r1,
     const at::Tensor &r2,
     c10::string_view rotary_mode,
-    at::IntArrayRef partial_slice)
+    at::IntArrayRef partial_slice,
+    bool negate_sin)
 {
     auto origin_dim_num = x.dim();
     return;
@@ -2129,8 +2102,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
-    // moe_grouped_matmul
-    ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);

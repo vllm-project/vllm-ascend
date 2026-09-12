@@ -22,6 +22,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
+    get_storage_block_size,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.models.glm5next.kv_cache import (
@@ -134,7 +135,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert len(indexer.kv_cache) == len(state.kv_cache) == 2
     assert isinstance(indexer_spec, AscendMLAAttentionSpec)
     assert indexer_spec.block_size == 256
-    assert indexer_spec.storage_block_size == 16
+    assert get_storage_block_size(indexer_spec) == 16
     assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
