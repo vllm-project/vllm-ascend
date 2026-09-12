@@ -116,13 +116,23 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router gates recompute logits in FP32. Ask AscendUnquantizedLinearMethod
-        # to materialize weight_fp32 during process_weights_after_loading so the hot path
-        # (and ACLGraph capture) never emits a per-forward aclop Cast via weight.to(fp32).
+        # Internal-router gates recompute logits in FP32. Resolve the weight
+        # choice here (the old forward-time
+        # `weight_fp32 if hasattr else weight.to(fp32)` judgment) so ACLGraph
+        # capture never emits a per-forward aclop Cast.
         # Use the ctor `gate` arg directly: nn.Module.__getattr__ can shadow
         # `@property is_internal_router` / `gate` while __init__ is still running.
-        if gate is not None and not hasattr(gate, "weight_fp32"):
-            gate.precast_fp32_weight = True
+        if gate is not None:
+            if hasattr(gate, "weight_fp32"):
+                # Already materialized (e.g. DeepSeek-V4 sets it itself).
+                pass
+            else:
+                # Resolve fp32 weight up front when Parameter already exists, then
+                # still request load-time refresh so process_weights_after_loading
+                # overwrites with the real checkpoint values (init-time Parameter
+                # would otherwise freeze stale random weights).
+                gate.weight_fp32 = gate.weight.to(torch.float32)
+                gate.precast_fp32_weight = True
 
         self.ascend_shared_experts = None
         if shared_experts is not None:
@@ -153,18 +163,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # DeepseekV2MoE.forward, always passing router_logits=hidden_states.
         # The runner must recompute router_logits via the gate.
         return self.gate is not None
-
-    def _gate_weight_fp32(self) -> torch.Tensor:
-        """Return the internal-router gate weight in FP32 without a hot-path Cast."""
-        gate = self.gate
-        assert gate is not None
-        weight_fp32 = getattr(gate, "weight_fp32", None)
-        if weight_fp32 is not None:
-            return weight_fp32
-        # Unexpected load path: cache once so later forwards do not keep casting.
-        weight_fp32 = gate.weight.data.to(torch.float32)
-        gate.weight_fp32 = weight_fp32
-        return weight_fp32
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -323,10 +321,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 if self.is_internal_router:
+                    gate = self.gate
+                    assert gate is not None
                     hidden_states_fp32 = (
                         router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
                     )
-                    router_logits = F.linear(hidden_states_fp32, self._gate_weight_fp32())
+                    # weight_fp32 is ensured in __init__ (precast / already present).
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -340,13 +341,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
             )
             if self.is_internal_router:
+                gate = self.gate
+                assert gate is not None
                 # Reuse the fused RMSNorm FP32 output when supplied. Otherwise,
                 # retain the standalone cast for other model call sites.
                 hidden_states_fp32 = (
                     router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
                 )
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, self._gate_weight_fp32())
+                # weight_fp32 is ensured in __init__ (precast / already present).
+                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()

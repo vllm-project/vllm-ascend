@@ -96,10 +96,16 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_get_config.return_value = mock_config
         self.layer.skip_weight_nz_conversion = True
         self.layer.precast_fp32_weight = True
+        # Real tensor so precast can materialize weight_fp32 alongside the NZ skip.
+        weight = torch.randn(8, 4, dtype=torch.float16)
+        self.layer.weight.data = weight
+        self.layer.prefix = "model.layers.0.mlp.gate"
 
         self.method.process_weights_after_loading(self.layer)
 
         mock_format_cast.assert_not_called()
+        self.assertEqual(self.layer.weight_fp32.dtype, torch.float32)
+        torch.testing.assert_close(self.layer.weight_fp32, weight.to(torch.float32))
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("vllm_ascend.ops.linear.maybe_trans_nz", side_effect=lambda x: x)
