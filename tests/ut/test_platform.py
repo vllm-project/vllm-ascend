@@ -99,7 +99,7 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
+    @patch("vllm_ascend.platform.enable_sfa_dcp_indexer", return_value=True)
     @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)
     def test_sfa_dcp_replicated_indexer_aligns_interleave_to_block_size(
         self,

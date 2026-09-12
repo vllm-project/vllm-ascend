@@ -245,10 +245,15 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_indexer", "expected_size"),
-    [(False, 1), (True, 4)],
+    ("replicated_indexer", "sharded_indexer", "expected_size"),
+    [(False, False, 1), (True, False, 4), (True, True, 1)],
 )
-def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_indexer, expected_size):
+def test_sfa_indexer_cache_spec_uses_dcp_indexer_allocation_factor(
+    monkeypatch,
+    replicated_indexer,
+    sharded_indexer,
+    expected_size,
+):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
     torch.nn.Module.__init__(indexer_module)
@@ -274,8 +279,8 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
     )
     monkeypatch.setattr(
         attn_utils,
-        "enable_sfa_dcp_replicated_indexer",
-        lambda _config: replicated_indexer,
+        "get_sfa_dcp_indexer_cache_factor",
+        lambda _config: 1 if sharded_indexer else (4 if replicated_indexer else 1),
     )
     monkeypatch.setattr(
         attn_utils,

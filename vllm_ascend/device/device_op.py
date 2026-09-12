@@ -328,14 +328,21 @@ class BaseDeviceAdaptor:
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
-    ) -> torch.Tensor:
+        *,
+        return_selected_scores: bool = False,
+        sparse_mode: int = 3,
+        block_table: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
+        block_table = attn_metadata.block_table if block_table is None else block_table
 
         if enable_sparse_li_c8:
+            if return_selected_scores:
+                raise NotImplementedError("Selected-score return is not supported for LI C8 indexer.")
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
             assert q_li_scale is not None
@@ -349,40 +356,44 @@ class BaseDeviceAdaptor:
                 key_dequant_scale=kv_cache[indexer_scale_cache_idx].squeeze(2),  # B S N D -> B S D
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
+                block_table=block_table,
                 query_quant_mode=0,
                 key_quant_mode=0,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=2048,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
             )
         elif use_torch_npu_lightning_indexer:
-            topk_indices, _ = torch_npu.npu_lightning_indexer(
+            topk_indices, selected_scores = torch_npu.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
+                block_table=block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=2048,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
+                **({"return_value": True} if return_selected_scores else {}),
             )
         else:
-            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices, selected_scores = torch.ops._C_ascend.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
+                block_table=block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=2048,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
+                **({"return_value": True} if return_selected_scores else {}),
             )
+        if return_selected_scores:
+            return topk_indices, selected_scores
         return topk_indices
 
     @classmethod
@@ -1283,11 +1294,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
-    ) -> torch.Tensor:
+        *,
+        return_selected_scores: bool = False,
+        sparse_mode: int = 3,
+        block_table: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         indexer_cache_idx = indexer_k_cache_idx
         indexer_scale_cache_idx = indexer_scale_cache_idx
+        block_table = attn_metadata.block_table if block_table is None else block_table
 
         if enable_sparse_li_c8:
+            if return_selected_scores:
+                raise NotImplementedError("Selected-score return is not supported for LI C8 indexer.")
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
             assert q_li_shape_ori is not None
@@ -1304,40 +1322,43 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     key_dequant_scale=key_dequant_scale,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table,
+                    block_table=block_table,
                     query_quant_mode=0,
                     key_quant_mode=0,
                     layout_query="TND",
                     layout_key="PA_BSND",
                     sparse_count=2048,
-                    sparse_mode=3,
+                    sparse_mode=sparse_mode,
                 )
             else:
-                topk_indices, _ = torch_npu.npu_lightning_indexer(
+                topk_indices, selected_scores = torch_npu.npu_lightning_indexer(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[indexer_cache_idx],
                     weights=weights,
                     actual_seq_lengths_query=actual_seq_lengths_query,
                     actual_seq_lengths_key=actual_seq_lengths_key,
-                    block_table=attn_metadata.block_table,
+                    block_table=block_table,
                     layout_query="TND",
                     layout_key="PA_BSND",
                     sparse_count=2048,
-                    sparse_mode=3,
+                    sparse_mode=sparse_mode,
                 )
         else:
-            topk_indices, _ = torch_npu.npu_lightning_indexer(
+            topk_indices, selected_scores = torch_npu.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
+                block_table=block_table,
                 layout_query="TND",
                 layout_key="PA_BSND",
                 sparse_count=2048,
-                sparse_mode=3,
+                sparse_mode=sparse_mode,
+                **({"return_value": True} if return_selected_scores else {}),
             )
+        if return_selected_scores:
+            return topk_indices, selected_scores
         return topk_indices
 
     @staticmethod

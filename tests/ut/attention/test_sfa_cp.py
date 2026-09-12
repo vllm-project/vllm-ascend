@@ -124,7 +124,7 @@ def test_sfa_cp_four_mode_resolution() -> None:
         with (
             patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=flags[0]),
             patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
+                "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_indexer",
                 return_value=flags[1],
             ),
         ):
@@ -139,7 +139,7 @@ def test_sfa_pcp_resolution_for_mrv2_config() -> None:
     with (
         patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_indexer",
             return_value=False,
         ),
     ):

@@ -32,7 +32,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
-    enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_indexer,
     vllm_version_is,
 )
 from vllm_ascend.weight_switch import (
@@ -1520,7 +1520,7 @@ def resolve_sfa_metadata_builder(
 ) -> type[AscendSFAMetadataBuilder]:
     """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_indexer(vllm_config)
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
@@ -1536,7 +1536,7 @@ def resolve_sfa_metadata_builder(
 def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    dcp_enabled = enable_sfa_dcp_indexer(vllm_config)
     pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl

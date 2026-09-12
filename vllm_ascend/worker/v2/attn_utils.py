@@ -61,8 +61,8 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
-    enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
+    get_sfa_dcp_indexer_cache_factor,
     is_hidden_state_cache_spec,
     vllm_version_is,
 )
@@ -81,11 +81,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
-    sfa_dcp_replicated_indexer_size = (
-        vllm_config.parallel_config.decode_context_parallel_size
-        if enable_sfa_dcp_replicated_indexer(vllm_config)
-        else 1
-    )
+    sfa_dcp_replicated_indexer_size = get_sfa_dcp_indexer_cache_factor(vllm_config)
 
     if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         c8_k_cache_dtype = torch.float8_e4m3fn
