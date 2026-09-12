@@ -13,14 +13,16 @@ from collections.abc import Sequence
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-from vllm_ascend import envs
+from vllm.v1.kv_cache_interface import KVQuantMode, MLAAttentionSpec
 
 
 def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
-    """Return whether V1 should preserve exact MLA specs for this runner."""
-    return not getattr(vllm_config, "use_v2_model_runner", False) and bool(envs.VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE)
+    """Return whether this runner uses the default V1 MLA cache path.
+
+    MRV2 keeps its separate implementation. All V1 MLA layers use component
+    views when their specs can be represented as nope/rope components.
+    """
+    return not getattr(vllm_config, "use_v2_model_runner", False)
 
 
 def _typed_empty_like_storage(raw: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -72,17 +74,39 @@ def _component_views(
     return nope, rope
 
 
+def is_component_mla_spec(layer: MLAAttention, spec: MLAAttentionSpec) -> bool:
+    """Return whether a spec can be represented as nope/rope components."""
+    spec_module = type(spec).__module__
+    return (
+        not spec_module.startswith("vllm_ascend")
+        and spec.kv_quant_mode == KVQuantMode.NONE
+        and spec.tokens_per_state == 1
+        and spec.state_content_bytes is None
+        and spec.num_head_slots is None
+        and spec.storage_block_size is None
+        and spec.alignment is None
+        and spec.model_version is None
+        and spec.head_size_v == 0
+        and getattr(layer, "indexer", None) is None
+        and not getattr(layer.impl, "fa_quant_layer", False)
+    )
+
+
 def build_mla_component_cache(
     raw: torch.Tensor,
     *,
     layer: MLAAttention,
     spec: MLAAttentionSpec,
     kernel_block_size: int | Sequence[int],
+    num_blocks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert one standardized MLA raw layer region into component views."""
     # component cache进入常规allocate/reshape链路：这里只做必要几何推导。
     if isinstance(kernel_block_size, Sequence):
         kernel_block_size = kernel_block_size[0]
+    if spec.head_size != layer.head_size or spec.num_kv_heads != getattr(layer, "num_kv_heads", spec.num_kv_heads):
+        raise ValueError(f"MLA layer and spec geometry disagree for {layer.layer_name}")
+
     manager_block_size = spec.block_size
     if manager_block_size % kernel_block_size != 0:
         raise ValueError(
@@ -98,11 +122,18 @@ def build_mla_component_cache(
         )
 
     slot_bytes = physical_page_bytes // ratio
+    if slot_bytes % element_size != 0:
+        raise ValueError(f"MLA kernel slot {slot_bytes} is not aligned to dtype size {element_size}")
     component_bytes = kernel_block_size * spec.num_kv_heads * layer.head_size * element_size
     if component_bytes > slot_bytes:
         raise ValueError(f"MLA kernel slot {slot_bytes} is smaller than nope+rope {component_bytes}")
 
-    num_blocks = raw.numel() // physical_page_bytes
+    expected_raw_bytes = physical_page_bytes * num_blocks
+    if raw.numel() != expected_raw_bytes:
+        raise ValueError(
+            f"MLA raw cache size {raw.numel()} does not match expected "
+            f"{expected_raw_bytes} bytes for {num_blocks} blocks"
+        )
     typed_raw = _typed_empty_like_storage(raw, spec.dtype)
     return _component_views(
         typed_raw,

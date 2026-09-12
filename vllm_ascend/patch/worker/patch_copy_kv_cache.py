@@ -8,7 +8,6 @@ import vllm.v1.worker.gpu_model_runner as gpu_model_runner
 import vllm.v1.worker.utils as utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 
-from vllm_ascend import envs
 from vllm_ascend.worker.mla_component_cache_v1 import is_mla_component_pair as _is_component_pair
 
 
@@ -57,7 +56,7 @@ def copy_kv_cache_blocks_inplace(
     """Copy whole kernel slots when the runner holds component-major MLA tuples."""
     copy_caches: list[object] = []
     for kv_cache in kv_caches:
-        if envs.VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE and _is_component_pair(kv_cache):
+        if _is_component_pair(kv_cache):
             nope, rope = kv_cache
             copy_caches.append(_component_page_view(nope, rope))
         elif _is_legacy_mla_pair(kv_cache):

@@ -56,6 +56,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
     weak_ref_tensors,
 )
+from vllm_ascend.worker.mla_component_cache_v1 import is_mla_component_pair
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if vllm_version_is("0.28.0"):
@@ -104,7 +105,13 @@ class AscendMLABackend(AttentionBackend):
         return num_blocks, block_size, num_kv_heads, head_size
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        try:
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+        if vllm_config is not None and getattr(vllm_config, "use_v2_model_runner", None) is True:
+            return None
         return (KVCacheLayout.LBNHC,)
 
     @classmethod
@@ -1455,6 +1462,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0:
             return self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=False)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        if self.enable_kv_nz and is_mla_component_pair(tuple(kv_cache)):
+            cache_mode = "PA"
         c_kv_scale = None
         if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
@@ -1860,7 +1869,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
             prolog_op = torch_npu.npu_mla_prolog_v3
-            cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
+            if is_mla_component_pair(tuple(kv_cache)):
+                cache_mode = "PA_BSND"
+            else:
+                cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.

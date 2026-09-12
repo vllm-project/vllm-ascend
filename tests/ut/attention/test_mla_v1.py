@@ -2686,3 +2686,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
+
+
+def test_v2_runner_keeps_legacy_layout_preference(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+        lambda: SimpleNamespace(use_v2_model_runner=True),
+    )
+    assert AscendMLABackend.supported_kv_cache_layouts() is None

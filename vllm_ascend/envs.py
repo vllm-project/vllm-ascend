@@ -22,19 +22,6 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-
-def _mla_component_cache_enabled() -> bool:
-    value = os.getenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "auto")
-    if value not in {"auto", "0", "1"}:
-        raise ValueError("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE must be auto, 0, or 1")
-    if value == "auto":
-        from vllm_ascend.device.device_config import get_ascend_device_type
-        from vllm_ascend.device.hardware import AscendDeviceType
-
-        return get_ascend_device_type() in {AscendDeviceType.A3, AscendDeviceType.A5}
-    return value == "1"
-
-
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -89,10 +76,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
-    # Enable the V1 MLA component-major KV cache layout. Valid values are auto,
-    # 0, and 1. The default ``auto`` enables it on Ascend A3/A5; other hardware
-    # uses the legacy path unless explicitly overridden. Not sensitive.
-    "VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE": _mla_component_cache_enabled,
 }
 
 # end-env-vars-definition

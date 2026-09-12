@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.worker.model_runner_v1 as model_runner_v1
-from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.patch.worker.patch_copy_kv_cache import (
     _component_page_view,
     _is_component_pair,
@@ -74,6 +73,7 @@ def _make_spec(*, block_size, num_kv_heads=1, nope_dim=512, rope_dim=64, dtype=t
 def _make_vllm_config(layers, *, use_v2_model_runner=False):
     return SimpleNamespace(
         use_v2_model_runner=use_v2_model_runner,
+        kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context=layers),
     )
 
@@ -105,6 +105,7 @@ def test_build_mla_component_cache_kernel_slot_geometry(manager_block_size, phys
         layer=layer,
         spec=padded_spec,
         kernel_block_size=128,
+        num_blocks=3,
     )
 
     slot_bytes = physical_page // ratio
@@ -124,7 +125,7 @@ def test_component_cow_copies_complete_kernel_slot(monkeypatch):
     spec = replace(logical_spec, page_size_padded=488448)
     layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
     raw = torch.zeros(3 * 488448, dtype=torch.int8)
-    nope, rope = build_mla_component_cache(raw, layer=layer, spec=spec, kernel_block_size=128)
+    nope, rope = build_mla_component_cache(raw, layer=layer, spec=spec, kernel_block_size=128, num_blocks=3)
 
     slot_bytes = 488448 // 3
     page_view = _component_page_view(nope, rope)
@@ -133,7 +134,6 @@ def test_component_cow_copies_complete_kernel_slot(monkeypatch):
     payload[128 * 512 * 2] = 0x5A
     page_view[7].copy_(payload)
 
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
     _install_cpu_h2d(monkeypatch)
     copy_kv_cache_blocks_inplace(
         [(nope, rope)],
@@ -141,22 +141,19 @@ def test_component_cow_copies_complete_kernel_slot(monkeypatch):
         [KVCacheBlockCopy(src_block_id=2, dst_block_id=0)],
     )
     torch.testing.assert_close(page_view[0], payload)
-    torch.testing.assert_close(page_view[3], _page_payload(slot_bytes, 0))
+    torch.testing.assert_close(page_view[3], torch.zeros_like(page_view[3]))
     torch.testing.assert_close(page_view[7], payload)
 
 
-def test_feature_can_be_forced_off(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "0")
-    assert not use_mla_component_cache(_make_vllm_config({}))
+def test_component_cache_is_default_for_v1():
+    assert use_mla_component_cache(_make_vllm_config({}))
 
 
-def test_feature_is_v1_only(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
+def test_component_cache_is_v1_only():
     assert not use_mla_component_cache(_make_vllm_config({}, use_v2_model_runner=True))
 
 
 def test_model_runner_keeps_exact_mla_spec_for_all_mla_models(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
     spec = _make_spec(block_size=128)
     layer = _FakeMLAAttention(spec=spec, nope_dim=512, rope_dim=64)
     runner = model_runner_v1.NPUModelRunner.__new__(model_runner_v1.NPUModelRunner)
@@ -171,8 +168,7 @@ def test_model_runner_keeps_exact_mla_spec_for_all_mla_models(monkeypatch):
     assert runner.get_kv_cache_spec() == {"layer": spec}
 
 
-def test_cow_patch_disabled_feature_uses_upstream_copy(monkeypatch):
-    monkeypatch.delenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", raising=False)
+def test_non_component_cow_uses_upstream_copy(monkeypatch):
     original_copy = MagicMock()
     monkeypatch.setattr(upstream_utils, "_orig_copy_kv_cache_blocks_inplace", original_copy)
     copies = [KVCacheBlockCopy(src_block_id=1, dst_block_id=0)]
@@ -180,8 +176,7 @@ def test_cow_patch_disabled_feature_uses_upstream_copy(monkeypatch):
     original_copy.assert_called_once_with([], 2, copies)
 
 
-def test_mla_component_views_are_built_in_normal_reshape_path(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
+def test_mla_component_views_are_built_in_normal_reshape_path():
     logical_spec = _make_spec(block_size=384)
     spec = replace(logical_spec, page_size_padded=488448)
     layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
@@ -223,23 +218,6 @@ def test_mla_component_views_are_built_in_normal_reshape_path(monkeypatch):
     assert _is_component_pair((nope, rope))
 
 
-@pytest.mark.parametrize(
-    ("device_type", "expected"),
-    [
-        (AscendDeviceType.A2, False),
-        (AscendDeviceType.A3, True),
-        (AscendDeviceType.A5, True),
-    ],
-)
-def test_auto_enable_matches_a3_and_a5(monkeypatch, device_type, expected):
-    import vllm_ascend.device.device_config as device_config
-    from vllm_ascend import envs
-
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "auto")
-    monkeypatch.setattr(device_config, "get_ascend_device_type", lambda: device_type)
-    assert envs.VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE is expected
-
-
 def test_mla_nope_uses_empty_rope_component_view():
     spec = _make_spec(block_size=128, rope_dim=0)
     layer = _FakeMLAAttention(spec=spec, nope_dim=512, rope_dim=0)
@@ -248,7 +226,52 @@ def test_mla_nope_uses_empty_rope_component_view():
         layer=layer,
         spec=spec,
         kernel_block_size=128,
+        num_blocks=2,
     )
     assert nope.shape == (2, 128, 1, 512)
     assert rope.shape == (2, 128, 1, 0)
     assert _is_component_pair((nope, rope))
+
+
+def test_special_mla_spec_falls_back_to_legacy_rebuild(monkeypatch):
+    logical_spec = replace(_make_spec(block_size=128), model_version="deepseek_v4")
+    layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
+    runner = model_runner_v1.NPUModelRunner.__new__(model_runner_v1.NPUModelRunner)
+    runner.vllm_config = _make_vllm_config({"layer": layer})
+    runner.shared_kv_cache_layers = {}
+    runner.use_compress = False
+    runner.use_sparse = False
+    runner.sparse_kv_offload_enabled = False
+    runner._use_mla_component_cache = True
+
+    monkeypatch.setattr(model_runner_v1, "has_ec_transfer", lambda: False)
+    rebuilt = runner.get_kv_cache_spec()["layer"]
+    assert type(rebuilt) is model_runner_v1.AscendMLAAttentionSpec
+    assert rebuilt.model_version == "deepseek_v4"
+
+
+def test_build_rejects_raw_size_mismatch():
+    spec = _make_spec(block_size=128)
+    layer = _FakeMLAAttention(spec=spec, nope_dim=512, rope_dim=64)
+    with pytest.raises(ValueError, match="raw cache size"):
+        build_mla_component_cache(
+            torch.zeros(spec.page_size_bytes + 1, dtype=torch.int8),
+            layer=layer,
+            spec=spec,
+            kernel_block_size=128,
+            num_blocks=1,
+        )
+
+
+def test_build_rejects_misaligned_kernel_slot():
+    logical_spec = _make_spec(block_size=256)
+    spec = replace(logical_spec, page_size_padded=12)
+    layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
+    with pytest.raises(ValueError, match="not aligned to dtype size"):
+        build_mla_component_cache(
+            torch.zeros(12, dtype=torch.int8),
+            layer=layer,
+            spec=spec,
+            kernel_block_size=128,
+            num_blocks=1,
+        )

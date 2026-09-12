@@ -82,7 +82,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -220,6 +219,7 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.mla_component_cache_v1 import (
     build_mla_component_cache,
+    is_component_mla_spec,
     use_mla_component_cache,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -4586,17 +4586,18 @@ class NPUModelRunner(GPUModelRunner):
         # per-layer raw regions intact here; MLA reshape turns its regions into
         # component-major strided views, while other backends continue to use
         # their legacy contiguous state/tensor views.
+        static_forward_context = self.compilation_config.static_forward_context
+        component_mla_requested = self._use_mla_component_cache and any(
+            layer_name in static_forward_context
+            and isinstance((layer := static_forward_context[layer_name]), MLAAttention)
+            and is_component_mla_spec(layer, spec)
+            for layer_name, spec in layer_kv_cache_spec.items()
+        )
         if (
             not use_legacy_shared_by_layout
             and not is_dsv4_main
             and not is_glm5_next
-            and (
-                self.hybrid_with_attn_and_mamba
-                or (
-                    self._use_mla_component_cache
-                    and any(type(spec) is MLAAttentionSpec for spec in layer_kv_cache_spec.values())
-                )
-            )
+            and (self.hybrid_with_attn_and_mamba or component_mla_requested)
             and supports_shared_backing_with_kv_transfer
             and kv_cache_config.kv_cache_tensors
         ):
@@ -4617,12 +4618,13 @@ class NPUModelRunner(GPUModelRunner):
                     if not regions:
                         break
                 if regions:
-                    backing = self._allocate_int8_cache_tensor(
-                        backing_size,
-                        alignment,
-                    )
+                    backing = self._allocate_int8_cache_tensor(backing_size, alignment)
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
+                elif component_mla_requested:
+                    raise ValueError(
+                        "MLA component cache requires a valid standardized shared backing plan"
+                    )
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
@@ -4784,6 +4786,15 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
+                    if (
+                        self._use_mla_component_cache
+                        and isinstance(static_forward_context.get(layer_name), MLAAttention)
+                        and is_component_mla_spec(static_forward_context[layer_name], current_kv_cache_spec)
+                        and layer_name not in kv_cache_raw_tensors
+                    ):
+                        raise ValueError(
+                            f"MLA component cache for {layer_name} has no standardized raw backing"
+                        )
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
@@ -4816,15 +4827,6 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
-                    if self._use_mla_component_cache and type(current_kv_cache_spec) is MLAAttentionSpec:
-                        # Fallback for custom descriptors that were not handled by
-                        # the standardized shared-backing materializer above.
-                        for layer_name_inner in shared_layers:
-                            if type(layer_kv_cache_spec[layer_name_inner]) is MLAAttentionSpec:
-                                kv_cache_raw_tensors[layer_name_inner] = (
-                                    self._allocate_int8_cache_tensor(kv_cache_tensor_size, alignment)
-                                )
-                        continue
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
@@ -4964,13 +4966,18 @@ class NPUModelRunner(GPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                if self._use_mla_component_cache and type(current_kv_cache_spec) is MLAAttentionSpec:
-                    attn_layer = self.compilation_config.static_forward_context[layer_name]
+                attn_layer = self.compilation_config.static_forward_context[layer_name]
+                if (
+                    self._use_mla_component_cache
+                    and isinstance(attn_layer, MLAAttention)
+                    and is_component_mla_spec(attn_layer, current_kv_cache_spec)
+                ):
                     kv_caches[layer_name] = build_mla_component_cache(
                         kv_cache_raw_tensors[layer_name],
                         layer=attn_layer,
                         spec=current_kv_cache_spec,
                         kernel_block_size=self.kernel_block_sizes[group.kv_cache_group_id],
+                        num_blocks=kv_cache_config.num_blocks,
                     )
                     continue
 
@@ -5615,13 +5622,6 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            elif isinstance(attn_module, MLAAttention) and self._use_mla_component_cache:
-                # 所有MLA模型统一保留exact upstream spec，避免按模型名、
-                # sparse/compress标记或特定backend重建私有spec。
-                spec = attn_module.get_kv_cache_spec(self.vllm_config)
-                kv_cache_spec[layer_name] = attn_module.get_attn_backend().customize_spec(spec)
-                attn_layer_names.add(layer_name)
-                continue
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
@@ -5632,6 +5632,25 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
+                component_spec = None
+                if (
+                    self._use_mla_component_cache
+                    and self.vllm_config.kv_transfer_config is None
+                    and not self.use_sparse
+                    and not self.sparse_kv_offload_enabled
+                ):
+                    candidate = attn_module.get_kv_cache_spec(self.vllm_config)
+                    component_spec = attn_module.get_attn_backend().customize_spec(candidate)
+                    if not is_component_mla_spec(attn_module, component_spec):
+                        component_spec = None
+
+                if component_spec is not None:
+                    # 可表示为nope/rope component的MLA统一保留upstream spec；
+                    # 特殊cache语义继续走既有兼容路径，保证模型仍可运行。
+                    kv_cache_spec[layer_name] = component_spec
+                    attn_layer_names.add(layer_name)
+                    continue
+
                 if self.use_sparse:
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
@@ -5658,7 +5677,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_sparse_sfa_c8=cache_sparse_sfa_c8,
                         store_on_host=self.sparse_kv_offload_enabled,
                     )
-                elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                elif (spec := component_spec) is not None or (spec := attn_module.get_kv_cache_spec(self.vllm_config)):
                     if getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None

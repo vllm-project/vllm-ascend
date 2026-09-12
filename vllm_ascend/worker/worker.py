@@ -497,13 +497,7 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        # 启用了首轴非连续的情况下，不允许使用modelRunnerV2，创建v2 runner直接报错
         if self.use_v2_model_runner:
-            if envs_ascend.VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE:
-                raise ValueError(
-                    "VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE=1 only supports "
-                    "ModelRunner V1, but ModelRunner V2 is enabled."
-                )
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
             from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
