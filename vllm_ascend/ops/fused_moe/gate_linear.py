@@ -49,7 +49,6 @@ class AscendGateLinear(GateLinear):
             prefix=prefix,
         )
         self.out_dtype = out_dtype
-        self.precast_fp32_weight = True
 
     def forward(self, x: torch.Tensor):
         # TODO: Remove this workaround after upgrading to a vLLM version that

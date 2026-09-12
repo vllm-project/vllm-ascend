@@ -59,7 +59,6 @@ class TestAscendGateLinear(TestBase):
         )
 
         self.assertEqual(gate.weight.dtype, torch.float32)
-        self.assertTrue(gate.precast_fp32_weight)
         self.assertEqual(gate.out_dtype, torch.float32)
 
         hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
