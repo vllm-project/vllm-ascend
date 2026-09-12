@@ -23,6 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import vllm_version_is
 
 _original_run_merged_draft = AscendSpecDecodeBaseProposer._run_merged_draft
 
@@ -99,6 +100,13 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
             # 310P does not support DCP, so skip context-parallel handling.
             ori_token_indices_to_sample = None
             query_lens_d = None
+
+            if (
+                vllm_version_is("0.28.0")
+                and self.uses_xdrope_dim > 0  # type: ignore[attr-defined]
+                and self.draft_uses_xdrope_dim == 0  # type: ignore[attr-defined]
+            ):
+                target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)

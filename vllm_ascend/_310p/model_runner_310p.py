@@ -452,6 +452,12 @@ class NPUModelRunner310(NPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
+        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:  # type: ignore[attr-defined]
+            self._calc_xdrope_positions(scheduler_output)  # type: ignore[attr-defined]
+            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(  # type: ignore[attr-defined]
+                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],  # type: ignore[attr-defined]
+                non_blocking=True,
+            )
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)

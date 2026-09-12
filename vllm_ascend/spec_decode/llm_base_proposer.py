@@ -289,6 +289,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 dtype=torch.int32,
                 device=device,
             )
+        elif (
+            vllm_version_is("0.28.0")
+            and self.uses_xdrope_dim > 0  # type: ignore[attr-defined]
+            and self.draft_uses_xdrope_dim > 0  # type: ignore[attr-defined]
+        ):
+            self.xdrope_positions = torch.zeros(  # type: ignore[attr-defined]
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),  # type: ignore[attr-defined]
+                dtype=torch.int32,
+                device=device,
+            )
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
@@ -358,7 +368,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
                 self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
+            except (NotImplementedError, AttributeError, TypeError, AssertionError):
+                # DSpark/DFlash drafts that inherit the shared target embedding
+                # (e.g. K3 DSpark, ``has_own_embed_tokens = False``) still have
+                # ``embed_tokens is None`` here: the embedding is installed by
+                # ``_maybe_share_embeddings`` further below. Upstream guards this
+                # with a capability check; the upstream assert in the meantime
+                # must also fall back to text-only instead of killing the worker.
                 logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
                 self.supports_mm_inputs: bool = False
 
@@ -1676,6 +1692,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
+            if (
+                vllm_version_is("0.28.0")
+                and self.uses_xdrope_dim > 0  # type: ignore[attr-defined]
+                and self.draft_uses_xdrope_dim == 0  # type: ignore[attr-defined]
+            ):
+                target_positions = target_positions[0]
+
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
