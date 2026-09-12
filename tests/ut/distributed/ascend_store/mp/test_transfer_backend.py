@@ -10,6 +10,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     MooncakeStoreConfig,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.mooncake_backend import MPMooncakeBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.service import TransferService
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.transfer import KVTransferProcess
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.transfer_backend import (
     TransferBackend,
     create_transfer_backend,
@@ -84,6 +86,43 @@ def test_registration_rollback_retains_only_failed_unregistrations():
     adapter.close()
     assert not adapter._registered
     assert backend.store.unregister_buffer.call_args_list[-1].args == (200, 10)
+
+
+def test_control_operations_cross_process_and_service_boundaries():
+    backend = MagicMock()
+    service = TransferService.__new__(TransferService)
+    service.backend = TransferBackend("memcache", backend, 0)
+    service.backend.set_device = MagicMock()
+
+    assert service.execute("batch_alloc", (["k1"], [64], 300_000)) is backend.batch_alloc.return_value
+
+    backend.batch_alloc.assert_called_once_with(["k1"], [64], 300_000)
+
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.transfer.TransferProcess"):
+        process = KVTransferProcess({})
+    process.client.call.reset_mock()
+    process.batch_alloc(["k1"], [64], 300_000)
+    process.client.call.assert_called_once_with("batch_alloc", (["k1"], [64], 300_000))
+
+    backend = MagicMock()
+    service = TransferService.__new__(TransferService)
+    service.backend = TransferBackend("mooncake", backend, 0)
+    service.backend.set_device = MagicMock()
+    with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.transfer.TransferProcess"):
+        process = KVTransferProcess({})
+
+    for method_name, operation, args, payload in (
+        ("batch_put_start", "batch_put_start", (["k1"], [64]), (["k1"], [64])),
+        ("batch_get_start", "batch_get_start", (["k1"],), ["k1"]),
+        ("batch_get_end", "batch_get_end", (["k1"],), ["k1"]),
+    ):
+        process.client.call.reset_mock()
+        getattr(process, method_name)(*args)
+        process.client.call.assert_called_once_with(operation, payload)
+
+        service.execute(operation, payload)
+        getattr(backend, method_name).assert_called_once_with(*args)
+
 
 def test_transfer_backend_forwards_capabilities_and_range_operations():
     backend = MagicMock()
