@@ -23,12 +23,10 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 
 
 class AscendGateLinear(GateLinear):
-    """Ascend replacement for vLLM GateLinear.
-    Router logits are sensitive to numerical precision because they directly
-    affect expert selection in MoE models. On NPU, computing the router gate in
-    lower precision may lead to accuracy issues in some agent workloads.
-    Therefore, this layer forces the gate input and weights to fp32 for the
-    router linear computation, and keeps the router logits in fp32.
+    """Ascend GateLinear: FP32 router weight/compute on NPU.
+
+    Skips GateLinear.__init__ (CUDA/ROCm GEMM probes). Signature matches
+    upstream for drop-in replacement; unused CUDA knobs are ignored.
     """
 
     def __init__(
@@ -37,27 +35,31 @@ class AscendGateLinear(GateLinear):
         output_size: int,
         bias: bool = False,
         out_dtype: torch.dtype | None = None,
-        params_dtype: torch.dtype | None = None,
-        force_fp32_compute: bool = False,
+        params_dtype: torch.dtype | None = None,  # noqa: ARG002
+        force_fp32_compute: bool = False,  # noqa: ARG002
         prefix: str = "",
     ):
-        super().__init__(
-            input_size=input_size,
-            output_size=output_size,
+        ReplicatedLinear.__init__(
+            self,
+            input_size,
+            output_size,
             bias=bias,
             params_dtype=torch.float32,
-            out_dtype=out_dtype,
-            force_fp32_compute=True,
+            quant_config=None,
             prefix=prefix,
         )
+        self.out_dtype = out_dtype
+        self.precast_fp32_weight = True
+
+    def set_out_dtype(self, out_dtype: torch.dtype) -> None:
+        if self.out_dtype is not None:
+            raise ValueError("out_dtype has already been set")
+        self.out_dtype = out_dtype
 
     def forward(self, x: torch.Tensor):
-        # TODO: Remove this workaround after upgrading to a vLLM version that
-        # no longer forces router logits to bf16 via
-        # self.gate.set_out_dtype(torch.bfloat16).
         if x.dtype != torch.float32:
             x = x.to(torch.float32)
-
         output, output_bias = ReplicatedLinear.forward(self, x)
-
+        if self.out_dtype is not None and output.dtype != self.out_dtype:
+            output = output.to(self.out_dtype)
         return output, output_bias

@@ -54,16 +54,29 @@ class TestAscendGateLinear(TestBase):
             input_size=16,
             output_size=4,
             bias=False,
+            out_dtype=torch.float32,
             prefix="test.gate",
         )
 
         self.assertEqual(gate.weight.dtype, torch.float32)
+        self.assertTrue(gate.precast_fp32_weight)
+        self.assertEqual(gate.out_dtype, torch.float32)
 
         hidden_states = torch.randn(2, 16, dtype=torch.bfloat16)
         output, output_bias = gate(hidden_states)
 
         self.assertEqual(output.dtype, torch.float32)
         self.assertIsNone(output_bias)
+
+    def test_set_out_dtype(self):
+        gate = AscendGateLinear(
+            input_size=16,
+            output_size=4,
+            bias=False,
+            prefix="test.gate",
+        )
+        gate.set_out_dtype(torch.float32)
+        self.assertEqual(gate.out_dtype, torch.float32)
 
 
 if __name__ == "__main__":
