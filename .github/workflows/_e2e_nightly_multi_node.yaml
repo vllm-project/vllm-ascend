@@ -83,6 +83,11 @@ on:
         type: boolean
         default: false
         description: enable Pod AOP pipeline on failure
+      profile_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: force-enable the torch profiler and export profiling artifacts
       bisect_good_commit:
         required: false
         type: string
@@ -299,6 +304,7 @@ jobs:
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
+            -D profile_enabled="${{ inputs.profile_enabled }}" \
             -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
             -D openlibing_secret="$OPENLIBING_SECRET" \
             -D vllm_ascend_branch="${{ inputs.vllm_ascend_branch }}" \
@@ -453,6 +459,24 @@ jobs:
             ls -la "$SRC" 2>/dev/null || echo "Directory does not exist"
           fi
 
+      - name: Fetch profiling results from PVC
+        if: ${{ always() && inputs.profile_enabled }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/profile_results
+          PVC_SRC="/root/.cache/profile_output/${{ steps.vars.outputs.benchmark_job_name }}"
+          echo "Fetching profiling results from PVC at $PVC_SRC..."
+          if [ -d "$PVC_SRC" ] && [ "$(ls -A "$PVC_SRC" 2>/dev/null)" ]; then
+            cp -r "$PVC_SRC"/. /tmp/profile_results/
+            echo "Profiling results fetched successfully from PVC:"
+            ls -la /tmp/profile_results/
+            rm -rf "${PVC_SRC:?}"/*
+            echo "PVC profiling contents cleaned up"
+          else
+            echo "Warning: No profiling results found in PVC at $PVC_SRC"
+            ls -la "$PVC_SRC" 2>/dev/null || echo "Directory does not exist"
+          fi
+
       - name: Post process
         if: always()
         run: |
@@ -563,3 +587,41 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Set profiling artifact timestamp
+        if: ${{ always() && inputs.profile_enabled }}
+        id: profile_ts
+        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Package profiling results
+        if: ${{ always() && inputs.profile_enabled }}
+        run: |
+          if [ -d /tmp/profile_results ] && [ "$(ls -A /tmp/profile_results 2>/dev/null)" ]; then
+            tar -czf /tmp/profile-results.tar.gz -C /tmp/profile_results .
+            echo "Profiling results packaged:"
+            du -sh /tmp/profile-results.tar.gz
+          else
+            echo "Warning: No profiling results found in /tmp/profile_results"
+          fi
+
+      - name: Upload profiling results (OBS)
+        if: ${{ always() && inputs.profile_enabled }}
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+          name: nightly-test-profiling-${{ inputs.name || inputs.config_file_path }}-${{ steps.profile_ts.outputs.artifact_ts }}
+          path: /tmp/profile-results.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload profiling results (GitHub Artifacts)
+        if: ${{ always() && inputs.profile_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-profiling-${{ steps.vars.outputs.benchmark_job_name }}-${{ steps.profile_ts.outputs.artifact_ts }}
+          path: /tmp/profile-results.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
