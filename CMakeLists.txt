@@ -20,9 +20,10 @@ set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 find_package(Torch REQUIRED)
 
 run_python(TORCH_VERSION
-  "import torch; print(torch.__version__)" "Failed to locate torch path")
+  "from importlib.metadata import version; print(version('torch').split('+', 1)[0])"
+  "Failed to locate torch version")
 # check torch version is 2.10.0
-if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.10.0")
+if(NOT "${TORCH_VERSION}" VERSION_EQUAL "2.10.0")
   message(FATAL_ERROR "Expected PyTorch version 2.10.0, but found ${TORCH_VERSION}")
 endif()
 
