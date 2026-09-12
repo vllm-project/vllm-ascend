@@ -2,6 +2,7 @@ _envs: &envs
   SERVER_PORT: "DEFAULT_PORT"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
   HCCL_BUFFSIZE: "1024"
@@ -29,7 +30,7 @@ _server_cmd: &server_cmd
 _benchmarks_perf: &benchmarks_perf
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    dataset_path: vllm-ascend/GSM8K-in3500-bs280
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128
