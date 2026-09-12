@@ -127,6 +127,13 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
     return metadata
 
 
+def test_fused_gdn_chunk_is_not_used_for_float16_inputs():
+    with patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True):
+        assert AscendGatedDeltaNetAttention._can_use_fused_chunk(torch.empty(1, dtype=torch.bfloat16))
+        assert not AscendGatedDeltaNetAttention._can_use_fused_chunk(torch.empty(1, dtype=torch.float16))
+        assert not AscendGatedDeltaNetAttention._can_use_fused_chunk(None)
+
+
 def test_connector_observes_updated_gdn_state_for_each_compiled_call():
     # vLLM registers this production dispatcher for NPU only. Keep a CPU
     # registration alive for this test so Inductor sees the same custom op.
