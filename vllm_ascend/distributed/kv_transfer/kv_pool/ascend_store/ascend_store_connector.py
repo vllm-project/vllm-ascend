@@ -104,6 +104,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        self.use_multiprocess = extra_config.get("use_multiprocess", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
@@ -122,6 +123,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
+        self._layerwise_step_prepared = False
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
@@ -141,6 +143,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def shutdown(self) -> None:
+        worker = getattr(self, "connector_worker", None)
+        if worker is not None and self.use_multiprocess:
+            worker.close()
 
     ############################################################
     # Scheduler Side Methods
@@ -241,6 +248,24 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if not self.use_multiprocess:
+            return
+        self._layerwise_step_prepared = False
+        self._current_step_has_real_forward = False
+        self._mamba_copy_bufs = None
+
+    def _prepare_layerwise_step(self, metadata: KVConnectorMetadata | None = None) -> None:
+        """Build this step's tasks before its first layer hook."""
+        if self._layerwise_step_prepared:
+            return
+        assert self.connector_worker is not None
+        if metadata is None:
+            metadata = self._get_connector_metadata()
+        self.connector_worker.start_load_kv(metadata)
+        self._layerwise_step_prepared = True
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         self._mamba_copy_bufs = None
@@ -259,11 +284,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 for request in metadata.requests
             ],
         )
-        self.connector_worker.start_load_kv(metadata)
+        if self.use_multiprocess and self.use_layerwise:
+            self._prepare_layerwise_step(metadata)
+        else:
+            self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        if self.use_multiprocess:
+            self._prepare_layerwise_step()
         assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
         if self._mamba_copy_bufs is not None:
@@ -296,6 +326,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             # A load-only consumer does not publish KV.
             return
+        if self.use_multiprocess:
+            self._prepare_layerwise_step()
         assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
@@ -304,7 +336,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # Don't do save if the role is kv_consumer
             return
 
-        if self.use_layerwise:
+        if self.use_layerwise and not self.use_multiprocess:
             return
 
         assert self.connector_worker is not None
