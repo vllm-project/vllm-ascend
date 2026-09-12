@@ -447,4 +447,3 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
-
