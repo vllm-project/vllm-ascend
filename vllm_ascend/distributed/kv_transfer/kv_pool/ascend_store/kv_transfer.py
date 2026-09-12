@@ -1343,11 +1343,14 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
 
         return cache
 
-    def _handle_request(  # type: ignore[override]
-        self, transfer_tasks: list[LayerTransferTask]
-    ):
-        if len(transfer_tasks) == 0:
+    def _handle_request(self, transfer_tasks: list[LayerTransferTask]):  # type: ignore[override]
+        try:
+            self._handle_layer_transfer(transfer_tasks)
+        finally:
             self.request_queue.task_done()
+
+    def _handle_layer_transfer(self, transfer_tasks: list[LayerTransferTask]) -> None:
+        if len(transfer_tasks) == 0:
             return
         if len(transfer_tasks) > 1:
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
@@ -1432,7 +1435,6 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         logger.debug("Key-based layer save event set: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].set()
         transfer_tasks.clear()
-        self.request_queue.task_done()
 
 
 class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
@@ -1471,9 +1473,13 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         logger.debug("Key-based layer save event cleared: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].clear()
 
-    def _handle_request(  # type: ignore[override]
-        self, data: LayerLoadTask
-    ):
+    def _handle_request(self, data: LayerLoadTask):  # type: ignore[override]
+        try:
+            self._handle_layer_transfer(data)
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_layer_transfer(self, data: LayerLoadTask) -> None:
         wait_for_save = data.wait_for_save_layer
         layer_id = data.layer_id
         if wait_for_save is not None:
@@ -1522,7 +1528,9 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
             key_list_c = _circular_shift(key_list, shift)
             addr_list_c = _circular_shift(addr_list, shift)
             size_list_c = _circular_shift(size_list, shift)
-            self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            results = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if results is None or len(results) != len(key_list_c) or any(result != 0 for result in results):
+                raise RuntimeError(f"Key-based layerwise {layer_id} load failed: results={results}")
 
         if layer_id == self.final_layer_id:
             for req_id, is_last_chunk in zip(req_ids, is_last_chunks):
@@ -1532,8 +1540,8 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug("Key-based layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
-        data.transfer_tasks.clear()
-        self.request_queue.task_done()
+        # The task list belongs to KVPoolWorker and can still be read by the
+        # forward thread. The worker replaces it at the start of the next step.
         self.get_event.set()
 
 
@@ -1726,14 +1734,17 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             finally:
                 self.request_queue.task_done()
             return
-        transfer_tasks = request
-        # Layerwise threads only run when the worker-side
-        # protocol gate is on; every store call below sits on the Backend ABC.
-        if len(transfer_tasks) == 0:
-            self.request_queue.task_done()
+        if request and request[0].use_key_major_ranges:
+            # The range handler owns queue completion, including failures.
+            self._handle_range_layer_tasks(request)
             return
-        if transfer_tasks[0].use_key_major_ranges:
-            self._handle_range_layer_tasks(transfer_tasks)
+        try:
+            self._handle_layer_transfer(request)
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_layer_transfer(self, transfer_tasks: list[LayerTransferTask]) -> None:
+        if len(transfer_tasks) == 0:
             return
         physical_layer = transfer_tasks[0].layer_id
         has_any_save = False
@@ -1798,13 +1809,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             logger.debug("Layer save event set: layer %d", physical_layer)
             self.layer_save_finished_events[physical_layer].set()
             transfer_tasks.clear()
-            self.request_queue.task_done()
             return
         assert not self.layer_save_finished_events[physical_layer].is_set(), f"thread: {physical_layer} save failed "
         logger.debug("Layer save event set: layer %d", physical_layer)
         self.layer_save_finished_events[physical_layer].set()
         transfer_tasks.clear()
-        self.request_queue.task_done()
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
@@ -1999,14 +2008,17 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         while time.perf_counter() < deadline:
             pass
 
-    def _handle_request(  # type: ignore[override]
-        self, data: LayerLoadTask
-    ):
+    def _handle_request(self, data: LayerLoadTask):  # type: ignore[override]
         if data.transfer_tasks and data.transfer_tasks[0].use_key_major_ranges:
+            # The range handler owns queue completion, including failures.
             self._handle_range_layer_task(data)
             return
-        # Layerwise threads only run when the worker-side
-        # protocol gate is on; every store call below sits on the Backend ABC.
+        try:
+            self._handle_layer_transfer(data)
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_layer_transfer(self, data: LayerLoadTask) -> None:
         wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
@@ -2032,7 +2044,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
             return
 
         # Build req_meta for all tasks first; if all are None, early return.
@@ -2059,7 +2070,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
             return
 
         if attention_start_gate is not None:
@@ -2126,7 +2136,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         # transfer_tasks aliases KVPoolWorker.layer_load_tasks[layer_id]. Do
         # not mutate the worker-owned list from this asynchronous thread. The
         # worker replaces all per-layer lists at the beginning of every step.
-        self.request_queue.task_done()
         self.get_event.set()
 
 

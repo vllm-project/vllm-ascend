@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 from prometheus_client import Counter, Gauge, Histogram
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
     AscendStorePromMetrics,
