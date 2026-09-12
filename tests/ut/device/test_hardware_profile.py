@@ -42,7 +42,11 @@ _STANDARD_CAPABILITIES = frozenset(
 
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES,
-    AscendDeviceType.A3: _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM},
+    AscendDeviceType.A3: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+    },
     AscendDeviceType._310P: frozenset(
         {
             HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
@@ -69,6 +73,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
             HardwareCapability.STANDARD_MAMBA_PATCH,
