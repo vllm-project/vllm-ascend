@@ -21,6 +21,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
 - `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+- `MiniMax-M3-EAGLE3`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3).
 
 It is recommended to place the model weight in a shared cache directory.
 
@@ -99,7 +100,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat(MiniMax-M3) and quantized(W8A8、MXFP8) model can be deployed on 1 Atlas 800 A3 (64GB × 16). W8A8 quantized model can be deployed on 1 Atlas 800 A2 (64GB × 8). MXFP8 quantized model can be deployed on 1 950DT products (96GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The bfloat(MiniMax-M3) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The W8A8 quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MXFP8 quantized model can be deployed on 1 950DT products (96GB × 8).
 
 === "A3 series(BF16)"
 
@@ -903,7 +904,25 @@ Key Parameter Descriptions:
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
-### 5.4 Multimodal and ViT DP (Optional)
+### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
+
+In addition to the direct Mooncake KV transfer described in Section 5.3, MiniMax-M3 1P1D can be deployed with a KV Cache Pool (Ascend Store). The engine uses `MultiConnector`: `MooncakeConnectorV1` transfers KV cache directly between the prefill and decode nodes, while `AscendStoreConnector` stores KV cache into and loads it from the pool, allowing KV reuse across decode instances and a recompute fallback on load failure.
+
+For environment prerequisites (CANN >= 8.5.0, `mooncake-transfer-engine-npu >= 0.3.11.post1`), Mooncake master/etcd startup, the `mooncake.json` configuration file, and the full connector parameter list, refer to the [KV Cache Pool (Ascend Store) Deployment Guide](../../user_guide/feature_guide/kv_pool.md).
+
+Key points common to both the prefill and decode nodes:
+
+- Export `PYTHONHASHSEED=0` on every node to guarantee uniform hash generation between the pool, the prefill node, and the decode node.
+- Export `MOONCAKE_CONFIG_PATH` pointing to the `mooncake.json` used by the pool backend.
+- `--kv-transfer-config` uses `"kv_connector": "MultiConnector"` with `"kv_load_failure_policy": "recompute"`, so a failed KV load from the pool rolls the request back to recomputation instead of failing it.
+- The `connectors` list contains `MooncakeConnectorV1` (its `prefill`/`decode` `dp_size`, `tp_size`, and `pp_size` must match the actual global layout, same as in Section 5.3) and `AscendStoreConnector` (`"backend": "mooncake"`, and a unique `lookup_rpc_port` for each instance).
+- The decode side can set `"load_async": true` to load KV cache from the pool asynchronously.
+
+The launch flow and `launch_online_dp.py` launcher are the same as in Section 5.3; only the role-specific `run_dp_template.sh` differs in the `--kv-transfer-config` connector composition and the pool-related environment variables.
+
+<!-- TODO: paste the verified A3 / 950DT products run_dp_template.sh configs with MultiConnector + AscendStoreConnector here. -->
+
+### 5.5 Multimodal and ViT DP (Optional)
 
 MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1,"video":0}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
 
