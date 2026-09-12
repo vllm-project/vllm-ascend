@@ -240,6 +240,7 @@ class TestAscendSFACacheComposition(TestBase):
                 enable_li_c8=enable_li_c8,
             ):
                 impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 64
                 impl.layer_name = "model.layers.0.self_attn.attn"
                 impl.has_indexer = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
