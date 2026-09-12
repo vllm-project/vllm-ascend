@@ -41,6 +41,39 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
+def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
+    """Store a causal-conv1d weight in the layout consumed by the NPU op.
+
+    Checkpoints and the upstream loader use [channels, 1, width], while
+    npu_causal_conv1d_custom consumes a contiguous [width, channels] tensor.
+    Allocate the parameter in the latter layout before loading and let the
+    existing loader write through a transposed view. This avoids a persistent
+    copy and a transpose in every forward.
+    """
+    weight = conv1d.weight
+    if weight.ndim != 3 or weight.shape[1] != 1:
+        raise ValueError(
+            "Expected causal conv1d weight shape [channels, 1, width], "
+            f"but got {tuple(weight.shape)}"
+        )
+    if not hasattr(weight, "weight_loader"):
+        raise AttributeError("Causal conv1d weight does not have a weight_loader")
+
+    original_weight_loader = weight.weight_loader
+    channels, _, width = weight.shape
+    weight.data = torch.empty(
+        (width, channels), dtype=weight.dtype, device=weight.device
+    )
+
+    def width_major_weight_loader(
+        param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs
+    ) -> None:
+        checkpoint_layout = param.data.transpose(0, 1).unsqueeze(1)
+        original_weight_loader(checkpoint_layout, loaded_weight, *args, **kwargs)
+
+    weight.weight_loader = width_major_weight_loader
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -302,7 +335,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        conv_weights_T = self.conv1d.weight
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -316,7 +349,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
@@ -345,12 +377,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
                 if get_pcp_group().world_size > 1:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
                     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-                    width = conv_weights.shape[1]
+                    width = conv_weights_T.shape[0]
                     state_len = width - 1
                     num_seqs = non_spec_query_start_loc.shape[0] - 1
                     prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
@@ -388,7 +419,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             -1, ...
                         ].transpose(-1, -2)
                 else:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                     torch.ops._C_ascend.npu_causal_conv1d_custom(
@@ -407,7 +437,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
