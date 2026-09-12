@@ -1428,7 +1428,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "are in draft-vocab space and incompatible with target-space "
                         "rejection sampling. Falling back to greedy."
                     )
-                raw_logits = self.model.compute_logits(sample_hidden_states)
+                # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
+                # compute logits in draft-vocab space so that the Markov bias
+                # (draft_vocab_size) can be added; sampled draft ids are then
+                # remapped to target ids.
+                raw_logits = self.model.compute_draft_logits(sample_hidden_states)
+
                 if lmhead_tp_enable():
                     # Remove B_max - B communication padding.
                     raw_logits = raw_logits[:num_indices]
@@ -1450,7 +1455,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         if probs is not None:
                             dspark_probs_list.append(probs)
                     else:
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                        next_token_ids = logits[:, idx].argmax(dim=-1)
+                        if dspark_has_vocab_mapping:
+                            next_token_ids = self.model.map_draft_to_target(next_token_ids)
+                        draft_token_ids[:, idx + 1].copy_(next_token_ids)
+
                 if use_probabilistic and dspark_probs_list:
                     # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                     # [num_blk * K, V] to match early_exit view logic.
