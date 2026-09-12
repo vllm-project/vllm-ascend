@@ -313,6 +313,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
+            # MegaMoe reads the fused int64 scale lists above exclusively: with
+            # use_cann_megamoe enabled the MoE comm selector always picks
+            # FUSED_MC2 and LoRA is excluded, so the gmm paths that consume
+            # w13_weight_scale_fp32 are unreachable, and this branch only runs
+            # without EPLB (use_expert_weight_list above owns that case).
+            # Drop the float32 scale copy to save NPU memory.
+            del layer.w13_weight_scale_fp32
+            torch.npu.empty_cache()
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
