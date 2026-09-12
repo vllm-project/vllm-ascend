@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect.auto_bisect import Bisector, _parse_args, _resolve_num_nodes
+from tools.bisect.auto_bisect import Bisector, _freeze_config, _parse_args, _resolve_num_nodes
 from tools.bisect.config import SCENE_MULTI, BisectInput, BisectOptions
 
 
@@ -165,3 +165,33 @@ def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path
 
     with pytest.raises(SystemExit, match="Could not determine --num-nodes"):
         _resolve_num_nodes(args, tmp_path)
+
+
+def test_freeze_config_copies_yaml_outside_repo(tmp_path: Path):
+    repo = tmp_path / "repo"
+    source = repo / "configs" / "case.yaml"
+    source.parent.mkdir(parents=True)
+    source.write_text("num_nodes: 4\n", encoding="utf-8")
+    args = argparse.Namespace(
+        config_base_path="configs",
+        config_yaml="case.yaml",
+        work_dir=str(tmp_path / "cache"),
+        node_index=2,
+    )
+
+    frozen_base = _freeze_config(args, repo)
+
+    assert frozen_base == str(tmp_path / "cache" / "frozen_configs" / "node_2")
+    assert (Path(frozen_base) / "case.yaml").read_text(encoding="utf-8") == "num_nodes: 4\n"
+
+
+def test_freeze_config_rejects_path_traversal(tmp_path: Path):
+    args = argparse.Namespace(
+        config_base_path="configs",
+        config_yaml="../case.yaml",
+        work_dir=str(tmp_path / "cache"),
+        node_index=0,
+    )
+
+    with pytest.raises(SystemExit, match="must stay below"):
+        _freeze_config(args, tmp_path)

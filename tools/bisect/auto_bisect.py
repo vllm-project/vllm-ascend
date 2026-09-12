@@ -29,6 +29,7 @@ commit is read from the nightly status table unless ``--good-commit`` is given.
 import argparse
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -405,10 +406,42 @@ def _resolve_num_nodes(args: argparse.Namespace, repo_dir: Path) -> int:
     )
 
 
+def _freeze_config(args: argparse.Namespace, repo_dir: Path) -> str | None:
+    """Copy the selected YAML outside the Git checkout before bisecting.
+
+    Candidate commits may predate the nightly case itself.  Keeping
+    ``CONFIG_BASE_PATH`` inside the repository would then make those trials
+    fail collection instead of measuring the candidate implementation.  Each
+    node gets an independent cached copy so all rounds execute the exact YAML
+    selected at the PR head.
+    """
+    if not args.config_base_path:
+        return None
+
+    config_rel = Path(args.config_yaml)
+    if config_rel.is_absolute() or ".." in config_rel.parts:
+        raise SystemExit(f"--config-yaml must stay below CONFIG_BASE_PATH: {args.config_yaml!r}")
+
+    source_base = Path(args.config_base_path)
+    if not source_base.is_absolute():
+        source_base = repo_dir / source_base
+    source = source_base / config_rel
+    if not source.is_file():
+        raise SystemExit(f"Cannot freeze missing bisect config: {source}")
+
+    frozen_base = Path(args.work_dir) / "frozen_configs" / f"node_{args.node_index}"
+    frozen = frozen_base / config_rel
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, frozen)
+    logger.info("Frozen bisect config %s -> %s", source, frozen)
+    return str(frozen_base)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     repo_dir = Path(args.repo_dir)
     num_nodes = _resolve_num_nodes(args, repo_dir)
+    args.config_base_path = _freeze_config(args, repo_dir)
     inp = BisectInput(
         scene=args.scene,
         config_yaml=args.config_yaml,
