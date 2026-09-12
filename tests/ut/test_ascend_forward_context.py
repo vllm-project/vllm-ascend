@@ -328,6 +328,35 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+@pytest.mark.parametrize("ep_world_size", [16, 32, 64, 128])
+def test_select_cann_megamoe_supports_ep128(monkeypatch, ep_world_size):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+
+    vllm_config = _make_vllm_config(quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(4097, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_cann_megamoe_rejects_ep_larger_than_128(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        ep_world_size=129,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+
+    vllm_config = _make_vllm_config(quant_type="w4a8")
+
+    assert afc.select_moe_comm_method(4097, vllm_config) == MoECommType.ALLTOALL
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [

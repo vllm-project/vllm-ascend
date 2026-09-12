@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
 from functools import lru_cache
 from importlib import import_module
 
@@ -22,6 +23,7 @@ import torch
 import torch.distributed
 import torch.distributed as dist
 import torch_npu
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -29,7 +31,7 @@ COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
-_CANN_MEGA_MOE_QUANT_MODE_None = 0
+_CANN_MEGA_MOE_QUANT_MODE_NONE = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 
 
@@ -121,6 +123,33 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
+def cann_mega_moe_supports_situ(mega_moe) -> bool:
+    """Whether the installed torch extension exposes SiTU parameters."""
+    try:
+        parameters = inspect.signature(mega_moe).parameters
+    except (TypeError, ValueError):
+        return False
+    return "activation" in parameters and "activation_params" in parameters
+
+
+def get_cann_mega_moe_activation_settings(
+    activation: MoEActivation | str | None,
+    *,
+    situ_beta: float | None = None,
+    situ_linear_beta: float | None = None,
+) -> tuple[str, dict[str, float] | None]:
+    """Translate vLLM activation metadata to the CANN MegaMoE API."""
+    activation_name = getattr(activation, "value", activation)
+    if activation == MoEActivation.SITU or activation_name == "situ":
+        activation_params = {"beta": 1.0 if situ_beta is None else situ_beta}
+        if situ_linear_beta is not None:
+            activation_params["linear_beta"] = situ_linear_beta
+        return "situglu", activation_params
+    if activation_name in (None, "silu", "swiglu", "swigluoai_uninterleave"):
+        return "swiglu", None
+    raise RuntimeError(f"CANN MegaMoe does not support activation {activation!r} in this integration.")
+
+
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
     # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
     # The current custom op package still requires explicit INT4 for W4A8
@@ -138,10 +167,10 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
     if quant_type == QuantType.W4A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
     if quant_type == QuantType.NONE:
-        return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
+        return (_CANN_MEGA_MOE_QUANT_MODE_NONE, None, None)
 
     raise RuntimeError(
-        "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
+        "MegaMoe integration supports BF16, W8A8/W4A8 INT on A2/A3, and MXFP on FP8-capable "
         "MegaMoe platforms. "
         f"Unsupported quant type: {quant_type}."
     )

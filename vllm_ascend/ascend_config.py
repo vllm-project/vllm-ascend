@@ -749,7 +749,11 @@ class AscendConfig:
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
         hf_text_config = vllm_config.model_config.hf_text_config
-        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        # Latent-MoE models such as Kimi K3 project tokens before dispatch, so
+        # MegaMoe sees routed_expert_hidden_size rather than the model width.
+        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+        if hidden_size is None:
+            hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
             hidden_size = vllm_config.model_config.get_hidden_size()
         if hidden_size is None:
@@ -758,7 +762,9 @@ class AscendConfig:
         if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
             return False
 
-        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        moe_intermediate_size = getattr(hf_text_config, "routed_expert_intermediate_size", None)
+        if moe_intermediate_size is None:
+            moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None:
             return False
         if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
