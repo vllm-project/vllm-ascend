@@ -1,0 +1,37 @@
+name: test-liqo
+on:
+  pull_request:
+
+jobs:
+  # 800i-4：liqo-test label → 远程 offload 到 aiframework / mind-third-ci，job 容器申请 4 卡 ascend-1980
+  # runner 已加 liqo.io/api-server-support: remote 注解（ascend-ci-deployment PR #1361），验证远端 API 访问与 NPU 分配
+  test-800i-4-remote:
+    runs-on: [liqo-test]
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
+    steps:
+      - name: Show NPU allocation
+        run: |
+          echo "HOSTNAME=$(hostname)"
+          echo "nproc=$(nproc)"
+          npu-smi info || true
+          echo "--- davinci devices ---"
+          ls -l /dev/davinci* 2>/dev/null || true
+          echo "device count: $(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)"
+      - run: sleep 600
+
+  # 800i-2：liqo-test-local label → 钉在 cn12-001 本地 arm64 节点，job 容器申请 2 卡 ascend-1980
+  test-800i-2-local:
+    runs-on: [liqo-test-local]
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
+    steps:
+      - name: Show NPU allocation
+        run: |
+          echo "HOSTNAME=$(hostname)"
+          echo "nproc=$(nproc)"
+          npu-smi info || true
+          echo "--- davinci devices ---"
+          ls -l /dev/davinci* 2>/dev/null || true
+          echo "device count: $(ls /dev/davinci[0-9]* 2>/dev/null | wc -l)"
+      - run: sleep 600
