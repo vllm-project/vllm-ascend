@@ -68,6 +68,8 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 class FusedMoEResult:
     routed_out: torch.Tensor
     before_dispatch_evt: torch.npu.Event | None = None
+    before_moe_up_evt: torch.npu.Event | None = None
+    before_swiglu_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
@@ -80,6 +82,8 @@ class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     after_routed_experts: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
+    before_moe_up: torch.npu.Event | None = field(default=None)
+    before_swiglu: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
@@ -497,8 +501,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         assert self._shared_experts is not None
         integrated_out = self._shared_experts(test_input)
-        part1_out = self._shared_experts_part1(test_input)
-        split_out = self._shared_experts_part2(test_input, part1_out)
+        shared_gate_up, gate_out = self._shared_experts_part1(test_input)
+        shared_act, gate_sigmoid = self._shared_experts_part2a(shared_gate_up, gate_out)
+        shared_out = self._shared_experts_part2b(shared_act)
+        split_out = self._shared_experts_part2c(shared_out, gate_sigmoid)
 
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
@@ -523,7 +529,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(hidden_states)  # type: ignore
-        return shared_gate_up
+        gate_out = None
+        assert self._shared_experts is not None
+        if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
+            gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
+        return shared_gate_up, gate_out
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
         shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
@@ -534,6 +544,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if hasattr(self._shared_experts, "expert_gate") and self._shared_experts.expert_gate is not None:
             gate_out, _ = self._shared_experts.expert_gate(hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
+        return shared_out
+
+    def _shared_experts_part2a(self, shared_gate_up: torch.Tensor, gate_out: torch.Tensor | None):
+        shared_act = self._shared_experts.act_fn(shared_gate_up)  # type: ignore
+        gate_sigmoid = None
+        if gate_out is not None:
+            gate_sigmoid = F.sigmoid(gate_out)
+        return shared_act, gate_sigmoid
+
+    def _shared_experts_part2b(self, shared_act: torch.Tensor):
+        shared_out, _ = self._shared_experts.down_proj(shared_act)  # type: ignore
+        return shared_out
+
+    def _shared_experts_part2c(self, shared_out: torch.Tensor, gate_sigmoid: torch.Tensor | None):
+        if gate_sigmoid is not None:
+            shared_out = gate_sigmoid * shared_out
         return shared_out
 
     def _get_quant_type(self) -> QuantType:
@@ -711,6 +737,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return FusedMoEResult(
                 routed_out=routed_out,
                 before_dispatch_evt=fused_experts_results.before_dispatch_evt,
+                before_moe_up_evt=fused_experts_results.before_moe_up_evt,
+                before_swiglu_evt=fused_experts_results.before_swiglu_evt,
                 before_gmm2_evt=fused_experts_results.before_gmm2_evt,
                 before_combine_evt=fused_experts_results.before_combine_evt,
                 swiglu_limit=fused_experts_results.swiglu_limit,
@@ -729,7 +757,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
-        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
+        # The fused FUSED_MC2 operators perform HCCL collective communication
+        # internally; running the shared expert on a concurrent stream during
+        # that collective deadlocks the device (AI core error 507057).
+        # Additionally, fused operators do not expose internal stages, so the
+        # per-phase wait events are all None on that path. Only use the shared
+        # stream on paths that provide proper wait events (ALLGATHER decode
+        # with the 4-phase overlap).
+        overlap_enabled = self.multistream_overlap_shared_expert and (
+            _EXTRA_CTX.moe_comm_type != MoECommType.FUSED_MC2
+        )
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=overlap_enabled):
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
                 self._shared_experts.down_proj, "weight_scale"
@@ -807,20 +845,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
-                # Ensure the shared experts wait for hidden_states to be ready.
+                # Phase 1: shared up+gate_linear || routed GatingTopk
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-                # Execute the gate projection and activation concurrently with the
-                # dispatch communication.
-                maybe_wait_event(fused_moe_evts.before_dispatch)
-                part1_out = self._shared_experts_part1(hidden_states)
-                # Execute the down projection concurrently with the combine
-                # communication.
-                maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = self._shared_experts_part2(hidden_states, part1_out)
+                shared_gate_up, gate_out = self._shared_experts_part1(hidden_states)
+                # Phase 2: shared swiglu+sigmoid || routed Moe_Up(GMM1)
+                maybe_wait_event(fused_moe_evts.before_moe_up)
+                shared_act, gate_sigmoid = self._shared_experts_part2a(shared_gate_up, gate_out)
+                # Phase 3: shared down || routed Moe_SwiGlu
+                maybe_wait_event(fused_moe_evts.before_swiglu)
+                shared_out = self._shared_experts_part2b(shared_act)
+                # Phase 4: gate_mul || routed Moe_Down(GMM2)
+                maybe_wait_event(fused_moe_evts.before_gmm2)
+                shared_out = self._shared_experts_part2c(shared_out, gate_sigmoid)
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
-        if self.multistream_overlap_shared_expert:
+        if overlap_enabled:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         # NOTE: This is exactly the opposite of
@@ -867,6 +907,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 after_routed_experts=after_routed_experts,
                 before_routed_experts=before_routed_experts,
                 before_dispatch=fused_moe_results.before_dispatch_evt,
+                before_moe_up=fused_moe_results.before_moe_up_evt,
+                before_swiglu=fused_moe_results.before_swiglu_evt,
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
                 swiglu_limit=fused_moe_results.swiglu_limit,

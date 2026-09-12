@@ -79,6 +79,8 @@ class FusedExpertsResult:
     # communication method that supports shared experts in parallel with routed
     # experts.
     before_dispatch_evt: torch.npu.Event | None = None
+    before_moe_up_evt: torch.npu.Event | None = None
+    before_swiglu_evt: torch.npu.Event | None = None
     before_gmm2_evt: torch.npu.Event | None = None
     before_combine_evt: torch.npu.Event | None = None
     # For dynamic_eplb
@@ -158,13 +160,15 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        before_moe_up_evt = torch.npu.current_stream().record_event()
+
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
         )
 
-        mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+        mlp_output, before_swiglu_evt, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
         routed_out = self.token_dispatcher.token_combine(
@@ -175,6 +179,8 @@ class MoECommMethod(ABC):
         return FusedExpertsResult(
             routed_out=routed_out,
             before_dispatch_evt=before_dispatch_evt,
+            before_moe_up_evt=before_moe_up_evt,
+            before_swiglu_evt=before_swiglu_evt,
             before_gmm2_evt=before_gmm2_evt,
             before_combine_evt=before_combine_evt,
             group_list_type=token_dispatch_output.group_list_type,

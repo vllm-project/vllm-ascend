@@ -461,7 +461,7 @@ def quant_apply_mlp(
             fallback_output_dtype=_output_dtype,
             mxfp_quant_dtype=mxfp_quant_dtype,
         )
-    return hidden_states, before_gmm2_evt
+    return hidden_states, before_swiglu_evt, before_gmm2_evt, before_gmm2_evt
 
 
 def unquant_apply_mlp(
@@ -534,6 +534,8 @@ def unquant_apply_mlp(
             lora_routing=lora_routing,
         )
 
+    before_swiglu_evt = torch.npu.current_stream().record_event()
+
     act_name = getattr(activation, "value", activation)
     if activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
@@ -564,6 +566,8 @@ def unquant_apply_mlp(
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
+    before_gmm2_evt = torch.npu.current_stream().record_event()
+
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
@@ -583,7 +587,7 @@ def unquant_apply_mlp(
             silu_out=gate_up_out,
             lora_routing=lora_routing,
         )
-    return hidden_states, None
+    return hidden_states, before_swiglu_evt, before_gmm2_evt
 
 
 def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
