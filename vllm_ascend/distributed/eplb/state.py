@@ -9,9 +9,13 @@ from typing import Any
 
 import torch
 from torch.distributed import all_reduce
+from vllm.config import ModelConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
@@ -100,6 +104,21 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
+
+    def add_model(
+        self,
+        model: MixtureOfExperts,
+        model_config: ModelConfig,
+    ) -> None:
+        super().add_model(model, model_config)
+        policy_name = get_ascend_config().eplb_config.v2_policy
+        if policy_name == "default":
+            return
+        policy = getattr(self, "_ascend_v2_policy", None)
+        if policy is None or policy.policy_name != policy_name:
+            policy = AscendV2EplbPolicy(policy_name)
+            self._ascend_v2_policy = policy
+        self.policy = policy
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
