@@ -10,6 +10,30 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.patch.worker import patch_qwen3_5
 
 
+@pytest.mark.skipif(
+    not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"),
+    reason="The 310P branch intentionally does not install packed GDN weights.",
+)
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
+    def fake_original_init(layer, *args, **kwargs):
+        del args, kwargs
+        torch.nn.Module.__init__(layer)
+        layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+        layer.conv1d = torch.nn.Module()
+        layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
+        layer.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda _layer: None)
+
+    with patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init):
+        layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
+        patch_qwen3_5._gdn_init_with_packed_weight(layer)
+
+    packed = layer.conv1d.get_parameter("ascend_conv1d_weight")
+    assert isinstance(packed, torch.nn.Parameter)
+    assert packed.shape == (4, 6)
+    assert packed.dtype == torch.bfloat16
+    assert not packed.requires_grad
+
+
 def test_qwen3_5_text_attention_uses_standard_rope():
     attention = SimpleNamespace(
         config=SimpleNamespace(model_type="qwen3_5_moe_text"),
