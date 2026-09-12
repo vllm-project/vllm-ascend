@@ -210,6 +210,7 @@ class TestAscendConfig(TestBase):
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
+        self.assertFalse(ascend_config.enable_prefill_bnsd)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
@@ -1051,6 +1052,13 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {"enable_prefill_mc2": "false"}
         self.assertFalse(init_ascend_config(vc).enable_prefill_mc2)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_prefill_bnsd_string_true_enables(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_prefill_bnsd": "true"}
+        self.assertTrue(init_ascend_config(vc).enable_prefill_bnsd)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

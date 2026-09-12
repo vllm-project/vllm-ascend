@@ -314,6 +314,7 @@ class AscendConfig:
             "enable_cpu_binding": true,
             "multistream_dsv4_dsa_overlap": true,
             "enable_prefill_mc2": false,
+            "enable_prefill_bnsd": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
             "enable_mc2_hierarchy_comm": false,
@@ -448,6 +449,9 @@ class AscendConfig:
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
+    # Experimental A2 optimization. Eligible long cached-prefill queries use
+    # BNSD while the paged KV cache remains in its native NHD layout.
+    enable_prefill_bnsd: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"

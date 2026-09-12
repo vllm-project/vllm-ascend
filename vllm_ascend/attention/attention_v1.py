@@ -40,6 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -72,6 +73,7 @@ else:
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+BNSD_PREFILL_MIN_QUERY_TOKENS = 4096
 _ATTN_KEYS_BUFFER = None
 
 
@@ -503,6 +505,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        self.enable_prefill_bnsd = get_ascend_config().enable_prefill_bnsd
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
@@ -1444,13 +1447,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                use_bnsd_prefill = self._can_use_bnsd_prefill(
+                    query,
+                    key,
+                    value,
+                    block_size,
+                    block_table,
+                    attn_metadata,
+                )
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
-                # FIA call each (A5 only).
+                # FIA call each. A2 also uses the split for eligible BNSD
+                # prefill queries.
                 # NOTE: Batch-invariant execution also requires prefill and
                 # decode to be processed separately, regardless of the device
                 # generation or attention state. Outside batch-invariant mode,
                 # preserve the existing A5 behavior for performance optimization.
-                if (
+                if use_bnsd_prefill or (
                     (
                         envs_vllm.VLLM_BATCH_INVARIANT
                         or (
@@ -1462,7 +1474,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     and attn_metadata.num_prefills > 0
                 ):
                     return self._forward_fia_chunked_prefill_split(
-                        query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
+                        query,
+                        key,
+                        value,
+                        key,
+                        passed_value,
+                        block_size,
+                        block_table,
+                        attn_metadata,
+                        output,
+                        use_bnsd_prefill=use_bnsd_prefill,
                     )
                 attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
                     query=query,
@@ -1491,6 +1512,51 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
+    def _can_use_bnsd_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_size: int,
+        block_table: torch.Tensor | None,
+        attn_metadata: AscendMetadata,
+    ) -> bool:
+        """Return whether the current cached-prefill slice can use BNSD FIA.
+
+        BNSD needs a regular sequence dimension, so this optimization is
+        deliberately limited to one long prefill request. Decode requests in
+        the same scheduler step remain on the compact TND path.
+        """
+        if (
+            not self.enable_prefill_bnsd
+            or not get_current_hardware_profile().supports(HardwareCapability.BNSD_PREFILL)
+            or self.pcp_enabled
+            or self.attn_type != AttentionType.DECODER
+            or self.head_size != 256
+            or attn_metadata.attn_state
+            not in (AscendAttentionState.PrefillCacheHit, AscendAttentionState.ChunkedPrefill)
+            or attn_metadata.num_prefills != 1
+            or block_table is None
+            or block_size != AscendAttentionBackend.get_supported_kernel_block_sizes()[0]
+            or query.dtype != torch.bfloat16
+            or key.dtype != torch.bfloat16
+            or value.dtype != torch.bfloat16
+        ):
+            return False
+
+        num_tokens = int(attn_metadata.actual_seq_lengths_q[-1])
+        num_prefill_tokens = num_tokens - attn_metadata.num_decode_tokens
+        return (
+            num_prefill_tokens >= BNSD_PREFILL_MIN_QUERY_TOKENS
+            and query.ndim == 3
+            and query.shape[1:] == (self.num_heads, self.head_size)
+            and key.ndim == 3
+            and key.shape[1:] == (block_size, self.num_kv_heads * self.head_size)
+            and value.shape == key.shape
+            and len(attn_metadata.seq_lens_list) > attn_metadata.num_decodes
+            and block_table.shape[0] > attn_metadata.num_decodes
+        )
+
     def _forward_fia_chunked_prefill_split(
         self,
         query: torch.Tensor,
@@ -1502,6 +1568,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_table: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        *,
+        use_bnsd_prefill: bool = False,
     ) -> torch.Tensor:
         """ChunkedPrefill with mixed prefill/decode: run decode and prefill in
         separate FIA calls. split_decodes_and_prefills has reordered the batch
@@ -1546,13 +1614,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
             prefill_seq_qlen = [
                 actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
             ]
+            prefill_query = query[num_decode_tokens:num_tokens]
+            input_layout = "TND"
+            prefill_layout_kwargs = {}
+            if use_bnsd_prefill:
+                prefill_query = prefill_query.transpose(0, 1).unsqueeze(0).contiguous()
+                input_layout = "BNSD"
+                # Keep the causal-window contract explicit for BNSD FIA.
+                prefill_layout_kwargs = {
+                    "pre_tokens": SWA_INT_MAX,
+                    "next_tokens": 0,
+                    "inner_precise": 0,
+                }
+
             prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
-                query=query[num_decode_tokens:num_tokens],
+                query=prefill_query,
                 key=key,
                 value=value,
                 atten_mask=attn_metadata.attn_mask,
                 block_table=block_table[num_decodes:],
-                input_layout="TND",
+                input_layout=input_layout,
                 block_size=block_size,
                 actual_seq_lengths=prefill_seq_qlen,
                 actual_seq_lengths_kv=seq_lens_list[num_decodes:],
@@ -1567,8 +1648,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata=attn_metadata,
                 is_prefill_no_cache=False,
                 sparse_mode=3,
+                **prefill_layout_kwargs,
             )
             n_prefill = num_tokens - num_decode_tokens
+            if use_bnsd_prefill:
+                prefill_out = prefill_out.squeeze(0).transpose(0, 1).contiguous()
             output[num_decode_tokens:num_tokens] = prefill_out.view(n_prefill, self.num_heads, self.head_size)
         return output
 

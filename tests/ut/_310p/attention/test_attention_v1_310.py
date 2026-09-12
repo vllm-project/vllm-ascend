@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -67,7 +68,13 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.ascend_config_patcher = patch(
+            "vllm_ascend.attention.attention_v1.get_ascend_config",
+            return_value=SimpleNamespace(enable_prefill_bnsd=False),
+        )
         self.config_patcher.start()
+        self.ascend_config_patcher.start()
+        self.addCleanup(self.ascend_config_patcher.stop)
         self.addCleanup(self.config_patcher.stop)
         self.impl = AscendAttentionBackendImpl310(
             num_heads=8,

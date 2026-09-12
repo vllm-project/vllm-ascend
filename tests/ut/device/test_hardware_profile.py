@@ -45,7 +45,11 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.BNSD_PREFILL,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+    },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
