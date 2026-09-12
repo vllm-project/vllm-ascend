@@ -791,6 +791,30 @@ def test_producer_scheduler_resolves_batch_metadata_by_external_request_id():
     assert send_req_info.local_block_ids == [[1, 2], [3]]
 
 
+def test_producer_scheduler_defaults_missing_remote_cached_tokens_to_zero():
+    scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
+    scheduler._reqs_need_send_layerwise = {}
+    # A P-first proxy sends do_remote_decode without remote_cached_tokens;
+    # only the D-first metaserver rendezvous fills that key in.
+    request = SimpleNamespace(
+        request_id="req-0",
+        kv_transfer_params={
+            "do_remote_decode": True,
+            "remote_host": "decode-1",
+            "remote_port": 1234,
+        },
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([1, 2], [3])
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    send_req_info = scheduler._reqs_need_send_layerwise["req-0"]
+    assert send_req_info.local_transferred_tokens == 0
+    assert send_req_info.local_block_ids == [[1, 2], [3]]
+    assert request.kv_transfer_params["remote_cached_tokens"] == 0
+
+
 def test_producer_scheduler_rejects_missing_batch_metadata():
     scheduler = SFAPDRD2HProducerScheduler.__new__(SFAPDRD2HProducerScheduler)
     scheduler._reqs_need_send_layerwise = {}
