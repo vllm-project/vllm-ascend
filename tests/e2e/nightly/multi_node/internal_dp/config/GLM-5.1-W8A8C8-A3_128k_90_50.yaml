@@ -4,6 +4,7 @@ num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_IF_BASE_PORT: "60200"
   OMP_PROC_BIND: "false"
   VLLM_USE_MODELSCOPE: "true"
   OMP_NUM_THREADS: "1"
