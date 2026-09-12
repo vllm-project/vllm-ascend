@@ -18,8 +18,8 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm_ascend.ops.linear import AscendReplicatedLinear
 
@@ -59,6 +59,12 @@ class AscendGateLinear(GateLinear):
         if x.dtype != torch.float32:
             x = x.to(torch.float32)
 
-        output, output_bias = ReplicatedLinear.forward(self, x)
-
+        # Use F.linear for FP32 router logits. AscendUnquantizedLinearMethod
+        # dispatches vllm::unquantized_gemm (PrivateUse1-only), which breaks
+        # cpu-ut and is unnecessary for this small gate GEMM.
+        bias = self.bias if not self.skip_bias_add else None
+        output = F.linear(x, self.weight, bias)
+        if not self.return_bias:
+            return output
+        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
