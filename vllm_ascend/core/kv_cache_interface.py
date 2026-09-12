@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 import torch
@@ -13,6 +14,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -44,6 +46,30 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
             storage_block_size = kv_cache_spec.storage_block_size
             return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+
+
+def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
+    """Whether state caches advance by a padded page size shared with attention.
+
+    Ascend mixed pools can bind one physical page to both an attention cache and a
+    recurrent state cache. The attention side of such a pool is addressed by an explicit
+    physical block stride (``indexes_kv_by_block_stride``) and the state caches are
+    padded to that same page size, so every view over the shared page has to advance by
+    the padded page size: otherwise a state update for one scheduler block ID would land
+    in the pages owned by another block ID.
+
+    The capability belongs to the pool rather than to a single spec, because hybrid
+    models also pad Mamba pages through ``cache_config.mamba_page_size_padded`` while
+    keeping the packed contiguous state layout, so padding alone does not require this
+    layout.
+    """
+    specs = list(kv_cache_specs)
+    state_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+    if not state_specs:
+        return False
+    if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
+        return False
+    return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
 @dataclass(frozen=True, kw_only=True)
