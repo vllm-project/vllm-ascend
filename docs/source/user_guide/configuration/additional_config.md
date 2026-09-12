@@ -338,6 +338,24 @@ unquantized BF16, even when the other model weights use MXFP quantization.
 Fine-grained O-projection TP, BF16 NZ weights (`weight_nz_mode=2`), and LoRA
 are not supported by this path.
 
+Enabling the option selects fusion only for supported layers. Unsupported
+configurations, including pipeline parallelism (`PP > 1`), retain the original
+O projection and communication path instead of failing model initialization.
+Sequence-parallel layers keep their separate ReduceScatter; layers without
+sequence parallelism retain their original full-token output layout. Existing
+  custom projection operators, quantized or non-BF16 O weights, and projections
+with bias also keep their original implementation.
+
+Selection also requires the V2 Python interface, a TP size in
+`{2, 4, 8, 16, 32, 64}`, and nonempty 2D weights with local `K` in
+`[256, 65535)`. At execution, unsupported activation dtype/shape, weight
+strides, empty batches, or padded communication payloads at or above 4 GiB
+use the original GEMM followed by `sp_reduce_scatter`. This fallback still
+returns the token shard expected by the MLA buffer and decoder. Branches
+depend on tensor metadata shared by the TP ranks, not tensor values or
+rank-local resource availability. The payload ceiling is an upper bound;
+kernel support below it still depends on the installed CANN version and shape.
+
 Each rank keeps its existing TP weight shard. Token padding moves before the
 fused GEMM, the MLA output buffer holds `ceil(num_tokens / TP)` rows, and the
 decoder skips its separate ReduceScatter. Output gates, KDA normalization,

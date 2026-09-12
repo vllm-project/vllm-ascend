@@ -12,6 +12,17 @@ from vllm_ascend.ops import linear_op
 from vllm_ascend.ops.linear import AscendRowParallelLinear
 
 
+@pytest.fixture(autouse=True)
+def available_fused_api(monkeypatch):
+    # CPU UT stubs do not expose this optional NPU interface by default.
+    monkeypatch.setattr(
+        linear_op.torch_npu,
+        "npu_quant_mm_reduce_scatter",
+        MagicMock(side_effect=AssertionError("test must provide its fused implementation")),
+        raising=False,
+    )
+
+
 def _make_layer(weight):
     return SimpleNamespace(
         weight=weight,
@@ -65,12 +76,20 @@ def test_fused_o_proj_matches_padded_partial_sum(monkeypatch, world_size, num_to
         return torch.stack(contributions).sum(0).chunk(size, dim=0)[rank], torch.empty(0)
 
     monkeypatch.setattr(linear_op.torch_npu, "npu_quant_mm_reduce_scatter", fused_mm, raising=False)
+    fallback_rs = MagicMock(return_value=expected)
+    monkeypatch.setattr(linear_op, "sp_reduce_scatter", fallback_rs)
 
     output, bias = op.apply(inputs[rank])
 
     torch.testing.assert_close(output, expected)
     assert bias is None
-    assert calls == [("kimi_tp", world_size, {"reduce_op": "sum", "comm_mode": "ai_cpu"})]
+    if num_tokens:
+        assert calls == [("kimi_tp", world_size, {"reduce_op": "sum", "comm_mode": "ai_cpu"})]
+        fallback_rs.assert_not_called()
+    else:
+        assert calls == []
+        fallback_rs.assert_called_once()
+        torch.testing.assert_close(fallback_rs.call_args.args[0], partials[rank])
     backend.get_hccl_comm_name.assert_called_once_with(rank)
 
 
@@ -117,3 +136,90 @@ def test_row_parallel_linear_dispatches_fused_projection(monkeypatch):
     assert bias is None
     fused.assert_called_once()
     assert fused.call_args.args[0].shape == (4, 256)
+
+
+def test_fused_o_proj_propagates_operator_failure(monkeypatch):
+    device_group = MagicMock()
+    device_group._get_backend.return_value.get_hccl_comm_name.return_value = "kimi_tp"
+    monkeypatch.setattr(
+        linear_op, "get_tp_group", lambda: SimpleNamespace(device_group=device_group, rank_in_group=0, world_size=2)
+    )
+    op = linear_op.KimiOProjMMReduceScatterOp(_make_layer(torch.zeros(32, 256, dtype=torch.bfloat16)))
+    fused = MagicMock(side_effect=RuntimeError("collective failed"))
+    monkeypatch.setattr(linear_op.torch_npu, "npu_quant_mm_reduce_scatter", fused, raising=False)
+
+    with pytest.raises(RuntimeError, match="collective failed"):
+        op.apply(torch.ones(3, 256, dtype=torch.bfloat16))
+
+    fused.assert_called_once()
+
+
+@pytest.mark.parametrize("world_size", [1, 3, 128])
+def test_fused_o_proj_rejects_unsupported_tp_before_hccl(monkeypatch, world_size):
+    device_group = MagicMock()
+    monkeypatch.setattr(
+        linear_op, "get_tp_group", lambda: SimpleNamespace(device_group=device_group, world_size=world_size)
+    )
+    layer = _make_layer(torch.zeros(32, 256, dtype=torch.bfloat16))
+    assert "TP size" in linear_op.KimiOProjMMReduceScatterOp.unsupported_reason(layer)
+    device_group._get_backend.assert_not_called()
+
+
+def test_fused_o_proj_rejects_missing_api_before_hccl(monkeypatch):
+    monkeypatch.setattr(linear_op.torch_npu, "npu_quant_mm_reduce_scatter", None, raising=False)
+    group = MagicMock()
+    monkeypatch.setattr(linear_op, "get_tp_group", group)
+    layer = _make_layer(torch.zeros(32, 256, dtype=torch.bfloat16))
+    assert "V2 interface" in linear_op.KimiOProjMMReduceScatterOp.unsupported_reason(layer)
+    group.assert_not_called()
+
+
+@pytest.mark.parametrize("shape", [(32, 0), (32, 255), (32, 65535), (0, 256), (2, 32, 256)])
+def test_fused_o_proj_rejects_unsupported_weight_shape(monkeypatch, shape):
+    monkeypatch.setattr(linear_op, "get_tp_group", lambda: SimpleNamespace(world_size=2))
+    layer = _make_layer(torch.zeros(shape, dtype=torch.bfloat16))
+    reason = linear_op.KimiOProjMMReduceScatterOp.unsupported_reason(layer)
+    assert ("local K" if len(shape) == 2 and shape[0] else "2D weights") in reason
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("case", ["empty", "fp32", "weight_stride", "comm_limit"])
+def test_fused_o_proj_runtime_fallback_preserves_token_shard(monkeypatch, rank, case):
+    device_group = MagicMock()
+    monkeypatch.setattr(
+        linear_op, "get_tp_group", lambda: SimpleNamespace(device_group=device_group, rank_in_group=rank, world_size=2)
+    )
+    num_tokens = 0 if case == "empty" else 3
+    generator = torch.Generator().manual_seed(17)
+    inputs = torch.randint(-2, 3, (2, num_tokens, 256), generator=generator).to(torch.bfloat16)
+    weights = torch.randint(-2, 3, (2, 32, 256), generator=generator).to(torch.bfloat16)
+    layer = _make_layer(weights[rank])
+    op = linear_op.KimiOProjMMReduceScatterOp(layer)
+    if case == "fp32":
+        inputs, weights = inputs.float(), weights.float()
+    elif case == "weight_stride":
+        weights = torch.stack((weights, weights), dim=-1)[..., 0]
+    elif case == "comm_limit":
+        # Exactly at the documented communication ceiling must avoid fusion.
+        monkeypatch.setattr(op, "MAX_COMM_BYTES", 4 * 32 * 2)
+    layer.weight = weights[rank]
+    partials = [torch.nn.functional.linear(x, w) for x, w in zip(inputs, weights)]
+    padded = [torch.nn.functional.pad(p, (0, 0, 0, (-num_tokens) % 2)) for p in partials]
+    expected = torch.stack(padded).sum(0).chunk(2, dim=0)[rank]
+
+    def reduce_scatter(local_partial):
+        torch.testing.assert_close(local_partial, partials[rank])
+        return expected
+
+    fallback_rs = MagicMock(side_effect=reduce_scatter)
+    fused = MagicMock(side_effect=AssertionError("unsupported input must not launch fusion"))
+    monkeypatch.setattr(linear_op, "sp_reduce_scatter", fallback_rs)
+    monkeypatch.setattr(linear_op.torch_npu, "npu_quant_mm_reduce_scatter", fused, raising=False)
+
+    output, bias = op.apply(inputs[rank])
+
+    torch.testing.assert_close(output, expected)
+    assert output.shape == ((num_tokens + 1) // 2, 32)
+    assert bias is None
+    fallback_rs.assert_called_once()
+    fused.assert_not_called()

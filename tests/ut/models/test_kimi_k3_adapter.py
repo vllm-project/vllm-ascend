@@ -174,20 +174,25 @@ def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
     torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
 
 
-@pytest.mark.parametrize("fuse_o_proj", [False, True])
-def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fuse_o_proj):
+@pytest.mark.parametrize(
+    "sequence_parallel,request_fusion,hardware_supported",
+    [(True, False, True), (True, True, True), (True, True, False), (False, True, True)],
+)
+def test_kimi_attention_residual_preserves_layout_and_one_reduction(
+    monkeypatch, sequence_parallel, request_fusion, hardware_supported
+):
     class IdentityAttention(nn.Module):
         def forward(self, *, hidden_states, positions):
             del positions
-            if fuse_o_proj:
+            if layer.fuse_o_proj_mm_reduce_scatter:
                 collective_shapes.append(("mm_reduce_scatter", hidden_states.shape))
                 return hidden_states.chunk(2, dim=0)[0]
             return hidden_states
 
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
-    layer.use_sequence_parallel = True
-    layer.fuse_o_proj_mm_reduce_scatter = fuse_o_proj
+    layer.use_sequence_parallel = sequence_parallel
+    layer.use_attn_residuals = True
     layer.prev_valid_blocks = 0
     layer.is_block_write_layer = False
     layer.input_layernorm = nn.Identity()
@@ -198,6 +203,17 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fuse_o_proj
     layer.mlp_res_proj = object()
     layer.mlp_res_norm = object()
     layer.self_attn = IdentityAttention()
+    layer.self_attn.o_proj = nn.Linear(2, 2, bias=False)
+    fused_factory = MagicMock(return_value=object())
+    fused_factory.unsupported_reason.return_value = None
+    monkeypatch.setattr(kimi_k3, "KimiOProjMMReduceScatterOp", fused_factory)
+    monkeypatch.setattr(
+        kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: hardware_supported)
+    )
+    monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=1))
+    layer.fuse_o_proj_mm_reduce_scatter = request_fusion and layer._enable_o_proj_mm_reduce_scatter(
+        SimpleNamespace(lora_config=None)
+    )
 
     collective_shapes = []
 
@@ -217,21 +233,28 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fuse_o_proj
         lambda prefix_sum, *_args, **_kwargs: prefix_sum,
     )
 
-    hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
-    block_residual = torch.zeros(2, 1, 2)
+    num_rows = 2 if sequence_parallel else 3
+    hidden_states = torch.arange(num_rows * 2, dtype=torch.float32).view(num_rows, 2)
+    block_residual = torch.zeros(num_rows, 1, 2)
     output, returned_residual = layer.forward_attn_residual(
         positions=torch.arange(3),
         hidden_states=hidden_states,
         block_residual=block_residual,
     )
 
-    assert collective_shapes == [
-        ("gather", torch.Size([2, 2])),
-        ("mm_reduce_scatter" if fuse_o_proj else "reduce_scatter", torch.Size([3, 2])),
-    ]
-    assert output.shape == torch.Size([2, 2])
+    expected_collectives = (
+        [
+            ("gather", torch.Size([2, 2])),
+            ("mm_reduce_scatter" if layer.fuse_o_proj_mm_reduce_scatter else "reduce_scatter", torch.Size([3, 2])),
+        ]
+        if sequence_parallel
+        else []
+    )
+    assert collective_shapes == expected_collectives
+    assert fused_factory.call_count == int(request_fusion and hardware_supported and sequence_parallel)
+    assert output.shape == hidden_states.shape
     torch.testing.assert_close(output, hidden_states * 4)
-    assert returned_residual.shape == torch.Size([2, 1, 2])
+    assert returned_residual.shape == block_residual.shape
 
 
 @pytest.mark.parametrize("is_mla", [False, True])
@@ -253,11 +276,13 @@ def test_kimi_fused_o_proj_preserves_projection_and_sets_mla_output_shard(monkey
     original_weight = attention.o_proj.weight
     original_keys = list(layer.state_dict())
     fused_op = object()
-    monkeypatch.setattr(kimi_k3, "KimiOProjMMReduceScatterOp", lambda _layer: fused_op)
+    fused_factory = MagicMock(return_value=fused_op)
+    fused_factory.unsupported_reason.return_value = None
+    monkeypatch.setattr(kimi_k3, "KimiOProjMMReduceScatterOp", fused_factory)
     monkeypatch.setattr(kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
     monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=1))
 
-    layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None))
+    assert layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None)) is True
 
     assert attention.o_proj.custom_op is fused_op
     assert attention.o_proj.weight is original_weight
@@ -267,29 +292,88 @@ def test_kimi_fused_o_proj_preserves_projection_and_sets_mla_output_shard(monkey
 
 
 @pytest.mark.parametrize(
-    "sequence_parallel,attn_residuals,hardware_supported,nz_mode,lora_config,error",
+    "sequence_parallel,attn_residuals,hardware_supported,nz_mode,lora_config",
     [
-        (False, True, True, 1, None, "sequence parallel"),
-        (True, False, True, 1, None, "attention residuals"),
-        (True, True, False, 1, None, "Ascend A5"),
-        (True, True, True, 2, None, "ND weights"),
-        (True, True, True, 1, object(), "LoRA"),
+        (False, True, True, 1, None),
+        (True, False, True, 1, None),
+        (True, True, False, 1, None),
+        (True, True, True, 2, None),
+        (True, True, True, 1, object()),
     ],
 )
-def test_kimi_fused_o_proj_rejects_unsupported_configuration(
-    monkeypatch, sequence_parallel, attn_residuals, hardware_supported, nz_mode, lora_config, error
+def test_kimi_fused_o_proj_keeps_original_operator_for_unsupported_configuration(
+    monkeypatch, sequence_parallel, attn_residuals, hardware_supported, nz_mode, lora_config
 ):
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = sequence_parallel
     layer.use_attn_residuals = attn_residuals
+    attention = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+    nn.Module.__init__(attention)
+    attention.o_proj = nn.Linear(2, 2, bias=False)
+    original_op = object()
+    attention.o_proj.custom_op = original_op
+    attention.o_proj.reduce_results = not sequence_parallel
+    attention.mla_attn = SimpleNamespace(output_token_shard_size=1)
+    layer.self_attn = attention
+    original_keys = list(layer.state_dict())
+    fused_factory = MagicMock(side_effect=AssertionError("unsupported configuration must not initialize fusion"))
+    monkeypatch.setattr(kimi_k3, "KimiOProjMMReduceScatterOp", fused_factory)
     monkeypatch.setattr(
         kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: hardware_supported)
     )
     monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=nz_mode))
 
-    with pytest.raises(ValueError, match=error):
-        layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=lora_config))
+    assert layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=lora_config)) is False
+    fused_factory.assert_not_called()
+    assert attention.o_proj.custom_op is original_op
+    assert attention.o_proj.reduce_results is (not sequence_parallel)
+    assert attention.mla_attn.output_token_shard_size == 1
+    assert list(layer.state_dict()) == original_keys
+
+
+@pytest.mark.parametrize("incompatible", ["fp16", "fp32", "quantized", "custom_op", "bias", "api", "tp", "local_k"])
+def test_kimi_fused_o_proj_keeps_incompatible_projection(monkeypatch, incompatible):
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    from vllm_ascend.ops import linear_op
+
+    layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_sequence_parallel = True
+    layer.use_attn_residuals = True
+    attention = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+    nn.Module.__init__(attention)
+    dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(incompatible, torch.bfloat16)
+    attention.o_proj = nn.Linear(
+        255 if incompatible == "local_k" else 256, 32, bias=incompatible == "bias", dtype=dtype
+    )
+    attention.o_proj.custom_op = object() if incompatible == "custom_op" else None
+    attention.o_proj.quant_method = object() if incompatible == "quantized" else UnquantizedLinearMethod()
+    attention.o_proj.reduce_results = False
+    attention.mla_attn = SimpleNamespace(output_token_shard_size=1)
+    layer.self_attn = attention
+    original_op = attention.o_proj.custom_op
+    original_weight = attention.o_proj.weight
+    monkeypatch.setattr(kimi_k3, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    monkeypatch.setattr(kimi_k3, "get_ascend_config", lambda: SimpleNamespace(weight_nz_mode=1))
+    monkeypatch.setattr(linear_op, "get_tp_group", lambda: SimpleNamespace(world_size=3 if incompatible == "tp" else 8))
+    monkeypatch.setattr(
+        linear_op.torch_npu,
+        "npu_quant_mm_reduce_scatter",
+        None if incompatible == "api" else MagicMock(),
+        raising=False,
+    )
+    fused_init = MagicMock(side_effect=AssertionError("unsupported projection must not initialize fusion"))
+    monkeypatch.setattr(kimi_k3.KimiOProjMMReduceScatterOp, "__init__", fused_init)
+
+    assert layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None)) is False
+
+    fused_init.assert_not_called()
+    assert attention.o_proj.custom_op is original_op
+    assert attention.o_proj.weight is original_weight
+    assert attention.o_proj.reduce_results is False
+    assert attention.mla_attn.output_token_shard_size == 1
 
 
 def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):

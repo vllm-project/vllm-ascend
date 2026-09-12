@@ -509,25 +509,29 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
-        self.fuse_o_proj_mm_reduce_scatter = get_ascend_config().enable_kimi_o_proj_mm_reduce_scatter
-        if self.fuse_o_proj_mm_reduce_scatter:
-            self._enable_o_proj_mm_reduce_scatter(vllm_config)
+        self.fuse_o_proj_mm_reduce_scatter = (
+            get_ascend_config().enable_kimi_o_proj_mm_reduce_scatter
+            and self._enable_o_proj_mm_reduce_scatter(vllm_config)
+        )
 
-    def _enable_o_proj_mm_reduce_scatter(self, vllm_config: VllmConfig) -> None:
+    def _enable_o_proj_mm_reduce_scatter(self, vllm_config: VllmConfig) -> bool:
         if not self.use_sequence_parallel or not self.use_attn_residuals:
-            raise ValueError("Kimi O-projection MM ReduceScatter requires sequence parallel attention residuals.")
+            return False
         if not get_current_hardware_profile().supports(HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE):
-            raise ValueError("Kimi O-projection MM ReduceScatter is only supported on Ascend A5.")
+            return False
         if get_ascend_config().weight_nz_mode == 2:
-            raise ValueError("Kimi O-projection MM ReduceScatter requires ND weights; set weight_nz_mode to 0 or 1.")
+            return False
         if vllm_config.lora_config is not None:
-            raise ValueError("Kimi O-projection MM ReduceScatter does not support LoRA.")
+            return False
         o_proj = self.self_attn.o_proj
+        if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
+            return False
         o_proj.custom_op = KimiOProjMMReduceScatterOp(o_proj)
         if isinstance(self.self_attn, AscendKimiMLAAttention):
             # The MLA custom op writes into a caller-owned output buffer. Its
             # token dimension must match the fused projection's TP shard.
             self.self_attn.mla_attn.output_token_shard_size = o_proj.tp_size
+        return True
 
     def _run_self_attn(
         self,
