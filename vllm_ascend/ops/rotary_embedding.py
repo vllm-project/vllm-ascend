@@ -551,6 +551,74 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
 
         return q.reshape(query_shape), k.reshape(key_shape)
 
+    def _forward_native_cached(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ):
+        # Sections outside the aclnnRopeWithSinCosCacheV2 allowlist (e.g.
+        # Qwen2.5-Omni's [16, 16, 0]) fall back to the eager native path,
+        # whose stock code recomputes the processed cos/sin for every
+        # decoder layer. Cache it keyed by the `positions` object identity
+        # (strong ref kept, so tensor-id reuse cannot alias; the stored
+        # shape + version counter invalidate in-place rewrites). Per-layer
+        # q/k rotation still runs.
+        cache = getattr(self, "_mrope_cos_sin_cache", None)
+        if (
+            cache is not None
+            and cache[0] is positions
+            and cache[3] == positions.shape
+            and cache[4] == positions._version
+        ):
+            cos, sin = cache[1], cache[2]
+        else:
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            cos_sin = cos_sin_cache[positions]  # type: ignore[index]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            if positions.ndim == 2:
+                assert self.mrope_section
+                if self.mrope_interleaved:
+                    from vllm.model_executor.layers.rotary_embedding.mrope import (
+                        apply_interleaved_rope,
+                    )
+
+                    cos = apply_interleaved_rope(cos, self.mrope_section)
+                    sin = apply_interleaved_rope(sin, self.mrope_section)
+                else:
+                    cos = torch.cat(
+                        [m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))],
+                        dim=-1,
+                    )
+                    sin = torch.cat(
+                        [m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))],
+                        dim=-1,
+                    )
+            self._mrope_cos_sin_cache = (
+                positions,
+                cos,
+                sin,
+                positions.shape,
+                positions._version,
+            )
+
+        num_tokens = positions.shape[-1]
+
+        query_shape = query.shape
+        query = query.reshape(num_tokens, -1, self.head_size)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        query_rot = self.apply_rotary_emb.forward_native(query_rot, cos, sin)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.reshape(num_tokens, -1, self.head_size)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
+        key_rot = self.apply_rotary_emb.forward_native(key_rot, cos, sin)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
     def forward_oot(
         self,
         positions: torch.Tensor,
@@ -562,7 +630,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             return self.forward_triton(positions, query, key)
 
         if self.mrope_section != [16, 24, 24]:
-            return super().forward_oot(positions, query, key)
+            return self._forward_native_cached(positions, query, key)
 
         import torch_npu
 
