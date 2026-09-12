@@ -51,7 +51,7 @@ def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
     copy and a transpose in every forward.
     """
     weight = conv1d.weight
-    if weight.ndim == 2:
+    if getattr(weight, "_causal_conv1d_weight_prepared", False):
         return
     if weight.ndim != 3 or weight.shape[1] != 1:
         raise ValueError(f"Expected causal conv1d weight shape [channels, 1, width], but got {tuple(weight.shape)}")
@@ -67,6 +67,7 @@ def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
         original_weight_loader(checkpoint_layout, loaded_weight, *args, **kwargs)
 
     weight.weight_loader = width_major_weight_loader
+    setattr(weight, "_causal_conv1d_weight_prepared", True)
 
 
 def try_rearrange_single_token_mixed_qkv(
