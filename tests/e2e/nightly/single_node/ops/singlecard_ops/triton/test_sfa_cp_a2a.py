@@ -6,6 +6,7 @@ import torch
 from vllm_ascend.ops.triton.sfa_cp import (
     fused_sfa_dcp_lse_combine,
     pack_sfa_dcp_output_lse,
+    pack_sfa_dcp_output_max_sum,
 )
 
 
@@ -28,6 +29,36 @@ def _simulate_receive(
         pack_sfa_dcp_output_lse(
             sender_outputs[source_rank],
             sender_lses[source_rank],
+            dcp_size,
+            scatter_dim,
+        )
+        for source_rank in range(dcp_size)
+    ]
+    return torch.stack([send_buffers[source_rank][destination_rank] for source_rank in range(dcp_size)])
+
+
+def _materialize_pa_bsnd_lse(
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+) -> torch.Tensor:
+    # This is the current-main Python contract. Non-finite results are later
+    # treated as invalid rank contributions by the existing packed consumer.
+    return (softmax_max + torch.log(softmax_sum))[:, 0].unsqueeze(-1)
+
+
+def _simulate_receive_max_sum(
+    sender_outputs: torch.Tensor,
+    sender_max: torch.Tensor,
+    sender_sum: torch.Tensor,
+    destination_rank: int,
+    scatter_dim: int,
+) -> torch.Tensor:
+    dcp_size = sender_outputs.shape[0]
+    send_buffers = [
+        pack_sfa_dcp_output_max_sum(
+            sender_outputs[source_rank],
+            sender_max[source_rank],
+            sender_sum[source_rank],
             dcp_size,
             scatter_dim,
         )
@@ -247,3 +278,123 @@ def test_finite_lse_outside_activation_dtype_range(
     tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
     assert torch.count_nonzero(actual).item() > 0
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scatter_dim", [0, 1])
+@torch.inference_mode()
+def test_pack_pa_bsnd_max_sum_and_fused_lse_combine(
+    dtype: torch.dtype,
+    scatter_dim: int,
+) -> None:
+    torch.manual_seed(20260913)
+    dcp_size = 8
+    num_tokens, num_heads, head_dim = (16, 8, 512) if scatter_dim == 0 else (5, 64, 512)
+    sender_outputs = torch.randn(
+        dcp_size,
+        num_tokens,
+        num_heads,
+        head_dim,
+        dtype=dtype,
+        device="npu",
+    )
+    sender_max = torch.randn(
+        dcp_size,
+        1,
+        num_tokens,
+        num_heads,
+        dtype=torch.float32,
+        device="npu",
+    )
+    sender_sum = torch.rand_like(sender_max) + 0.125
+    sender_lse = _materialize_pa_bsnd_lse(sender_max, sender_sum)
+
+    destination_rank = 3
+    recv = _simulate_receive_max_sum(
+        sender_outputs,
+        sender_max,
+        sender_sum,
+        destination_rank,
+        scatter_dim,
+    )
+    if scatter_dim == 0:
+        local_tokens = num_tokens // dcp_size
+        token_slice = slice(destination_rank * local_tokens, (destination_rank + 1) * local_tokens)
+        expected = _reference_merge(sender_outputs[:, token_slice], sender_lse[:, token_slice, :, 0])
+    else:
+        local_heads = num_heads // dcp_size
+        head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
+        expected = _reference_merge(sender_outputs[:, :, head_slice], sender_lse[:, :, head_slice, 0])
+
+    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scatter_dim", [0, 1])
+@torch.inference_mode()
+def test_pa_bsnd_max_sum_strides_invalid_statistics_and_all_invalid_rows(
+    dtype: torch.dtype,
+    scatter_dim: int,
+) -> None:
+    torch.manual_seed(20260914)
+    dcp_size, num_tokens, num_heads, head_dim = 8, 16, 64, 128
+    output_storage = torch.randn(
+        dcp_size,
+        num_tokens,
+        num_heads,
+        head_dim + 4,
+        dtype=dtype,
+        device="npu",
+    )
+    max_storage = torch.full(
+        (dcp_size, 1, num_tokens, num_heads * 2),
+        70_000.0,
+        dtype=torch.float32,
+        device="npu",
+    )
+    sum_storage = torch.ones_like(max_storage)
+    sender_outputs = output_storage[..., :head_dim]
+    sender_max = max_storage[..., ::2]
+    sender_sum = sum_storage[..., ::2]
+    sender_max += torch.arange(dcp_size, dtype=torch.float32, device="npu").view(-1, 1, 1, 1) * 0.25
+
+    sender_sum[:, :, 0, :] = 0.0
+    sender_sum[0, 0, 1, 0] = -1.0
+    sender_sum[1, 0, 1, 0] = float("nan")
+    sender_sum[2, 0, 1, 0] = float("inf")
+    sender_max[3, 0, 1, 0] = float("nan")
+    sender_max[4, 0, 1, 0] = float("inf")
+    sender_max[5, 0, 1, 0] = float("-inf")
+    sender_outputs[:, 0] = float("nan")
+
+    assert not sender_outputs.is_contiguous()
+    assert not sender_max.is_contiguous()
+    assert not sender_sum.is_contiguous()
+    sender_lse = _materialize_pa_bsnd_lse(sender_max, sender_sum)
+
+    destination_rank = 0
+    recv = _simulate_receive_max_sum(
+        sender_outputs,
+        sender_max,
+        sender_sum,
+        destination_rank,
+        scatter_dim,
+    )
+    if scatter_dim == 0:
+        expected = _reference_merge(
+            sender_outputs[:, : num_tokens // dcp_size],
+            sender_lse[:, : num_tokens // dcp_size, :, 0],
+        )
+    else:
+        expected = _reference_merge(
+            sender_outputs[:, :, : num_heads // dcp_size],
+            sender_lse[:, :, : num_heads // dcp_size, 0],
+        )
+    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim)
+
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    assert torch.count_nonzero(actual[0]).item() == 0
+    assert torch.isfinite(actual[1:]).all()
