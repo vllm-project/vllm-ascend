@@ -247,3 +247,48 @@ def test_finite_lse_outside_activation_dtype_range(
     tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-2
     torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
     assert torch.count_nonzero(actual).item() > 0
+
+
+@pytest.mark.parametrize("num_tokens", [48, 96, 144])
+@torch.inference_mode()
+def test_mla_history_current_fp32_combine(num_tokens: int) -> None:
+    torch.manual_seed(num_tokens)
+    num_partials, num_heads, head_dim = 17, 2, 512
+    outputs = torch.randn(num_partials, num_tokens, num_heads, head_dim)
+    lse = torch.randn(num_partials, num_tokens, num_heads) * 20 + 1000
+    # FIA empty histories, a current-only row, and an entirely padded row.
+    lse[1:16, 0] = float("inf")
+    lse[:16, 1] = float("inf")
+    outputs[:16, 1] = float("nan")
+    lse[:, 2] = float("inf")
+    outputs[:, 2] = float("nan")
+    lse[0, 3] = float("nan")
+    lse[1, 3] = -float("inf")
+    expected = _reference_merge(outputs, lse)
+    recv = torch.cat((outputs, lse.unsqueeze(-1)), dim=-1).npu()
+    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim=0).cpu()
+    assert actual.dtype == torch.float32
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, atol=3e-6, rtol=3e-5)
+
+
+@pytest.mark.parametrize("num_tokens", [48, 96, 144])
+@torch.inference_mode()
+def test_mla_history_lse_then_current_merge(num_tokens: int) -> None:
+    torch.manual_seed(num_tokens)
+    outputs = torch.randn(17, num_tokens, 6, 512)
+    lse = torch.randn(17, num_tokens, 6) * 5 + 1000
+    lse[:16, 0] = float("inf")
+    outputs[:16, 0] = float("nan")
+    lse[:, 1] = float("inf")
+    outputs[:, 1] = float("nan")
+    expected = _reference_merge(outputs, lse)
+    history = torch.cat((outputs[:16], lse[:16].unsqueeze(-1)), dim=-1).npu()
+    merged_history = fused_sfa_dcp_lse_combine(history, 512, scatter_dim=0, return_lse=True)
+    assert merged_history.shape == (num_tokens, 6, 513)
+    current = torch.cat((outputs[-1], lse[-1].unsqueeze(-1)), dim=-1).npu()
+    actual = fused_sfa_dcp_lse_combine(
+        torch.stack((merged_history, current)), 512, scatter_dim=0
+    )
+    torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=5e-4)
+    assert torch.isfinite(actual).all()
