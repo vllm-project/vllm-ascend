@@ -332,9 +332,7 @@ def triton_split_qkv_rmsnorm_mrope(
         raise ValueError("q_bias and k_bias must be both present or both absent")
     if q_bias is not None and k_bias is None:
         raise ValueError("q_bias and k_bias must be both present or both absent")
-    if q_bias is not None and k_bias is not None and (
-        q_bias.numel() != head_size or k_bias.numel() != head_size
-    ):
+    if q_bias is not None and k_bias is not None and (q_bias.numel() != head_size or k_bias.numel() != head_size):
         raise ValueError("q_bias and k_bias must each contain head_size elements")
 
     if rope_dim is None:
