@@ -557,11 +557,7 @@ def quant_apply_mlp(
             elif is_swigluoai_uninterleave:
                 scale = _prepare_swigluoai_grouped_matmul_scales(w1_scale, _output_dtype)
             else:
-                scale = (
-                    [item.to(w2_scale[0].dtype) for item in w1_scale]
-                    if isinstance(w1_scale, list)
-                    else [w1_scale]
-                )
+                scale = [item.to(w2_scale[0].dtype) for item in w1_scale] if isinstance(w1_scale, list) else [w1_scale]
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],

@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -76,6 +77,31 @@ EPLB_EXPERT_WEIGHT_NAMES = {
     (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
 }
+
+
+_W4A8MXFP_NZ_WEIGHT_NAMES = {
+    "w13_weight_list",
+    "w2_weight_list",
+}
+
+
+def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
+    """Create an offset-0 NZ receive buffer matching an MXFP expert."""
+    buffer_tensor = torch.empty(
+        expert_tensor.shape,
+        dtype=expert_tensor.dtype,
+        device=expert_tensor.device,
+    )
+    input_dtype = (
+        torch.float4_e2m1fn_x2 if expert_tensor.dtype == torch.float4_e2m1fn_x2 else torch_npu.float4_e2m1fn_x2
+    )
+    torch_npu.npu_format_cast_(
+        buffer_tensor,
+        29,
+        customize_dtype=torch.float8_e4m3fn,
+        input_dtype=input_dtype,
+    )
+    return buffer_tensor
 
 
 class VllmEplbAdaptor:
@@ -139,9 +165,13 @@ class VllmEplbAdaptor:
                 continue
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
+            quant_type = expert_weight_key[0]
             for buffer_id in range(num_buffer_tensor):
-                for expert_tensor in expert_tensors:
-                    buffer_tensor = torch.empty_like(expert_tensor)
+                for name, expert_tensor in zip(expert_weight_names, expert_tensors):
+                    if quant_type == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                        buffer_tensor = _new_w4a8_mxfp_nz_buffer(expert_tensor)
+                    else:
+                        buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):

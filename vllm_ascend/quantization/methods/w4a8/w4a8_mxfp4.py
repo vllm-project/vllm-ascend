@@ -119,9 +119,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self.use_expert_weight_list = (
-            (vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True)
-            or self.dynamic_eplb
-        )
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        ) or self.dynamic_eplb
 
     @staticmethod
     def get_weight(
@@ -161,14 +160,29 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
 
+        if self.use_expert_weight_list:
+            # EPLB keeps each expert as an independent N-major NZ tensor.
+            # FP8 x FP4 GroupedMatmul requires transposeWeight=true, which is
+            # represented by a transpose view. This does not allocate or copy
+            # any NPU weight storage.
+            w1 = [weight.transpose(0, 1) for weight in layer.w13_weight_list]
+            w2 = [weight.transpose(0, 1) for weight in layer.w2_weight_list]
+            w1_scale = layer.w13_weight_scale_list
+            w2_scale = layer.w2_weight_scale_list
+        else:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight_list if self.use_expert_weight_list else layer.w13_weight,
-                w2=layer.w2_weight_list if self.use_expert_weight_list else layer.w2_weight,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb or self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
@@ -182,8 +196,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale_list if self.use_expert_weight_list else layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale_list if self.use_expert_weight_list else layer.w2_weight_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
             )
         )
 
@@ -204,28 +218,57 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         ]
 
     @staticmethod
-    def _format_mxfp4_weight(weight: torch.Tensor) -> torch.Tensor:
+    def _format_mxfp4_weight(weight: torch.Tensor, input_dtype) -> torch.Tensor:
         return torch_npu.npu_format_cast(
             weight,
             29,
             customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
+            input_dtype=input_dtype,
         )
+
+    @staticmethod
+    def _format_mxfp4_weight_inplace(weight: torch.Tensor, input_dtype) -> torch.Tensor:
+        """Convert an independent ND expert tensor to NZ in place."""
+        torch_npu.npu_format_cast_(
+            weight,
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=input_dtype,
+        )
+        return weight
 
     def _process_moe_weights_after_loading(self, layer, reinterpret_as_uint8: bool = False) -> None:
         for tensor_name in ("w13_weight", "w2_weight"):
             tensor = getattr(layer, tensor_name)
-            weight = tensor.data.view(torch.uint8) if reinterpret_as_uint8 else tensor.data
+            weight = tensor.data
+            input_dtype = torch_npu.float4_e2m1fn_x2
+            use_native_fp4 = (
+                not reinterpret_as_uint8
+                and tensor_name == "w13_weight"
+                and getattr(layer, "activation", None) in (MoEActivation.SITU, "situ")
+            )
+            if reinterpret_as_uint8:
+                weight = weight.view(torch.uint8)
+            elif use_native_fp4:
+                input_dtype = torch.float4_e2m1fn_x2
+
             if self.use_expert_weight_list:
-                # EPLB replaces experts independently. Split the ND tensor
-                # before format casting because cloning FRACTAL_NZ views is
-                # not supported by torch_npu.
-                weight = weight.transpose(1, 2).contiguous()
-                expert_list = [self._format_mxfp4_weight(expert.clone()) for expert in weight.unbind(dim=0)]
+                # Keep the checkpoint N-major layout while splitting it by
+                # expert. clone() creates independent storage with
+                # storage_offset == 0 for EPLB D2D replacement.
+                expert_list = []
+                for expert in weight.unbind(dim=0):
+                    expert = expert.clone()
+                    if use_native_fp4:
+                        expert = expert.view(torch.float4_e2m1fn_x2)
+                    expert = self._format_mxfp4_weight_inplace(expert, input_dtype)
+                    expert_list.append(expert)
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
             else:
-                tensor.data = self._format_mxfp4_weight(weight).transpose(1, 2)
+                if use_native_fp4:
+                    weight = weight.view(torch.float4_e2m1fn_x2)
+                tensor.data = self._format_mxfp4_weight(weight, input_dtype).transpose(1, 2)
 
         for tensor_name in ("w13_weight_scale", "w2_weight_scale"):
             tensor = getattr(layer, tensor_name)
@@ -233,44 +276,17 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             scale = tensor.data.reshape(g, n, k // 2, 2)
             if reinterpret_as_uint8:
                 scale = scale.view(torch.uint8)
-            scale = scale.transpose(-3, -2).contiguous()
             if self.use_expert_weight_list:
-                expert_list = [expert.clone() for expert in scale.unbind(dim=0)]
+                expert_list = [expert.transpose(0, 1).contiguous() for expert in scale.unbind(dim=0)]
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
             else:
-                tensor.data = scale
+                tensor.data = scale.transpose(-3, -2)
 
         if self.use_expert_weight_list:
             torch.npu.empty_cache()
 
     def process_weights_after_loading(self, layer):
-        # Only GMSQ needs native FP4 Tensor metadata. Keep the legacy loader
-        # for other activations and for W2, which is consumed by ordinary GMM2.
-        w13 = layer.w13_weight.data
-        w13_input_dtype = torch_npu.float4_e2m1fn_x2
-        if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
-            # view(dtype) requires a torch.dtype, not torch_npu's integer type ID.
-            w13 = w13.view(torch.float4_e2m1fn_x2)
-            w13_input_dtype = torch.float4_e2m1fn_x2
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            w13,
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=w13_input_dtype,
-        )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data,
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
         self._process_moe_weights_after_loading(layer)
 
 
