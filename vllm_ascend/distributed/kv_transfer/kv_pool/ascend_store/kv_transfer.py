@@ -1295,7 +1295,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         ready_event: threading.Event,
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
-        sync_save_events: list[torch.npu.Event],
+        sync_save_events: list[torch.npu.Event | None],
     ):
         super().__init__(
             m_store,
@@ -1420,7 +1420,9 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             addrs_to_put = [addr_list[index] for index in missing_indices]
             sizes_to_put = [size_list[index] for index in missing_indices]
             if keys_to_put:
-                self.sync_save_events[layer_id].synchronize()
+                save_event = self.sync_save_events[layer_id]
+                if save_event is not None:
+                    save_event.synchronize()
                 self.m_store.put(keys_to_put, addrs_to_put, sizes_to_put)
 
         if layer_id == self.final_layer_id:
@@ -1550,7 +1552,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         ready_event: threading.Event,
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
-        sync_save_events: list[torch.npu.Event],
+        sync_save_events: list[torch.npu.Event | None],
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
@@ -1634,7 +1636,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         active_indices = [index for index, key in enumerate(req_meta.keys) if key in self._active_put_keys]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
-            self.sync_save_events[layer_id].synchronize()
+            save_event = self.sync_save_events[layer_id]
+            if save_event is not None:
+                save_event.synchronize()
             active_buffers = [req_meta.all_buffers[index] for index in active_indices]
             active_sizes = [req_meta.all_sizes[index] for index in active_indices]
             active_offsets = [req_meta.all_offsets[index] for index in active_indices]
@@ -1761,7 +1765,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
         if has_any_save:
-            self.sync_save_events[physical_layer].synchronize()
+            save_event = self.sync_save_events[physical_layer]
+            if save_event is not None:
+                save_event.synchronize()
             gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
             addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
             size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
@@ -1821,7 +1827,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         get_event: threading.Event,
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
-        sync_save_events: list[torch.npu.Event],
+        sync_save_events: list[torch.npu.Event | None],
         num_layers: int,
         h2d_stagger_us: int = 0,
         max_transfer_blocks: int = 0,
@@ -1953,7 +1959,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
                 if self.save_failure_checker is not None:
                     self.save_failure_checker()
-                self.sync_save_events[wait_for_save].synchronize()
+                save_event = self.sync_save_events[wait_for_save]
+                if save_event is not None:
+                    save_event.synchronize()
                 self.layer_save_finished_events[wait_for_save].clear()
 
             if len(data.transfer_tasks) != 1:
@@ -2022,7 +2030,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
-            self.sync_save_events[wait_for_save].synchronize()
+            save_event = self.sync_save_events[wait_for_save]
+            if save_event is not None:
+                save_event.synchronize()
             logger.debug("Layer save event cleared: layer %d", wait_for_save)
             self.layer_save_finished_events[wait_for_save].clear()
 
