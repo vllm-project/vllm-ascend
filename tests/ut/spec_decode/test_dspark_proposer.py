@@ -19,12 +19,15 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
@@ -346,10 +349,184 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
 
 
+class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
+    """The target descriptor supplies only the synchronized request bucket;
+    DSpark owns the draft token width used for its graph key."""
+
+    @pytest.mark.parametrize(
+        ("configured_mode", "structural", "rollout"),
+        [
+            (CUDAGraphMode.FULL_DECODE_ONLY, True, True),
+            (CUDAGraphMode.FULL_AND_PIECEWISE, True, False),
+            (CUDAGraphMode.FULL, False, False),
+            (CUDAGraphMode.NONE, False, False),
+        ],
+    )
+    def test_resolved_mode_is_evaluated_once(self, configured_mode, structural, rollout):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+
+        proposer.set_resolved_cudagraph_mode(configured_mode)
+
+        assert proposer._request_aligned_decode_graph is structural
+        assert proposer._dspark_graph_rollout_enabled is rollout
+
+    @pytest.mark.parametrize("blocker", ["dynamic", "dcp", "probabilistic", "eager"])
+    def test_unsupported_modes_disable_rollout(self, blocker):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.dynamic_spec = None
+        proposer.speculative_config = SimpleNamespace(
+            enforce_eager=False,
+            disable_padded_drafter_batch=False,
+        )
+        proposer.dcp_size = 1
+        proposer._enable_probabilistic_draft_probs = False
+        if blocker == "dynamic":
+            proposer.dynamic_spec = object()
+        elif blocker == "dcp":
+            proposer.dcp_size = 2
+        elif blocker == "probabilistic":
+            proposer._enable_probabilistic_draft_probs = True
+        else:
+            proposer.speculative_config.enforce_eager = True
+
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        assert proposer._dspark_graph_rollout_enabled is False
+        assert proposer.use_cuda_graph is False
+
+    def test_maps_target_request_bucket_to_draft_width(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        target_desc = BatchDescriptor(
+            num_tokens=36,
+            num_reqs=4,
+            uniform=True,
+            has_lora=True,
+            num_active_loras=2,
+        )
+
+        mode, draft_desc = proposer.build_draft_graph_descriptor(CUDAGraphMode.FULL, target_desc)
+
+        assert mode == CUDAGraphMode.FULL
+        assert draft_desc == BatchDescriptor(
+            num_tokens=32,
+            num_reqs=4,
+            uniform=True,
+            has_lora=True,
+            num_active_loras=2,
+        )
+
+    def test_dummy_capture_builds_exact_r_row_attention_metadata(self, monkeypatch):
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=4,
+            block_size=8,
+            draft_attn_causal=None,
+        )
+        proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("capture DP sync must be skipped")),
+            optimistic_seq_lens_cpu=torch.arange(4, dtype=torch.int32),
+            seq_lens=torch.arange(4, dtype=torch.int32),
+        )
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        proposer.vllm_config = SimpleNamespace()
+        proposer.token_indices_to_sample = torch.zeros(32, dtype=torch.int32)
+        proposer._get_positions = lambda n: proposer.positions[:n]
+        proposer._runnable = MagicMock()
+        proposer.model.precompute_and_store_context_kv = MagicMock()
+        metadata = SimpleNamespace(attn_mask=object(), attn_state=None)
+        builder = MagicMock()
+        builder.build_for_graph_capture.return_value = metadata
+        proposer.draft_attn_groups[0].get_metadata_builder = lambda: builder
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context",
+            lambda *args, **kwargs: nullcontext(),
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_forward_context",
+            lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL),
+        )
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer._EXTRA_CTX", SimpleNamespace(capturing=True))
+
+        proposer.dummy_run(
+            num_tokens=36,
+            num_reqs=4,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+        )
+
+        common_metadata = builder.build_for_graph_capture.call_args.args[0]
+        assert builder.build_for_graph_capture.call_args.args[1] == AscendAttentionState.SpecDecoding
+        assert common_metadata.attn_state == AscendAttentionState.SpecDecoding
+        assert common_metadata.query_start_loc_cpu.tolist() == [0, 8, 16, 24, 32]
+        assert proposer._runnable.call_args.kwargs["num_input_tokens"] == 32
+        assert proposer._runnable.call_args.kwargs["batch_size"] == 4
+        assert proposer._runnable.call_args.kwargs["multi_steps_attn_metadata"] == [{"L0": metadata}]
+        proposer.runner._sync_metadata_across_dp.assert_not_called()
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
+
+    def test_context_kv_runs_only_in_the_outside_hook(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._context_kv_graph_active = False
+        proposer._dflash_num_context = 3
+        proposer._dflash_hidden_states = torch.zeros(8, 4)
+        proposer._context_positions_buffer = torch.zeros(8, dtype=torch.int32)
+        proposer._context_slot_mapping_buffers = [torch.zeros(8, dtype=torch.int32)]
+        proposer.model = MagicMock()
+
+        proposer._prepare_context_kv_inside_runnable(8, proposer._context_slot_mapping_buffers)
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
+
+        proposer._prepare_inputs_outside_draft_runnable(8)
+        proposer.model.precompute_and_store_context_kv.assert_called_once()
+        args = proposer.model.precompute_and_store_context_kv.call_args.args
+        assert args[0].shape[0] == 3
+        assert args[1].shape[0] == 3
+        assert args[2][0].shape[0] == 3
+
+    def test_context_kv_graph_uses_target_bucket_and_precomputes_inside(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer._dflash_num_context = 27
+        proposer.max_num_tokens = 64
+        proposer.use_cuda_graph = True
+        proposer._draft_num_tokens_across_dp = torch.empty(1, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(dp_size=1)
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        proposer._dispatch_draft_graph(
+            num_actual_tokens=24,
+            num_actual_reqs=3,
+            target_mode=CUDAGraphMode.FULL,
+            target_desc=BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+            uniform_decode=True,
+            has_lora=False,
+        )
+        proposer._dflash_hidden_states = torch.full((64, 4), 9.0)
+        proposer._context_positions_buffer = torch.full((64,), 9, dtype=torch.int32)
+        proposer._context_slot_mapping_buffers = [torch.arange(64, dtype=torch.int32)]
+        proposer.model = MagicMock()
+        proposer._prepare_inputs_outside_draft_runnable(num_input_tokens=24)
+
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
+        assert proposer._context_kv_graph_num_tokens == 36
+        assert torch.count_nonzero(proposer._dflash_hidden_states[27:36]) == 0
+        assert torch.all(proposer._context_slot_mapping_buffers[0][27:36] == -1)
+
+        proposer._prepare_context_kv_inside_runnable(24, proposer._context_slot_mapping_buffers)
+
+        proposer.model.precompute_and_store_context_kv.assert_called_once()
+        context_states, context_positions, context_slots = proposer.model.precompute_and_store_context_kv.call_args.args
+        assert context_states.shape == (36, 4)
+        assert context_positions.shape == (36,)
+        assert context_slots[0].shape == (36,)
+
+
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     """``set_inputs_first_pass`` returns the anchor-first query budget and
     rewrites the common attention metadata into the DSpark cross-attention
-    shape (N query tokens per request, non-causal, chunked-prefill state)."""
+    shape (N query tokens per request and speculative-decoding state)."""
 
     @pytest.fixture(autouse=True)
     def _mock_kernel(self, monkeypatch):
@@ -426,7 +603,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         # attention is non-causal cross-attention over the draft query block.
         assert cad.causal is False
         assert cad.attn_mask is None
-        assert cad.attn_state == AscendAttentionState.ChunkedPrefill
+        assert cad.attn_state == AscendAttentionState.SpecDecoding
         # positions is the full buffer (DSA slices it), not a pre-slice.
         assert cad.positions is proposer.positions
         # slot mapping is a slice of the primary group's query buffer (shares
@@ -435,6 +612,8 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert cad.slot_mapping.data_ptr() == proposer._per_group_query_slot_mapping_buffers[0].data_ptr()
         assert cad.slot_mapping.shape[0] == num_query_total
         # optional attrs the proposer rewrites when present.
+        # Eager behavior remains unchanged; mapped FULL rewrites this field to
+        # cumulative boundaries in _prepare_mapped_full_graph_metadata().
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
         assert cad.decode_token_per_req == block_size
 
@@ -564,6 +743,79 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
         assert proposer.kernel_block_size == 128
         assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, 64]
+
+    def test_same_cache_group_splits_mixed_causal_layers(self, monkeypatch):
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: ["L0", "L1"],
+            get_draft_attn_causal=lambda: [True, False],
+        )
+        proposer.max_query_tokens = proposer.max_num_tokens = 8
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layers = {name: SimpleNamespace(get_attn_backend=lambda backend=backend: backend) for name in ("L0", "L1")}
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *args, **kwargs: layers,
+        )
+        spec = MagicMock(block_size=128)
+        config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["L0", "L1"], kv_cache_spec=spec)])
+
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(config)
+
+        assert proposer._draft_layer_causal == {"L0": True, "L1": False}
+        assert {tuple(group.layer_names) for group in proposer.draft_attn_groups} == {("L0",), ("L1",)}
+
+    def test_build_metadata_uses_each_group_causality(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        seen = []
+        groups = []
+        for gid, layer_name in enumerate(("L0", "L1")):
+            builder = MagicMock()
+            builder.build_for_drafting.side_effect = lambda common, draft_index, **kwargs: (
+                seen.append(common.causal) or SimpleNamespace()
+            )
+            groups.append(
+                SimpleNamespace(
+                    kv_cache_group_id=gid,
+                    layer_names=[layer_name],
+                    get_metadata_builder=lambda builder=builder: builder,
+                )
+            )
+        proposer.draft_attn_groups = groups
+        proposer._draft_layer_causal = {"L0": True, "L1": False}
+        proposer._per_group_block_table_buffers = {0: torch.zeros(1, 1), 1: torch.zeros(1, 1)}
+        proposer._per_group_query_slot_mapping_buffers = {0: torch.zeros(1), 1: torch.zeros(1)}
+        proposer.method = "dspark"
+        proposer.use_compress = False
+        proposer.sliding_window = None
+        common = SimpleNamespace(
+            num_reqs=1,
+            block_table_tensor=torch.zeros(1, 1),
+            slot_mapping=torch.zeros(1),
+            causal=None,
+        )
+
+        metadata, _ = proposer.build_draft_attn_metadata(common, 1, 1)
+
+        assert seen == [True, False]
+        assert set(metadata[0]) == {"L0", "L1"}
+
+    def test_graph_update_dispatches_each_backend_once(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        backend_a, backend_b = MagicMock(), MagicMock()
+        proposer.draft_attn_groups = [
+            SimpleNamespace(backend=backend_a),
+            SimpleNamespace(backend=backend_a),
+            SimpleNamespace(backend=backend_b),
+        ]
+        proposer.update_stream = proposer.vllm_config = MagicMock()
+
+        with patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params") as update:
+            proposer._update_full_graph_params(MagicMock(), 8, [{"L0": MagicMock()}])
+
+        assert [call.args[0] for call in update.call_args_list] == [backend_a, backend_b]
 
     @pytest.mark.parametrize("draft_uses_mla", [False, True], ids=["gqa", "mla"])
     def test_mixed_target_and_dspark_group_creates_one_draft_attention_group(self, monkeypatch, draft_uses_mla: bool):

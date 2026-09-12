@@ -27,6 +27,7 @@ from unittest.mock import patch
 import pytest
 from vllm.config import CompilationConfig
 
+from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import _run_speculative_decoding
 
 MAIN_MODEL = "Eco-Tech/GLM-5.2-w4a8"
@@ -60,14 +61,15 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         "CLOSE_MATMUL_K_SHIFT": "1",
     },
 )
-def test_glm_5_2_dspark_acceptance_tp8() -> None:
+@wait_until_npu_memory_free()
+def test_glm_5_2_dspark_aclgraph_acceptance_tp8() -> None:
     _run_speculative_decoding(
         model_name=MAIN_MODEL,
         speculative_config={
             "method": "dspark",
             "model": SPECULATOR_MODEL,
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
-            "enforce_eager": True,
+            "enforce_eager": False,
         },
         expected_acceptance_length=DSPARK_EXPECTED_ACCEPTANCE_LENGTH,
         runner_kwargs={

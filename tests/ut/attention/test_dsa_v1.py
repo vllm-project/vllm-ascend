@@ -22,7 +22,9 @@ import pytest
 import torch
 from vllm.v1.attention.backend import AttentionCGSupport
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import (
+    AscendDSACPMetadataBuilder,
     AscendDSAPCPImpl,
     AscendDSAPCPMetadata,
     AscendDSAPCPMetadataBuilder,
@@ -98,6 +100,24 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+@pytest.mark.parametrize("builder_cls", [AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder])
+def test_draft_graph_capture_supplies_dsa_build_context(builder_cls):
+    builder = builder_cls.__new__(builder_cls)
+    builder.build = MagicMock(return_value=SimpleNamespace(attn_state=None))
+
+    metadata = builder.build_for_graph_capture(
+        SimpleNamespace(num_reqs=4),
+        AscendAttentionState.SpecDecoding,
+    )
+
+    assert builder.build.call_args.kwargs["common_ratio_to_sas_metadata"] == {}
+    assert builder.build.call_args.kwargs["num_actual_reqs"] == 4
+    if builder_cls is AscendDSAMetadataBuilder:
+        assert metadata.attn_state == AscendAttentionState.SpecDecoding
+    else:
+        assert builder.build.call_args.kwargs["attn_state"] == AscendAttentionState.SpecDecoding
 
 
 @pytest.mark.parametrize(
