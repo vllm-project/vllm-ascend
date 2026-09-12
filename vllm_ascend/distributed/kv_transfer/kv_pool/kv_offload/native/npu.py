@@ -55,7 +55,7 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks if vllm_version_is("0.28.0") else self.num_chunks,
+            num_cpu_blocks=self.num_blocks if vllm_version_is("0.29.0") else self.num_chunks,
         )
 
 
@@ -85,7 +85,7 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
 
         region_kwargs = (
             dict(num_blocks=self.num_blocks, kv_bytes_per_block=self.kv_bytes_per_chunk)
-            if vllm_version_is("0.28.0")
+            if vllm_version_is("0.29.0")
             else dict(num_chunks=self.num_chunks, kv_bytes_per_chunk=self.kv_bytes_per_chunk)
         )
         worker_mmap = SharedOffloadRegion(
@@ -97,6 +97,6 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks if vllm_version_is("0.28.0") else self.num_chunks,
+            num_cpu_blocks=self.num_blocks if vllm_version_is("0.29.0") else self.num_chunks,
             mmap_region=worker_mmap,
         )

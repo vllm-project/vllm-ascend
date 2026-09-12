@@ -109,6 +109,6 @@ def get_310p_rope_state(
 ) -> Ascend310PRopeState | None:
     if model_config.uses_mrope:
         assert isinstance(model, SupportsMRoPE)
-        num_dims = 3 if vllm_version_is("0.28.0") else model_config.mrope_num_dims
+        num_dims = 3 if vllm_version_is("0.29.0") else model_config.mrope_num_dims
         return Ascend310PRopeState(num_dims, max_num_reqs, max_num_tokens, max_model_len, device)
     return None

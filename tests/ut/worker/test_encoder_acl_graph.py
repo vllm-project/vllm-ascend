@@ -180,7 +180,7 @@ def test_capture_budget_graph_npu():
             side_effect=lambda tensors: tensors,
         ),
     ):
-        mgr._capture_budget_graph(2048, **({} if vllm_version_is("0.28.0") else {"axis_keys": ()}))
+        mgr._capture_budget_graph(2048, **({} if vllm_version_is("0.29.0") else {"axis_keys": ()}))
 
     graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph

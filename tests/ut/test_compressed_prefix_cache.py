@@ -60,9 +60,7 @@ def _make_full_manager(
     compress_ratio: int = 4,
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
-    ratio_kwargs = (
-        {"compress_ratio": compress_ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": compress_ratio}
-    )
+    ratio_kwargs = {"tokens_per_state": compress_ratio}
     spec = AscendMLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
@@ -166,7 +164,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     manager.cache_blocks(
         request_a,
         num_tokens=logical_block_size,
-        **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
+        **({} if vllm_version_is("0.29.0") else {"replay_boundaries": (logical_block_size,)}),
     )
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
@@ -214,7 +212,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     manager.cache_blocks(
         request,
         num_tokens=logical_block_size,
-        **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
+        **({} if vllm_version_is("0.29.0") else {"replay_boundaries": (logical_block_size,)}),
     )
 
     logical_hashes = BlockHashListWithBlockSize(
@@ -245,7 +243,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
-    ratio_kwargs = {"compress_ratio": 4} if vllm_version_is("0.28.0") else {"tokens_per_state": 4}
+    ratio_kwargs = {"tokens_per_state": 4}
     compressed_spec = MLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
@@ -289,7 +287,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         manager.cache_blocks(
             request_a,
             num_tokens=logical_block_size,
-            **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
+            **({} if vllm_version_is("0.29.0") else {"replay_boundaries": (logical_block_size,)}),
         )
 
     per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(

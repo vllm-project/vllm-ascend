@@ -30,11 +30,10 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextStateCache,
     format_indexer_kpool_slot_mapping,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
 def test_state_uses_sliding_pages_and_full_precision():

@@ -101,7 +101,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
             ori_token_indices_to_sample = None
             query_lens_d = None
 
-            if vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            if vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)

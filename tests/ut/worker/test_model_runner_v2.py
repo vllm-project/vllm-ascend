@@ -56,7 +56,7 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
@@ -204,18 +204,14 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent on main (upstream vLLM #53515). v0.28.0 omits the kwarg.
+    # padded extent on both supported versions (upstream vLLM #53515).
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 2
+    assert len(partition_calls) == 1
     padded_call = next(
         call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
-    unpadded_call = next(
-        call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
-    )
-    assert unpadded_call is not None
     padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
@@ -262,7 +258,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
         parent.assert_called_once_with(dummy)
     else:
         parent.assert_called_once_with(dummy, valid_state_slots=False)

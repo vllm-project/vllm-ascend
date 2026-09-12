@@ -41,12 +41,11 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeScheduler,
     RecomputeSchedulerConfig,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
 def _create_live_recompute_scheduler(*, async_scheduling: bool = False, max_num_seqs: int = 16):
@@ -85,9 +84,8 @@ def test_add_request_does_not_inject_placeholder_spec_tokens():
     scheduler.requests = {}
     scheduler.log_stats = False
     scheduler.connector = None
-    if not vllm_version_is("0.28.0"):
-        # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
-        scheduler.spec_decode_metrics_level = "none"
+    # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
+    scheduler.spec_decode_metrics_level = "none"
 
     enqueued_requests = []
 
@@ -940,10 +938,7 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     scheduler._make_scheduled_encoder_input_stats = MagicMock(return_value="enc-stats")
     scheduler.ec_connector = MagicMock()
     scheduler.ec_connector.build_connector_meta.return_value = "ec-meta"
-    if vllm_version_is("0.28.0"):
-        scheduler.kv_cache_manager.take_partial_tail_offloads = MagicMock(return_value={})
-    else:
-        scheduler.kv_cache_manager.take_boundary_state_offloads = MagicMock(return_value={})
+    scheduler.kv_cache_manager.take_boundary_state_offloads = MagicMock(return_value={})
     request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
     scheduler.add_request(request)
 
@@ -954,10 +949,7 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     assert scheduler_output.scheduled_encoder_input_stats == "enc-stats"
     assert scheduler_output.ec_connector_metadata == "ec-meta"
     scheduler._mamba_block_aligned_split.assert_called()
-    if vllm_version_is("0.28.0"):
-        scheduler.kv_cache_manager.take_partial_tail_offloads.assert_called_once()
-    else:
-        scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
+    scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
 
 
 def test_schedule_breaks_waiting_when_mamba_split_has_no_tokens():

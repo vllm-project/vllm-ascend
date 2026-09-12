@@ -34,7 +34,6 @@ from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.core.short_request_first_scheduler import (
     ShortRequestFirstRequestQueue,
 )
-from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
@@ -360,13 +359,10 @@ class TestProfilingChunkScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            if not vllm_version_is("0.28.0"):
-                # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
-                # Scheduler.__init__, which infinitely recurses on a bare
-                # MagicMock hf_config. Override it to keep the UT runnable.
-                stack.enter_context(
-                    patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False)
-                )
+            # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
+            # Scheduler.__init__, which infinitely recurses on a bare
+            # MagicMock hf_config. Override it to keep the UT runnable.
+            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
             scheduler = ProfilingChunkScheduler(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,

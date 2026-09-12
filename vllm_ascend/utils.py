@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
@@ -591,23 +590,20 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
 
 
 @torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
+def _vllm_empty_device_matches_release(target_vllm_version: str, installed_version: Version) -> bool:
+    """Identify the pinned release in an untagged empty-device SCM build.
 
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
-    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
-    after the move on main.
-
-    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
-    must not be traced when version gates run during torch.compile.
+    Both supported lanes now use v1 PCP, so module locations cannot identify
+    the release. setuptools-scm preserves the checkout SHA in the local version.
     """
-    if target_vllm_version != "0.28.0":
+    if target_vllm_version != "0.29.0" or installed_version.local is None:
         return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
+    scm_node = installed_version.local.split(".")[0]
+    if not scm_node.startswith("g"):
+        return False
+    commit = scm_node[1:]
+    release_commit = "98dff2a81d747d1dba01a47f939f48c3526d4206"
+    return 7 <= len(commit) <= 40 and release_commit.startswith(commit)
 
 
 @functools.cache
@@ -620,15 +616,14 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
         parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
+        if Version(parsed.public) == Version(target_vllm_version):
             return True
         if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
+            return _vllm_empty_device_matches_release(target_vllm_version, parsed)
         return False
     except InvalidVersion:
         raise ValueError(
@@ -645,8 +640,6 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.28.0"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -790,7 +783,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
         REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention

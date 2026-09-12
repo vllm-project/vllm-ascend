@@ -11,7 +11,6 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as _sample_for_version
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
@@ -32,18 +31,6 @@ def gumbel_sample(
     is_drafting: bool = False,
 ) -> torch.Tensor:
     """Run the existing target-sampling assertions through each lane's API."""
-    if vllm_version_is("0.28.0"):
-        return _sample_for_version(
-            logits,
-            expanded_idx_mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature=apply_temperature,
-            logits_cache=logits_cache,
-            logits_cache_col=logits_cache_col,
-            is_drafting=is_drafting,
-        )
     return _sample_for_version(
         logits,
         expanded_idx_mapping,
