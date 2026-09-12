@@ -13,6 +13,7 @@ P (``kv_producer``): build metadata for layer-wise READ_READY notifications.
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,19 @@ if TYPE_CHECKING:
 
 METASERVER_MAX_RETRIES = 3
 METASERVER_RETRY_DELAY_SECONDS = 1.0
+# Outer (timer-based) resubmission cap before a request is marked failed.
+METASERVER_MAX_OUTER_RETRIES = 3
+# The metaserver POST is synchronous with P's prefill (the proxy dispatches
+# the P notification and returns only after P finishes), so the read timeout
+# must cover long prefills; it exists to bound a hung proxy/P endpoint, not
+# to cut slow-but-progressing prefills short.
+METASERVER_HTTP_TIMEOUT = httpx.Timeout(
+    connect=10.0, read=600.0, write=30.0, pool=10.0
+)
+# Finished-request markers only need to outlive pending retry timers/futures
+# (seconds); the TTL bounds memory on long-running engines. Internal ids are
+# unique per admission, so an expired entry can never suppress a new request.
+METASERVER_CANCELLED_TTL_SECONDS = 3600.0
 
 
 class _SendReqInfo:
@@ -219,6 +233,17 @@ class SFAPDRD2HProducerScheduler:
         return False, None
 
 
+class _MetaserverDispatchError(RuntimeError):
+    """The P-side dispatch outcome is known-bad or unknowable.
+
+    Covers HTTP non-2xx (the proxy reported the dispatch as failed) and
+    transport failures after the notification may have reached the proxy.
+    Re-POSTing the same notification could double-admit the same external
+    request id on P (the very failure mode this patch family fixes), so the
+    request must be failed instead of retried.
+    """
+
+
 class SFAPDRD2HScheduler:
     def __init__(
         self,
@@ -278,9 +303,18 @@ class SFAPDRD2HScheduler:
         self.executor = ThreadPoolExecutor(32)
         self._metaserver_futures = {}
         self._metaserver_retry_timers = {}
-        self._cancelled_metaserver_requests: set[str] = set()
+        self._metaserver_retry_counts: dict[str, int] = {}
+        # internal request id -> monotonic time of cancellation; pruned
+        # lazily on add (see request_finished_all_groups).
+        self._cancelled_metaserver_requests: dict[str, float] = {}
         self._metaserver_lock = threading.Lock()
         self._shutdown_event = threading.Event()
+        # Requests whose P-side rendezvous definitively failed (HTTP 5xx from the
+        # proxy dispatch, or transport retries exhausted). Keyed by the internal
+        # request id; values are the D-side (main, indexer) block ids, flushed
+        # into the consumer metadata so the worker fails the request via the
+        # invalid-block channel instead of leaving it waiting forever.
+        self._rendezvous_failed_reqs: dict[str, tuple[list[int], list[int]]] = {}
 
     # ------------------------------------------------------------------
     # D side (kv_consumer)
@@ -343,7 +377,7 @@ class SFAPDRD2HScheduler:
         metaserver = params.get("metaserver")
         if metaserver is not None and not params.get("do_virtual", False):
             with self._metaserver_lock:
-                self._cancelled_metaserver_requests.discard(request.request_id)
+                self._cancelled_metaserver_requests.pop(request.request_id, None)
             self._submit_metaserver_request(
                 request_id=request.request_id,
                 url=metaserver,
@@ -369,6 +403,11 @@ class SFAPDRD2HScheduler:
             main_block_ids, indexer_block_ids = tracker
             meta.add_request(req_id, main_block_ids, indexer_block_ids)
         self._reqs_need_recv.clear()
+        with self._metaserver_lock:
+            failed = self._rendezvous_failed_reqs
+            self._rendezvous_failed_reqs = {}
+        for req_id, (main_ids, indexer_ids) in failed.items():
+            meta.add_failed_request(req_id, main_ids, indexer_ids)
         return meta
 
     def request_finished(self, request: Request, block_ids: list[int]) -> tuple[bool, dict[str, Any] | None]:
@@ -383,9 +422,17 @@ class SFAPDRD2HScheduler:
         self._request_trackers.pop(request.request_id, None)
         self._reqs_need_recv.discard(request.request_id)
         with self._metaserver_lock:
-            self._cancelled_metaserver_requests.add(request.request_id)
+            now = time.monotonic()
+            self._cancelled_metaserver_requests = {
+                req_id: ts
+                for req_id, ts in self._cancelled_metaserver_requests.items()
+                if now - ts <= METASERVER_CANCELLED_TTL_SECONDS
+            }
+            self._cancelled_metaserver_requests[request.request_id] = now
             future = self._metaserver_futures.pop(request.request_id, None)
             timer = self._metaserver_retry_timers.pop(request.request_id, None)
+            self._metaserver_retry_counts.pop(request.request_id, None)
+            self._rendezvous_failed_reqs.pop(request.request_id, None)
         if future is not None:
             future.cancel()
         if timer is not None:
@@ -398,7 +445,7 @@ class SFAPDRD2HScheduler:
     def _access_metaserver(self, url: str, message: dict[str, Any]):
         with httpx.Client(
             limits=httpx.Limits(max_connections=100000),
-            timeout=None,
+            timeout=METASERVER_HTTP_TIMEOUT,
         ) as client:
             retry = 0
             while retry < METASERVER_MAX_RETRIES:
@@ -406,16 +453,22 @@ class SFAPDRD2HScheduler:
                 try:
                     response = client.post(url, json=message)
                     if response.is_error:
-                        logger.warning(
-                            "Metaserver returned HTTP %d for request %s; "
-                            "treating it as delivered for legacy-proxy compatibility",
-                            response.status_code,
-                            message.get("request_id"),
+                        # Any non-2xx means the P-side notification did not
+                        # land (5xx: the dispatch failed, possibly after PD
+                        # side effects; 4xx: the endpoint rejected it). The
+                        # request must not keep waiting for KV that will
+                        # never arrive, and re-POSTing the same notification
+                        # could double-admit on P, so fail the request.
+                        raise _MetaserverDispatchError(
+                            "metaserver returned HTTP %d for request %r"
+                            % (response.status_code, message.get("request_id"))
                         )
                     return
-                except httpx.RequestError as error:
+                except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+                    # The request never left the client (connection could not
+                    # be established): retrying is side-effect-free.
                     logger.error(
-                        "Metaserver transport failed: url=%s, retry=%d, error=%s: %s",
+                        "Metaserver connect failed: url=%s, retry=%d, error=%s: %s",
                         url,
                         retry,
                         type(error).__name__,
@@ -423,6 +476,22 @@ class SFAPDRD2HScheduler:
                     )
                     if retry == METASERVER_MAX_RETRIES:
                         raise
+                except httpx.RequestError as error:
+                    # The notification was sent (or died mid-flight after
+                    # sending). Retrying could double-admit on P because the
+                    # proxy dispatches synchronously; fail the request
+                    # instead. Mirrors the proxy's connect-only retry policy.
+                    logger.error(
+                        "Metaserver transport failed after send (not retrying): "
+                        "url=%s, error=%s: %s",
+                        url,
+                        type(error).__name__,
+                        error,
+                    )
+                    raise _MetaserverDispatchError(
+                        "metaserver transport failed after send for request %r: %s"
+                        % (message.get("request_id"), error)
+                    )
 
     def _submit_metaserver_request(
         self,
@@ -472,9 +541,23 @@ class SFAPDRD2HScheduler:
                 return
         error = future.exception()
         if error is not None:
+            if isinstance(error, _MetaserverDispatchError):
+                # The dispatch definitively failed on P; re-POSTing the same
+                # notification could create a second admission with the same
+                # external id (duplicate KV transfer round). Fail the request.
+                self._mark_rendezvous_failed(request_id, error)
+                return
+            with self._metaserver_lock:
+                retries = self._metaserver_retry_counts.get(request_id, 0) + 1
+                self._metaserver_retry_counts[request_id] = retries
+            if retries > METASERVER_MAX_OUTER_RETRIES:
+                self._mark_rendezvous_failed(request_id, error)
+                return
             logger.error(
-                "Access metaserver failed for request %s; retrying in %.1f seconds: %s",
+                "Access metaserver failed for request %s; retry %d/%d in %.1f seconds: %s",
                 request_id,
+                retries,
+                METASERVER_MAX_OUTER_RETRIES,
                 METASERVER_RETRY_DELAY_SECONDS,
                 error,
             )
@@ -494,6 +577,22 @@ class SFAPDRD2HScheduler:
                 self._metaserver_retry_timers[request_id] = timer
             timer.start()
             return
+
+    def _mark_rendezvous_failed(self, request_id: str, error: BaseException) -> None:
+        """Record a request whose P-side rendezvous definitively failed."""
+        with self._metaserver_lock:
+            if request_id in self._cancelled_metaserver_requests:
+                return
+            self._metaserver_retry_counts.pop(request_id, None)
+            trackers = self._request_trackers.get(request_id)
+            if trackers is not None:
+                self._rendezvous_failed_reqs[request_id] = trackers
+        logger.error(
+            "SFAPDRD2H D rendezvous failed for request %s; request will be "
+            "failed via the invalid-block channel: %s",
+            request_id,
+            error,
+        )
 
     def shutdown(self) -> None:
         self._shutdown_event.set()

@@ -383,13 +383,54 @@ async def send_request_to_service(
                 result_future = proxy_state.req_id_future[request_id]
                 result_future.set_result(response.json()["kv_transfer_params"])
             return
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+        except httpx.HTTPStatusError as e:
+            # The P engine processed this notification request and returned an
+            # error status (e.g. 500 after a KV load failure). The request may
+            # already have produced PD side effects, so re-POSTing the same
+            # request_id would create a second admission with the same external
+            # id and a duplicate KV transfer round. Fail immediately instead.
+            logger.error(
+                "P notification rejected, not retrying: request_id=%s endpoint=%s "
+                "attempt=%s status=%s error=%s",
+                request_id,
+                endpoint,
+                attempt,
+                e.response.status_code,
+                e,
+            )
+            raise
+        except httpx.RequestError as e:
+            if not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                # Read/write timeouts and protocol errors can occur after P has
+                # received the notification; PD side effects cannot be ruled
+                # out, so a retry could duplicate the transfer round.
+                logger.error(
+                    "P notification transport failure after send, not retrying: "
+                    "request_id=%s endpoint=%s attempt=%s error_type=%s",
+                    request_id,
+                    endpoint,
+                    attempt,
+                    type(e).__name__,
+                )
+                raise
+            logger.warning(
+                "Connect-level failure (request likely not delivered), retrying: "
+                "request_id=%s endpoint=%s attempt=%s error_type=%s",
+                request_id,
+                endpoint,
+                attempt,
+                type(e).__name__,
+            )
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error(
+                    "All %s attempts failed for %s: request_id=%s",
+                    max_retries,
+                    endpoint,
+                    request_id,
+                )
                 raise last_exc
 
 

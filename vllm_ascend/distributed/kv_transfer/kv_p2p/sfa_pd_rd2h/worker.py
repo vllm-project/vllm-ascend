@@ -144,6 +144,21 @@ class SFAPDRD2HConsumerWorker:
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
         self._terminal_ext_ids: set[str] = set()
+        # External req ids whose P-side rendezvous failed (dispatch error or
+        # exhausted transport retries). get_finished reports them as FAILED
+        # receive terminals (done_recving + invalid blocks in the same
+        # output): without a terminal the scheduler would finish the request
+        # with delay_free_blocks=True and its blocks would never be released,
+        # because no READ_DONE will ever arrive for a transfer that never
+        # started on P.
+        self._rendezvous_failed_ext_ids: set[str] = set()
+        # External ids whose receive terminal was already mapped and reported
+        # to the scheduler in a done_recving (safe to clean on request end).
+        self._reported_terminal_ext_ids: set[str] = set()
+        # Internal request ids whose cleanup is deferred until their receive
+        # terminal is reported (scheduler cancellation is not transport
+        # completion; cleaning earlier would orphan the terminal mapping).
+        self._deferred_cleanup_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Common
@@ -180,15 +195,61 @@ class SFAPDRD2HConsumerWorker:
 
     # -- D-side forwards to the composed SFA worker (LRU load path) --
     def start_load_kv(self, metadata: KVConnectorMetadata):
+        # Failure markers first: the terminal must be queued on the read
+        # thread before any re-registration of the same external id can
+        # rearm it later in this same step.
+        for failed in getattr(metadata, "failed_requests", []) or []:
+            try:
+                failed_req_id, main_ids, indexer_ids = failed
+            except (TypeError, ValueError):
+                continue
+            # Rendezvous failed on P: these dest blocks will never receive KV.
+            # Route them into the invalid-block channel so the scheduler fails
+            # the request, AND report a FAILED receive terminal: invalid
+            # blocks alone would finish the request with delay_free_blocks=
+            # True while no READ_DONE can ever arrive, so the blocks would
+            # never be released.
+            ext_id = get_external_request_id(failed_req_id)
+            self._invalid_block_ids.update(main_ids)
+            self._invalid_block_ids.update(indexer_ids)
+            if self._mf_read_thread is not None:
+                # Serialize the terminal with the copy loop: the read thread
+                # applies tombstone + failed-set between batches, so the
+                # terminal can never race an in-flight copy of this ext (the
+                # HTTP failure says nothing about whether P is still
+                # streaming). The ext->internal mapping stays from the
+                # original registration; no replay here.
+                self._mf_read_thread.mark_failed_requests({ext_id})
+            else:
+                # No read thread => no transfer was ever in flight; the
+                # direct (v2) terminal path is safe.
+                self.request_map[ext_id] = failed_req_id
+                self._rendezvous_failed_ext_ids.add(ext_id)
+            logger.warning(
+                "SFAPD D rendezvous failed: tp=%s req=%s ext=%s main=%d indexer=%d "
+                "thread_serialized=%s",
+                self.tp_rank,
+                failed_req_id,
+                ext_id,
+                len(main_ids),
+                len(indexer_ids),
+                self._mf_read_thread is not None,
+            )
         for req in getattr(metadata, "requests", []):
             req_id = getattr(req, "req_id", None)
             if req_id is not None:
                 ext_id = get_external_request_id(req_id)
+                old_req_id = self.request_map.get(ext_id)
                 self.request_map[ext_id] = req_id
                 main_ids = list(getattr(req, "main_block_ids", []) or [])
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                if self._mf_read_thread is not None:
+                    # Clear completed/tombstone/pending-failure markers left
+                    # by an earlier round so this round's batches are not
+                    # filtered as duplicates.
+                    self._mf_read_thread.rearm_requests({ext_id})
 
     def save_kv_layer(
         self,
@@ -206,15 +267,38 @@ class SFAPDRD2HConsumerWorker:
         ext_ids = set()
         for req_id in req_ids:
             ext_id = get_external_request_id(req_id)
-            ext_ids.add(ext_id)
             self._cpu_blocks_by_req.pop(req_id, None)
+            if self.request_map.get(ext_id) != req_id:
+                # The ext-keyed state belongs to a newer registration (or was
+                # already cleaned): only the request that currently owns the
+                # ext may clear it. This protects a fresh round's mapping and
+                # read-thread markers from the previous round's cleanup while
+                # still letting the new round's own cleanup proceed.
+                continue
+            if ext_id not in self._reported_terminal_ext_ids:
+                # The receive terminal has not been reported yet: scheduler
+                # cancellation is not transport completion. Keep the mapping
+                # and dest blocks so the terminal can still be mapped into
+                # done_recving, tombstone arrivals, and flush a failure
+                # marker so the deferred cleanup completes next step.
+                self._deferred_cleanup_ids.add(req_id)
+                if self._mf_read_thread is not None:
+                    self._mf_read_thread.discard_requests({ext_id})
+                    self._mf_read_thread.mark_failed_requests({ext_id})
+                else:
+                    self._rendezvous_failed_ext_ids.add(ext_id)
+                continue
+            ext_ids.add(ext_id)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
+            self._reported_terminal_ext_ids.discard(ext_id)
+            self._deferred_cleanup_ids.discard(req_id)
+            self._rendezvous_failed_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
         # retried external id cannot complete a later request on stale arrivals.
-        if self._mf_read_thread is not None:
+        if ext_ids and self._mf_read_thread is not None:
             self._mf_read_thread.discard_requests(ext_ids)
 
     def _gather_tp_read_status(
@@ -241,6 +325,16 @@ class SFAPDRD2HConsumerWorker:
         if hasattr(self, "_mf_read_thread") and self._mf_read_thread is not None:
             local_done = self._mf_read_thread.get_and_clear_done()
             local_failed = self._mf_read_thread.get_and_clear_failed()
+            if self._rendezvous_failed_ext_ids:
+                # Rendezvous failures are receive terminals with failure
+                # semantics, like read-thread failures: they enter the
+                # terminal/failed accounting so every TP rank reports them,
+                # done_recving carries them to the scheduler in the same
+                # output as the invalid blocks, and the failed side keeps
+                # the invalid-block bookkeeping consistent.
+                local_failed = local_failed | self._rendezvous_failed_ext_ids
+                self._terminal_ext_ids.update(self._rendezvous_failed_ext_ids)
+                self._rendezvous_failed_ext_ids.clear()
             self._terminal_ext_ids.update(local_done | local_failed)
 
         tp_status = self._gather_tp_read_status(
@@ -265,6 +359,9 @@ class SFAPDRD2HConsumerWorker:
                 internal = self.request_map.get(ext_id)
                 if internal is not None:
                     done_recving.add(internal)
+                    # Terminal mapped and reported: request cleanup may now
+                    # proceed (see _cleanup_request_state).
+                    self._reported_terminal_ext_ids.add(ext_id)
                 else:
                     still_pending.add(ext_id)
             self._pending_done = still_pending
@@ -282,8 +379,15 @@ class SFAPDRD2HConsumerWorker:
         # request_map[ext_id] and discard _pending_done[ext_id] before the
         # resolution loop above, leaking any finished req whose DONE arrives in
         # the same step (unmappable -> stuck in _pending_done forever).
+        preexisting_deferred = set(self._deferred_cleanup_ids)
         if finished_req_ids:
             self._cleanup_request_state(finished_req_ids)
+        if preexisting_deferred:
+            # Retry cleanups deferred in earlier steps: their terminal may
+            # have been reported in this very output. Ids deferred just now
+            # cannot complete in this call (their terminal was not mapped
+            # yet) and are left for the next step.
+            self._cleanup_request_state(preexisting_deferred)
 
         return set(), done_recving
 

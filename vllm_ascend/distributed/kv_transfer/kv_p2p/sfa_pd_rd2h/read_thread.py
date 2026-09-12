@@ -28,6 +28,8 @@ READ_THREAD_POLL_TIMEOUT_MS = 100
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 DEST_BLOCK_WAIT_TIMEOUT = 2.0
 DEST_BLOCK_WAIT_INTERVAL = 0.001
+# How long a finished request's tombstone keeps filtering its late batches.
+DISCARDED_TOMBSTONE_TTL_SECONDS = 900.0
 
 
 @dataclass
@@ -103,7 +105,26 @@ class MembPullReadThread(threading.Thread):
         self._p_sessions: dict[bytes, str] = {}
         self._p_layer_metas: dict[bytes, dict[str, Any]] = {}
         self._done_requests: set[str] = set()
+        # ext_ids whose full transfer already completed once. A later batch for
+        # these ids is a duplicate round: its data must not be copied again
+        # (the request may already be decoding from those blocks) and it must
+        # not re-enter the done accounting.
+        self._completed_ext_ids: set[str] = set()
+        # ext_ids whose request was finished/cleaned up on D. A late batch for
+        # these ids must be dropped BEFORE the dest-block wait: their dest
+        # blocks are already freed, so waiting would stall this ROUTER loop
+        # for the full timeout and end in READ_FAILED noise. Kept as
+        # tombstones (TTL-bounded) because the completed marker is discarded
+        # with the request and would otherwise let post-cleanup batches
+        # through the duplicate filter.
+        self._discarded_ext_ids: dict[str, float] = {}
         self._failed_requests: set[str] = set()
+        # ext_ids queued for a failure receive terminal (rendezvous failures
+        # reported by the worker). The run loop drains this between batches
+        # and applies tombstone + failed-set under the same lock the copy
+        # loop uses, so the resulting terminal can never race an in-flight
+        # copy of the same ext.
+        self._pending_failures: set[str] = set()
         # Request completion needs every contributor in the group (unequal P/D TP):
         # track which group_member_idx values have reported done per request, and the
         # group size to wait for. A request enters _done_requests only once all `ratio`
@@ -124,15 +145,90 @@ class MembPullReadThread(threading.Thread):
                 contributors.add(group_member_idx)
                 if len(contributors) >= self._expected_ratio[ext_id]:
                     self._done_requests.add(ext_id)
+                    self._completed_ext_ids.add(ext_id)
                     self._done_contributors.pop(ext_id, None)
                     self._expected_ratio.pop(ext_id, None)
 
     def discard_requests(self, ext_ids: set[str]) -> None:
-        """Drop partial contributor state for finished/cancelled requests."""
+        """Drop per-request state for finished/cancelled requests.
+
+        Discarded ids become tombstones so late batches for the finished
+        request are filtered before the dest-block wait instead of stalling
+        on freed blocks; expired tombstones are pruned to bound memory.
+        """
+        now = time.monotonic()
         with self._lock:
             for ext_id in ext_ids:
                 self._done_contributors.pop(ext_id, None)
                 self._expected_ratio.pop(ext_id, None)
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids[ext_id] = now
+            expired = [
+                ext_id
+                for ext_id, ts in self._discarded_ext_ids.items()
+                if now - ts > DISCARDED_TOMBSTONE_TTL_SECONDS
+            ]
+            for ext_id in expired:
+                del self._discarded_ext_ids[ext_id]
+
+    def rearm_requests(self, ext_ids: set[str]) -> None:
+        """Clear completed/tombstone markers for ids starting a fresh round.
+
+        The worker calls this when start_load_kv re-registers an external id
+        (e.g. a client reusing the same request id after the previous one
+        finished); without this the new round's batches would be filtered as
+        duplicates of the old round.
+        """
+        with self._lock:
+            for ext_id in ext_ids:
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids.pop(ext_id, None)
+                self._pending_failures.discard(ext_id)
+                # Old-round contributor accounting must not combine with the
+                # new round's arrivals into a fake completion.
+                self._done_contributors.pop(ext_id, None)
+                self._expected_ratio.pop(ext_id, None)
+
+    def mark_failed_requests(self, ext_ids) -> None:
+        """Queue ext_ids for a failure receive terminal, serialized with copies.
+
+        The rendezvous (metaserver) failure path calls this instead of
+        reporting the terminal directly: the HTTP failure says nothing about
+        whether P is still streaming KV, so the terminal must be emitted from
+        the copy loop itself to guarantee no batch for this ext is in flight
+        when the scheduler releases the destination blocks.
+        """
+        with self._lock:
+            # No tombstone check: the scheduler-side guards
+            # (_cancelled_metaserver_requests / tracker lifetime) mean a
+            # marker only arrives for a request that still needs its
+            # terminal (e.g. one in delayed-free). Dropping it here or in
+            # the drain would leak that request's blocks forever.
+            self._pending_failures.update(ext_ids)
+
+    def _drain_pending_failures(self) -> None:
+        """Apply queued failure markers (run loop only, between batches)."""
+        with self._lock:
+            if not self._pending_failures:
+                return
+            pending = self._pending_failures
+            self._pending_failures = set()
+            now = time.monotonic()
+            for ext_id in pending:
+                # No tombstone check: the marker may be the only terminal a
+                # delayed-free request will ever get (its cleanup already
+                # tombstoned the ext); suppressing it leaks the blocks.
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids[ext_id] = now
+                self._done_requests.discard(ext_id)
+                self._failed_requests.add(ext_id)
+                self._done_contributors.pop(ext_id, None)
+                self._expected_ratio.pop(ext_id, None)
+                logger.warning(
+                    "MembPull D applied failed receive terminal: tp=%s ext=%s",
+                    self.tp_rank,
+                    ext_id,
+                )
 
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
@@ -175,6 +271,7 @@ class MembPullReadThread(threading.Thread):
             decoder = msgspec.msgpack.Decoder(type=tuple)
             encoder = msgspec.msgpack.Encoder()
             while not self._stop_event.is_set():
+                self._drain_pending_failures()
                 try:
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
@@ -232,6 +329,42 @@ class MembPullReadThread(threading.Thread):
                             for entry in msg[3]
                         ]
                         done_ext_ids = list(msg[4]) if len(msg) > 4 else []
+                        # Pre-copy duplicate/stale suppression: an ext_id whose
+                        # full transfer already completed, or whose request was
+                        # already cleaned up on D, must not be copied again (a
+                        # duplicate round could overwrite blocks the request is
+                        # decoding from; a post-cleanup batch would stall on
+                        # freed dest blocks). Skip the data but still reply
+                        # READ_DONE below so P can release source resources.
+                        if self._completed_ext_ids or self._discarded_ext_ids:
+                            now = time.monotonic()
+                            with self._lock:
+                                completed_snapshot = set(self._completed_ext_ids)
+                                discarded_snapshot = {
+                                    ext_id
+                                    for ext_id, ts in self._discarded_ext_ids.items()
+                                    if now - ts <= DISCARDED_TOMBSTONE_TTL_SECONDS
+                                }
+                            stale_snapshot = completed_snapshot | discarded_snapshot
+                            fresh_reqs = [
+                                entry
+                                for entry in read_reqs
+                                if entry[0] not in stale_snapshot
+                            ]
+                            skipped_ids = sorted(
+                                {
+                                    entry[0]
+                                    for entry in read_reqs
+                                    if entry[0] in stale_snapshot
+                                }
+                            )
+                            if skipped_ids:
+                                read_reqs = fresh_reqs
+                            done_ext_ids = [
+                                ext
+                                for ext in done_ext_ids
+                                if ext not in stale_snapshot
+                            ]
                         # Contributor identity (unequal P/D TP). Absent = legacy single
                         # contributor: member 0 of a 1-member group pulls everything.
                         group_member_idx = int(msg[5]) if len(msg) > 5 else 0
@@ -283,6 +416,17 @@ class MembPullReadThread(threading.Thread):
                             failed_ids.update(done_ext_ids)
                             with self._lock:
                                 self._failed_requests.update(failed_ids)
+                                # A failed transfer round dooms the request:
+                                # tombstone it so later batches for the same
+                                # ext cannot copy into blocks the scheduler
+                                # may have already freed (the one-step window
+                                # between terminal reporting and request
+                                # cleanup).
+                                now = time.monotonic()
+                                for failed_id in failed_ids:
+                                    if failed_id not in self._discarded_ext_ids:
+                                        self._discarded_ext_ids[failed_id] = now
+                                    self._completed_ext_ids.discard(failed_id)
                         if succeeded and done_ext_ids:
                             self._record_chunk_done(done_ext_ids, group_member_idx, ratio)
 
