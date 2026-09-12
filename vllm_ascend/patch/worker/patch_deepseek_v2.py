@@ -1,3 +1,5 @@
+
+
 from itertools import islice
 
 import torch
@@ -37,8 +39,9 @@ from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilde
 from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
 from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
     add_pp_topk_indices,
-    configure_pp_topk_transport,
+    make_empty_intermediate_tensors,
 )
 
 
@@ -313,7 +316,11 @@ def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
         ),
         None,
     )
-    configure_pp_topk_transport(self)
+    self.make_empty_intermediate_tensors = make_empty_intermediate_tensors(
+        self,
+        self.make_empty_intermediate_tensors,
+        (PPTransportDataType.TOPK_INDICES,),
+    )
 
 
 _patched_deepseek_v2_model_init = _deepseek_v2_model_init_with_pp_topk_transport
