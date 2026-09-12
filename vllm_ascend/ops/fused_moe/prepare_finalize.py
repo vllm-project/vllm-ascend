@@ -507,6 +507,21 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pertoken_scale=None,
         )
 
+    def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self._use_ep_sequence_parallel():
+            return self.all_gather_input_id_with_ep_group(input_ids)
+        return self.all_gather_input_id_with_dp_group(input_ids)
+
+    def all_gather_input_id_with_ep_group(self, input_ids: torch.Tensor) -> torch.Tensor:
+        input_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_ids.reshape(-1, 1)).reshape(-1)
+        if self.moe_config.pcp_size > 1:
+            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
+            pad_size = max_tokens_across_pcp - input_ids.numel()
+            if pad_size > 0:
+                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
+        return input_ids
+
     def all_gather_input_id_with_dp_group(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
