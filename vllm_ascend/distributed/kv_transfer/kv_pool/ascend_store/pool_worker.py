@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_mooncake_layerwise_namespace,
     get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
@@ -176,6 +177,11 @@ class KVPoolWorker:
             self.backend_name,
             self.use_layerwise,
         )
+        self.mooncake_layerwise_namespace = (
+            get_mooncake_layerwise_namespace(vllm_config.model_config, vllm_config.parallel_config)
+            if self.use_block_key_layerwise
+            else ""
+        )
         # Resolve the backend's layerwise protocol (if any) once through the
         # registry; generic code never imports the protocol module by name.
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
@@ -235,6 +241,8 @@ class KVPoolWorker:
         else:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
+        if self.use_block_key_layerwise and self.put_step % self.dcp_size != 0:
+            raise ValueError("Mooncake layerwise DCP groups must fit within a replicated KV-head group")
         self.my_key_index = (
             self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
             + self.dcp_rank * (self.tp_size // self.put_step)
@@ -1082,11 +1090,9 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
-        if self.tp_rank % self.put_step != 0:
+        # DCP ranks hold different token shards even when their KV heads
+        # are replicated. Save one copy of every (head, DCP) shard.
+        if not self._is_layerwise_save_rank():
             return
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
@@ -1729,8 +1735,22 @@ class KVPoolWorker:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
+    def _is_layerwise_save_rank(self) -> bool:
+        dcp_size = self.dcp_size if self.use_block_key_layerwise else 1
+        return self.tp_rank % self.put_step < dcp_size
+
     def _is_layerwise_save_owner(self) -> bool:
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
+        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self._is_layerwise_save_rank()
+
+    def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
+        return make_layerwise_block_key(
+            self.model_name,
+            block_hash_or_tail,
+            self.head_or_tp_rank,
+            namespace=self.mooncake_layerwise_namespace,
+            pp_rank=self.pp_rank,
+            dcp_rank=self.dcp_rank,
+        )
 
     def _mooncake_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -1832,19 +1852,15 @@ class KVPoolWorker:
         request.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
-            key = make_layerwise_block_key(
-                self.model_name,
+            key = self._make_mooncake_layerwise_key(
                 block_hash_to_str(group_block_hashes[block_index]),
-                self.head_or_tp_rank,
             )
             request.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = make_layerwise_block_key(
-                self.model_name,
+            request.save_last_block_key = self._make_mooncake_layerwise_key(
                 f"{request.req_id}_lastblock",
-                self.head_or_tp_rank,
             )
             key_slots.append((request.save_last_block_key, None, request.partial_block_index))
 
@@ -1900,10 +1916,8 @@ class KVPoolWorker:
             for block_index in range(start_block, end_block):
                 current_entries.append(
                     (
-                        make_layerwise_block_key(
-                            self.model_name,
+                        self._make_mooncake_layerwise_key(
                             block_hash_to_str(group_block_hashes[block_index]),
-                            self.head_or_tp_rank,
                         ),
                         block_index,
                     )
@@ -1915,10 +1929,8 @@ class KVPoolWorker:
             if needs_last_block and 0 <= partial_block_index < len(request.block_ids):
                 current_entries.append(
                     (
-                        make_layerwise_block_key(
-                            self.model_name,
+                        self._make_mooncake_layerwise_key(
                             f"{request.req_id}_lastblock",
-                            self.head_or_tp_rank,
                         ),
                         partial_block_index,
                     )

@@ -53,14 +53,18 @@ def make_worker(
     use_mla=False,
     enable_kv_events=False,
     num_hidden_layers=None,
+    pp_size=1,
+    pp_rank=0,
+    dcp_size=1,
+    kv_cache_config=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
     pcp_group.return_value.world_size = 1
-    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
-    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
+    start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=tp_rank % dcp_size)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
@@ -71,10 +75,18 @@ def make_worker(
     if num_hidden_layers is not None:
         config.model_config.hf_text_config.num_hidden_layers = num_hidden_layers
     config.model_config.get_num_layers.return_value = num_layers
+    config.model_config.get_layers_start_end_indices.side_effect = lambda pc: (
+        (pc.rank // tp_size) * num_layers,
+        (pc.rank // tp_size + 1) * num_layers,
+    )
     config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
     config.parallel_config.data_parallel_rank = 0
-    config.parallel_config.rank = 0
-    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.rank = pp_rank * tp_size + tp_rank
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.pipeline_parallel_size = pp_size
+    config.parallel_config.prefill_context_parallel_size = 1
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    config.parallel_config.cp_kv_cache_interleave_size = 1
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
         "backend": "mooncake",
@@ -87,7 +99,7 @@ def make_worker(
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise)
+    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
 class _SparseSWAHitManager:
