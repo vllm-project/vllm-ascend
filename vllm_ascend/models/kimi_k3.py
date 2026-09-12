@@ -75,18 +75,10 @@ from vllm.models.kimi_k3.nvidia.model import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
-
-if HAS_TRITON:
-    from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
-        apply_attn_res,
-    )
-else:
-    apply_attn_res = None  # type: ignore[assignment]
 
 
 def _apply_ascend_attn_res(
@@ -100,29 +92,13 @@ def _apply_ascend_attn_res(
     if num_valid_blocks <= 0:
         return prefix_sum
 
-    if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
-        return apply_attn_res(
-            prefix_sum,
-            block_residual,
-            proj,
-            norm,
-            num_valid_blocks,
-        )
-
-    values = torch.cat(
-        (
-            block_residual[:, :num_valid_blocks, :],
-            prefix_sum.unsqueeze(1),
-        ),
-        dim=1,
+    return torch.ops._C_ascend.attn_res_fwd(
+        prefix_sum,
+        block_residual[:, :num_valid_blocks, :],
+        proj.weight,
+        norm.weight,
+        norm.variance_epsilon,
     )
-    values_fp32 = values.float()
-    inverse_rms = torch.rsqrt(values_fp32.square().mean(-1, keepdim=True) + norm.variance_epsilon)
-    normalized_without_gamma = values_fp32 * inverse_rms
-    score_weight = norm.weight.float() * proj.weight.squeeze(0).float()
-    scores = (normalized_without_gamma * score_weight).sum(-1)
-    probabilities = scores.softmax(-1).unsqueeze(1)
-    return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
 
 
 class AscendKimiMoE(nn.Module):
