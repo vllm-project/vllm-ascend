@@ -57,7 +57,7 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     ModelConfig = None
     VllmConfig = None

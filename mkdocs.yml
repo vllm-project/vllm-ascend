@@ -181,7 +181,7 @@ extra:
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
   main_pytorch_version: "2.10.0"
-  main_torch_npu_version: "2.10.0.post4"
+  main_torch_npu_version: "2.10.0.post6"
   main_torchvision_version: "0.25.0"
   main_torchaudio_version: "2.10.0"
   main_triton_ascend_version: "3.2.2"

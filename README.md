@@ -71,7 +71,7 @@ Whether you are a performance tuner looking to deploy vLLM-Ascend in production 
 - Software:
     - Python >= 3.10, < 3.13
     - CANN == 9.1.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
-    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post6
     - vLLM (the same version as vllm-ascend)
 
 ## Accessing Ascend NPU
