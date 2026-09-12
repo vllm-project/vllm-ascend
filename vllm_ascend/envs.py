@@ -87,6 +87,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Whether to remove the QKV concat for contiguous single-token GDN decode.
+    # Set "0" to force the upstream rearrange path for A/B comparisons.
+    "VLLM_ASCEND_ENABLE_GDN_SINGLE_TOKEN_QKV_VIEW": lambda: _strict_binary_env(
+        "VLLM_ASCEND_ENABLE_GDN_SINGLE_TOKEN_QKV_VIEW", "1"
+    ),
 }
 
 # end-env-vars-definition
