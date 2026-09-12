@@ -516,6 +516,33 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
+        # TODO: delete the deprecated flashcomm option when upstream SP is ready.
+        flashcomm_explicitly_enabled = validate_additional_config_bool(
+            (vc.additional_config or {}).get("enable_flashcomm1", False),
+            "additional_config.enable_flashcomm1",
+        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
+        # so users only need `enable_dsa_cp=true` in additional_config.
+        if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
+            logger.info_once("DSA-CP is enabled. Auto-enabling SP.")
+
+        effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
+
+        # NOTE: ParallelConfig.use_sequence_parallel_moe is a read-only
+        # property derived from all2all_backend, so steer it through the
+        # backend switch: "flashinfer_all2allv" is outside the SP-capable
+        # set and disables SP MoE, the default keeps it enabled.
+        want_sp_moe = (
+            effective_flashcomm
+            and vc.parallel_config.enable_expert_parallel
+            and vc.parallel_config.tensor_parallel_size > 1
+        )
+        if not want_sp_moe and vc.parallel_config.use_sequence_parallel_moe:
+            vc.parallel_config.all2all_backend = "flashinfer_all2allv"
+        logger.info_once(
+            "Sequence-parallel MoE is %s.",
+            "enabled" if vc.parallel_config.use_sequence_parallel_moe else "disabled",
+        )
 
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
@@ -524,7 +551,16 @@ class AscendConfig:
         has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
             vc.model_config.hf_text_config, "index_topk"
         )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer
+        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
+            logger.warning_once(
+                "DSA-CP is enabled, but the current config does not support sequence-parallel. Disabling DSA-CP."
+            )
+        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
+
+        logger.info_once(
+            "DSA-CP is %s.",
+            "enabled" if self.enable_dsa_cp else "disabled",
+        )
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):

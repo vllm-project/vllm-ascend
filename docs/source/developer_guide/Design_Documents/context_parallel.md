@@ -76,7 +76,8 @@ This mode is selected automatically for SFA sparse models when
 requires `decode_context_parallel_size == tensor_parallel_size`.
 
 For a GLM-5.2 DSA-CP deployment, enable sequence parallelism and DSA-CP and keep the CP
-interleave size equal to the KV-cache block size:
+interleave size equal to the KV-cache block size.
+Enabling DSA-CP automatically enables FlashComm as the all2all backend:
 
 ```bash
 
@@ -86,7 +87,7 @@ vllm serve <glm-5.2-model> \
   --decode-context-parallel-size <N> \
   --block-size <B> \
   --cp-kv-cache-interleave-size <B> \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true}'
+  --additional-config '{"enable_dsa_cp": true}'
 ```
 
 The replicated indexer increases indexer-cache memory in proportion to the

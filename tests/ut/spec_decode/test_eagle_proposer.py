@@ -750,128 +750,6 @@ class TestEagleProposerHelperMethods(TestBase):
 
 
 # fmt: off
-class TestEagleProposerMaybePadAndGather:
-    @pytest.fixture(autouse=True)
-    def setUp_and_tearDown(self):
-        self.check_mock()
-        self.device = torch.device("cpu")
-        yield
-
-    def _new_proposer(
-        self,
-        method,
-        *,
-        is_multimodal_model=False,
-        use_sequence_parallel_moe=False,
-    ):
-        proposer = object.__new__(AscendEagleProposer)
-        proposer.method = method
-        proposer.is_multimodal_model = is_multimodal_model
-        proposer.use_sequence_parallel_moe = use_sequence_parallel_moe
-        return proposer
-
-    def test_maybe_pad_and_reduce_is_removed(self):
-        proposer = self._new_proposer("eagle3")
-        hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
-        positions = torch.arange(6, device=self.device, dtype=torch.int64)
-
-        reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(hidden_states, positions)
-
-        assert reduced_hidden_states is hidden_states
-        assert reduced_positions is positions
-
-    @pytest.mark.parametrize(
-        "use_sequence_parallel_moe,hidden_states_is_none,expect_gather",
-        [
-            (True, False, True),
-            (True, True, True),
-            (False, False, False),
-        ],
-    )
-    def test_mtp_maybe_all_gather_and_unpad(
-        self,
-        use_sequence_parallel_moe,
-        hidden_states_is_none,
-        expect_gather,
-    ):
-        proposer = self._new_proposer(
-            "mtp",
-            use_sequence_parallel_moe=use_sequence_parallel_moe,
-        )
-        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
-        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
-        hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
-
-        def fake_all_gather(input_tensor, dim, world_size, group_name):
-            assert dim == 0
-            return torch.cat((input_tensor, input_tensor + 100), dim=0)
-
-        with (
-            patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.get_tp_group",
-                return_value=MagicMock(world_size=2, unique_name="tp_group"),
-            ),
-            patch(
-                "torch.ops.vllm.all_gather",
-                side_effect=fake_all_gather,
-                create=True,
-            ) as mock_all_gather,
-        ):
-            gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
-                proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
-            )
-
-        if expect_gather:
-            expected_last_hidden_states = torch.cat((last_hidden_states, last_hidden_states + 100), dim=0)
-            expected_positions = torch.cat((positions, positions + 100), dim=0)
-            assert mock_all_gather.call_count == 2
-            assert torch.equal(gathered_last_hidden_states, expected_last_hidden_states)
-            assert torch.equal(gathered_positions, expected_positions)
-            if hidden_states_is_none:
-                assert gathered_hidden_states is None
-            else:
-                assert gathered_hidden_states is gathered_last_hidden_states
-        else:
-            mock_all_gather.assert_not_called()
-            assert gathered_last_hidden_states is last_hidden_states
-            assert gathered_positions is positions
-            assert gathered_hidden_states is hidden_states
-
-    def test_eagle_maybe_all_gather_and_unpad_does_not_gather(self):
-        proposer = self._new_proposer("eagle3")
-        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
-        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
-        hidden_states = last_hidden_states + 1000
-
-        gathered_last_hidden_states, gathered_positions, gathered_hidden_states = proposer.maybe_all_gather_and_unpad(
-            last_hidden_states, positions, hidden_states
-        )
-
-        assert gathered_last_hidden_states is last_hidden_states
-        assert gathered_positions is positions
-        assert gathered_hidden_states is hidden_states
-
-    def check_mock(self):
-        import vllm_ascend.spec_decode.llm_base_proposer
-
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "get_tp_group")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
-
-        assert hasattr(RunnerCls, "maybe_pad_and_reduce")
-        sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
-        assert self.get_param_names(sig) == ["self", "hidden_states", "positions"]
-
-        assert hasattr(RunnerCls, "maybe_all_gather_and_unpad")
-        sig = inspect.signature(RunnerCls.maybe_all_gather_and_unpad)
-        assert self.get_param_names(sig) == ["self", "last_hidden_states", "positions", "hidden_states"]
-
-    def get_param_names(self, sig):
-        return [p.name for p in sig.parameters.values()]
-# fmt: on
-
-
-# fmt: off
 class TestEagleProposerPropose:
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
@@ -2240,16 +2118,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
-        self.proposer.maybe_pad_and_reduce = MagicMock(
-            side_effect=lambda hidden_states, positions: (hidden_states, positions)
-        )
-        self.proposer.maybe_all_gather_and_unpad = MagicMock(
-            side_effect=lambda last_hidden_states, positions, hidden_states: (
-                last_hidden_states,
-                positions,
-                hidden_states,
-            )
-        )
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
@@ -2398,8 +2266,6 @@ class TestRunMergedDraft(TestBase):
         RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         for attr in (
             "_run_merged_draft",
-            "maybe_pad_and_reduce",
-            "maybe_all_gather_and_unpad",
             "model_returns_tuple",
         ):
             assert hasattr(RunnerCls, attr), f"AscendSpecDecodeBaseProposer.{attr} not found"
@@ -2418,12 +2284,6 @@ class TestRunMergedDraft(TestBase):
             "is_prefill",
             "sampling_metadata",
         ]
-        sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "hidden_states", "positions"]
-        sig = inspect.signature(RunnerCls.maybe_all_gather_and_unpad)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "last_hidden_states", "positions", "hidden_states"]
         sig = inspect.signature(RunnerCls.model_returns_tuple)
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self"]
@@ -2583,7 +2443,6 @@ class TestRunMergedDraft(TestBase):
         self.proposer.build_model_inputs_first_pass.assert_called_once_with(
             12, self.proposer._context_slot_mapping_buffers
         )
-        self.proposer.maybe_all_gather_and_unpad.assert_not_called()
         self.assertNotIn("hidden_states", self.proposer.model.calls[0])
         self.assertTrue(
             torch.equal(
