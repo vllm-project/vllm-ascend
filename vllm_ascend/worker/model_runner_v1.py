@@ -4165,11 +4165,10 @@ class NPUModelRunner(GPUModelRunner):
 
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
-
+            
             if self.drafter is not None:
-                update_stream_setter = getattr(self.drafter, "set_update_stream", None)
-                if callable(update_stream_setter):
-                    update_stream_setter(self.update_stream)
+                if hasattr(self.drafter, "set_update_stream"):
+                    self.drafter.set_update_stream(self.update_stream)
                 else:
                     self.drafter.update_stream = self.update_stream
 
