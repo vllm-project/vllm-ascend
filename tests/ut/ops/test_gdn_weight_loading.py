@@ -52,3 +52,15 @@ def test_prepare_causal_conv1d_weight_requires_loader() -> None:
     weight = torch.nn.Parameter(torch.empty(6, 1, 4), requires_grad=False)
     with pytest.raises(AttributeError, match="does not have a weight_loader"):
         prepare_causal_conv1d_weight_for_loading(SimpleNamespace(weight=weight))
+
+
+def test_prepare_causal_conv1d_weight_is_idempotent() -> None:
+    weight = torch.nn.Parameter(torch.empty(6, 1, 4), requires_grad=False)
+    weight.weight_loader = lambda param, loaded_weight: None
+    conv1d = SimpleNamespace(weight=weight)
+
+    prepare_causal_conv1d_weight_for_loading(conv1d)
+    prepare_causal_conv1d_weight_for_loading(conv1d)
+
+    assert weight.shape == (4, 6)
+    assert weight.is_contiguous()

@@ -33,9 +33,7 @@ def test_single_token_qkv_rearrange_uses_input_storage() -> None:
 
     assert result is not None
     query, key, value = result
-    expected_query, expected_key, expected_value = mixed_qkv.split(
-        [q_dim, k_dim, v_dim], dim=-1
-    )
+    expected_query, expected_key, expected_value = mixed_qkv.split([q_dim, k_dim, v_dim], dim=-1)
     torch.testing.assert_close(query.flatten(), expected_query.flatten())
     torch.testing.assert_close(key.flatten(), expected_key.flatten())
     torch.testing.assert_close(value.flatten(), expected_value.flatten())
@@ -73,6 +71,21 @@ def test_non_contiguous_qkv_rearrange_uses_original_path() -> None:
         q_dim=8,
         k_dim=8,
         v_dim=16,
+        head_k_dim=4,
+        head_v_dim=8,
+    )
+
+    assert result is None
+
+
+def test_invalid_qkv_dimensions_fall_back() -> None:
+    mixed_qkv = torch.arange(32).view(1, 32)
+
+    result = try_rearrange_single_token_mixed_qkv(
+        mixed_qkv,
+        q_dim=6,
+        k_dim=8,
+        v_dim=18,
         head_k_dim=4,
         head_v_dim=8,
     )

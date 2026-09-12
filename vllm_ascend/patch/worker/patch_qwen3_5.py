@@ -69,8 +69,6 @@ def _ascend_rearrange_mixed_qkv(
     return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
 
 
-
-
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
     return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
