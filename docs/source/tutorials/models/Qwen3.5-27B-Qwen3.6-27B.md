@@ -267,7 +267,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-310p
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
         export VLLM_USE_MODELSCOPE=True
         export HCCL_BUFFSIZE=512
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -351,7 +351,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-310p
         export VLLM_USE_MODELSCOPE=True
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
