@@ -239,9 +239,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 pin_memory=self.runner.pin_memory,
             )
 
-        batch_size = max(num_tokens // (self.num_speculative_tokens + 1), 1)
-        if is_profile:
-            batch_size = min(batch_size, self.runner.max_num_reqs)
+        batch_size = min(
+            max(num_tokens // (self.num_speculative_tokens + 1), 1),
+            self.runner.max_num_reqs,
+        )
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             num_computed_tokens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]

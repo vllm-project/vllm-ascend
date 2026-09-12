@@ -812,10 +812,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         model_positions = self._get_positions(num_tokens)
 
-        batch_size = max(num_tokens // (self.num_speculative_tokens + 1), 1)
-        # TODO: temporarily hack here, we should find out batch_size for profile_run
-        if is_profile:
-            batch_size = min(batch_size, self.runner.max_num_reqs)
+        # Limit dummy requests to avoid oversized logits after DP padding.
+        batch_size = min(
+            max(num_tokens // (self.num_speculative_tokens + 1), 1),
+            self.runner.max_num_reqs,
+        )
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = (None, None)

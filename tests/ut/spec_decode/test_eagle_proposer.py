@@ -23,6 +23,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
@@ -524,6 +525,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.runner.dcp_size = 1
         self.runner.dcp_manager = None
         self.runner.pin_memory = False
+        self.runner.max_num_reqs = 32
         self.runner.dynamic_eplb = True
         self.runner.eplb_heat_collection_status = True
         self.runner._sync_metadata_across_dp.return_value = (8, torch.tensor([8]), CUDAGraphMode.NONE)
@@ -614,6 +616,28 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
+
+    def test_long_dummy_bounds_sampling_after_dp_padding(self):
+        self.proposer.num_speculative_tokens = 3
+        self.proposer.extra_slots_per_request = 1
+        self.proposer.use_cuda_graph = False
+        for cls in (AscendEagleProposer, AscendStep3p5MTPProposer):
+            for num_tokens, is_profile in ((65536, False), (131072, False), (131072, True)):
+                with (
+                    self.subTest(proposer=cls.__name__, num_tokens=num_tokens, is_profile=is_profile),
+                    patch(f"{cls.dummy_run.__module__}.set_ascend_forward_context"),
+                    patch(
+                        f"{cls.dummy_run.__module__}.get_forward_context",
+                        return_value=SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE),
+                    ),
+                ):
+                    self.runner._sync_metadata_across_dp.return_value = (num_tokens, None, CUDAGraphMode.NONE)
+                    # An idle DP starts small and is padded to a peer's long prefill.
+                    cls.dummy_run(self.proposer, num_tokens=4, is_profile=is_profile)
+                    call = self.proposer._runnable.call_args.kwargs
+                    self.assertEqual(call["num_input_tokens"], num_tokens)
+                    self.assertEqual(call["batch_size"], self.runner.max_num_reqs)
+                    self.assertEqual(call["token_indices_to_sample"].numel(), self.runner.max_num_reqs)
 
     # cpu does not support parallel-group, let alone `sp`
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
