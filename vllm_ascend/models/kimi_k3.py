@@ -93,10 +93,10 @@ def _apply_ascend_attn_res(
         return prefix_sum
 
     return torch.ops._C_ascend.attn_res_fwd(
-        prefix_sum.contiguous(),
-        block_residual[:, :num_valid_blocks, :].contiguous(),
-        proj.weight.contiguous(),
-        norm.weight.contiguous(),
+        prefix_sum,
+        block_residual[:, :num_valid_blocks, :],
+        proj.weight,
+        norm.weight,
         norm.variance_epsilon,
     )
 
