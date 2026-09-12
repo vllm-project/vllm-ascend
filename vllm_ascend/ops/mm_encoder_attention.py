@@ -29,6 +29,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
@@ -194,6 +195,79 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             **fia_kwargs,
         )
         return out
+
+    def _can_use_fused_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        cu_seqlens: torch.Tensor | None,
+    ) -> bool:
+        """Check the specialized Qwen3.5-VL eager preprocessing contract."""
+        if not HAS_TRITON:
+            return False
+        # ACL-graph capture owns the preallocated FIA buffers and remains on
+        # the established path until this producer has capture-safe buffers.
+        if get_encoder_forward_context().capturing:
+            return False
+        if self.head_size != 72 or self.num_heads != 8 or self.num_kv_heads != 8:
+            return False
+        if cu_seqlens is None or rotary_pos_emb_cos is None or rotary_pos_emb_sin is None:
+            return False
+        if qkv_proj.ndim != 3 or qkv_proj.shape[1] != 1:
+            return False
+        token_count = qkv_proj.shape[0]
+        if qkv_proj.shape[2] != 3 * self.num_heads * self.head_size:
+            return False
+        if rotary_pos_emb_cos.shape != (token_count, self.head_size // 2):
+            return False
+        if rotary_pos_emb_sin.shape != rotary_pos_emb_cos.shape:
+            return False
+        if qkv_proj.dtype != torch.bfloat16:
+            return False
+        if rotary_pos_emb_cos.dtype != qkv_proj.dtype or rotary_pos_emb_sin.dtype != qkv_proj.dtype:
+            return False
+        if qkv_proj.device.type != "npu":
+            return False
+        if rotary_pos_emb_cos.device != qkv_proj.device or rotary_pos_emb_sin.device != qkv_proj.device:
+            return False
+        return qkv_proj.is_contiguous() and rotary_pos_emb_cos.is_contiguous() and rotary_pos_emb_sin.is_contiguous()
+
+    def forward_qkv_rope_pad_fia(
+        self,
+        qkv_proj: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None,
+        rotary_pos_emb_sin: torch.Tensor | None,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Return fused eager FIA output as ``[1, T, H, 72]``, or ``None``.
+
+        The Triton producer replaces QKV layout extraction, Q/K RoPE, and
+        three pad-to-128 operations. Unsupported inputs deliberately return
+        ``None`` so that the vLLM model keeps its existing implementation.
+        """
+        del sequence_lengths  # The existing FIA eager path also consumes cu_seqlens.
+        if not self._can_use_fused_qkv_rope_pad_fia(
+            qkv_proj, rotary_pos_emb_cos, rotary_pos_emb_sin, cu_seqlens
+        ):
+            return None
+
+        from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
+
+        q_pad, k_pad, v_pad = vision_qkv_rope_pad(
+            qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin
+        )
+        token_count = qkv_proj.shape[0]
+        actual_q, actual_kv = maybe_compute_actual_seq_lengths(
+            self._maybe_compute_cu_seqlens(1, token_count, cu_seqlens),
+            token_count,
+            token_count,
+            cudagraph_mm_encoder=False,
+        )
+        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_q, actual_kv)
+        return self._maybe_unpad_output(context, self.head_size).unsqueeze(0)
 
     def _forward_eager_fia(
         self,

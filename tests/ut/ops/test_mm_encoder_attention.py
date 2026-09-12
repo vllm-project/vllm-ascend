@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -137,6 +138,57 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(out.shape, query.shape)
         self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12])
         self.assertEqual(self.captured["q_shape"], (len(seq_lens) * max_q_len, 4, MAX_PAD_SIZE))
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    def test_fused_qkv_rope_pad_guard_accepts_supported_contract(
+        self,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer(num_heads=8, num_kv_heads=8, head_size=72)
+        device = SimpleNamespace(type="npu")
+
+        qkv = MagicMock(
+            ndim=3,
+            shape=(41, 1, 1728),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        qkv.is_contiguous.return_value = True
+        cos = MagicMock(
+            shape=(41, 36),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        cos.is_contiguous.return_value = True
+        sin = MagicMock(
+            shape=(41, 36),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        sin.is_contiguous.return_value = True
+
+        self.assertTrue(
+            layer._can_use_fused_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                torch.tensor([0, 41], dtype=torch.int32),
+            )
+        )
+
+        qkv.dtype = torch.float16
+        self.assertFalse(
+            layer._can_use_fused_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                torch.tensor([0, 41], dtype=torch.int32),
+            )
+        )
 
 
 class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
