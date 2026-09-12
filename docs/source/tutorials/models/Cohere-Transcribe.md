@@ -1,6 +1,6 @@
 # Cohere Transcribe
 
-## 1 Introduction
+## 1 Introduction 
 
 Cohere Transcribe is a family of automatic speech recognition (ASR) models from Cohere, based on a 2B-parameter Conformer encoder-decoder architecture that supports 14 languages (English, French, German, Italian, Spanish, Portuguese, Greek, Dutch, Polish, Chinese (Mandarin), Japanese, Korean, Vietnamese, and Arabic).
 
