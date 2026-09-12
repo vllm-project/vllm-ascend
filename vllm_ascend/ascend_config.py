@@ -682,10 +682,13 @@ class AscendConfig:
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         model_architectures = getattr(vc.model_config, "architectures", None) or []
-        assert not (
-            self.enable_fused_mc2 == 1
-            and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
+        # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
+        # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not _MEGA_MOE_SUPPORTED), (
+            "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
+            "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
+        )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(

@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
 from functools import lru_cache
 from importlib import import_module
 
@@ -121,6 +122,36 @@ def load_cann_mega_moe_ops():
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe
     return get_symm_buffer_for_mega_moe, mega_moe
+
+
+def select_mega_moe_activation_kwargs(
+    mega_moe_op: object,
+    *,
+    activation_clamp: float | None,
+    swiglu_alpha: float,
+    swiglu_beta: float,
+) -> dict[str, float | None]:
+    """Bind SwiGLU-OAI kwargs only when the CANN MegaMoe op accepts them.
+
+    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``). Older MegaMoe
+    builds only expose ``activation_clamp`` for standard SwiGLU, so extra
+    kwargs are filtered by the operator signature.
+    """
+    kwargs: dict[str, float | None] = {"activation_clamp": activation_clamp}
+    try:
+        params = inspect.signature(mega_moe_op).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    optional = {
+        "glu_alpha": swiglu_alpha,
+        "glu_bias": swiglu_beta,
+        "swiglu_alpha": swiglu_alpha,
+        "swiglu_beta": swiglu_beta,
+    }
+    for name, value in optional.items():
+        if name in params:
+            kwargs[name] = value
+    return kwargs
 
 
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:

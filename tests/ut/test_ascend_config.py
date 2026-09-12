@@ -960,6 +960,16 @@ class TestUpstreamConfigCompatibility(TestBase):
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
 
+        minimax_m3 = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=6144,
+                    intermediate_size=3072,
+                )
+            )
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
+
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A2),
@@ -1118,6 +1128,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
         # routes to dispatch_ffn_combine instead of mega_moe.
         self.assertFalse(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_rejects_fused_mc2_dispatch_ffn_combine(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.additional_config = {"enable_fused_mc2": 1}
+
+        with self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix):
+        def _fake_find_spec(name, *args, **kwargs):
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.model_config.hf_text_config = SimpleNamespace(
+            hidden_size=6144,
+            intermediate_size=3072,
+        )
+        vc.additional_config = {"enable_fused_mc2": 2}
+
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+            config = init_ascend_config(vc)
+
+        self.assertEqual(config.enable_fused_mc2, 1)
+        self.assertTrue(is_mega_moe_supported())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
