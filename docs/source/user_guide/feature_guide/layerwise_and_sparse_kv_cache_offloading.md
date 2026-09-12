@@ -250,7 +250,131 @@ On A5 nodes, add `"memfabric_transfer_protocol": "device_urma"` to
 | `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
 
-## 4. Start the P/D Proxy
+## 4. Fused-Overlap Sparse KV Cache Offload on Decode
+
+Fused-overlap is an optimized Decode path for Sparse KV Cache Offload. It is
+not a separate KV-transfer mode: configure the Prefill and Decode data path as
+described in sections 2 and 3, then enable `use_fused_overlap` on the Decode
+node.
+
+In the regular sparse-offload path, Decode copies top-k misses from its full
+host KV pool into the NPU hot buffer and then invokes sparse attention. With
+fused-overlap enabled, the custom
+`npu_fused_sparse_attention_overlap` operator performs miss handling and
+sparse attention together. It reads full main KV from the Decode-owned host
+pool, preserves the NPU selection buffer across Decode steps, and overlaps
+selection-buffer updates for misses with attention computation. The operator
+updates the selection buffer and its residency metadata in place; do not
+attempt to manage those tensors from application code.
+
+### Requirements and Compatibility
+
+In addition to the requirements in section 3, the fused-overlap path has the
+following requirements:
+
+- Deploy disaggregated Prefill and Decode. Enable the feature only on Decode;
+  Prefill must keep `sparse_kv_offload_config.enabled` disabled.
+- Use Model Runner V1, an SFA/MLA sparse-attention model, and BF16 main SFA KV
+  cache. The fused operator specialization in this release is validated for
+  GLM-5.2 Decode.
+- Build and install vLLM Ascend at this revision with custom operators enabled.
+  The Decode process must register
+  `npu_fused_sparse_attention_overlap`; a missing registration means that the
+  custom operator package was not built or is not visible to the process.
+- Use a PageAttention block size of 128. The model `index_topk` must be no
+  greater than 2048. Set `topk_buffer_size` to a multiple of 128 and no less
+  than `index_topk`.
+- Context parallelism and pipeline parallelism are unsupported. The standard
+  Sparse KV Cache Offload restrictions still apply, including the requirement
+  that the full Decode KV history fit in the configured host pool.
+
+The custom operator supports Decode graph capture. For serving workloads,
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is the
+recommended graph configuration. Keep the setting consistent across all
+Decode replicas.
+
+### Decode Configuration
+
+Start from the Decode command in section 3. Replace its
+`--additional-config` value with the following configuration, and retain the
+same `SfaRemoteD2HConnector` configuration. The values below are examples;
+size them for the target model, context length, and concurrency.
+
+```bash
+export VLLM_USE_V1=1
+
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{
+    "sparse_kv_offload_config": {
+        "enabled": true,
+        "use_fused_overlap": true,
+        "topk_buffer_size": 4096,
+        "dram_size_per_dp_GB": 180
+    }
+}' \
+--kv-transfer-config '{
+    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": 20050,
+    "kv_connector_extra_config": {
+        "transfer_backend": "memfabric",
+        "use_layerwise": true
+    }
+}'
+```
+
+`sparse_kv_offload_config` is the vLLM Ascend configuration namespace at this
+revision. Put `use_fused_overlap` inside that object. Do not use an
+unrecognized `kv_offload_decode_config` key: additional configuration is
+validated and unknown keys are rejected. The `script/2p1d/` deployment files
+were prepared from a separate development tree and contain that historical
+name and the historical `SFAPDCpuOffloadConnector` connector; when reusing
+them with this commit, use `sparse_kv_offload_config` and
+`SfaRemoteD2HConnector` as shown above.
+
+The Prefill command remains the Layerwise configuration from section 2. It
+must use `MultiConnector` with `SfaRemoteD2HConnector` and
+`AscendStoreConnector`, and it must retain `--enforce-eager`. The two
+connectors jointly protect a reusable Prefill buffer until both the Memcache
+save and the Decode remote read complete.
+
+| Parameter | Description |
+| :--- | :--- |
+| `enabled` | Enables Sparse KV Cache Offload on the Decode node. It must be `true` before the fused path can be selected. |
+| `use_fused_overlap` | Selects the fused-overlap Decode implementation. The default is `false`, which retains the regular top-k-miss copy followed by sparse attention path. |
+| `topk_buffer_size` | Per-row NPU selection-buffer capacity in tokens. It must be at least `index_topk` and divisible by the KV cache block size. The fused operator in this release requires block size 128 and `index_topk <= 2048`. |
+| `dram_size_per_dp_GB` | Host memory limit for one Decode DP rank's full main-KV pool. TP ranks in the same DP rank share this pool. Startup fails if the aligned planned pool exceeds this limit. |
+| `keep_device_kv_cache` | Retains the full NPU main KV cache for PD-colocated debugging. Keep it unset or `false` for fused-overlap P/D deployment; it removes the capacity benefit of Decode offload. |
+
+### Verification and Troubleshooting
+
+After the first Decode request, verify that the Decode log contains a line
+beginning with:
+
+```text
+[fused_overlap_offload][decode]
+```
+
+This line is emitted once per attention implementation and includes the query,
+top-k, selection-buffer, and full-KV shapes. During initialization, the host
+pool log reports `SparseKVOffloadManager starts CPU KV pool initialization`.
+These messages confirm that the fused path has both its selection buffer and
+full host KV source.
+
+Common startup failures are configuration failures:
+
+- If `topk_buffer_size` is smaller than `index_topk` or not divisible by the
+  block size, increase it to a valid multiple of 128.
+- If the planned CPU pool exceeds `dram_size_per_dp_GB`, increase the limit or
+  reduce the configured context length, batch size, or concurrency.
+- If the custom operator is not registered, rebuild and install the custom-op
+  package for the active environment, then ensure the Decode process loads
+  that installation.
+- If a fused request has more than one top-k head or uses an unsupported cache
+  layout, use the regular Decode offload path from section 3 instead.
+
+
+## 5. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are
 ready, start the proxy:
@@ -268,7 +392,7 @@ python examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_exa
 For multi-node deployment, advertise reachable addresses instead of
 `0.0.0.0`. Send inference requests to the proxy port (`9000` in this example).
 
-## 5. Limitations
+## 6. Limitations
 
 - Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
 - Context parallelism has not been validated with Layerwise Prefill Offload.
