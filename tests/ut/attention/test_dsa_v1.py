@@ -744,7 +744,7 @@ def test_dsa_cp_defers_device_metadata(
     builder._build_sas_metadata.assert_called_once()
     if compressor_ratio == 4:
         builder._build_qli_metadata.assert_called_once()
-        assert builder._build_qli_metadata.call_args.kwargs["max_seqlen_q"] == 2
+        assert "max_seqlen_q" not in builder._build_qli_metadata.call_args.kwargs
         assert builder._build_qli_metadata.call_args.kwargs["max_seqlen_k"] == 8
     else:
         builder._build_qli_metadata.assert_not_called()
@@ -863,7 +863,7 @@ def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
     )
 
 
-def test_dsa_cp_qli_metadata_uses_host_maxima():
+def test_dsa_cp_qli_metadata_uses_device_query_lengths():
     builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
     builder.compressor_ratio = 4
     builder.common_ratio_to_sas_metadata = {}
@@ -891,7 +891,6 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
             query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
             seq_lens=seq_lens,
             num_reqs=2,
-            max_seqlen_q=2,
             max_seqlen_k=8,
         )
 
