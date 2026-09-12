@@ -341,13 +341,22 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     current_output[1] = float("nan")
     expected = torch.full((2, 2, 4), (dcp_size + 3.0) / (dcp_size + 1.0))
     expected[1] = 0.0
-    events = []
+    events: list[object] = []
     active = ["main"]
     main = Mock()
     comm = Mock()
-    main.record_event.side_effect = lambda: events.append("history_ready") or "ready"
+
+    def record_history_ready() -> str:
+        events.append("history_ready")
+        return "ready"
+
+    def record_comm_done() -> str:
+        events.append("comm_done")
+        return "done"
+
+    main.record_event.side_effect = record_history_ready
     comm.wait_event.side_effect = lambda event: events.append(("comm_wait", event))
-    comm.record_event.side_effect = lambda: events.append("comm_done") or "done"
+    comm.record_event.side_effect = record_comm_done
     main.wait_event.side_effect = lambda event: events.append(("main_wait", event))
 
     @contextmanager
