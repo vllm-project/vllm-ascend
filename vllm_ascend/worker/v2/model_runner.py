@@ -338,15 +338,16 @@ class NPUModelRunner(GPUModelRunner):
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_draft_tokens_per_req = None
         num_valid_tokens = num_scheduled_tokens_np
-        if scheduler_output.scheduled_spec_decode_tokens:
-            num_valid_tokens = np.array(
-                [
-                    num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                    for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                ],
+        if draft_tokens:
+            num_draft_tokens_per_req = np.fromiter(
+                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
+                count=num_reqs,
             )
+            num_valid_tokens = num_scheduled_tokens_np - num_draft_tokens_per_req
         attn_state = build_attn_state(
             self.vllm_config,
             self.input_buffers.seq_lens_np,
@@ -355,9 +356,6 @@ class NPUModelRunner(GPUModelRunner):
             num_valid_tokens,
         )
 
-        # Get the number of draft tokens for each request.
-        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_draft_tokens_per_req = None
         if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
@@ -367,11 +365,6 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens_per_req = np.fromiter(
-                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-                dtype=np.int32,
-                count=num_reqs,
-            )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
