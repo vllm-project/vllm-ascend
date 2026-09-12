@@ -2162,6 +2162,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             vllm_config,
             device,
             metadata_cls=dsa_v1.AscendDSAMetadata,
+            rope_runtime_buffer={},
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group

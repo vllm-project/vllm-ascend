@@ -53,6 +53,7 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
+from vllm_ascend.ops import rope_dsv4
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -1665,6 +1666,66 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
         ):
             with pytest.raises(ValueError, match="cannot be enabled at the same time"):
                 get_backend_cls()
+
+
+def test_pcp_builders_keep_global_rope_separate_from_reused_local_metadata(monkeypatch):
+    state = rope_dsv4.RopeGlobalState()
+    monkeypatch.setattr(rope_dsv4, "_ROPE_STATE", state)
+    angles = torch.arange(32 * 4, dtype=torch.float32).reshape(32, 1, 1, 4)
+    state.full_rope_cache["config"] = (angles.cos(), angles.sin())
+    state.registry_summary["config"] = {"default"}
+    state.layer_info["layer"] = ("config", ["default"])
+    state.runtime_buffer["config"] = {"default": (torch.empty(16, 1, 1, 4), torch.empty(16, 1, 1, 4))}
+    config = _make_vllm_config()
+    config.parallel_config.prefill_context_parallel_size = 2
+    with patch("vllm_ascend.attention.context_parallel.dsa_cp.get_pcp_group") as pcp_group:
+        pcp_group.return_value.rank_in_group = 0
+        builders = [
+            AscendDSAPCPMetadataBuilder(_make_kv_cache_spec(4), ["layer"], config, torch.device("cpu"))
+            for _ in range(2)
+        ]
+    for builder in builders:
+        builder.decode_threshold = builder._global_metadata_builder.decode_threshold = 16
+        monkeypatch.setattr(builder, "build_req_metadata", MagicMock())
+        monkeypatch.setattr(builder._global_metadata_builder, "build_req_metadata", MagicMock())
+
+    def build(builder, positions, shared):
+        offsets = torch.tensor([0, len(positions)], dtype=torch.int32)
+        common = SimpleNamespace(
+            num_reqs=1,
+            num_actual_tokens=len(positions),
+            num_input_tokens=len(positions),
+            max_query_len=len(positions),
+            context_parallel_metadata=None,
+            query_start_loc=offsets,
+            query_start_loc_cpu=offsets,
+            positions=positions,
+            seq_lens=torch.tensor([32]),
+            _seq_lens_cpu=torch.tensor([32]),
+            block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
+            attn_state=MagicMock(),
+        )
+        AscendDSAMetadataBuilder.build(builder, 0, common, common_ratio_to_sas_metadata=shared)
+
+    addresses: dict[tuple[int | str, str], int] = {}
+    for count in (4, 16, 6):
+        global_pos, local_pos = torch.arange(count), torch.arange(count - 1) + 5
+        local_cache: dict[str, Any] = {}
+        global_caches = []
+        for index, builder in enumerate(builders):
+            global_cache: dict[str, Any] = {}
+            build(builder._global_metadata_builder, global_pos, global_cache)
+            global_caches.append(global_cache)
+            build(builder, local_pos, local_cache)
+            for key, full in zip(("cos", "sin"), state.full_rope_cache["config"]):
+                local = local_cache[key]["layer"]
+                torch.testing.assert_close(local, full[local_pos], rtol=0, atol=0)
+                assert local.data_ptr() == addresses.setdefault(("local", key), local.data_ptr())
+                for cached in global_caches:
+                    torch.testing.assert_close(cached[key]["layer"], full[global_pos], rtol=0, atol=0)
+                global_tensor = global_cache[key]["layer"]
+                assert global_tensor.data_ptr() != local.data_ptr()
+                assert global_tensor.data_ptr() == addresses.setdefault((index, key), global_tensor.data_ptr())
 
 
 def test_pcp_metadata_builds_from_manager_global_view():
