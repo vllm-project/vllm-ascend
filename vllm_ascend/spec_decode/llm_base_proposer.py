@@ -1470,9 +1470,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # Only the dspark method is handled here since it relies on
                 # the DSpark confidence head.
                 if self.dynamic_spec is not None:
+                    # Confidence is defined for the same sampled query rows
+                    # used by LMHead. ``last_hidden_states`` can instead be
+                    # shorter (repeated graph indices) or longer (a padded
+                    # graph bucket), so reshaping it as B * K is invalid.
+                    confidence_rows = num_blk * self.num_speculative_tokens
                     self.dynamic_spec.update(
                         model=self.model,
-                        last_hidden_states=last_hidden_states,
+                        last_hidden_states=sample_hidden_states[:confidence_rows],
                         draft_token_ids=draft_token_ids,
                         num_reqs=num_blk,
                     )

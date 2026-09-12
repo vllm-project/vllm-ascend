@@ -755,6 +755,89 @@ class TestDSparkInitValidation:
 
         assert proposer.use_cuda_graph is False
 
+    def test_dynamic_confidence_uses_sampled_hidden_rows(self):
+        """Graph padding/repeated indices must not reshape raw model output."""
+
+        class DraftModel:
+            vocab_size = 16
+
+            def __init__(self):
+                self.last_hidden_states = None
+
+            def __call__(self, **kwargs):
+                num_rows = kwargs["input_ids"].shape[0]
+                self.last_hidden_states = torch.arange(
+                    num_rows * 4,
+                    dtype=torch.float32,
+                ).view(num_rows, 4)
+                return self.last_hidden_states, torch.zeros_like(self.last_hidden_states)
+
+            def compute_logits(self, hidden_states):
+                return torch.zeros(
+                    hidden_states.shape[0],
+                    self.vocab_size,
+                    dtype=hidden_states.dtype,
+                )
+
+            def markov_embed(self, token_ids):
+                return torch.zeros((*token_ids.shape, 4), dtype=torch.float32)
+
+            def markov_bias(self, markov_emb):
+                return torch.zeros(
+                    markov_emb.shape[0],
+                    self.vocab_size,
+                    dtype=markov_emb.dtype,
+                )
+
+        model = DraftModel()
+        dynamic_spec = MagicMock()
+        proposer = SimpleNamespace(
+            runner=None,
+            method="dspark",
+            model=model,
+            num_speculative_tokens=3,
+            parallel_drafting=True,
+            _enable_probabilistic_draft_probs=False,
+            _share_mtp_indices=False,
+            input_ids=torch.arange(4, dtype=torch.int64),
+            positions=torch.arange(4, dtype=torch.int64),
+            _get_positions=lambda num_tokens: torch.arange(num_tokens, dtype=torch.int64),
+            _dspark_draft_buffer=torch.zeros((4, 4), dtype=torch.int64),
+            _dspark_seed_buffer=torch.zeros(4, dtype=torch.int64),
+            dynamic_spec=dynamic_spec,
+        )
+        sample_indices = torch.tensor([0, 1, 1, 2, 2, 3], dtype=torch.int64)
+
+        with (
+            patch(
+                "vllm_ascend.spec_decode.llm_base_proposer.lmhead_tp_enable",
+                return_value=False,
+            ),
+            patch(
+                "vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config",
+                return_value=SimpleNamespace(enable_reduce_sample=False),
+            ),
+        ):
+            draft_token_ids = AscendSpecDecodeBaseProposer._run_merged_draft(
+                proposer,
+                num_input_tokens=4,
+                batch_size=2,
+                token_indices_to_sample=sample_indices,
+                target_positions=proposer.positions,
+                inputs_embeds=None,
+                multi_steps_attn_metadata=[None],
+                num_tokens=4,
+                sampling_metadata=object(),
+            )
+
+        call = dynamic_spec.update.call_args.kwargs
+        assert call["num_reqs"] == 2
+        assert draft_token_ids.shape == (2, 3)
+        torch.testing.assert_close(
+            call["last_hidden_states"],
+            model.last_hidden_states[sample_indices],
+        )
+
 
 class TestDSparkGraphDummyRun(_DSparkProposerTestBase):
     def test_query_runnable_does_not_inject_hidden_states(self):
