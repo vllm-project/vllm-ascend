@@ -51,15 +51,13 @@ class AscendGateLinear(GateLinear):
         self.out_dtype = out_dtype
         self.precast_fp32_weight = True
 
-    def set_out_dtype(self, out_dtype: torch.dtype) -> None:
-        if self.out_dtype is not None:
-            raise ValueError("out_dtype has already been set")
-        self.out_dtype = out_dtype
-
     def forward(self, x: torch.Tensor):
+        # TODO: Remove this workaround after upgrading to a vLLM version that
+        # no longer forces router logits to bf16 via
+        # self.gate.set_out_dtype(torch.bfloat16).
         if x.dtype != torch.float32:
             x = x.to(torch.float32)
+
         output, output_bias = ReplicatedLinear.forward(self, x)
-        if self.out_dtype is not None and output.dtype != self.out_dtype:
-            output = output.to(self.out_dtype)
+
         return output, output_bias

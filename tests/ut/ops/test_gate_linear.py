@@ -68,16 +68,6 @@ class TestAscendGateLinear(TestBase):
         self.assertEqual(output.dtype, torch.float32)
         self.assertIsNone(output_bias)
 
-    def test_set_out_dtype(self):
-        gate = AscendGateLinear(
-            input_size=16,
-            output_size=4,
-            bias=False,
-            prefix="test.gate",
-        )
-        gate.set_out_dtype(torch.float32)
-        self.assertEqual(gate.out_dtype, torch.float32)
-
 
 if __name__ == "__main__":
     unittest.main()
