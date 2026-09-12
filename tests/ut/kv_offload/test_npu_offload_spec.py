@@ -158,7 +158,7 @@ def test_cpu_spec_uses_v027_blocks_per_chunk(
     monkeypatch.setattr(npu_mod, "NPUOffloadingWorker", fake_worker)
     spec = npu_mod.NPUOffloadingSpec.__new__(npu_mod.NPUOffloadingSpec)
     spec.blocks_per_chunk = 4
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
         spec.num_blocks = 17
     else:
         spec.num_chunks = 17
@@ -221,7 +221,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     spec._engine_id = "engine-dp0"
     spec.replicated_layout = replicated_layout
     spec.cpu_page_size_per_worker = 64
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
         spec.num_blocks = 10
     else:
         spec.num_chunks = 10
@@ -233,9 +233,9 @@ def test_tiering_worker_matches_v027_shared_region_contract(
 
     assert result is sentinel_worker
     assert captured["engine_id"] == "engine-dp0"
-    assert captured["num_blocks" if vllm_version_is("0.28.0") else "num_chunks"] == 10
+    assert captured["num_blocks" if vllm_version_is("0.29.0") else "num_chunks"] == 10
     assert captured["rank"] == expected_rank
-    assert captured["kv_bytes_per_block" if vllm_version_is("0.28.0") else "kv_bytes_per_chunk"] == 4096
+    assert captured["kv_bytes_per_block" if vllm_version_is("0.29.0") else "kv_bytes_per_chunk"] == 4096
     assert captured["cpu_page_size"] == 64
     assert captured["worker_kwargs"] == {
         "kv_caches": kv_caches,

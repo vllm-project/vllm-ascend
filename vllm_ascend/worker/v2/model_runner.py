@@ -80,7 +80,7 @@ from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpecul
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-if vllm_version_is("0.28.0"):
+if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
@@ -329,7 +329,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
                 context_len=context_len,
-                **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
             )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
@@ -532,7 +532,7 @@ class NPUModelRunner(GPUModelRunner):
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212). Release still prepares them here.
-        if vllm_version_is("0.28.0") and self.use_dcp:
+        if vllm_version_is("0.29.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -599,7 +599,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             **(
                 {"max_seq_len_np": self.req_states.max_seq_len[idx_mapping_np] if self.use_pp else None}
-                if vllm_version_is("0.28.0")
+                if vllm_version_is("0.29.0")
                 else {}
             ),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
@@ -615,20 +615,11 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-
-        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
-        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
-        if vllm_version_is("0.28.0"):
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-            )
-        else:
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-                padded_num_tokens=batch_desc.num_tokens,
-            )
+        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            padded_num_tokens=batch_desc.num_tokens,
+        )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -641,10 +632,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
-                **({} if vllm_version_is("0.28.0") else {"valid_state_slots": valid_state_slots}),
+                **({} if vllm_version_is("0.29.0") else {"valid_state_slots": valid_state_slots}),
             )
         block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-        if not vllm_version_is("0.28.0") and valid_state_slots:
+        if not vllm_version_is("0.29.0") and valid_state_slots:
             # Match the upstream state-slot contract in the persistent PCP views.
             for block_table in block_tables:
                 state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)

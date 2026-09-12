@@ -278,10 +278,6 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].untyped_storage().nbytes() == 160
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     class FakeMambaSpec:
         block_size = 1
@@ -796,10 +792,6 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128
