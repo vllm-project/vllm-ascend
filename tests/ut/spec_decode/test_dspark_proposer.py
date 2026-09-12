@@ -832,6 +832,7 @@ class TestDSparkInitValidation:
 
         call = dynamic_spec.update.call_args.kwargs
         assert call["num_reqs"] == 2
+        assert model.last_hidden_states is not None
         assert draft_token_ids.shape == (2, 3)
         torch.testing.assert_close(
             call["last_hidden_states"],
