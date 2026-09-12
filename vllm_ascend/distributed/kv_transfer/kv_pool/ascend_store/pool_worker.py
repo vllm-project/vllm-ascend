@@ -8,6 +8,11 @@ from collections.abc import Callable, Generator
 from typing import Any
 
 import numpy as np
+
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    discard_failed_load,
+    record_failed_load,
+)
 import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -1293,18 +1298,25 @@ class KVPoolWorker:
                 block_gvas: list[int] = []
                 new_keys: list[str] = []
                 new_positions: list[int] = []
+                revalidated_keys = 0
                 for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
                     key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
-                    cached = self._allocated_gvas.get(key)
-                    if cached is not None:
-                        block_gvas.append(cached)
-                    else:
-                        new_keys.append(key)
-                        new_positions.append(len(block_gvas))
-                        block_gvas.append(0)
+                    if key in self._allocated_gvas:
+                        # Mid-segment cached key: the pool blob may still
+                        # exist, but the client-side gvaBlobTracker entry can
+                        # have expired (alloc TTL elapsed / operateQueue
+                        # drained) and batch_copy would fail with -3102
+                        # UNMATCHED_KEY. Never write through a cached GVA:
+                        # route every key through batch_alloc, which
+                        # re-registers the tracker for an existing blob (or
+                        # allocates a fresh one if it was evicted).
+                        revalidated_keys += 1
+                    new_keys.append(key)
+                    new_positions.append(len(block_gvas))
+                    block_gvas.append(0)
 
                 if new_keys:
-                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys))
+                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys), LAYERWISE_READ_LEASE_TTL_MS)
                     if any(gva <= 0 for gva in new_gvas):
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
@@ -1339,6 +1351,7 @@ class KVPoolWorker:
                         allocated = self.m_store.batch_alloc(
                             [partial_key],
                             [alloc_size],
+                            LAYERWISE_READ_LEASE_TTL_MS,
                         )
                         partial_gva = allocated[0] if allocated else 0
                         if partial_gva > 0:
@@ -1358,14 +1371,14 @@ class KVPoolWorker:
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "new_keys=%d cached_keys=%d alloc_size=%d",
+                    "new_keys=%d revalidated=%d alloc_size=%d",
                     request.req_id,
                     group_id,
                     effective_block_size,
                     save_start_block,
                     save_end_block,
                     len(new_keys),
-                    len(block_gvas) - len(new_keys),
+                    revalidated_keys,
                     alloc_size,
                 )
 
@@ -1540,8 +1553,40 @@ class KVPoolWorker:
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
                     if self.num_kv_cache_groups == 1:
+                        if leased_keys:
+                            self.m_store.batch_remove_lease(list(dict.fromkeys(leased_keys)))
+                        # The whole load plan for this request is cancelled, so every
+                        # block it would have filled is now invalid on the engine side,
+                        # not just the blocks whose GVA query failed. Report the full
+                        # planned range so the scheduler's failure accounting (and any
+                        # recompute-policy truncation) reflects the true extent.
+                        cancelled_block_ids = set(invalid_block_ids)
+                        if block_ids_by_group is not None:
+                            cancelled_block_ids.update(
+                                block_id
+                                for block_id in block_ids_by_group[load_start_block:full_blocks]
+                                if block_id is not None
+                            )
                         with self._invalid_block_ids_lock:
-                            self._invalid_block_ids.update(invalid_block_ids)
+                            self._invalid_block_ids.update(cancelled_block_ids)
+                        # Never save KV computed over an unloaded prefix: the request is
+                        # doomed and the garbage prefix would poison the pool for future
+                        # requests hitting the same content hashes. Record the request so
+                        # the SfaRemoteD2H producer skips its PD push as well.
+                        request.can_save = False
+                        record_failed_load((request.req_id,))
+                        logger.warning(
+                            "load_gvas: req=%s invalid_blocks=%d; canceling load (no save, no PD push); scheduler will fail the request",
+                            request.req_id,
+                            len(cancelled_block_ids),
+                        )
+                        request.load_spec = None
+                        request.load_keys = []
+                        request.load_block_gvas_by_group_np = None
+                        request.load_block_gvas_np = None
+                        all_group_load_gvas = []
+                        all_group_load_keys = []
+                        break
                     else:
                         leased_keys_to_release = list(
                             dict.fromkeys(
@@ -1644,30 +1689,30 @@ class KVPoolWorker:
                         task.cached_process_tokens = cached
 
     def _build_shared_load_data(self) -> None:
-        """Build shared block data once and attach to all layer load tasks.
+        """Build shared block data per task, not per group.
 
-        In multi-group mode, shared data is built per-group because each
-        group has different block_ranges (different effective_block_size).
+        Tasks within one group can require different load ranges:
+        independent layers skip locally cached prefixes (load_start_block =
+        vllm_cached_tokens // block_size) while reuse layers must reload
+        from block 0, and partial blocks are tracked per layer. Sharing the
+        first task's descriptor across the group drops the
+        [0, local_hit) range from reuse layers and leaves the reloaded
+        prefix corrupt. Build one descriptor per task from its own ranges;
+        reintroduce cross-task sharing only with a full transfer-plan
+        equality check (request set, per-request start/end, partial index
+        and address-mapping semantics).
         """
         if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             return
-        for group_id in range(self.num_kv_cache_groups):
-            first_task = None
-            for layer_id in range(self.num_layers):
-                for task in self.layer_load_tasks[layer_id]:
-                    if task.group_id == group_id:
-                        first_task = task
-                        break
-                if first_task:
-                    break
-            if first_task is None:
-                continue
-            shared = self.kv_recv_thread.build_shared_data(first_task)
-            if shared is not None:
-                for layer_id in range(self.num_layers):
-                    for task in self.layer_load_tasks[layer_id]:
-                        if task.group_id == group_id:
-                            task.shared_block_data = shared
+        for layer_id in range(self.num_layers):
+            for task in self.layer_load_tasks[layer_id]:
+                shared = self.kv_recv_thread.build_shared_data(task)
+                if shared is not None:
+                    # build_shared may return views into reusable builder buffers.
+                    # Each queued task must own its block IDs and GVA snapshot.
+                    shared.block_ids_arr = shared.block_ids_arr.copy()
+                    shared.block_gvas_arr = shared.block_gvas_arr.copy()
+                    task.shared_block_data = shared
 
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
@@ -1676,12 +1721,15 @@ class KVPoolWorker:
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+        # Resolve load GVA/leases before creating save tasks. A scheduler hit
+        # is only provisional: if load preparation finds an invalid GVA or
+        # lease, it clears load_spec and the request must be planned as a
+        # fresh recompute/save in this same step.
+        self._prepare_load_gvas(requests)
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
-        # Protect the previous partial before allocating the next snapshot.
-        self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for physical_layer in range(self.num_layers):
