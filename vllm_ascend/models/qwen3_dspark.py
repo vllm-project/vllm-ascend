@@ -56,7 +56,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
-    def set_target_model_capture_mode(self, target_model: torch.nn.Module) -> None:
+    def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
+        """Select draft auxiliary inputs, without changing target Eager/Graph mode."""
         set_capture_mode = getattr(target_model, "set_dspark_aux_capture_materialized", None)
         if set_capture_mode is None:
             get_language_model = getattr(target_model, "get_language_model", None)

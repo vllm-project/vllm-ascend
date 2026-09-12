@@ -63,9 +63,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             model = super().load_draft_model(target_model, target_attn_layer_names)
         finally:
             delattr(draft_hf_config, "_ascend_target_rotation_path")
-        set_target_model_capture_mode = getattr(model, "set_target_model_capture_mode", None)
-        if set_target_model_capture_mode is not None:
-            set_target_model_capture_mode(target_model)
+        configure_aux_hidden_capture = getattr(model, "configure_target_aux_hidden_capture", None)
+        if configure_aux_hidden_capture is not None:
+            configure_aux_hidden_capture(target_model)
 
         return model
 

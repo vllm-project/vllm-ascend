@@ -85,7 +85,7 @@ def test_registered_draft_class_declares_capabilities(architecture, monkeypatch)
     )
     draft_cls = get_model_cls(config)
     if architecture == "DSparkDraftModel":
-        assert not hasattr(draft_cls, "set_target_model_capture_mode")
+        assert not hasattr(draft_cls, "configure_target_aux_hidden_capture")
     else:
         assert draft_cls is AscendQwen3DSparkForCausalLM
 
@@ -107,7 +107,7 @@ def test_draft_without_hook_preserves_target_capture(monkeypatch):
 
 def test_qwen3_class_selects_materialized_target_capture():
     target = _target()
-    _draft().set_target_model_capture_mode(target)
+    _draft().configure_target_aux_hidden_capture(target)
     target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
@@ -115,13 +115,13 @@ def test_undeclared_format_uses_materialized_capture():
     target = _target()
     draft = _draft()
     del draft.config.dspark_aux_hidden_state_format
-    draft.set_target_model_capture_mode(target)
+    draft.configure_target_aux_hidden_capture(target)
     target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
 def test_wrapped_target_capture():
     target = _target()
-    _draft().set_target_model_capture_mode(SimpleNamespace(get_language_model=lambda: target))
+    _draft().configure_target_aux_hidden_capture(SimpleNamespace(get_language_model=lambda: target))
     target.set_dspark_aux_capture_materialized.assert_called_once_with(True)
 
 
@@ -129,7 +129,7 @@ def test_wrapped_target_capture():
 def test_missing_target_setter_preserves_native_behavior(wrapped):
     target = SimpleNamespace()
     model = SimpleNamespace(get_language_model=lambda: target) if wrapped else target
-    _draft().set_target_model_capture_mode(model)
+    _draft().configure_target_aux_hidden_capture(model)
     assert vars(target) == {}
 
 

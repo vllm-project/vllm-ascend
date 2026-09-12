@@ -1214,9 +1214,9 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them or the Ascend attention state. The
-    latter must be ``SpecDecoding`` so draft tokens use speculative attention
-    semantics instead of being treated as independent requests. Must run inside
+    speculator path does not forward them or the Ascend attention state.
+    Preserve the existing ``SpecDecoding`` routing until state-independent
+    draft execution is validated across attention backends. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
