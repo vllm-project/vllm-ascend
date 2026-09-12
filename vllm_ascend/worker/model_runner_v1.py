@@ -1136,6 +1136,15 @@ class NPUModelRunner(GPUModelRunner):
 
         self.maybe_save_ec_to_connector({mm_hash: output}, mm_hash)
 
+    def _snapshot_num_computed_tokens(self, num_reqs: int) -> torch.Tensor:
+        # The next batch can update or condense the persistent CPU array while
+        # a non-blocking H2D still reads it. An owned pinned source lets the
+        # host allocator defer reuse until the copy completes.
+        source = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+        snapshot = torch.empty_like(source, pin_memory=source.is_pinned())
+        snapshot.copy_(source)
+        return snapshot
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1370,10 +1379,9 @@ class NPUModelRunner(GPUModelRunner):
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
         valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
+        count_snapshot = self._snapshot_num_computed_tokens(num_reqs)
         if self.use_async_spec_decode:
-            computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                device=self.device, non_blocking=True
-            )
+            computed_token_tensor_cpu = count_snapshot.to(device=self.device, non_blocking=True)
         if (
             self.use_async_spec_decode
             and valid_sampled_token_count_gpu is not None
@@ -1392,7 +1400,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                count_snapshot,
                 non_blocking=True,
             )
 

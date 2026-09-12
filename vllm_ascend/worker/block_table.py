@@ -277,7 +277,17 @@ class BlockTable:
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
-        self.block_table.copy_to_gpu(num_reqs)
+        if not self.pin_memory:
+            self.block_table.copy_to_gpu(num_reqs)
+            return
+
+        # The scheduler may mutate the table while this non-blocking H2D is
+        # pending. Give each copy its own pinned source; the host allocator
+        # records its stream and defers reuse until the copy has completed.
+        source = self.block_table.cpu[:num_reqs]
+        snapshot = torch.empty_like(source, pin_memory=True)
+        snapshot.copy_(source)
+        self.block_table.gpu[:num_reqs].copy_(snapshot, non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)

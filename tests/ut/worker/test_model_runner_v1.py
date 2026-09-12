@@ -30,6 +30,47 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestComputedTokenSnapshot(unittest.TestCase):
+    def test_pending_batches_survive_counter_update_and_condense(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        source = torch.tensor([32768, 32768, 32768, -1], dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(num_computed_tokens_cpu_tensor=source)
+
+        # Defer reading each transfer source until later batches have mutated
+        # the persistent array, as an asynchronous H2D is allowed to do.
+        pending = [runner._snapshot_num_computed_tokens(3)]
+        source[2] += 59
+        source[0] = source[2]
+        pending.append(runner._snapshot_num_computed_tokens(2))
+        source.zero_()
+        pending.append(runner._snapshot_num_computed_tokens(1))
+        source.fill_(99)
+
+        self.assertEqual([value.tolist() for value in pending], [[32768, 32768, 32768], [32827, 32768], [0]])
+        self.assertEqual(len({value.data_ptr() for value in pending}), 3)
+        self.assertTrue(all(value.data_ptr() != source.data_ptr() for value in pending))
+
+    def test_snapshot_preserves_pinned_allocation_request(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        source = torch.tensor([12, 24], dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(num_computed_tokens_cpu_tensor=source)
+        empty_like = torch.empty_like
+
+        # CPU-only CI cannot allocate NPU pinned memory. Check the requested
+        # allocation mode while using real CPU storage for the snapshot.
+        with (
+            patch.object(torch.Tensor, "is_pinned", return_value=True),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.torch.empty_like",
+                side_effect=lambda tensor, **kwargs: empty_like(tensor),
+            ) as allocate,
+        ):
+            snapshot = runner._snapshot_num_computed_tokens(1)
+        self.assertTrue(allocate.call_args.kwargs["pin_memory"])
+        source.fill_(0)
+        self.assertEqual(snapshot.tolist(), [12])
+
+
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

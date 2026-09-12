@@ -183,6 +183,48 @@ class TestBlockTableComputeSlotMapping(TestBase):
             np.array([7, 11], dtype=np.int32),
         )
 
+    def test_commit_preserves_sources_until_deferred_copies_finish(self):
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+        block_table.pin_memory = True
+
+        class DeferredGpuCopy:
+            def __init__(self):
+                self.sources = []
+
+            def __getitem__(self, key):
+                return self
+
+            def copy_(self, source, non_blocking=False):
+                assert non_blocking
+                self.sources.append(source)
+                return self
+
+        destination = DeferredGpuCopy()
+        block_table.block_table.gpu = destination
+        empty_like = torch.empty_like
+        expected = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+        # CPU-only tests model deferred consumption; remote NPU tests cover
+        # pinned allocation and the allocator's asynchronous lifetime tracking.
+        with patch(
+            "vllm_ascend.worker.block_table.torch.empty_like",
+            side_effect=lambda tensor, **kwargs: empty_like(tensor),
+        ) as allocate:
+            for values in expected:
+                block_table.add_row(values, 0)
+                block_table.commit_block_table(1)
+                block_table.clear_row(0)
+
+        self.assertEqual(allocate.call_count, len(expected))
+        self.assertTrue(all(call.kwargs["pin_memory"] for call in allocate.call_args_list))
+        for source, values in zip(destination.sources, expected):
+            self.assertEqual(source.shape[0], 1)
+            self.assertNotEqual(source.data_ptr(), block_table.block_table.cpu.data_ptr())
+            np.testing.assert_array_equal(source[0, :4], np.array(values, dtype=np.int32))
+
     def _test_slot_mapping_for_ranks(self, dcp_world_size, cp_kv_cache_interleave_size, test_configs):
         """Helper method to test slot_mapping across multiple ranks
 
