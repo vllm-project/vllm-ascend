@@ -128,23 +128,30 @@ public:
         const uint32_t subM = MsaCeilDiv(task.mActual, subBlockNum);
         mOff_ = subIdx * subM;
         mSub_ = (mOff_ >= task.mActual) ? 0U : MsaMinU32(subM, task.mActual - mOff_);
-        // 暂存区按半个 M-tile 静态分配；若 subcore 数变化导致行数超出则退回逐 pass 直写。
-        stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS);
+        // 暂存区按半个 M-tile 静态分配；行数超出则退回逐 pass 直写。
+        // score 末维超过一窗（如 275 page → stride 288）时也走直写：滑窗 flush 会和
+        // S16 乒乓共用硬件事件，第二窗首个 stile（GM 下标 256）会丢掉变成 -inf。
+        stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS) && (strideOutToken_ <= MSA_STAGE_BLOCKS);
         stageBlkBase_ = 0;
         stageBlkEnd_ = 0;
         rowInReqBase_ = task.mStart + mOff_;
         tokenBase0_ = task.cuQStart;
+        writeLo_ = task.sBlkBegin;
+        writeHi_ = task.writeTailFill ? strideOutToken_ : task.sBlkEnd;
         if constexpr (!IS_QUANT) {
             // 本任务两级 S16 的 V_MTE2 余额；EndTask 对称 Wait，避免跨任务/跨启动泄漏。
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        }
+        if (stageOn_) {
+            OpenStageWindow(0);
         }
     }
 
     /// 任务结束：把暂存窗口里剩余的 score 写回 GM。
     __aicore__ inline void EndTask()
     {
-        FlushStage();
+        FlushStageToStrideEnd();
         if constexpr (!IS_QUANT) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
@@ -166,11 +173,7 @@ public:
         if (mSub_ == 0U) {
             return;
         }
-        if (stageOn_ && (blkBase >= stageBlkBase_ + MSA_STAGE_BLOCKS)) {
-            FlushStage();
-            stageBlkBase_ = blkBase;
-            stageBlkEnd_ = blkBase;
-        }
+        AdvanceStageWindow(blkBase);
     }
 
     __aicore__ inline void FinishSTile(uint32_t blkBase)
@@ -324,11 +327,11 @@ private:
         if (stageOn_) {
             StageScore(blkBase, rowOff - mOff_, rows);
         } else {
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
             StoreScore(task, blkBase, rowOff, rows);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
         }
     }
 
@@ -344,28 +347,62 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
-    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥1KB 的连续 DataCopy。
+    /// 打开以 base 为起点的 score 暂存窗口，整窗先填 -inf。
+    __aicore__ inline void OpenStageWindow(uint32_t base)
+    {
+        stageBlkBase_ = base;
+        stageBlkEnd_ = MsaMinU32(base + MSA_STAGE_BLOCKS, strideOutToken_);
+        AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, mSub_ * MSA_STAGE_BLOCKS);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    /// blk 越过当前窗时先 flush，再开下一窗。MTE3 用 EVENT_ID2，避开 S16 乒乓的 EVENT_ID0/1。
+    __aicore__ inline void AdvanceStageWindow(uint32_t blk)
+    {
+        if (!stageOn_) {
+            return;
+        }
+        while (blk >= stageBlkBase_ + MSA_STAGE_BLOCKS) {
+            FlushStage();
+            OpenStageWindow(stageBlkBase_ + MSA_STAGE_BLOCKS);
+        }
+    }
+
+    /// 当前窗中本 chunk 负责的列；writeTailFill 时 writeHi_ 延到 score 末维。
+    __aicore__ inline void FlushStageToStrideEnd()
+    {
+        FlushStage();
+    }
+
+    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥32B 对齐的连续 DataCopy。
+    /// MTE3 用 EVENT_ID2，避开 S16 乒乓的 EVENT_ID0/1。
     __aicore__ inline void FlushStage()
     {
         if (!stageOn_ || stageBlkEnd_ <= stageBlkBase_) {
             return;
         }
-        const uint32_t count = stageBlkEnd_ - stageBlkBase_;
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        const uint32_t lo = (writeLo_ > stageBlkBase_) ? writeLo_ : stageBlkBase_;
+        const uint32_t hi = (writeHi_ < stageBlkEnd_) ? writeHi_ : stageBlkEnd_;
+        if (hi <= lo) {
+            return;
+        }
+        const uint32_t count = hi - lo;
+        const uint32_t ubOff = lo - stageBlkBase_;
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
         uint32_t tOff = rowInReqBase_ / numQHeads_;
         uint32_t h = rowInReqBase_ - tOff * numQHeads_;
-        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + stageBlkBase_;
+        uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + lo;
         for (uint32_t r = 0; r < mSub_; ++r) {
             AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_],
-                              ubStage_[r * MSA_STAGE_BLOCKS], count);
+                              ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
             if (++h == numQHeads_) {
                 h = 0;
                 tokenBase += strideOutToken_;
             }
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
     }
 
     /// sparse_mode=3：rightDownCausal；否则仅 kv_len 截断。
@@ -687,6 +724,8 @@ private:
     uint32_t tokenBase0_ = 0;
     uint32_t stageBlkBase_ = 0;
     uint32_t stageBlkEnd_ = 0;
+    uint32_t writeLo_ = 0;
+    uint32_t writeHi_ = 0;
     bool stageOn_ = false;
 
     uint32_t numQHeads_ = 1;

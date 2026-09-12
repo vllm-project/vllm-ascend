@@ -149,6 +149,9 @@ aclnnStatus aclnnMsaIndexScore(
   axis. The operator reads the first-axis element stride from tensor metadata;
   all inner axes must be contiguous. TND keys must be contiguous, and
   `scaleOptional` remains tightly packed by logical page.
+- A2/A3 and Ascend 950 size the MIX launch from the estimated M-task count.
+  Ascend 950 short-M/long-KV decode can split visible KV S-tiles into
+  `kvChunks`; short-KV and wide-table inputs remain single-chunk.
 
 ## Invocation Example
 
@@ -197,9 +200,10 @@ For BNBD, set `layoutKey="BNBD"` and use a
 
 ## Validation Matrix
 
-The standalone example runs 40 cases on Ascend 950: 36
-FLOAT16/BFLOAT16/INT8 cases plus four FP8 cases. A2/A3 skip FP8 and run 36
+The standalone example runs 50 cases on Ascend 950: 40
+FLOAT16/BFLOAT16/INT8 cases plus ten FP8 cases. A2/A3 skip FP8 and run 40
 cases. The matrix includes all supported layouts, empty sequences,
-non-contiguous PageAttention page axes, and a block-table width of 257.
+non-contiguous PageAttention page axes, a block-table width of 257, and
+short-M decode with compact, wide-table, and 275-page long-KV inputs.
 
 FLOAT16/BFLOAT16/INT8 use `atol=rtol=1e-3`; FP8 uses `atol=rtol=2e-2`.
