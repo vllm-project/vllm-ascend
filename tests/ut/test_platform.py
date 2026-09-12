@@ -14,6 +14,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _configure_minimax_m3_a5_mixed_kv_cache,
     _setup_compile_backend,
     _validate_eplb_config,
     _validate_sfa_dcp_kv_sp,
@@ -97,6 +98,93 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    @patch(
+        "vllm_ascend.platform.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_minimax_m3_fp8_automatically_keeps_gqa_cache_bf16(self, _mock_profile):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="MiniMaxM3SparseForCausalLM",
+                hf_text_config=SimpleNamespace(
+                    num_hidden_layers=5,
+                    sparse_attention_config={"sparse_attention_freq": [0, 0, 0, 1, 1]},
+                ),
+            ),
+            cache_config=SimpleNamespace(
+                cache_dtype="fp8",
+                kv_cache_dtype_skip_layers=[],
+            ),
+        )
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
+
+        self.assertEqual(
+            vllm_config.cache_config.kv_cache_dtype_skip_layers,
+            ["0", "1", "2"],
+        )
+
+    def test_minimax_m3_mixed_kv_cache_auto_config_is_strictly_scoped(self):
+        test_cases = (
+            (AscendDeviceType.A3, "MiniMaxM3SparseForCausalLM", "fp8"),
+            (AscendDeviceType.A5, "MiniMaxM2ForCausalLM", "fp8"),
+            (AscendDeviceType.A5, "LlamaForCausalLM", "fp8"),
+            (AscendDeviceType.A5, "MiniMaxM3SparseForCausalLM", "auto"),
+            (AscendDeviceType.A5, "MiniMaxM3SparseForCausalLM", "bfloat16"),
+        )
+        for device_type, architecture, cache_dtype in test_cases:
+            with self.subTest(
+                device_type=device_type,
+                architecture=architecture,
+                cache_dtype=cache_dtype,
+            ):
+                vllm_config = SimpleNamespace(
+                    model_config=SimpleNamespace(
+                        architecture=architecture,
+                        hf_text_config=SimpleNamespace(
+                            num_hidden_layers=5,
+                            sparse_attention_config={"sparse_attention_freq": [0, 0, 0, 1, 1]},
+                        ),
+                    ),
+                    cache_config=SimpleNamespace(
+                        cache_dtype=cache_dtype,
+                        kv_cache_dtype_skip_layers=[],
+                    ),
+                )
+                with patch(
+                    "vllm_ascend.platform.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ):
+                    _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
+
+                self.assertEqual(vllm_config.cache_config.kv_cache_dtype_skip_layers, [])
+
+    @patch(
+        "vllm_ascend.platform.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_minimax_m3_fp8_preserves_explicit_cache_skip_layers(self, _mock_profile):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="MiniMaxM3SparseForConditionalGeneration",
+                hf_text_config=SimpleNamespace(
+                    num_hidden_layers=5,
+                    sparse_attention_config={"sparse_attention_freq": [0, 0, 0, 1, 1]},
+                ),
+            ),
+            cache_config=SimpleNamespace(
+                cache_dtype="fp8_e4m3",
+                kv_cache_dtype_skip_layers=[4, "sliding_window"],
+            ),
+        )
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
+
+        self.assertEqual(
+            vllm_config.cache_config.kv_cache_dtype_skip_layers,
+            ["4", "sliding_window", "0", "1", "2"],
+        )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)

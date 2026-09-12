@@ -75,6 +75,12 @@ logger.info_once(
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_REDUCED_CAPTURE_SIZES = 4
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
 
 
 class NPUPlatform(Platform):
@@ -632,6 +638,40 @@ class NPUPlatform(Platform):
         }
 
 
+def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
+    """Keep MiniMax-M3 GQA KV cache in BF16 on the A5 FP8 path."""
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+    if (
+        model_config is None
+        or cache_config is None
+        or model_config.architecture not in _MINIMAX_M3_ARCHITECTURES
+        or cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
+        or not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    ):
+        return
+
+    text_config = model_config.hf_text_config
+    sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
+    sparse_freq = sparse_config.get("sparse_attention_freq") or []
+    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    gqa_layer_ids = [
+        str(layer_idx) for layer_idx in range(text_config.num_hidden_layers) if layer_idx not in sparse_layer_ids
+    ]
+    if not gqa_layer_ids:
+        return
+
+    skip_layers = list(dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or [])))
+    known_skip_layers = set(skip_layers)
+    skip_layers.extend(layer for layer in gqa_layer_ids if layer not in known_skip_layers)
+    cache_config.kv_cache_dtype_skip_layers = skip_layers
+    logger.info_once(
+        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
+        ", ".join(gqa_layer_ids),
+        cache_config.cache_dtype,
+    )
+
+
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
     """
     Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
@@ -665,6 +705,8 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
                 "Parameter is not supported on Ascend NPU. parameter=calculate_kv_scales, action: resetting to False."
             )
             vllm_config.cache_config.calculate_kv_scales = False
+
+        _configure_minimax_m3_a5_mixed_kv_cache(vllm_config)
 
     # ==================== 3. MultiModal Config ====================
     multimodal_config = getattr(model_config, "multimodal_config", None) if model_config else None
