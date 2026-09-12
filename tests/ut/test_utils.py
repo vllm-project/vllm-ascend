@@ -98,6 +98,32 @@ class TestUtils(TestBase):
         )
         self.assertTrue(torch.allclose(output, expected))
 
+    def test_is_standard_nd_weight(self):
+        # CPU tensors are the ND-compatible stand-in used by CPU unit tests.
+        self.assertTrue(utils._is_standard_nd_weight(torch.randn(2, 2)))
+
+        npu_weight = SimpleNamespace(device=SimpleNamespace(type="npu"))
+        with mock.patch(
+            "vllm_ascend.utils.torch_npu.get_npu_format",
+            create=True,
+            return_value=utils.ACL_FORMAT_FRACTAL_ND,
+        ):
+            self.assertTrue(utils._is_standard_nd_weight(npu_weight))
+
+        with mock.patch(
+            "vllm_ascend.utils.torch_npu.get_npu_format",
+            create=True,
+            return_value=utils.ACL_FORMAT_FRACTAL_NZ,
+        ):
+            self.assertFalse(utils._is_standard_nd_weight(npu_weight))
+
+        with mock.patch(
+            "vllm_ascend.utils.torch_npu.get_npu_format",
+            create=True,
+            side_effect=RuntimeError("format unavailable"),
+        ):
+            self.assertFalse(utils._is_standard_nd_weight(npu_weight))
+
     def test_aligned_16(self):
         # align to 16
         input_tensor = torch.randn(15, 64)

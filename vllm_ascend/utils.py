@@ -293,6 +293,23 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     return True
 
 
+def _is_standard_nd_weight(weight: torch.Tensor) -> bool:
+    """Return whether ``weight`` is stored in the standard ND format.
+
+    CPU tensors do not expose an NPU storage format and are treated as
+    ND-compatible for CPU unit tests. On NPU, only the exact standard ND
+    format is accepted; all other formats and format-query failures must use
+    the layer's normal projection path.
+    """
+    if weight.device.type != "npu":
+        return True
+
+    try:
+        return int(torch_npu.get_npu_format(weight)) == ACL_FORMAT_FRACTAL_ND
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow additional_config.weight_nz_mode
