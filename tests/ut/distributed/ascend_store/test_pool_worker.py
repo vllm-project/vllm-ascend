@@ -201,6 +201,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.layer_load_finished_events = [threading.Event()]
         worker.kv_recv_thread = MagicMock()
         worker.external_slot_release_waiter = MagicMock()
+        worker.use_layerwise_transfer = False
         worker._submit_ready_layer_loads = MagicMock()
 
         worker.wait_for_layer_load()
@@ -1516,10 +1517,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         missing_info = MagicMock()
         missing_info.size.return_value = 0
         missing_info.gva_list.return_value = []
-        worker.m_store.batch_get_key_info.side_effect = [
-            [valid_info],
-            [missing_info],
-        ]
+        worker.m_store.batch_get_key_info.return_value = [valid_info, missing_info]
         worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
             num_groups=2,

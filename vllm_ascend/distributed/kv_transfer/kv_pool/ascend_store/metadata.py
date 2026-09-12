@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -1280,7 +1281,44 @@ class LayerTransferTask:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
     # Mooncake uses one remote object per block/rank with per-layer ranges.
+    finished_req_ids: set[str] = field(default_factory=set)
+    uses_hbm_tail: bool = False
     use_key_major_ranges: bool = False
+    preparation: LayerwisePreparation | None = None
+
+
+@dataclass
+class LayerwisePreparation:
+    """Run one transfer-batch preparation callback exactly once."""
+
+    callback: Callable[[], None] = field(repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _ready: bool = field(default=False, init=False, repr=False)
+    _error: BaseException | None = field(default=None, init=False, repr=False)
+
+    def ensure_ready(self) -> None:
+        if self._ready:
+            if self._error is not None:
+                raise self._error
+            return
+        with self._lock:
+            if not self._ready:
+                try:
+                    self.callback()
+                except BaseException as error:
+                    self._error = error
+                finally:
+                    self._ready = True
+            if self._error is not None:
+                raise self._error
+
+
+@dataclass
+class LayerSaveTask:
+    """Layer-level save work, including control-only saves with no copies."""
+
+    layer_id: int
+    transfer_tasks: list[LayerTransferTask]
 
 
 @dataclass
@@ -1289,6 +1327,7 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    preparation: LayerwisePreparation | None = None
 
 
 @dataclass(init=False)

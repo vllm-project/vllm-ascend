@@ -45,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
@@ -376,6 +375,12 @@ class KVPoolScheduler:
             return self._lookup_layerwise_with_coordinator(request, token_len)
         return self._lookup_layerwise_contiguous(request, token_len, num_computed_tokens)
 
+    def _layerwise_publication_states(self, keys: list[str]) -> list[int]:
+        states = self.store_scheduler.batch_is_exist(keys)
+        if len(states) != len(keys) or any(state not in (0, 1) for state in states):
+            raise RuntimeError(f"Invalid layerwise publication states: expected={len(keys)}, states={states}")
+        return states
+
     def _lookup_layerwise_with_coordinator(
         self,
         request: "Request",
@@ -407,21 +412,13 @@ class KVPoolScheduler:
             all_keys = [key for block_keys in keys_by_block for key in block_keys]
             if not all_keys:
                 return []
-            key_infos = self.store_scheduler.batch_get_key_info(all_keys)
-            if len(key_infos) != len(all_keys):
-                logger.error(
-                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
-                    len(all_keys),
-                    len(key_infos),
-                )
-                return []
-            # A block is hit only when ALL ranks' keys return valid GVA
+            states = self._layerwise_publication_states(all_keys)
             hits: list[BlockHash] = []
             offset = 0
-            for block_hash, block_keys in zip(allowed_hashes, keys_by_block):
-                block_infos = key_infos[offset : offset + len(block_keys)]
+            for block_hash, block_keys in zip(allowed_hashes, keys_by_block, strict=True):
+                block_states = states[offset : offset + len(block_keys)]
                 offset += len(block_keys)
-                if all(ki.size() and ki.size() > 0 for ki in block_infos):
+                if all(state == 1 for state in block_states):
                     hits.append(block_hash)
             return hits
 
@@ -438,66 +435,33 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
-        # In layerwise mode, always query from block 0 because the remote
-        # pool stores per-layer data that may not match local prefix cache.
-        num_hash_blocks = token_len // self.hash_block_size
-        block_hashes_to_check = request.block_hashes[:num_hash_blocks]
-        hits_per_group: list[int] = []
-
-        for group_id in range(len(self.grouped_block_size)):
-            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
-            group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
-            query_start_block = (
-                0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
-            )
-            group_block_hashes = group_block_hashes[query_start_block:]
-            # Generate all-rank keys for each block hash
-            keys_by_block = [
-                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
-            ]
-            all_keys = [key for block_keys in keys_by_block for key in block_keys]
-            if not all_keys:
+        """Check publication for every group/rank in one metadata operation."""
+        hashes = request.block_hashes[: token_len // self.hash_block_size]
+        query_keys: list[str] = []
+        plans: list[tuple[int, int, int, int]] = []
+        ranks_per_block = self.tp_size // self.put_step
+        for group_id, block_size in enumerate(self.grouped_block_size):
+            group_hashes = get_block_hashes(hashes, block_size, self.hash_block_size)
+            start = 0 if self.layerwise_offload else min(num_computed_tokens // block_size, len(group_hashes))
+            group_hashes = group_hashes[start:]
+            if not group_hashes:
                 continue
-
-            key_infos = self.store_scheduler.batch_get_key_info(all_keys)
-            if len(key_infos) != len(all_keys):
-                logger.error(
-                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
-                    len(all_keys),
-                    len(key_infos),
-                )
-                hits_per_group.append(0)
-                continue
-
-            # A block is hit only when ALL ranks' keys return valid GVA
-            num_hit_blocks = 0
-            offset = 0
-            for block_keys in keys_by_block:
-                block_infos = key_infos[offset : offset + len(block_keys)]
-                offset += len(block_keys)
-                if all(ki.size() and ki.size() > 0 for ki in block_infos):
-                    num_hit_blocks += 1
-                else:
-                    break
-
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
-
-        if not hits_per_group:
-            logger.debug(
-                "hit_check: req=%s token_len=%d no participating groups (all skipped)",
-                request.request_id,
-                token_len,
-            )
+            plans.append((len(query_keys), len(group_hashes), start, block_size))
+            for block_hash in group_hashes:
+                query_keys.extend(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+        if not query_keys:
             return 0
-        hit_tokens = min(hits_per_group)
-        logger.debug(
-            "hit_check: req=%s token_len=%d hits_per_group=%s hit_tokens=%d",
-            request.request_id,
-            token_len,
-            hits_per_group,
-            hit_tokens,
-        )
-        return hit_tokens
+        states = self._layerwise_publication_states(query_keys)
+        hits = []
+        for offset, count, start, block_size in plans:
+            prefix = 0
+            for index in range(count):
+                begin = offset + index * ranks_per_block
+                if not all(state == 1 for state in states[begin : begin + ranks_per_block]):
+                    break
+                prefix += 1
+            hits.append((start + prefix) * block_size)
+        return min(hits)
 
     def _get_mooncake_layerwise_hit_tokens(
         self,
