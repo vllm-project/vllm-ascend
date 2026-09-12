@@ -68,6 +68,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Force an even group_list distribution across local experts. This is a
+    # diagnostic-only switch: it changes the expert boundaries without
+    # rerouting tokens and therefore must not be used for accuracy evaluation.
+    # 0, or not set: preserve the group_list produced by the token dispatcher.
+    # 1: replace count/cumulative group_list values with an even distribution.
+    "VLLM_ASCEND_ENABLE_MOE_SYNTHETIC_BALANCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_MOE_SYNTHETIC_BALANCE", "0"))
+    ),
+    # Development-only W4A8 MXFP routing override for load probes. It is
+    # ignored by MegaMoe and graph-mode requests.
+    "VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", "0"))
+    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),

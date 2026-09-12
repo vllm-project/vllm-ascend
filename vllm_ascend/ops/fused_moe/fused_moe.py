@@ -22,13 +22,16 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import CannMegaMoeLayerCapability, evaluate_cann_mega_moe_layer
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
@@ -129,7 +132,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
-        setup_moe_comm_method(self.moe_config)
+        self.cann_mega_moe_capability = CannMegaMoeLayerCapability(False, "CANN MegaMoe is disabled", self.quant_type)
+        if get_ascend_config().enable_fused_mc2 == 1 and is_mega_moe_supported():
+            self.cann_mega_moe_capability = evaluate_cann_mega_moe_layer(
+                self.moe_config,
+                routed_experts.quant_method,
+                getattr(self.moe_config, "activation", getattr(routed_experts, "activation", "silu")),
+                situ_beta=getattr(self.moe_config, "activation_situ_beta", None),
+                situ_linear_beta=getattr(self.moe_config, "activation_situ_linear_beta", None),
+            )
+            logger.info_once(
+                "CANN MegaMoe layer capability: supported=%s, quant=%s, activation=%s, reason=%s.",
+                self.cann_mega_moe_capability.supported,
+                self.cann_mega_moe_capability.quant_type,
+                self.cann_mega_moe_capability.activation,
+                self.cann_mega_moe_capability.reason or "supported",
+            )
+        setup_moe_comm_method(
+            self.moe_config,
+            cann_mega_moe_capability=self.cann_mega_moe_capability,
+        )
         alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)

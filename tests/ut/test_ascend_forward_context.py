@@ -503,7 +503,8 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
-    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    selector = MagicMock(return_value=None)
+    monkeypatch.setattr(afc, "select_moe_comm_method", selector)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
 
     moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
@@ -517,3 +518,4 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+    selector.assert_called_once_with(4, vllm_config, model_instance=None)

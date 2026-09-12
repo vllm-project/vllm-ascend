@@ -1035,6 +1035,25 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(is_mega_moe_supported())
 
     @_clean_up
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_a5_explicit_megamoe_defers_to_layer_capability(self, mock_fix, legacy_check, mock_device):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_fused_mc2": 2}
+
+        def find_spec(name, *args, **kwargs):
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=find_spec):
+            config = init_ascend_config(vc)
+        self.assertEqual(config.enable_fused_mc2, 1)
+        self.assertTrue(is_mega_moe_supported())
+        legacy_check.assert_not_called()
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
