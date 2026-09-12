@@ -1098,7 +1098,14 @@ class KVPoolScheduler:
         current_step_sending: list[int] = []
         for group_id in self.mamba_group_ids:
             group_block_ids = req_meta.block_ids_by_group[group_id]
-            current_step_sending.extend([block_id for block_id in group_block_ids if block_id > 0])
+            # The last num_speculative_blocks slots are speculative scratch
+            # blocks that the allocator relocates in place; relocation requires
+            # them exclusively owned (ref_cnt == 1), so they must never be
+            # pinned here (crashes allocate_new_blocks after vllm PR #51358).
+            non_spec_block_ids = (
+                group_block_ids[: -self.num_speculative_blocks] if self.num_speculative_blocks > 0 else group_block_ids
+            )
+            current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
         assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])
