@@ -38,6 +38,10 @@ class TestAscendGateLinear(TestBase):
                 "vllm.distributed.parallel_state.get_tp_group",
                 return_value=self.mock_group,
             ),
+            patch(
+                "vllm_ascend.ops.linear_op.get_tp_group",
+                return_value=self.mock_group,
+            ),
         ]
 
         for p in self.patches:
