@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import logger
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
@@ -65,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -1147,6 +1149,11 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        # Hash-routed MoE layers keep no text correction bias parameter:
+        # text tokens select experts through tid2eid and image tokens
+        # through bias_vl.
+        hash_moe_layer_ids = {moe.layer_idx for moe in self.moe_mlp_layers if moe.hash}
+
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
 
@@ -1196,6 +1203,15 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 pass
             elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
+
+            if name.endswith(".gate.e_score_correction_bias"):
+                layer_idx = extract_layer_index(name)
+                if layer_idx in hash_moe_layer_ids:
+                    logger.info_once(
+                        "Skipping text router correction bias for hash-routed MoE layer %d",
+                        layer_idx,
+                    )
+                    continue
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):

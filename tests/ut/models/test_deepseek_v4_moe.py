@@ -203,3 +203,69 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     assert moe.gate.bias_vl.shape == (config.n_routed_experts,)
     assert fused_moe.call_args.kwargs["bias_vl"] is moe.gate.bias_vl
     assert fused_moe.call_args.kwargs["e_score_correction_bias"] is None
+
+
+def test_deepseek_v4_load_weights_skips_hash_layer_gate_bias(monkeypatch):
+    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        n_routed_experts=4,
+        n_shared_experts=0,
+        num_attention_heads=8,
+    )
+    model.num_redundant_experts = 0
+    model.moe_mlp_layers = [
+        SimpleNamespace(layer_idx=1, hash=True),
+        SimpleNamespace(layer_idx=2, hash=False),
+    ]
+
+    gate = nn.Module()
+    gate.e_score_correction_bias = nn.Parameter(torch.zeros(4))
+    layer = nn.Module()
+    layer.mlp = nn.Module()
+    layer.mlp.gate = gate
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([nn.Module(), nn.Module(), layer])
+
+    monkeypatch.setattr(
+        deepseek_v4_module.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mix_placement=False),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_module,
+        "fused_moe_make_expert_params_mapping",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_v4_module, "is_pp_missing_parameter", lambda name, model: False)
+
+    # Hash layers route text tokens through tid2eid, so the checkpoint's
+    # text correction bias has no destination parameter there. Both the
+    # e_score_correction_bias naming and the legacy .gate.bias naming that
+    # gets remapped to it must be skipped without raising KeyError.
+    hash_bias = torch.full((4,), 7.0)
+    legacy_hash_bias = torch.full((4,), 8.0)
+    # Regular layers still load the bias under both namings.
+    text_bias = torch.full((4,), 9.0)
+    legacy_text_bias = torch.full((4,), 10.0)
+
+    loaded = model.load_weights(
+        iter(
+            [
+                ("model.layers.1.mlp.gate.e_score_correction_bias", hash_bias),
+                ("model.layers.1.mlp.gate.bias", legacy_hash_bias),
+                ("model.layers.2.mlp.gate.e_score_correction_bias", text_bias),
+                ("model.layers.2.mlp.gate.bias", legacy_text_bias),
+            ]
+        )
+    )
+
+    assert loaded == {"model.layers.2.mlp.gate.e_score_correction_bias"}
+    torch.testing.assert_close(gate.e_score_correction_bias.data, legacy_text_bias)
