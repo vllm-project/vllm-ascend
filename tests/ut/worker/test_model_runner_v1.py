@@ -264,6 +264,49 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens_event = MagicMock()
         return runner
 
+    def test_folded_state_copy_uses_packed_device_indices_for_every_layer(self):
+        runner = self._build_runner()
+        runner._folded_prefill_rows = (5,)
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["kda0", "kda1"])]
+        )
+        runner.compilation_config = SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(kv_cache=(torch.empty(1), torch.empty(1))) for name in ("kda0", "kda1")
+            }
+        )
+        metadata = SimpleNamespace(
+            folded_prefill_state_copies=((2, 1, 4),),
+            spec_state_indices_tensor=torch.tensor([[4, 3, 2, 1], [13, 9, 7, 11]]),
+        )
+        copies = []
+
+        def copy_states(conv, recurrent, indices, count):
+            # State selectors must not be published before all layers finish.
+            assert runner._folded_prefill_rows == ()
+            copies.append((indices.tolist(), count))
+
+        with patch("vllm_ascend.worker.model_runner_v1.canonicalize_folded_prefill_state", side_effect=copy_states):
+            runner._canonicalize_folded_prefill_states({"kda0": metadata, "kda1": metadata})
+        assert copies == [([13, 9, 7, 11], 4), ([13, 9, 7, 11], 4)]
+        assert runner._folded_prefill_rows == (2,)
+
+    def test_folded_prompt_count_is_published_only_after_canonicalization(self):
+        for asynchronous in (False, True):
+            runner = self._build_runner()
+            runner.use_async_scheduling = asynchronous
+            runner.cache_config.mamba_cache_mode = "none"
+            runner._folded_prefill_rows = (0,)
+            runner.input_batch.req_ids = ["prompt", "decode"]
+            runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+            # Prompt output can be discarded; real decode accepted 3 tokens.
+            output = torch.tensor([[-1, -1, -1], [5, 6, 7]])
+            runner._update_states_after_model_execute(output, SimpleNamespace())
+            target = runner.num_accepted_tokens.np if asynchronous else runner.input_batch.num_accepted_tokens_cpu
+            np.testing.assert_array_equal(target[:2], [1, 3])
+            runner._canonicalize_folded_prefill_states({})
+            assert runner._folded_prefill_rows == ()
+
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
         with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):

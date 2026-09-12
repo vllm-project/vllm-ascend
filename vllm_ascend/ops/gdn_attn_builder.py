@@ -473,6 +473,32 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
+    def _fold_spec_sized_prefill_chunks_into_spec(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        spec_sequence_masks_cpu: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Fold stateful prompt chunks without changing their input state slot.
+
+        ``num_accepted_tokens - 1`` selects the previously committed state;
+        the current query length describes output slots, not that selector.
+        The runner canonicalizes folded outputs after forward, including graph
+        replay, before publishing their state count for the next iteration.
+        """
+        m = common_attn_metadata
+        if m.is_prefilling is None or m.seq_lens_cpu_upper_bound is None or num_accepted_tokens is None:
+            return spec_sequence_masks_cpu, num_accepted_tokens
+        n = spec_sequence_masks_cpu.numel()
+        query_lens = torch.diff(m.query_start_loc_cpu)[:n]
+        fold = (
+            m.is_prefilling[:n]
+            & ~spec_sequence_masks_cpu
+            & (query_lens == self.num_spec + 1)
+            & (m.seq_lens_cpu_upper_bound[:n] > query_lens)
+        )
+        return spec_sequence_masks_cpu | fold, num_accepted_tokens
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -494,6 +520,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.vllm_config.cache_config.mamba_cache_mode,
         )
 
+        folded_prefill_state_copies: tuple[tuple[int, int, int], ...] = ()
         spec_sequence_masks_cpu: torch.Tensor | None = None
         spec_sequence_indices: torch.Tensor | None = None
         non_spec_sequence_indices: torch.Tensor | None = None
@@ -515,6 +542,17 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # Dynamic speculative decoding can be enabled while this batch
                 # carries no draft tokens. Keep the batch on the non-spec path.
                 spec_sequence_masks_cpu.zero_()
+            original_spec_masks = spec_sequence_masks_cpu
+            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
+                m, spec_sequence_masks_cpu, num_accepted_tokens
+            )
+            folded_rows = torch.nonzero(spec_sequence_masks_cpu & ~original_spec_masks, as_tuple=True)[0].tolist()
+            # Remember original request rows and their packed spec rows.
+            # The runner must use the actual device state indices, not a
+            # column inferred from the CPU sequence-length upper bound.
+            folded_prefill_state_copies = tuple(
+                (row, int(spec_sequence_masks_cpu[:row].sum()), self.num_spec + 1) for row in folded_rows
+            )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
@@ -823,6 +861,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        attn_metadata.folded_prefill_state_copies = folded_prefill_state_copies
         attn_metadata = self._attach_non_spec_prefill_metadata(
             attn_metadata,
             non_spec_chunked_prefill_metadata,
