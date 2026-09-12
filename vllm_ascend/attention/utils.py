@@ -16,6 +16,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -213,6 +214,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
+
+    if not vllm_version_is("0.28.0"):
+        # vLLM #55353 removed these caches; Ascend builders still consume them.
+        _seq_lens_cpu: torch.Tensor | None = None
+        _num_computed_tokens_cpu: torch.Tensor | None = None
 
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.

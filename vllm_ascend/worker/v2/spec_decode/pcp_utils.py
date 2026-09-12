@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from vllm.config import VllmConfig, replace
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -38,10 +40,15 @@ def disable_target_pcp_for_replicated_draft(
         raise RuntimeError("Replicated draft execution requires model_state to use the target PCP manager.")
 
     model_state.pcp_manager = None
+    if not vllm_version_is("0.28.0"):
+        # vLLM #56107 also partitions through the speculator's own manager.
+        speculator.pcp_manager = None
     try:
         yield
     finally:
         model_state.pcp_manager = target_pcp_manager
+        if not vllm_version_is("0.28.0"):
+            speculator.pcp_manager = target_pcp_manager
 
 
 def prepare_replicated_pcp_config(

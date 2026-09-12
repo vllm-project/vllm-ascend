@@ -22,6 +22,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vll
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -126,14 +127,29 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 torch.from_numpy(self.input_batch.is_prefilling_np),
             ),
         ):
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-            )
+            if vllm_version_is("0.28.0"):
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
+            else:
+                # vLLM #56181 requires the graph descriptor and query width.
+                attn_metadata = self._build_uniform_attn_metadata(
+                    num_reqs=self.input_batch.num_reqs,
+                    batch_desc=BatchExecutionDescriptor(
+                        cg_mode=CUDAGraphMode.FULL,
+                        num_reqs=num_reqs_padded,
+                        num_tokens=num_tokens_padded,
+                    ),
+                    num_query_per_req=self.num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
@@ -180,6 +196,15 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if (
+            not vllm_version_is("0.28.0")
+            and self.replicated_pcp
+            and self.pcp_manager is not None
+            and not dummy_run
+            and not aux_hidden_states
+        ):
+            # vLLM #56107 passes local target states; aux states are global.
+            last_hidden_states = self.pcp_manager.restore_hidden_states(last_hidden_states)
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate

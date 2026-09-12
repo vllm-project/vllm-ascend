@@ -24,7 +24,7 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -458,14 +458,26 @@ class TestEagleProposerLoadModel(TestBase):
         mock_model.model.embed_tokens = MagicMock()
         mock_model.model.embed_tokens.weight = weight
 
-        mock_get_model.return_value = MagicMock()
-        mock_get_model.return_value.model.embed_tokens.weight = weight
+        draft_model = MagicMock()
+        draft_model.model.embed_tokens.weight = weight
+        mock_get_model.return_value = draft_model
+        if not vllm_version_is("0.28.0"):
+            self.proposer.supports_mm_inputs = True
+            draft_model.has_own_embed_tokens = False
+
+            def embed_after_sharing(input_ids, multimodal_embeddings=None):
+                self.assertIs(draft_model.model.embed_tokens, mock_model.model.embed_tokens)
+                return torch.zeros((*input_ids.shape, 1))
+
+            draft_model.embed_input_ids.side_effect = embed_after_sharing
 
         with set_current_vllm_config(self.vllm_config):
             self.proposer.load_model(mock_model)
             mock_get_model.assert_called_once()
             self.assertEqual(self.proposer.attn_layer_names, ["layer3"])
             self.assertIs(self.proposer.model.model.embed_tokens, mock_model.model.embed_tokens)
+            if not vllm_version_is("0.28.0"):
+                draft_model.embed_input_ids.assert_called_once()
 
     @patch("vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.get_model")
@@ -1363,7 +1375,10 @@ class TestEagleProposerPropose:
             property
         )
         assert isinstance(
-            inspect.getattr_static(vllm.config.ModelConfig, "uses_xdrope_dim"),
+            inspect.getattr_static(
+                vllm.config.ModelConfig,
+                "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims",
+            ),
             property
         )
         assert isinstance(
@@ -1479,9 +1494,11 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
+            'dcp_local_seq_lens_cpu', \
             '_num_computed_tokens_cache'
         }
+        if vllm_version_is("0.28.0"):
+            fields.update({'_seq_lens_cpu', '_num_computed_tokens_cpu'})
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)
         missing = fields - actual
@@ -1495,7 +1512,7 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -2173,7 +2190,8 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        for field in ("uses_mrope", "uses_xdrope_dim", "use_mla", "is_multimodal_model"):
+        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
+        for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
             assert hasattr(vllm.config.ModelConfig, method)

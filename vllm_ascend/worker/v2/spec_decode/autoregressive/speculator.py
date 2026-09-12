@@ -157,6 +157,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
     ) -> tuple[
         dict[str, Any] | None,
         dict[str, torch.Tensor] | None,
@@ -191,6 +192,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             step=0,
             query_start_loc_np=input_batch.query_start_loc_np,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
         return attn_metadata, slot_mappings
 
@@ -249,6 +251,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             # Replicated drafts use global tokens, unlike the PCP-local target.
             # Every DP rank must take the draft sync, including decode and idle ranks.
             sync_state = None if self.replicated_pcp else dp_sync
+            if self.replicated_pcp and self.pcp_manager is not None and not dummy_run and not aux_hidden_states:
+                # vLLM #56107 now passes PCP-local target/pre-hc states.
+                # Aux states have already been restored by the parent runner.
+                last_hidden_states = self.pcp_manager.restore_hidden_states(last_hidden_states)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -432,6 +438,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             slot_mappings,
             num_reqs,
             num_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
         # Draft prefill reuses target metadata, but the target metadata may
         # also contain target-only attention layers (e.g. GDN layers).
@@ -460,7 +467,26 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
         query_start_loc_np: np.ndarray | None = None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
     ) -> dict[str, Any] | None:
+        if not vllm_version_is("0.28.0"):
+            # vLLM #56181 split the metadata API and made token padding
+            # depend on the actual graph mode. Retain this local graph helper.
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=cudagraph_runtime_mode,
+                num_reqs=num_reqs_padded,
+                num_tokens=num_tokens_padded,
+            )
+            if query_start_loc_np is None:
+                query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
+            return self._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+            )
         assert self.input_batch is not None
         with build_draft_attn_metadata_factory(
             self.input_buffers.positions,
@@ -483,6 +509,39 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
+        return attn_metadata
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        # Main's inherited uniform builder also calls this entry point.
+        assert self.input_batch is not None
+        num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+        with build_draft_attn_metadata_factory(
+            self.input_buffers.positions,
+            num_tokens,
+            torch.from_numpy(self.input_batch.is_prefilling_np),
+        ):
+            attn_metadata = super()._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+            )
+        if attn_metadata is not None:
+            for metadata in attn_metadata.values():
+                if metadata is not None:
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
 
     def build_draft_attn_metadatas(

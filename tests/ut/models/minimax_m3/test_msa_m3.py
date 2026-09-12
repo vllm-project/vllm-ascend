@@ -59,7 +59,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 
 
 @dataclass
@@ -104,12 +104,17 @@ def _create_common_attn_metadata(
     ).view(batch_spec.batch_size, max_blocks)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
+    cpu_cache_kwargs = {}
+    if vllm_version_is("0.28.0"):
+        cpu_cache_kwargs = {
+            "_seq_lens_cpu": seq_lens_cpu,
+            "_num_computed_tokens_cpu": num_computed_tokens_cpu,
+        }
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        **cpu_cache_kwargs,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max(batch_spec.query_lens),
@@ -413,12 +418,17 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     padded_query_start_loc[batch_size + 1] = common.query_start_loc[batch_size]
     padded_query_start_loc_cpu = padded_query_start_loc.cpu()
 
+    cpu_cache_kwargs = {}
+    if vllm_version_is("0.28.0"):
+        cpu_cache_kwargs = {
+            "_seq_lens_cpu": common._seq_lens_cpu,
+            "_num_computed_tokens_cpu": common._num_computed_tokens_cpu,
+        }
     padded_common = CommonAttentionMetadata(
         query_start_loc=padded_query_start_loc,
         query_start_loc_cpu=padded_query_start_loc_cpu,
         seq_lens=common.seq_lens,
-        _seq_lens_cpu=common._seq_lens_cpu,
-        _num_computed_tokens_cpu=common._num_computed_tokens_cpu,
+        **cpu_cache_kwargs,
         num_reqs=batch_size + 1,
         num_actual_tokens=common.num_actual_tokens,
         max_query_len=common.max_query_len,
