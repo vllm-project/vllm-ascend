@@ -45,6 +45,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 600
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 780
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 470
+  tests/e2e/pull_request/one_card/spec_decode/test_gemma4_mtp.py: 900
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 510
   tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 500
   tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 270
