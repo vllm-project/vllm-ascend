@@ -224,14 +224,15 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
+        from vllm.config import get_current_vllm_config
+
+        from vllm_ascend.utils import enable_dsa_cp, enable_sfa
+
         use_compress = getattr(attn_selector_config, "use_compress", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
         # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
         try:
-            from vllm.config import get_current_vllm_config
-            from vllm_ascend.utils import enable_sfa
-
             if use_sparse and not enable_sfa(get_current_vllm_config()):
                 use_sparse = False
         except Exception:
@@ -261,19 +262,44 @@ class NPUPlatform(Platform):
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
-        if attn_selector_config.use_pcp:
-            pcp_backend_map = {
-                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
-                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
-                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
-            }
-            pcp_backend = pcp_backend_map.get(backend_key)
-            if pcp_backend is None:
-                raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
-            return pcp_backend
+        use_pcp = attn_selector_config.use_pcp
+        use_dcp = getattr(attn_selector_config, "use_dcp", None)
+        if use_dcp is None:
+            # vLLM 0.28.0 does not include DCP in AttentionSelectorConfig.
+            parallel_config = get_current_vllm_config().parallel_config
+            use_dcp = parallel_config.decode_context_parallel_size > 1
 
-        return backend_map[backend_key]
+        if use_pcp and backend_key not in backend_map:
+            raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
+        default_backend = backend_map[backend_key]
+        use_dsa_cp = (use_sparse or use_compress) and enable_dsa_cp()
+        if backend_key == (True, True, False):
+            if get_ascend_config().sparse_kv_offload_config.enabled:
+                name = "AscendSFAKVOffloadBackend"
+            elif use_dsa_cp:
+                name = "AscendSFADSADCPBackend" if use_dcp else "AscendSFADSACPBackend"
+            elif use_pcp and use_dcp:
+                name = "AscendSFAPCPDCPBackend"
+            elif use_dcp:
+                name = "AscendSFADCPBackend"
+            elif use_pcp:
+                name = "AscendSFAPCPBackend"
+            else:
+                return default_backend
+            return f"vllm_ascend.attention.sfa_v1.{name}"
+        if backend_key == (True, False, True):
+            if use_pcp and use_dsa_cp:
+                raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+            if use_dsa_cp:
+                return "vllm_ascend.attention.dsa_v1.AscendDSACPBackend"
+            if use_pcp:
+                return "vllm_ascend.attention.dsa_v1.AscendDSAPCPBackend"
+            return default_backend
+        if use_dcp:
+            if use_mla:
+                return "vllm_ascend.attention.mla_v1.AscendMLADCPBackend"
+            return "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend"
+        return default_backend
 
     @classmethod
     def import_kernels(cls) -> None:

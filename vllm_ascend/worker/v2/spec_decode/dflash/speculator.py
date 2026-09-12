@@ -158,6 +158,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
+        num_tokens_padded: int,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         metadata = next(

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -86,7 +86,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
-        self.draft_vllm_config = self._create_draft_vllm_config()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -109,18 +108,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
-
-    def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
-        parallel_config = replace(
-            self.vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-        )
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-        )
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -283,19 +270,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        # Initialize the draft attention backend with its PCP=1 config.
-        with set_current_vllm_config(self.attn_vllm_config):
-            super().set_attn(
-                model_state,
-                kv_cache_config,
-                block_tables,
-                target_input_buffers,
-                target_attn_groups,
-            )
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
 
-            # Use the first executable draft attention layer as the architecture
-            # discriminator and cache it for ACL graph parameter updates.
-            self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        # Use the first executable draft attention layer as the architecture
+        # discriminator and cache it for ACL graph parameter updates.
+        self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -498,7 +483,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         }
 
         if is_draft_model_prefill:
-            if self.attn_architecture in ("DSA", "SFA"):
+            # Target PCP metadata excludes replicated draft layers. Every
+            # draft backend needs its own global prefill metadata for replay;
+            # an empty dict would leave captured attention events unrecorded.
+            if self.replicated_pcp:
                 prepared_attn_metadata, _ = self._prepare_replicated_prefill_attn(
                     attn_metadata,
                     None,
@@ -596,34 +584,21 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
+        num_tokens_padded: int,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        metadata = next(
-            metadata
-            for layer_name, metadata in self.model_state.attn_metadata.items()
-            if layer_name in self.draft_attn_layer_names
+        draft_attn_metadatas = self.build_draft_attn_metadatas(
+            num_reqs_padded,
+            num_tokens_padded,
+            is_draft_model_prefill,
         )
-        if is_draft_model_prefill:
-            return [
+        fia_params: list[dict[str, Any]] = []
+        for attn_metadata in draft_attn_metadatas:
+            metadata = next(iter(attn_metadata.values()))
+            fia_params.append(
                 {
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
-                }
-            ]
-        assert self.input_batch is not None
-        num_reqs = self.input_batch.num_reqs
-        query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            fia_params.append(
-                {
-                    "actual_seq_lengths": query_start_loc,
-                    "actual_seq_lengths_kv": seq_lens,
                     "block_table": metadata.block_tables,
                 }
             )

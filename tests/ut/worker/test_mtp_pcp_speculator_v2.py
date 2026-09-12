@@ -45,11 +45,13 @@ def _make_padded_input_batch() -> MagicMock:
     return input_batch
 
 
+@pytest.mark.parametrize("speculator_cls", [AscendMTPSpeculator, AscendEagleSpeculator])
 @pytest.mark.parametrize(
     ("target_pcp_size", "expected_execution_pcp_size"),
     [(2, 1), (1, 1)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
+    speculator_cls,
     target_pcp_size: int,
     expected_execution_pcp_size: int,
 ) -> None:
@@ -95,11 +97,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
-        patch.object(
-            speculator_module,
-            "replace",
-            side_effect=fake_replace,
-        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
             side_effect=fake_replace,
@@ -115,7 +112,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             return_value=object(),
         ),
     ):
-        speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
+        speculator = speculator_cls(target_config, torch.device("cpu"))
 
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
@@ -129,13 +126,11 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
 
-    draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
-    assert draft_config.model_config is draft_model_config
-    assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
+    # No second VllmConfig construction/validation for a dense draft under MoE.
+    assert not hasattr(speculator, "draft_vllm_config")
 
 
 @pytest.mark.parametrize(("replicated_pcp", "manager_is_disabled"), [(True, True), (False, False)])
@@ -300,7 +295,11 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
         ("DSA", True, True),
         ("DSA", False, False),
         ("SFA", True, True),
-        ("MLA", True, False),
+        ("SFA", False, False),
+        ("MLA", True, True),
+        ("MLA", False, False),
+        ("GQA", True, True),
+        ("GQA", False, False),
     ],
 )
 def test_graph_prefill_builds_draft_metadata(
@@ -316,9 +315,11 @@ def test_graph_prefill_builds_draft_metadata(
     speculator.draft_attn_layer_names = {"draft.layer"}
     local_draft_metadata = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     global_draft_metadata = object()
-    speculator.model_state = SimpleNamespace(
-        attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
-    )
+    # Replicated draft layers are excluded from the target's attention groups.
+    target_metadata = {"target.layer": object()}
+    if not replicated_pcp:
+        target_metadata["draft.layer"] = local_draft_metadata
+    speculator.model_state = SimpleNamespace(attn_metadata=target_metadata)
     speculator._build_draft_attn_metadata = MagicMock(
         return_value={"draft.layer": global_draft_metadata},
     )
@@ -334,6 +335,43 @@ def test_graph_prefill_builds_draft_metadata(
     assert actual == [{"draft.layer": expected_metadata}]
     assert speculator._build_draft_attn_metadata.call_count == int(rebuild_metadata)
     assert local_draft_metadata.decode.actual_seq_lengths_q[-1] == 8
+
+
+@pytest.mark.parametrize("is_prefill", [True, False])
+def test_updatable_graph_uses_replicated_draft_metadata(is_prefill: bool) -> None:
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.replicated_pcp = True
+    speculator.attn_architecture = "GQA"
+    speculator.input_batch = _make_padded_input_batch()
+    speculator.input_batch.is_dummy = False
+    speculator.draft_attn_layer_names = {"draft.layer"}
+    speculator.model_state = SimpleNamespace(attn_metadata={"target.layer": object()})
+    speculator.block_tables = MagicMock()
+    speculator.kv_cache_config = object()
+    speculator.max_model_len = 21
+    speculator.num_speculative_steps = 3
+    speculator.target_input_buffers = MagicMock(spec=speculator_module.AscendInputBuffers)
+    speculator.target_input_buffers.seq_lens_cpu = torch.tensor([10, 20, 99, 99], dtype=torch.int32)
+    speculator.input_buffers = SimpleNamespace(
+        draft_seq_lens_cpus=[torch.zeros(4, dtype=torch.int32) for _ in range(2)],
+    )
+    block_tables = torch.zeros((4, 2), dtype=torch.int32)
+    draft_metadata = SimpleNamespace(
+        actual_seq_lengths_q=[3, 6, 6, 6],
+        seq_lens_list=[10, 20, 0, 0],
+        seq_lens_cpu=torch.zeros(4, dtype=torch.int32),
+        block_tables=block_tables,
+    )
+    speculator._build_draft_attn_metadata = MagicMock(return_value={"draft.layer": draft_metadata})
+
+    with patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}):
+        params = speculator.build_fia_params(4, 8 if is_prefill else 4, is_prefill)
+
+    expected_seq_lens = [[10, 20, 0, 0]] if is_prefill else [[11, 21, 0, 0], [12, 21, 0, 0]]
+    expected_query_lens = [3, 6, 6, 6] if is_prefill else [1, 2, 3, 4]
+    assert [entry["actual_seq_lengths_kv"] for entry in params] == expected_seq_lens
+    assert all(entry["actual_seq_lengths"] == expected_query_lens for entry in params)
+    assert all(entry["block_table"] is block_tables for entry in params)
 
 
 @pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")

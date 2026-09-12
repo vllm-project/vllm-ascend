@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -141,15 +141,15 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
-        draft_vllm_config = self.speculator.draft_vllm_config
+        vllm_config = self.speculator.vllm_config
 
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc)
         else:
             # This will be removed once the refactoring is fully complete.
-            return self._graph_replay(desc, attn_backend, num_tokens, draft_vllm_config)
+            return self._graph_replay(desc, attn_backend, num_tokens, vllm_config)
 
-    def _graph_replay(self, desc, attn_backend, num_tokens, draft_vllm_config):
+    def _graph_replay(self, desc, attn_backend, num_tokens, vllm_config):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         # Mirror vLLM's DP graph-replay token-count metadata.
@@ -160,17 +160,11 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             desc.num_tokens,
             self.is_draft_model_prefill,
         )
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the draft config because set_forward_context()
-        # does not update it.
-        # TODO: Remove this explicit current-config scope once ACL graph replay
-        # passes VllmConfig directly through the graph-update interfaces.
+
         with (
-            set_current_vllm_config(draft_vllm_config),
             set_forward_context(
                 attn_metadata,
-                draft_vllm_config,
+                vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
@@ -190,7 +184,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 self.update_stream,
                 forward_context,
                 num_tokens,
-                draft_vllm_config,
+                vllm_config,
                 self.speculator.speculative_config,
                 draft_attn_metadatas=draft_attn_metadatas,
             )
@@ -201,6 +195,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
+            desc.num_tokens,
             self.is_draft_model_prefill,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
