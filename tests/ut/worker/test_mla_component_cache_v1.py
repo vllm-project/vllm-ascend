@@ -275,3 +275,42 @@ def test_build_rejects_misaligned_kernel_slot():
             kernel_block_size=128,
             num_blocks=1,
         )
+
+
+def test_component_reshape_rejects_non_lbnhc_final_layout():
+    logical_spec = _make_spec(block_size=384)
+    spec = replace(logical_spec, page_size_padded=488448)
+    layer = _FakeMLAAttention(spec=logical_spec, nope_dim=512, rope_dim=64)
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=488448 * 3,
+                layers=["layer"],
+                layer_stride=488448 * 3,
+                block_stride=488448,
+                offset=0,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        kv_cache_layout=KVCacheLayout.LBHNC.name,
+    )
+    runner = model_runner_v1.NPUModelRunner.__new__(model_runner_v1.NPUModelRunner)
+    runner._use_mla_component_cache = True
+    runner.runner_only_attn_layers = set()
+    runner.kernel_block_sizes = [[128]]
+    runner.compilation_config = SimpleNamespace(static_forward_context={"layer": layer})
+    runner._kv_cache_spec_attn_group_iterator = lambda: [
+        SimpleNamespace(
+            backend=_FakeMLABackend,
+            kv_cache_spec=spec,
+            layer_names=["layer"],
+            kv_cache_group_id=0,
+        )
+    ]
+
+    with pytest.raises(ValueError, match="final LBNHC layout"):
+        runner._reshape_kv_cache_tensors(
+            config,
+            {"layer": torch.zeros(488448 * 3, dtype=torch.int8)},
+        )

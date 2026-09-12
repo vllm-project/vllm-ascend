@@ -105,13 +105,11 @@ class AscendMLABackend(AttentionBackend):
         return num_blocks, block_size, num_kv_heads, head_size
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
-        try:
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-        if vllm_config is not None and getattr(vllm_config, "use_v2_model_runner", None) is True:
-            return None
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The Ascend MLA kernels address a per-layer [B, N, H, C] view. Declaring
+        # this capability lets hybrid layout negotiation choose LBNHC (or fail
+        # early when another backend is incompatible) instead of silently
+        # allowing another backend to force an incompatible physical layout.
         return (KVCacheLayout.LBNHC,)
 
     @classmethod

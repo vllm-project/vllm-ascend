@@ -80,6 +80,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -4593,6 +4594,11 @@ class NPUModelRunner(GPUModelRunner):
             and is_component_mla_spec(layer, spec)
             for layer_name, spec in layer_kv_cache_spec.items()
         )
+        if component_mla_requested and kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+            raise ValueError(
+                "MLA component cache requires the final LBNHC layout, got "
+                f"{kv_cache_config.kv_cache_layout!r}"
+            )
         if (
             not use_legacy_shared_by_layout
             and not is_dsv4_main
@@ -4972,6 +4978,11 @@ class NPUModelRunner(GPUModelRunner):
                     and isinstance(attn_layer, MLAAttention)
                     and is_component_mla_spec(attn_layer, current_kv_cache_spec)
                 ):
+                    if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+                        raise ValueError(
+                            "MLA component cache requires the final LBNHC layout, got "
+                            f"{kv_cache_config.kv_cache_layout!r}"
+                        )
                     kv_caches[layer_name] = build_mla_component_cache(
                         kv_cache_raw_tensors[layer_name],
                         layer=attn_layer,

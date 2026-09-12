@@ -71,7 +71,7 @@ class TestAscendMLABackend(TestBase):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
         self.assertEqual(result, [128])
 
-    def test_supported_kv_cache_layouts(self):
+    def test_supported_kv_cache_layouts_declares_lbnhc(self):
         self.assertEqual(AscendMLABackend.supported_kv_cache_layouts(), (KVCacheLayout.LBNHC,))
 
     @patch("vllm_ascend.attention.mla_v1.enable_dcp")
@@ -2686,11 +2686,3 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
-
-
-def test_v2_runner_keeps_legacy_layout_preference(monkeypatch):
-    monkeypatch.setattr(
-        "vllm_ascend.attention.mla_v1.get_current_vllm_config",
-        lambda: SimpleNamespace(use_v2_model_runner=True),
-    )
-    assert AscendMLABackend.supported_kv_cache_layouts() is None
