@@ -27,6 +27,7 @@ if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_simt
+    import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_vnorm
 
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
