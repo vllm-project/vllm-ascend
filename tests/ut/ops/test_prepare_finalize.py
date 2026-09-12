@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
@@ -30,6 +31,14 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.original_num_experts = 8
+        # Provide a current vllm config so the MoE pad helper takes its
+        # zero-block cat path (tp_size=1 covers every pad in these tests)
+        # instead of falling back to F.pad outside a worker context.
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        config_context = set_current_vllm_config(mock_vllm_config)
+        config_context.__enter__()
+        self.addCleanup(config_context.__exit__, None, None, None)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)

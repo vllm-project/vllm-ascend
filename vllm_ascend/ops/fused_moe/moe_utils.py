@@ -21,8 +21,10 @@ from importlib import import_module
 import torch
 import torch.distributed
 import torch.distributed as dist
+import torch.nn as nn
 import torch_npu
 from torch.nn.functional import pad
+from vllm.config import get_current_vllm_config_or_none
 
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
@@ -240,3 +242,54 @@ def enable_fusion_gmmswigluquant():
 
     ascend_config = get_ascend_config()
     return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
+
+
+# Token-dim padding via `torch.cat` with a persistent zero block, replacing
+# `nn.functional.pad` in the MoE prepare paths. On NPU each `F.pad` lowers to
+# two device kernels (a full-output MemSet plus a PadV3 copy) while the padded
+# data is only a few KB in decode, so the pair is pure launch overhead
+# (~44us per MoE layer in a Kimi K3 TP16 decode profile). The cat variant is
+# one ConcatD kernel per tensor and is safe under cudagraph replay: the cat
+# output is a fresh tensor per call (each captured graph owns its output
+# buffer), and the zero block is never written after allocation, so the
+# zero-tail property is structural — no cross-call bookkeeping.
+
+# (width..., dtype, device) -> zero block of [tp_size, width...]. Both MoE
+# prepare paths pad to a multiple of tp_size by fewer than tp_size rows (MC2
+# pads the local token count up to the DP-uniform padded_num_tokens; All2All
+# pads up to exactly tp_size), so one tp_size-row block per tensor width
+# serves every pad and is allocated exactly once — never replaced or freed,
+# which is what makes it safe for captured graphs to reference.
+#
+# Outside a worker context there is no current vllm config (e.g. unit tests
+# calling prepare() directly): tp_size then reads as 0 and every pad takes
+# the F.pad fallback below.
+#
+# A pad wider than tp_size can only happen outside that invariant (e.g. an
+# eager call with zero tokens); it falls back to plain `nn.functional.pad`
+# instead of growing the entry, keeping the cache static.
+#
+# Memory footprint: the key drops the token dim, so the cache holds one entry
+# per distinct (trailing shape, dtype, device) — a set fixed by the model
+# config, independent of batch size and cudagraph capture sizes (two entries
+# for Kimi K3 TP16: hidden 3584, experts 896), each tp_size * width *
+# dtype.itemsize bytes, so the whole cache peaks at O(0.1) MB.
+_PAD_ZERO_BLOCKS: dict[tuple, torch.Tensor] = {}
+
+
+def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
+    """Token-dim padding of `x` ([n, ...] -> [padded_len, ...]) by concatenating
+    a slice of a cached zero block: value-equivalent to
+    `F.pad(x, (0, 0, 0, padded_len - n))` at one kernel instead of two."""
+    pad_rows = padded_len - x.shape[0]
+    assert pad_rows >= 0, f"padded_len ({padded_len}) is smaller than the input's token dim ({x.shape[0]})"
+    vllm_config = get_current_vllm_config_or_none()
+    tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config is not None else 0
+    if pad_rows > tp_size:
+        return nn.functional.pad(x, (0, 0, 0, pad_rows))
+    key = (*x.shape[1:], x.dtype, str(x.device))
+    zero_block = _PAD_ZERO_BLOCKS.get(key)
+    if zero_block is None:
+        zero_block = torch.zeros((tp_size, *x.shape[1:]), dtype=x.dtype, device=x.device)
+        _PAD_ZERO_BLOCKS[key] = zero_block
+    return torch.cat([x, zero_block[:pad_rows]], dim=0)
