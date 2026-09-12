@@ -188,6 +188,7 @@ class AscendMetadata:
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
     actual_seq_lengths_q: list[int] = None  # type: ignore
+    prefill_actual_seq_lengths_q: list[int] | None = None
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -346,6 +347,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+        prefill_actual_seq_lengths_q = None
+        if num_prefills > 0:
+            prefill_actual_seq_lengths_q = [
+                actual_seq_lengths_q[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_lengths_q))
+            ]
         seq_lens_list = seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
@@ -399,6 +405,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,
+            prefill_actual_seq_lengths_q=prefill_actual_seq_lengths_q,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
@@ -1542,10 +1549,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # prefill part
         if attn_metadata.num_prefills > 0:
-            # rebase cumulative q offsets to start at 0 for the prefill slice
-            prefill_seq_qlen = [
-                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
-            ]
+            prefill_seq_qlen = attn_metadata.prefill_actual_seq_lengths_q
+            assert prefill_seq_qlen is not None
             prefill_out, _ = DeviceOperator.npu_fused_infer_attention_score(
                 query=query[num_decode_tokens:num_tokens],
                 key=key,
@@ -2106,9 +2111,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         if attn_metadata.num_prefills > 0:
             prefill_q = query[num_decode_tokens:num_tokens]
 
-            prefill_seq_qlen = [
-                actual_seq_qlen[i] - num_decode_tokens for i in range(num_decodes, len(actual_seq_qlen))
-            ]
+            prefill_seq_qlen = attn_metadata.prefill_actual_seq_lengths_q
+            assert prefill_seq_qlen is not None
 
             all_new_prefill = True
             for i in range(num_decodes, len(attn_metadata.seq_lens_list)):

@@ -133,6 +133,33 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
+    def _common_metadata_for_query_lens(self, query_lens: list[int]) -> AscendCommonAttentionMetadata:
+        query_start = [0]
+        for query_len in query_lens:
+            query_start.append(query_start[-1] + query_len)
+        num_reqs = len(query_lens)
+        num_tokens = query_start[-1]
+        seq_lens = [max(query_len, 1) for query_len in query_lens]
+
+        return AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor(query_start, dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor(query_start, dtype=torch.int32),
+            seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+            seq_lens_cpu=torch.tensor(seq_lens, dtype=torch.int32),
+            num_reqs=num_reqs,
+            num_actual_tokens=num_tokens,
+            max_query_len=max(query_lens, default=0),
+            decode_token_per_req=1,
+            block_table_tensor=torch.zeros((max(num_reqs, 1), 1), dtype=torch.int32),
+            slot_mapping=torch.arange(num_tokens, dtype=torch.int32),
+            actual_seq_lengths_q=[],
+            positions=torch.arange(num_tokens, dtype=torch.int32),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_computed_tokens_cpu=None,
+            causal=True,
+            max_seq_len=max(seq_lens, default=0),
+        )
+
     def test_reorder_batch(self):
         mock_input_batch = MagicMock()
         mock_scheduler_output = MagicMock()
@@ -199,6 +226,34 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+    def test_build_caches_mixed_prefill_actual_seq_lengths_q(self):
+        self.builder.decode_threshold = 3
+        common_attn_metadata = self._common_metadata_for_query_lens([1, 3, 5, 2, 7])
+
+        metadata = self.builder.build(1, common_attn_metadata)
+
+        old_expression = [
+            metadata.actual_seq_lengths_q[i] - metadata.num_decode_tokens
+            for i in range(metadata.num_decodes, len(metadata.actual_seq_lengths_q))
+        ]
+        self.assertEqual(metadata.num_decodes, 2)
+        self.assertEqual(metadata.num_decode_tokens, 4)
+        self.assertEqual(old_expression, [5, 7, 14])
+        self.assertEqual(metadata.prefill_actual_seq_lengths_q, old_expression)
+
+    def test_build_prefill_actual_seq_lengths_q_phase_boundaries(self):
+        prefill_metadata = self.builder.build(1, self._common_metadata_for_query_lens([4, 6]))
+        self.assertEqual(prefill_metadata.num_decodes, 0)
+        self.assertEqual(prefill_metadata.prefill_actual_seq_lengths_q, prefill_metadata.actual_seq_lengths_q)
+
+        decode_metadata = self.builder.build(1, self._common_metadata_for_query_lens([1, 1, 1]))
+        self.assertEqual(decode_metadata.num_prefills, 0)
+        self.assertIsNone(decode_metadata.prefill_actual_seq_lengths_q)
+
+        empty_metadata = self.builder.build(1, self._common_metadata_for_query_lens([]))
+        self.assertEqual(empty_metadata.num_prefills, 0)
+        self.assertIsNone(empty_metadata.prefill_actual_seq_lengths_q)
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
@@ -901,3 +956,79 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
         mock_graph_task_update_begin.assert_called_once()
         mock_graph_task_update_end.assert_called_once()
+
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score")
+    def test_fia_chunked_prefill_split_uses_cached_prefill_seq_lengths(self, mock_fia):
+        query = torch.randn(16, 8, 64)
+        key = torch.randn(16, 8, 64)
+        value = torch.randn(16, 8, 64)
+        output = torch.empty_like(query)
+        cached_prefill_qlen = [5, 12]
+        metadata = AscendMetadata(
+            num_decode_tokens=4,
+            num_decodes=2,
+            num_prefills=2,
+            actual_seq_lengths_q=[1, 4, 9, 16],
+            prefill_actual_seq_lengths_q=cached_prefill_qlen,
+            seq_lens_list=[12, 13, 5, 7],
+            attn_mask=None,
+        )
+        block_table = torch.zeros((4, 1), dtype=torch.int32)
+        self.impl.key_cache = None
+        self.impl.value_cache = None
+
+        def fake_fia(**kwargs):
+            return torch.ones_like(kwargs["query"]), None
+
+        mock_fia.side_effect = fake_fia
+
+        first = self.impl._forward_fia_chunked_prefill_split(
+            query, key, value, key, value, 128, block_table, metadata, output
+        )
+        second = self.impl._forward_fia_chunked_prefill_split(
+            query, key, value, key, value, 128, block_table, metadata, torch.empty_like(query)
+        )
+
+        self.assertIs(first, output)
+        self.assertEqual(second.shape, output.shape)
+        self.assertEqual(mock_fia.call_count, 4)
+        self.assertIs(mock_fia.call_args_list[1].kwargs["actual_seq_lengths"], cached_prefill_qlen)
+        self.assertIs(mock_fia.call_args_list[3].kwargs["actual_seq_lengths"], cached_prefill_qlen)
+
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_c8_chunked_prefill_uses_cached_prefill_seq_lengths(self, mock_fia):
+        query = torch.randn(16, 8, 64)
+        float_key = torch.randn(16, 8, 64)
+        float_value = torch.randn(16, 8, 64)
+        output = torch.empty_like(query)
+        cached_prefill_qlen = [5, 12]
+        metadata = AscendMetadata(
+            num_decode_tokens=4,
+            num_decodes=2,
+            num_prefills=2,
+            actual_seq_lengths_q=[1, 4, 9, 16],
+            prefill_actual_seq_lengths_q=cached_prefill_qlen,
+            seq_lens_list=[12, 13, 5, 7],
+            block_tables=torch.zeros((4, 1), dtype=torch.int32),
+            attn_mask=None,
+        )
+        layer = MagicMock()
+        layer._c8_k_aq_scale_nz_bnsd = torch.ones(8, 1, 64)
+        layer._c8_v_aq_scale_nz_bnsd = torch.ones(8, 1, 64)
+        self.impl_c8_kv_share.key_cache = torch.zeros((1, 32, 8, 64), dtype=torch.int8)
+        self.impl_c8_kv_share.value_cache = torch.zeros((1, 32, 8, 64), dtype=torch.int8)
+
+        def fake_fia(*args, **kwargs):
+            if kwargs["input_layout"] == "BNSD":
+                return torch.ones((4, 8, 1, 64)), None
+            return torch.ones_like(kwargs["query"]), None
+
+        mock_fia.side_effect = fake_fia
+
+        result = self.impl_c8_kv_share._forward_c8_chunked_prefill(
+            query, float_key, float_value, metadata, output, layer
+        )
+
+        self.assertIs(result, output)
+        self.assertEqual(mock_fia.call_count, 2)
+        self.assertIs(mock_fia.call_args_list[1].kwargs["actual_seq_lengths"], cached_prefill_qlen)
