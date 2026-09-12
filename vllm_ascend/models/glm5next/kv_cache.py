@@ -14,7 +14,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
@@ -83,11 +82,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
-        ratio_kwargs: dict[str, Any] = (
-            {"compress_ratio": self.compress_ratio}
-            if vllm_version_is("0.28.0")
-            else {"tokens_per_state": self.compress_ratio}
-        )
+        ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,

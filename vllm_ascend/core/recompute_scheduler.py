@@ -36,7 +36,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
@@ -59,9 +59,6 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     print_scheduler_summary,
 )
 from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.28.0"):
-    from vllm.v1.core.sched.output import KVConnectorBlockState
 
 
 @dataclass
@@ -978,32 +975,30 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        pending_partial_tail_offloads = None
         kv_connector_block_state = None
-        if vllm_version_is("0.28.0"):
-            if (
-                self.connector is not None
-                and self.vllm_config.kv_transfer_config is not None
-                and self.vllm_config.kv_transfer_config.is_kv_producer
-            ):
-                pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
-        else:
-            # #51358 drains boundary offers even without a connector.
-            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
-            if self.connector is not None:
+        # #51358 drains boundary offers even without a connector.
+        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+        if self.connector is not None:
+            # A scheduled request can finish a cache chunk without allocating
+            # new blocks. Resolve its current table only when the connector reads it.
+            block_state_req_ids = set(num_scheduled_tokens)
+            block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+            if vllm_version_is("0.29.0"):
                 snapshot_req_ids = {req.req_id for req in new_reqs_data}
                 snapshot_req_ids.update(
                     req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
+                    for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
                     if block_ids
                 )
                 snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
                 kv_connector_block_state = KVConnectorBlockState(
                     block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
+            else:
+                kv_connector_block_state = KVConnectorBlockState(
+                    req_ids=block_state_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
                     boundary_state_offloads=boundary_state_offloads,
                 )
 
@@ -1044,11 +1039,8 @@ class RecomputeScheduler(Scheduler):
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
-        if not vllm_version_is("0.28.0"):
-            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         scheduler_output = RecomputeSchedulerOutput(**scheduler_output_kwargs)
-        if vllm_version_is("0.28.0"):
-            scheduler_output.partial_tail_offloads = pending_partial_tail_offloads
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1064,8 +1056,7 @@ class RecomputeScheduler(Scheduler):
             scheduler_output.ec_connector_metadata = ec_meta
 
         # Connector-only block state must not be dispatched to workers.
-        if not vllm_version_is("0.28.0"):
-            scheduler_output.kv_connector_block_state = None
+        scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps that will later be
         # processed by update_from_output.

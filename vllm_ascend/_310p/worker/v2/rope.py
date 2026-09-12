@@ -11,6 +11,7 @@ from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.utils import vllm_version_is
 
 
 class Ascend310PRopeState:
@@ -106,8 +107,8 @@ def get_310p_rope_state(
     max_model_len: int,
     device: torch.device,
 ) -> Ascend310PRopeState | None:
-    # 310P Qwen3-VL / Qwen3.5 use MRoPE only; XD-RoPE is out of scope.
     if model_config.uses_mrope:
         assert isinstance(model, SupportsMRoPE)
-        return Ascend310PRopeState(3, max_num_reqs, max_num_tokens, max_model_len, device)
+        num_dims = 3 if vllm_version_is("0.29.0") else model_config.mrope_num_dims
+        return Ascend310PRopeState(num_dims, max_num_reqs, max_num_tokens, max_model_len, device)
     return None

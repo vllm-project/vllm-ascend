@@ -48,7 +48,7 @@ import torch
 # AttributeError. Setting VLLM_VERSION makes ``vllm_version_is`` use it instead
 # of ``vllm.__version__``. This must happen before the first ``vllm_ascend``
 # import below, and it must not override an explicitly exported value.
-os.environ.setdefault("VLLM_VERSION", "0.28.0")
+os.environ.setdefault("VLLM_VERSION", "0.29.0")
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton  # noqa: E402
 from vllm_ascend.ops.triton.v2.metrics.num_nans import _num_nans_kernel  # noqa: E402

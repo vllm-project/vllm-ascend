@@ -40,7 +40,6 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -227,13 +226,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
-        dp_sync: Any = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -241,12 +238,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
-        if vllm_version_is("0.28.0"):
-            sync_state = num_tokens_across_dp
-        else:
-            # Replicated drafts use global tokens, unlike the PCP-local target.
-            # Every DP rank must take the draft sync, including decode and idle ranks.
-            sync_state = None if self.replicated_pcp else dp_sync
+        # Replicated drafts use global tokens, unlike the PCP-local target.
+        # Every DP rank must take the draft sync, including decode and idle ranks.
+        sync_state = None if self.replicated_pcp else dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (

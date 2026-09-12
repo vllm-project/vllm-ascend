@@ -20,7 +20,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MAIN = "model.layers.1.attn"
@@ -30,7 +30,7 @@ MAMBA = "model.layers.0.linear_attn"
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
 class _AttentionBackend:

@@ -40,7 +40,7 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -431,9 +431,7 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the lane-specific descriptor changed by vLLM #51718."""
-    if "shared_by" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    """Build the standardized descriptor shared by both supported versions."""
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
@@ -445,8 +443,6 @@ def _make_kv_cache_tensor(
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """Map the MLA compression field renamed by vLLM #51718."""
-    if vllm_version_is("0.28.0"):
-        return {"compress_ratio": ratio}
     return {"tokens_per_state": ratio}
 
 
@@ -788,15 +784,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
-        if vllm_version_is("0.28.0"):
-            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
-        else:
-            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
-
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
@@ -866,10 +856,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "vLLM #51718 only changed the main planner",
-    )
     @patch(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
