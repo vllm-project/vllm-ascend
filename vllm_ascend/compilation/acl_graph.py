@@ -23,7 +23,12 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import weak_ref_tensors
+from ..utils import use_updatable_graph, weak_ref_tensors
+from .updatable_graph import (
+    ContextSource,
+    SharedSource,
+    UpdatableGraph,
+)
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -105,6 +110,7 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        update_stream: torch.npu.Stream | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -131,7 +137,19 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.update_stream = update_stream
+        self.attn_backend = None
+        self.draft_attn_metadata_updates: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
+
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_attn_backend(self, attn_backend):
+        self.attn_backend = attn_backend
+
+    def set_draft_attn_metadata_updates(self, update_params: list[dict[str, Any]]):
+        self.draft_attn_metadata_updates = update_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -179,7 +197,7 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+            aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -288,8 +306,29 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
+            self.attn_backend, batch_descriptor.num_tokens, self.vllm_config
+        ):
+            self._updatable_graph_replay(forward_context, entry.aclgraph)
+        else:
+            entry.aclgraph.replay()
         return entry.output
+
+    def _updatable_graph_replay(
+        self,
+        forward_context,
+        graph: UpdatableGraph,
+    ):
+        if _EXTRA_CTX.is_draft_model:
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_attn_metadata_updates))
+        else:
+            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
+        if self.enable_enpu:
+            graph.update(self.update_stream, resolved_tasks)
+            graph.replay()
+        else:
+            graph.replay()
+            graph.update(self.update_stream, resolved_tasks)
 
 
 def weak_ref_workspaces(params):
@@ -310,6 +349,9 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
+    if use_updatable_graph(attn_backend, num_tokens, vllm_config):
+        return
+
     # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise
     # AssertionError outside set_current_vllm_config(); the SFA backend
     # resolution in get_impl_cls() needs the config.
