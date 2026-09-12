@@ -80,13 +80,13 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
               requests:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
             ports:
               - containerPort: 8080
             volumeMounts:
@@ -177,13 +177,13 @@ spec:
                   "{{ max_good_age_days | default("3") }}"
             resources:
               limits:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
               requests:
-                {{ npu_resource_name | default("huawei.com/ascend-1980") }}: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
             volumeMounts:
               - mountPath: /root/.cache
                 name: shared-volume
