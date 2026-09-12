@@ -500,6 +500,13 @@ class BaseDeviceAdaptor:
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
         torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
 
+    # ===== SWA / Compressor KV Scatter =====
+
+    @staticmethod
+    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
+
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod

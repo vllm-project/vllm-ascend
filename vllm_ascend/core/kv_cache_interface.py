@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.core.circular_buffer import AscendCircularBufferManager, AscendCircularBufferSpec
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -287,6 +288,27 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
+    from vllm_ascend.core.deepseek_v41 import (
+        DeepseekV41CompressorStateSpec,
+        DeepseekV41DraftSWASpec,
+        DeepseekV41FullSpec,
+        DeepseekV41IndexerSpec,
+        DeepseekV41SWASpec,
+    )
+
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCircularBufferSpec,
+        manager_class=AscendCircularBufferManager,
+        uniform_type_base_spec=AscendCircularBufferSpec,
+    )
+    for spec, manager in (
+        (DeepseekV41FullSpec, FullAttentionManager),
+        (DeepseekV41IndexerSpec, FullAttentionManager),
+        (DeepseekV41SWASpec, SlidingWindowManager),
+        (DeepseekV41DraftSWASpec, SlidingWindowManager),
+        (DeepseekV41CompressorStateSpec, AscendCircularBufferManager),
+    ):
+        KVCacheSpecRegistry.register(kvcache_spec_cls=spec, manager_class=manager, uniform_type_base_spec=spec)
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,

@@ -159,6 +159,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             if self.tid2eid is not None or self.bias_vl is not None:
                 if input_ids is None:
                     raise ValueError("DeepSeek V4 vision/hash MoE routing requires input_ids.")
+                # The model sanitizes placeholder IDs once before layer-local
+                # communication, which only pads with zeros or shards IDs.
                 input_ids = input_ids.to(torch.int64)
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
@@ -172,31 +174,22 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                     # ids. Apply the identical TP chunk only when communication
                     # has not already aligned ids with local router rows.
                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
-                input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:
                 input_ids = None
                 tid2eid_ones = None
-            if self.bias_vl is not None and input_ids is not None:
-                topk_weights, topk_ids = select_deepseek_v4_vision_experts(
-                    router_logits=router_logits,
-                    input_ids=input_ids,
-                    tid2eid=tid2eid_ones,
-                    bias_vl=self.bias_vl,
-                    text_bias=self.e_score_correction_bias,
-                    top_k=self.top_k,
-                    renormalize=self.renormalize,
-                    routed_scaling_factor=self.routed_scaling_factor,
-                    image_sentinel_lo=self.image_sentinel_lo,
-                )
-                return topk_weights.to(torch.float32), topk_ids.to(
-                    torch.int32 if indices_type is None else indices_type
-                )
+            bias_vl = self.bias_vl
+            if bias_vl is not None and bias_vl.dtype != router_logits.dtype:
+                bias_vl = bias_vl.to(router_logits.dtype)
+            text_bias = self.e_score_correction_bias
+            if text_bias is not None and text_bias.dtype != router_logits.dtype:
+                text_bias = text_bias.to(router_logits.dtype)
             topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
                 x=router_logits,
                 k=self.top_k,
-                bias=self.e_score_correction_bias,
+                bias=text_bias,
                 input_ids=input_ids,
                 tid2eid=tid2eid_ones,
+                bias_vl=bias_vl,
                 k_group=topk_group,
                 group_count=num_expert_group,
                 routed_scaling_factor=self.routed_scaling_factor,
@@ -207,8 +200,10 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 renorm=0,
                 norm_type=2,
                 out_flag=False,
+                image_sentinel_lo=self.image_sentinel_lo,
+                image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
             )
-            return topk_weights, topk_ids
+            return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
             self.e_score_correction_bias = self.e_score_correction_bias.to(router_logits.dtype)

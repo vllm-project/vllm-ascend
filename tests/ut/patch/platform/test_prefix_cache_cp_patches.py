@@ -900,6 +900,26 @@ class _FakeEagleManager:
         self.use_eagle = False
 
 
+def test_verify_and_split_accepts_one_unique_spec_across_groups() -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    repeated_group = kv_cache_config.kv_cache_groups[0]
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = replace(
+        kv_cache_config,
+        kv_cache_groups=[repeated_group, repeated_group],
+    )
+    coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
+    coordinator.eagle_group_ids = set()
+    coordinator.enable_partial_hash_hits = False
+    coordinator.dcp_world_size = 1
+    coordinator.enable_caching = False
+
+    coordinator.verify_and_split_kv_cache_groups()
+
+    assert len(coordinator.attention_groups) == 1
+    assert coordinator.attention_groups[0].group_ids == [0, 1]
+
+
 def test_verify_and_split_propagates_eagle_to_managers() -> None:
     """Regression for DeepSeek-V4 prefix-cache hit rate 0% with MTP/EAGLE.
 

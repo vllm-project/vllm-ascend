@@ -67,6 +67,31 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertIsInstance(config, AscendModelSlimConfig)
         self.assertEqual(config.quant_description, self.sample_config)
 
+    def test_from_metadata_only_config_defers_description_load(self):
+        config = AscendModelSlimConfig.from_config(
+            {"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"}
+        )
+        self.assertEqual(config.quant_description, {})
+
+    def test_deepseek_v41_packed_mapping_uses_checkpoint_shard_names(self):
+        self.ascend_config._update_packed_modules_mapping("deepseek_v4.1")
+        self.assertEqual(
+            self.ascend_config.packed_modules_mapping["gate_up_proj"],
+            ["w1", "w3"],
+        )
+        self.assertEqual(
+            self.ascend_config.packed_modules_mapping["experts"],
+            ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+        )
+
+    def test_deepseek_v41_quant_prefix_maps_terminal_projection(self):
+        self.assertEqual(
+            self.ascend_config.quant_prefix_mapper(
+                "deepseek_v4.1", "model.layers.0.mlp.shared_experts.down_proj"
+            ),
+            "layers.0.ffn.shared_experts.w2",
+        )
+
     @patch("vllm_ascend.quantization.configs.modelslim_config.torch.npu.is_available")
     def test_override_quantization_method(self, mock_is_available):
         # Test when NPU is available
@@ -591,6 +616,38 @@ class TestQuantPrefixMapper(TestBase):
                     config.quant_prefix_mapper("deepseek_v4", prefix),
                     expected,
                 )
+
+    def test_deepseek_v41_vision_maps_wrapped_language_model_prefixes(self):
+        config = AscendModelSlimConfig(
+            {
+                "embed.weight": "W8A8_DYNAMIC",
+                "layers.0.attn.q_proj.weight": "W8A8_DYNAMIC",
+                "head.weight": "FLOAT",
+            }
+        )
+
+        cases = {
+            "language_model.model.embed_tokens": "embed",
+            "language_model.model.layers.0.self_attn.q_proj": (
+                "layers.0.attn.q_proj"
+            ),
+            "language_model.lm_head": "head",
+        }
+        for prefix, expected in cases.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    config.quant_prefix_mapper("deepseek_v4.1", prefix),
+                    expected,
+                )
+
+    def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
+        dense_mapping = get_packed_modules_mapping("qwen3_5_text")
+        moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
+        self.assertEqual(dense_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
+        self.assertEqual(
+            moe_mapping["experts"],
+            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        )
 
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})

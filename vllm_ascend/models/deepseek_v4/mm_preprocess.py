@@ -390,9 +390,11 @@ class DeepseekV4VLMultiModalProcessor(BaseMultiModalProcessor[DeepseekV4VLProces
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object] | None = None,
     ) -> BatchFeature:
-        """Combine the local image transform with v0.27 tokenization."""
+        """Combine the local image transform with vLLM tokenization."""
+        if tok_kwargs is None:
+            tok_kwargs = {}
         processor = self.info.get_hf_processor(**mm_kwargs)
         processed = processor(
             text=prompt,

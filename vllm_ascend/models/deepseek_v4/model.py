@@ -372,7 +372,7 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             bias_vl=self.gate.bias_vl,
-            image_sentinel_lo=129257,
+            image_sentinel_lo=getattr(config, "image_sentinel_base_id", 129257),
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -385,6 +385,7 @@ class DeepseekV4MoE(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         hidden_states_fp32: torch.Tensor | None = None,
+        already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         if self.gate.tid2eid is not None and input_ids is None:
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
@@ -393,6 +394,14 @@ class DeepseekV4MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         if hidden_states_fp32 is not None:
             hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
+        # Chunk the hidden states so they aren't replicated across TP ranks.
+        # This avoids duplicate computation in self.experts.
+        # TODO: We can replace the all_reduce at the end of attn with a
+        # reduce_scatter instead of chunking here.
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            if hidden_states_fp32 is not None:
+                hidden_states_fp32 = sequence_parallel_chunk(hidden_states_fp32)
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoEFactory class
@@ -435,7 +444,10 @@ class DeepseekV4MoE(nn.Module):
         else:
             final_hidden_states = fused_moe_out
 
-        if not self.is_sequence_parallel and self.tp_size > 1 and fused_moe_out_is_tuple:
+        if self.is_sequence_parallel and not already_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1 and fused_moe_out_is_tuple:
             # Legacy tuple outputs are reduced here. Tensor outputs from the
             # upstream MoERunner have already gone through its final reduction.
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
@@ -460,6 +472,8 @@ def _get_llama_4_scaling(
 
 
 class DeepseekV4Attention(nn.Module):
+    swa_cache_cls = AscendDeepseekV4SWACache
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -616,7 +630,7 @@ class DeepseekV4Attention(nn.Module):
                 )
 
         k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
-        swa_cache_layer = AscendDeepseekV4SWACache(
+        swa_cache_layer = self.swa_cache_cls(
             head_dim=self.head_dim,
             window_size=self.window_size,
             dtype=k_dtype,
@@ -671,7 +685,8 @@ class DeepseekV4Attention(nn.Module):
         return self.dsa_attn(positions, hidden_states, llama_4_scaling)
 
 
-class DeepseekV4DecoderLayer(nn.Module):
+class DeepseekV2DecoderLayer(nn.Module):
+    attention_cls = DeepseekV4Attention
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -698,7 +713,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
         self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
-        attn_cls = DeepseekV4Attention
+        attn_cls = self.attention_cls
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -746,10 +761,18 @@ class DeepseekV4DecoderLayer(nn.Module):
         return hidden_states, hidden_states.float()
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y = torch.ops._C_ascend.npu_hc_pre_v2(
-            x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
+        y, post, comb, _ = torch.ops._C_ascend.npu_hc_pre_v2(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            None,
+            hc_mult=self.hc_mult,
+            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+            norm_eps=self.norm_eps,
+            hc_eps=self.hc_eps,
         )
-        return y
+        return y, post, comb
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
         y = torch.ops._C_ascend.npu_hc_post(
@@ -794,12 +817,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+DeepseekV4DecoderLayer = DeepseekV2DecoderLayer
+
+
 @support_torch_compile
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
     # vLLM #50514 validates and relays the model's existing PP aux payload.
     supports_aux_hidden_states_over_pp = True
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+    decoder_layer_cls = DeepseekV2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -838,8 +865,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
+            lambda prefix: self.decoder_layer_cls(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
+        )
+        self.needs_moe_input_ids = any(
+            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None
+            for layer in islice(self.layers, self.start_layer, self.end_layer)
         )
 
         if get_pp_group().is_last_rank:
@@ -953,13 +984,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if pp_group.is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
+        moe_input_ids = input_ids
+        if self.needs_moe_input_ids:
+            moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
                 llama_4_scaling,
-                input_ids=input_ids,
+                input_ids=moe_input_ids,
             )
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states.mean(dim=1)

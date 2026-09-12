@@ -36,6 +36,44 @@ class _FakeMoERunner(nn.Module):
         return hidden_states
 
 
+@pytest.mark.parametrize("is_internal_router", [False, True])
+@pytest.mark.parametrize("is_sequence_parallel", [False, True])
+@pytest.mark.parametrize("has_fp32_input", [False, True])
+def test_deepseek_v4_moe_reuses_fp32_input_on_matching_token_shard(
+    monkeypatch, is_internal_router, is_sequence_parallel, has_fp32_input
+):
+    hidden_states = torch.randn(4, 8, dtype=torch.bfloat16)
+    fp32_input = hidden_states.float() if has_fp32_input else None
+    input_ids = torch.tensor([11, 22, 13, 24])
+    experts = MagicMock(side_effect=lambda **kwargs: kwargs["hidden_states"])
+    experts.is_internal_router = is_internal_router
+    gate = SimpleNamespace(tid2eid=torch.zeros(32, 2), weight=torch.randn(3, 8))
+    moe = SimpleNamespace(gate=gate, experts=experts, is_sequence_parallel=is_sequence_parallel, tp_size=1)
+    monkeypatch.setattr(deepseek_v4_module, "sequence_parallel_chunk", lambda x: x[2:])
+    monkeypatch.setattr(deepseek_v4_module, "tensor_model_parallel_all_gather", lambda x, _dim: torch.cat([x, x]))
+    linear = MagicMock(wraps=torch.nn.functional.linear)
+    monkeypatch.setattr(deepseek_v4_module.F, "linear", linear)
+
+    deepseek_v4_module.DeepseekV4MoE.forward(moe, hidden_states, input_ids, fp32_input)
+
+    kwargs = experts.call_args.kwargs
+    expected_hidden = hidden_states[2:] if is_sequence_parallel else hidden_states
+    torch.testing.assert_close(kwargs["hidden_states"], expected_hidden, rtol=0, atol=0)
+    assert kwargs["input_ids"] is input_ids
+    if is_internal_router:
+        router_input = kwargs["router_logits"]
+        linear.assert_not_called()
+    else:
+        linear.assert_called_once()
+        router_input = linear.call_args.args[0]
+        torch.testing.assert_close(kwargs["router_logits"], expected_hidden.float() @ gate.weight.T)
+    torch.testing.assert_close(router_input.float(), expected_hidden.float(), rtol=0, atol=0)
+    if has_fp32_input:
+        expected_fp32 = fp32_input[2:] if is_sequence_parallel else fp32_input
+        assert router_input.dtype == torch.float32
+        assert router_input.data_ptr() == expected_fp32.data_ptr()
+
+
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
     gate = _FakeGate()
 

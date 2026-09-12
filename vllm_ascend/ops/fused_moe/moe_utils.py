@@ -36,6 +36,22 @@ _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
+    # ``TokenDispatcherWithAll2AllV`` builds split sizes with torch/numpy.
+    # Normalize them before crossing the torch.distributed boundary: recent
+    # ProcessGroupHCCL versions do not reliably accept numpy scalar values and
+    # can report a misleading dimension mismatch instead of a type error.
+    if input_split_sizes is not None:
+        input_split_sizes = [int(size) for size in input_split_sizes]
+        if sum(input_split_sizes) != input_.size(0):
+            raise RuntimeError(
+                "MoE all-to-all input split mismatch: "
+                f"input_shape={tuple(input_.shape)}, "
+                f"input_splits={input_split_sizes}, "
+                f"input_split_sum={sum(input_split_sizes)}"
+            )
+    if output_split_sizes is not None:
+        output_split_sizes = [int(size) for size in output_split_sizes]
+
     if output_split_sizes is None:
         # Equal split (all2all)
         a2a_out = torch.empty_like(input_)

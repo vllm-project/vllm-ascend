@@ -1,0 +1,96 @@
+[
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "请按“第一张、第二张”的顺序回答：第一张图"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "examples/images/carrots.jpeg"
+            }
+          },
+          {
+            "type": "text",
+            "text": "和第二张图"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "examples/images/corn.jpeg"
+            }
+          },
+          {
+            "type": "text",
+            "text": "中分别是什么食材？它们通常食用的部位分别是什么？"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "中国的首都是哪里？"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the weather for a specific location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string", "description": "The city name"},
+              "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "What's the weather like in Beijing?"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Hello"
+      },
+      {
+        "role": "assistant",
+        "content": "Hi there! How can I help you?"
+      },
+      {
+        "role": "system",
+        "content": "Mid-conversation instruction update: reply in Chinese only. (deepseek_v41 only)"
+      }
+    ]
+  }
+]
