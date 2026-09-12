@@ -134,7 +134,7 @@ except ImportError:  # pragma: no cover - exercised on v0.28.0
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -494,13 +494,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
-        # Backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need
-        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
-        # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
-        )
+        # Refined after per-layer metadata builders are initialized. Compressed
+        # attention always constructs host metadata and therefore remains true.
+        self._needs_seq_lens_cpu_sync = self.use_compress
 
         # kv role
         self.is_kv_producer = False
@@ -4231,6 +4227,8 @@ class NPUModelRunner(GPUModelRunner):
                 draft_kernel_block_sizes = kernel_block_sizes
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
+        self._update_seq_lens_cpu_sync_requirement()
+
         if (
             self.speculative_config
             and self.speculative_config.uses_extract_hidden_states()
@@ -5643,6 +5641,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
+
+    def _update_seq_lens_cpu_sync_requirement(self) -> None:
+        attn_groups = [group for cache_groups in self.attn_groups for group in cache_groups]
+        draft_attn_groups = getattr(self.drafter, "draft_attn_groups", ()) if self.drafter is not None else ()
+        self._needs_seq_lens_cpu_sync = self.use_compress or any(
+            getattr(attn_group.get_metadata_builder(0), "requires_exact_host_seq_lens", True)
+            for attn_group in (*attn_groups, *draft_attn_groups)
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

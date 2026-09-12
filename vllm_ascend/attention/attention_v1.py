@@ -24,7 +24,6 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -44,17 +43,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.flash_attn_cann_ops import (
-    CANN_FLASH_ATTN_METADATA_BUFFER_SIZE,
-    LAYOUT_KV_PAGED_BBND,
-    LAYOUT_KV_PAGED_BNBD,
-    LAYOUT_KV_TND,
-    SUPPORTED_HEAD_DIMS,
-    flash_attn_adapter,
-    flash_attn_metadata_adapter,
-    get_causal_attn_mask,
-    is_cann_ops_flash_attn_available,
-)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -73,9 +61,15 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.ops.flash_attn import (
+    build_flash_attn_metadata,
+    flash_attn_metadata_size,
+    run_flash_attn,
+)
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.28.0"):
@@ -162,108 +156,15 @@ class AscendAttentionBackend(AttentionBackend):
         return [128]
 
 
-def _cann_ops_flash_attn_supported(vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> bool:
-    """Whether cann_ops.flash_attn (eager or graph) may be prepared for.
-
-    Superset of ``AscendAttentionBackendImpl._resolve_cann_ops_flash_attn``: it
-    only checks what is observable without a layer instance, so per-layer
-    conditions (alibi, sinks, encoder-decoder) still resolve in the impl and
-    layers that fall back keep their FIA paths.
-    """
-    if not envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN:
-        return False
-    if not get_current_hardware_profile().supports(HardwareCapability.CANN_FLASH_ATTN):
-        return False
-    if not is_cann_ops_flash_attn_available():
-        return False
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
-        # PCP rank-local tensors are incompatible with this path (see the impl).
-        return False
-    if kv_cache_spec.head_size not in SUPPORTED_HEAD_DIMS:
-        return False
-    if kv_cache_spec.head_size_v != kv_cache_spec.head_size:
-        # Doc: asymmetric K/V needs head_dim_v, which the adapter does not pass.
-        return False
-    if str(vllm_config.cache_config.cache_dtype).lower() not in ("auto", "bfloat16", "float16"):
-        # The operator only accepts bf16/fp16 q/k/v.
-        return False
-    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_c8_quant", False):
-        return False
-    # Operator constraint: 1024 >= block_size >= 16, block_size % 16 == 0.
-    kernel_block_size = min(AscendAttentionBackend.get_supported_kernel_block_sizes())
-    if not (16 <= kernel_block_size <= 1024 and kernel_block_size % 16 == 0):
-        return False
-    hf_config = vllm_config.model_config.hf_config
-    num_attention_heads = getattr(hf_config, "num_attention_heads", None)
-    if num_attention_heads is None:
-        num_attention_heads = getattr(getattr(hf_config, "text_config", None), "num_attention_heads", None)
-    if num_attention_heads is None:
-        return False
-    return num_attention_heads % get_tensor_model_parallel_world_size() == 0
-
-
-def _cann_ops_flash_attn_graph_supported(vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> bool:
-    """Whether cann_ops.flash_attn graph-mode support should be prepared.
-
-    Under ``enforce_eager`` no capture/replay ever happens, so only the eager
-    path (and the shared device-side ``seq_lens_npu`` upload) is prepared.
-    """
-    if vllm_config.model_config.enforce_eager:
-        return False
-    return _cann_ops_flash_attn_supported(vllm_config, kv_cache_spec)
-
-
-def _cann_ops_flash_attn_feature_enabled() -> bool:
-    """True when the feature is configured for this process (env switch +
-    hardware + extension), whatever any single layer resolves.
-
-    Only the FIA graph capture consults it: cann_ops layers have no captured
-    FIA params, so the replay pass must resolve metadata by layer name (see
-    ``update_graph_params``). False (every A2/A3/310P deployment) keeps FIA
-    capture exactly as it was.
-    """
-    return (
-        bool(envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN)
-        and get_current_hardware_profile().supports(HardwareCapability.CANN_FLASH_ATTN)
-        and is_cann_ops_flash_attn_available()
-    )
-
-
-def _cann_flash_attn_mask_params(causal: bool, sliding_window: int | None) -> tuple[int, int, int]:
-    """``(mask_mode, win_left, win_right)`` for the operator's Mask group.
-
-    Mode 4 (window) counts the tokens on each side of the current one, both
-    bounds inclusive and -1 meaning infinity (operator gold reference:
-    tests/pytests/utils/data.py:generate_cpu_mask, README §1.5); vLLM's
-    ``sliding_window`` includes the current token, hence the -1, and a
-    bidirectional window only bounds the left side. Modes 3 and 0 require
-    win_left/win_right == -1 (doc), and the fixed (2048, 2048) int8 attn_mask is
-    required for 3/4 and forbidden for 0.
-    """
+def _flash_attn_mask_config(
+    sliding_window: int | None,
+    causal: bool,
+) -> tuple[int, int, int]:
     if sliding_window is not None:
-        return 4, sliding_window - 1, 0 if causal else -1
+        return 4, sliding_window, 0
     if causal:
         return 3, -1, -1
     return 0, -1, -1
-
-
-# Paged-KV layout per (num_kv_heads, head_size), published by the first
-# impl forward (see _get_paged_kv_layout) for the metadata builder, which
-# runs before the cache tensor exists and defaults to PA_BBND otherwise.
-_paged_kv_layout_by_spec: dict[tuple[int, int], str] = {}
-
-
-def _resolve_paged_kv_layout(k: torch.Tensor, num_kv_heads: int) -> str:
-    """PA layout of a paged KV view, from its shape (a stride test cannot tell
-    block-major from head-major here)."""
-    if k.size(2) == num_kv_heads:
-        return LAYOUT_KV_PAGED_BBND
-    if k.size(1) == num_kv_heads:
-        return LAYOUT_KV_PAGED_BNBD
-    raise ValueError(
-        f"unsupported paged KV cache view for cann_ops.flash_attn: "
-        f"shape={tuple(k.shape)}, num_kv_heads={num_kv_heads}"
-    )
 
 
 class AscendAttentionState(Enum):
@@ -304,11 +205,12 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
     seq_lens_cpu: torch.Tensor = None
     seq_lens_list: list[int] = None  # type: ignore
-    # Device-side seq_lens for the cann_ops paths (PrivateUse1 kernels do not
-    # stage CPU tensors); None when they are not prepared for. FIA keeps using
-    # the CPU tensors above.
-    seq_lens_npu: torch.Tensor | None = None
     actual_seq_lengths_q: list[int] = None  # type: ignore
+    flash_attn_metadata: torch.Tensor | None = None
+    flash_attn_seq_lens: torch.Tensor | None = None
+    flash_attn_max_query_len: int = 0
+    flash_attn_max_seq_len: int = 0
+    flash_attn_num_tokens: int = 0
 
     query_start_loc: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -332,22 +234,6 @@ class AscendMetadata:
     reshape_cache_event: torch.npu.Event = None
 
     pcp_local_num_input_tokens: int | None = None
-
-    # ***************** cann_ops flash_attn graph buffers ******************* #
-    # Refreshed every step; stable addresses let the two-phase operator pair be
-    # captured directly (cf. DSA's sas/qli buffers). None when not prepared for.
-    cann_flash_attn_metadata: torch.Tensor | None = None
-    cann_flash_attn_cu_seqlens_q: torch.Tensor | None = None
-    cann_flash_attn_seqused_kv: torch.Tensor | None = None
-    cann_flash_attn_block_table: torch.Tensor | None = None
-    # Builder's description of this step, checked by the layer paths on reuse.
-    cann_flash_attn_layout_kv: str | None = None
-    cann_flash_attn_mask_mode: int | None = None
-    cann_flash_attn_num_heads_q: int | None = None
-    cann_flash_attn_win_left: int | None = None
-    cann_flash_attn_win_right: int | None = None
-    cann_flash_attn_max_seqlen_q: int | None = None
-    cann_flash_attn_max_seqlen_kv: int | None = None
 
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
@@ -397,27 +283,37 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
+        self._fia_seq_lens_buffer = torch.zeros(
+            scheduler_config.max_num_seqs + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._fia_block_table_buffer: torch.Tensor | None = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
-        # Graph mode only: the per-step device seq_lens upload and the persistent
-        # buffers the two-phase operator pair is captured on are both prepared
-        # here. Eager layers describe their own call instead (local lane).
-        self._use_cann_ops_flash_attn = _cann_ops_flash_attn_graph_supported(vllm_config, kv_cache_spec)
-        self._cann_flash_attn_num_heads_q: int | None = None
-        if self._use_cann_ops_flash_attn:
-            # Only the (graph-mode) refresh below consumes this.
-            hf_config = self.model_config.hf_config
-            num_attention_heads = getattr(hf_config, "num_attention_heads", None)
-            if num_attention_heads is None:
-                num_attention_heads = getattr(getattr(hf_config, "text_config", None), "num_attention_heads", None)
-            self._cann_flash_attn_num_heads_q = num_attention_heads // get_tensor_model_parallel_world_size()
-        # Persistent graph buffers, allocated lazily on the first build()
-        # call (before graph capture) so their addresses never change once
-        # graphs are recorded.
-        self.cann_flash_attn_metadata: torch.Tensor | None = None
-        self.cann_flash_attn_cu_seqlens_q: torch.Tensor | None = None
-        self.cann_flash_attn_seqused_kv: torch.Tensor | None = None
-        self.cann_flash_attn_block_table: torch.Tensor | None = None
+        # cann_ops.flash_attn (A5) preparation, following PR #15336: the first
+        # layer impl decides for the whole group and the builder owns the
+        # bucketed device buffers the two-phase operator pair is captured on
+        # (metadata rebuilt eagerly every step, also during ACLGraph capture
+        # dummy runs). Eager layers consume the same builder description.
+        # Opt-in is kept behind VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN until the
+        # integration is validated in production; PCP is excluded on top of
+        # the upstream gate: rank-local re-sliced q/k/v are incompatible with
+        # the group-wide TND slicing (cf. PR #14340 hybrid models).
+        self._flash_attn_impl: AscendAttentionBackendImpl | None = None
+        self._flash_attn_metadata_buffers: dict[tuple[str, int], torch.Tensor] = {}
+        self._flash_attn_seq_lens_buffers: dict[int, torch.Tensor] = {}
+        if layer_names and self.pcp_size == 1 and envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN:
+            impl = self.compilation_config.static_forward_context[layer_names[0]].impl
+            if (
+                is_950()
+                and str(device).startswith("npu")
+                and isinstance(impl, AscendAttentionBackendImpl)
+                and not impl.enable_c8_quant
+                and impl.attn_type != AttentionType.ENCODER_DECODER
+                and impl.head_size in (64, 128, 256)
+            ):
+                self._flash_attn_impl = impl
 
     @classmethod
     def get_cudagraph_support(
@@ -427,16 +323,20 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        if _cann_ops_flash_attn_graph_supported(vllm_config, kv_cache_spec):
-            # With cann_ops.flash_attn active, attention runs on
-            # builder-refreshed persistent buffers; restrict capture to
-            # uniform batch shapes like the other tiling-sink backends
-            # (DSA/SFA) whose metadata buffers assume uniform batches.
-            return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
+
+    @property
+    def requires_exact_host_seq_lens(self) -> bool:
+        """Whether async speculative decode must correct host KV lengths.
+
+        Device-side tiling consumes the authoritative NPU sequence lengths.
+        Legacy attention paths still pass Python length lists to CANN and need
+        the host mirror to be corrected before metadata construction.
+        """
+        return self._flash_attn_impl is None
 
     def _split_decodes_and_prefills(
         self,
@@ -482,14 +382,18 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        # Keep a host mirror for legacy attention paths and bookkeeping. The
+        # flash_attn (device-side) path consumes common_attn_metadata.seq_lens
+        # directly and only uses this mirror as an upper bound, so it does not
+        # need an accepted-token D2H.
+        if isinstance(common_attn_metadata._seq_lens_cpu, torch.Tensor):
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif isinstance(common_attn_metadata.seq_lens_cpu, torch.Tensor):
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+            seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+        seq_lens = seq_lens_cpu
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
@@ -505,11 +409,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        # The model runner keeps a persistent device query_start_loc buffer
+        # (refreshed in place every step), so reuse it instead of a fresh H2D.
+        query_start_loc = common_attn_metadata.query_start_loc[: query_start_loc_cpu.shape[0]]
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
-        seq_lens_list = seq_lens.tolist()
+        host_seq_lens = seq_lens if self.requires_exact_host_seq_lens else seq_lens_cpu
+        seq_lens_list = host_seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
@@ -531,31 +437,29 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # capture, and _get_fia_params derives the PrefillCacheHit batch size from
         # seq_lens.shape[0], so the tensor has to carry the dummy request too.
         num_reqs_fia = len(actual_seq_lengths_q)
+        if common_attn_metadata.seq_lens is not None:
+            seq_lens_device = common_attn_metadata.seq_lens[:num_reqs_fia]
+        else:
+            seq_lens_device = seq_lens[:num_reqs_fia].to(self.device)
+        if seq_lens_device.shape[0] < num_reqs_fia:
+            # FlashAttention PA requires a valid positive KV length for every
+            # synthetic graph-padding request. The zero block-table row points
+            # at block 0 and the padded output is discarded downstream.
+            self._fia_seq_lens_buffer[:num_reqs_fia].fill_(1)
+            self._fia_seq_lens_buffer[: seq_lens_device.shape[0]].copy_(seq_lens_device)
+            seq_lens_device = self._fia_seq_lens_buffer[:num_reqs_fia]
+
         if len(seq_lens_list) < num_reqs_fia:
             padding_len = num_reqs_fia - len(seq_lens_list)
             seq_lens_list = seq_lens_list + [1] * padding_len
             seq_lens = torch.cat([seq_lens, seq_lens.new_ones(padding_len)])
         if block_table is not None and block_table.shape[0] < num_reqs_fia:
-            block_table = torch.cat(
-                [
-                    block_table,
-                    block_table.new_zeros((num_reqs_fia - block_table.shape[0], block_table.shape[1])),
-                ],
-                dim=0,
-            )
-
-        # Graph mode consumes seq_lens as a device tensor (seqused_kv): upload
-        # once per step so the buffer refresh and every captured layer share one
-        # H2D copy. Eager layers move seq_lens themselves in the local lane;
-        # FIA paths keep reading the CPU-side seq_lens / seq_lens_list.
-        seq_lens_npu: torch.Tensor | None = None
-        if self._use_cann_ops_flash_attn:
-            if seq_lens.device == self.device:
-                # parallel_drafting / cross-attention already carry a GPU
-                # seq_lens; reuse it as-is.
-                seq_lens_npu = seq_lens
-            else:
-                seq_lens_npu = seq_lens.pin_memory().to(self.device, non_blocking=True)
+            required_shape = (self.vllm_config.scheduler_config.max_num_seqs + 1, block_table.shape[1])
+            if self._fia_block_table_buffer is None or self._fia_block_table_buffer.shape != required_shape:
+                self._fia_block_table_buffer = block_table.new_zeros(required_shape)
+            self._fia_block_table_buffer[:num_reqs_fia].zero_()
+            self._fia_block_table_buffer[: block_table.shape[0]].copy_(block_table)
+            block_table = self._fia_block_table_buffer[:num_reqs_fia]
 
         backend_metadata = self._build_backend_metadata(
             common_attn_metadata,
@@ -565,6 +469,23 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             num_prefills=num_prefills,
         )
+        # ``-1`` makes CANN derive both maxima from the live cumulative/used
+        # length tensors. Unlike a Python int captured as an ACLGraph attribute,
+        # these tensors are updated before replay, so metadata and the main op
+        # remain consistent when the batch's actual maxima change.
+        flash_attn_max_query_len = -1
+        flash_attn_max_seq_len = -1
+        flash_attn_seq_lens = None
+        flash_attn_metadata = None
+        if self._flash_attn_impl is not None:
+            flash_attn_seq_lens = self._get_flash_attn_seq_lens_buffer(num_reqs_fia)
+            flash_attn_seq_lens.copy_(seq_lens_device)
+            flash_attn_metadata = self._build_flash_attn_metadata(
+                query_start_loc,
+                flash_attn_seq_lens,
+                common_attn_metadata.causal,
+                attn_state,
+            )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -572,10 +493,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
-            seq_lens_npu=seq_lens_npu,
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,
+            flash_attn_metadata=flash_attn_metadata,
+            flash_attn_seq_lens=flash_attn_seq_lens,
+            flash_attn_max_query_len=flash_attn_max_query_len,
+            flash_attn_max_seq_len=flash_attn_max_seq_len,
+            flash_attn_num_tokens=int(query_start_loc_cpu[-1].item()),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
@@ -588,194 +513,78 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.pcp_enabled:
             assert expanded_slot_mapping is not None
             self._finalize_pcp_metadata(attn_metadata, expanded_slot_mapping)
-        # Graph mode only: eager steps have nothing to capture, so each layer
-        # describes its own call instead (the layer-side reuse check then finds
-        # no stamped description and takes the local lane).
-        if self._use_cann_ops_flash_attn:
-            assert seq_lens_npu is not None
-            # SeqLens group, host side (no device sync). The installed operator
-            # (CANN 9.2) expects the exact maxima next to the cumulative/used
-            # lengths - they are what its own test harness always passes.
-            query_start_loc_host = [0, *actual_seq_lengths_q]
-            max_seqlen_q = max(curr - prev for prev, curr in zip(query_start_loc_host, query_start_loc_host[1:]))
-            self._refresh_cann_flash_attn_buffers(
-                attn_metadata,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens_npu,
-                block_table=block_table,
-                num_reqs=num_reqs_fia,
-                causal=common_attn_metadata.causal,
-                is_tnd=attn_state == AscendAttentionState.PrefillNoCache,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=(
-                    max_seqlen_q if attn_state == AscendAttentionState.PrefillNoCache else int(seq_lens.max())
-                ),
-            )
         return attn_metadata
 
-    def _refresh_cann_flash_attn_buffers(
-        self,
-        attn_metadata: AscendMetadata,
-        query_start_loc: torch.Tensor,
-        seq_lens: torch.Tensor,
-        block_table: torch.Tensor | None,
-        num_reqs: int,
-        causal: bool,
-        is_tnd: bool,
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
-    ) -> None:
-        """Refresh the persistent cann_ops.flash_attn buffers and rebuild the
-        flash_attn metadata eagerly every step (also during ACLGraph capture
-        dummy runs).
+    def _get_flash_attn_seq_lens_buffer(self, num_reqs: int) -> torch.Tensor:
+        """Persistent per-request-count seq_lens buffer (PR #15336 bucketing).
 
-        One description per step for the whole attention group (TND for
-        PrefillNoCache, the paged parameter group otherwise), reused by every
-        layer's eager/graph forward through ``_cann_flash_attn_reuse_ready``, so
-        the metadata op and the main op always agree as the doc requires.
-        Addresses never move after the first call, mirroring DSA's sas/qli
-        buffers.
-
-        Two invariants carry this without per-step work: the stamped slices are
-        rebuilt with the same ``num_reqs`` any captured graph was built with
-        (the runner pads the request count from the batch descriptor), and
-        target/draft steps share the buffers in stream order.
-
-        Graph deployments only (the caller gates on the graph-mode flag), so a
-        group whose layers all fall back pays one refresh per step with nobody
-        consuming it; the layers log why they fell back.
+        ACLNN converts tensor views to static descriptors, so each captured
+        graph size must keep its own stable allocation instead of re-slicing
+        one shared buffer.
         """
-        if block_table is None or num_reqs == 0:
-            return
-        logger.info_once(
-            "[cann_ops.flash_attn] builder refresh active (kv_heads=%d, head_size=%d); "
-            "layers that fell back to FIA still pay one refresh per step",
-            self.kv_cache_spec.num_kv_heads,
-            self.kv_cache_spec.head_size,
-        )
-        if self.cann_flash_attn_cu_seqlens_q is None:
-            max_buf_reqs = (
-                max(
-                    self.vllm_config.scheduler_config.max_num_seqs,
-                    getattr(self.compilation_config, "max_cudagraph_capture_size", 0) or 0,
-                )
-                + 2
-            )
-            self.cann_flash_attn_cu_seqlens_q = torch.zeros(max_buf_reqs + 1, dtype=torch.int32, device=self.device)
-            self.cann_flash_attn_seqused_kv = torch.zeros(max_buf_reqs, dtype=torch.int32, device=self.device)
-        if self.cann_flash_attn_block_table is None:
-            self.cann_flash_attn_block_table = torch.zeros(
-                (self.cann_flash_attn_seqused_kv.shape[0], block_table.shape[1]),
+        buffer = self._flash_attn_seq_lens_buffers.get(num_reqs)
+        if buffer is None:
+            buffer = torch.empty(num_reqs, dtype=torch.int32, device=self.device)
+            self._flash_attn_seq_lens_buffers[num_reqs] = buffer
+        return buffer
+
+    def _get_flash_attn_metadata_buffer(
+        self,
+        layout_kv: str,
+        num_reqs: int,
+        num_kv_heads: int,
+    ) -> torch.Tensor:
+        """Persistent metadata buffer bucketed by (layout, request count)."""
+        key = (layout_kv, num_reqs)
+        buffer = self._flash_attn_metadata_buffers.get(key)
+        if buffer is None:
+            buffer = torch.empty(
+                flash_attn_metadata_size(num_reqs, num_kv_heads),
                 dtype=torch.int32,
                 device=self.device,
             )
-        elif self.cann_flash_attn_block_table.shape[1] != block_table.shape[1]:
-            raise RuntimeError(
-                "cann_ops.flash_attn graph block_table buffer width "
-                f"{self.cann_flash_attn_block_table.shape[1]} does not match the "
-                f"current block table width {block_table.shape[1]}."
-            )
-        if num_reqs + 1 > self.cann_flash_attn_cu_seqlens_q.shape[0]:
-            raise RuntimeError(
-                f"cann_ops.flash_attn graph buffers sized for "
-                f"{self.cann_flash_attn_seqused_kv.shape[0]} requests but got {num_reqs}."
-            )
+            self._flash_attn_metadata_buffers[key] = buffer
+        return buffer
 
-        # The SeqLens group carries the exact maxima (host-derived, no sync):
-        # seqused_kv for every layout (the pre-9.2 operator rejects its absence)
-        # and max_seqlen_q/max_seqlen_kv, which is what the operator's own test
-        # harness always passes.
-        self.cann_flash_attn_cu_seqlens_q[: num_reqs + 1].copy_(query_start_loc[: num_reqs + 1], non_blocking=True)
-        self.cann_flash_attn_seqused_kv[:num_reqs].copy_(seq_lens, non_blocking=True)
-        self.cann_flash_attn_block_table[:num_reqs].copy_(block_table[:num_reqs])
-
-        cu_seqlens_q = self.cann_flash_attn_cu_seqlens_q[: num_reqs + 1]
-        seqused_kv = self.cann_flash_attn_seqused_kv[:num_reqs]
-        mask_mode, win_left, win_right = _cann_flash_attn_mask_params(
-            causal, getattr(self.kv_cache_spec, "sliding_window", None)
-        )
-        if is_tnd:
-            # TND: kv lengths come from cu_seqlens_kv; block_table is unused.
-            layout_kv = LAYOUT_KV_TND
-            cu_seqlens_kv = cu_seqlens_q
+    def _build_flash_attn_metadata(
+        self,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        causal: bool,
+        attn_state: AscendAttentionState,
+    ) -> torch.Tensor | None:
+        """Rebuild the flash_attn metadata eagerly every step."""
+        impl = self._flash_attn_impl
+        if impl is None:
+            return None
+        num_reqs = query_start_loc.shape[0] - 1
+        layout_kv = "TND" if attn_state == AscendAttentionState.PrefillNoCache else "PA_BBND"
+        mask_mode, win_left, win_right = _flash_attn_mask_config(impl.sliding_window, causal)
+        kwargs: dict[str, Any] = {
+            "cu_seqlens_q": query_start_loc,
+            "batch_size": num_reqs,
+            # Derive maxima from the live length tensors. Python scalar
+            # attributes are frozen by ACLGraph capture.
+            "max_seqlen_q": -1,
+            "max_seqlen_kv": -1,
+            "mask_mode": mask_mode,
+            "win_left": win_left,
+            "win_right": win_right,
+            "layout_q": "TND",
+            "layout_kv": layout_kv,
+            "layout_out": "TND",
+        }
+        if layout_kv == "TND":
+            kwargs["cu_seqlens_kv"] = query_start_loc
         else:
-            # PA layout from the registry (real one after the first forward).
-            layout_kv = _paged_kv_layout_by_spec.get(
-                (self.kv_cache_spec.num_kv_heads, self.kv_cache_spec.head_size),
-                LAYOUT_KV_PAGED_BBND,
-            )
-            cu_seqlens_kv = None
-        metadata_params = dict(
-            num_heads_q=self._cann_flash_attn_num_heads_q,
-            num_heads_kv=self.kv_cache_spec.num_kv_heads,
-            head_dim=self.kv_cache_spec.head_size,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            seqused_kv=seqused_kv,
-            batch_size=num_reqs,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            mask_mode=mask_mode,
-            win_left=win_left,
-            win_right=win_right,
-            layout_kv=layout_kv,
+            kwargs["seqused_kv"] = seq_lens
+        return build_flash_attn_metadata(
+            impl.num_heads,
+            impl.num_kv_heads,
+            impl.head_size,
+            output_buffer=self._get_flash_attn_metadata_buffer(layout_kv, num_reqs, impl.num_kv_heads),
+            **kwargs,
         )
-        if self.cann_flash_attn_metadata is None:
-            raw_metadata = flash_attn_metadata_adapter(**metadata_params)
-            # Probe at the maximum batch, for both parameter groups, so the
-            # captured buffer never has to grow. The descriptor scales with
-            # batch * num_kv_heads (README §2.1), so one paged flavour covers the
-            # whole PA family.
-            max_buf_reqs = self.cann_flash_attn_seqused_kv.shape[0]
-            probe_cu_seqlens_q = torch.arange(max_buf_reqs + 1, dtype=torch.int32, device=self.device)
-            probe_seqused_kv = torch.ones(max_buf_reqs, dtype=torch.int32, device=self.device)
-            # Every probe request has q_len = kv_len = 1, so the maxima are 1.
-            probe_specs = (
-                (LAYOUT_KV_PAGED_BBND, None, probe_seqused_kv),
-                (LAYOUT_KV_TND, probe_cu_seqlens_q, probe_seqused_kv),
-            )
-            probe_sizes = (
-                flash_attn_metadata_adapter(
-                    **dict(
-                        metadata_params,
-                        cu_seqlens_q=probe_cu_seqlens_q,
-                        cu_seqlens_kv=probe_cu_seqlens_kv,
-                        seqused_kv=probe_seqused_kv_arg,
-                        batch_size=max_buf_reqs,
-                        max_seqlen_q=1,
-                        max_seqlen_kv=1,
-                        layout_kv=probe_layout_kv,
-                    )
-                )
-                .numel()
-                for probe_layout_kv, probe_cu_seqlens_kv, probe_seqused_kv_arg in probe_specs
-            )
-            buffer_size = max(
-                raw_metadata.numel(),
-                *probe_sizes,
-                CANN_FLASH_ATTN_METADATA_BUFFER_SIZE,
-            )
-            self.cann_flash_attn_metadata = torch.zeros(buffer_size, dtype=raw_metadata.dtype, device=self.device)
-            self.cann_flash_attn_metadata[: raw_metadata.numel()].copy_(raw_metadata)
-        else:
-            flash_attn_metadata_adapter(out_buffer=self.cann_flash_attn_metadata, **metadata_params)
-
-        # Build the fixed attn_mask here (before any capture) so its address is
-        # graph-independent, like the buffers above.
-        get_causal_attn_mask(self.device)
-
-        # Stamped as one set; the layer paths check all of them before reuse.
-        attn_metadata.cann_flash_attn_metadata = self.cann_flash_attn_metadata
-        attn_metadata.cann_flash_attn_cu_seqlens_q = cu_seqlens_q
-        attn_metadata.cann_flash_attn_seqused_kv = seqused_kv
-        attn_metadata.cann_flash_attn_block_table = None if is_tnd else self.cann_flash_attn_block_table[:num_reqs]
-        attn_metadata.cann_flash_attn_layout_kv = layout_kv
-        attn_metadata.cann_flash_attn_mask_mode = mask_mode
-        attn_metadata.cann_flash_attn_num_heads_q = self._cann_flash_attn_num_heads_q
-        attn_metadata.cann_flash_attn_win_left = win_left
-        attn_metadata.cann_flash_attn_win_right = win_right
-        attn_metadata.cann_flash_attn_max_seqlen_q = max_seqlen_q
-        attn_metadata.cann_flash_attn_max_seqlen_kv = max_seqlen_kv
 
     def _finalize_pcp_metadata(
         self,
@@ -860,7 +669,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
-        self._paged_kv_layout: str | None = None
         self.value_cache = None
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
@@ -873,15 +681,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         # cann_ops_transformer.flash_attn (A5) natively consumes first-axis
         # (block-axis) non-contiguous paged KV caches as produced for hybrid
-        # models (cf. PR #14340). Eager runs call the adapter directly; during
-        # ACLGraph capture only the main op is captured on the
-        # builder-refreshed persistent buffers, with per-layer fallback to
-        # the FIA/paged-attention full-graph paths.
-        self._use_cann_ops_flash_attn = self._resolve_cann_ops_flash_attn()
-        # True only on deployments where the feature can engage at all. Used to
-        # keep FIA graph capture untouched when it cannot (A2/A3/310P or the
-        # env switch off): see the layer-name capture in full_graph_fia(_v2).
-        self._cann_flash_attn_may_skip_fia = _cann_ops_flash_attn_feature_enabled()
+        # models (cf. PR #14340). The builder owns the bucketed persistent
+        # buffers the two-phase operator pair runs on; per-layer eligibility
+        # is resolved at forward time from the stamped metadata (PR #15336).
+        # True only on deployments where flash layers can actually skip FIA
+        # capture (env switch on + A5): see the layer-name capture in
+        # full_graph_fia(_v2). Keeps FIA graph capture untouched otherwise.
+        self._cann_flash_attn_may_skip_fia = bool(envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN) and is_950()
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
@@ -1742,285 +1548,88 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
-    def _resolve_cann_ops_flash_attn(self) -> bool:
-        """Decide whether eager GQA attention may use cann_ops.flash_attn.
-
-        Enabled only when explicitly requested via the environment switch,
-        on A5 hardware with the extension installed, and only for plain
-        bf16/fp16 GQA (no alibi, no c8 quant, no PCP).
-        """
-
-        def _disabled(reason: str) -> bool:
-            logger.info("[cann_ops.flash_attn] disabled: %s", reason)
-            return False
-
-        if not envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN:
-            return _disabled("VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN is not set")
-        if not get_current_hardware_profile().supports(HardwareCapability.CANN_FLASH_ATTN):
-            return _disabled("hardware does not support CANN_FLASH_ATTN")
-        if not is_cann_ops_flash_attn_available():
-            logger.warning(
-                "VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN=1 but cann_ops_transformer is not installed; "
-                "falling back to npu_fused_infer_attention_score."
-            )
-            return False
-        if self.head_size not in SUPPORTED_HEAD_DIMS:
-            return _disabled(f"head_size {self.head_size} not in {sorted(SUPPORTED_HEAD_DIMS)}")
-        if self.alibi_slopes is not None:
-            return _disabled("alibi_slopes is set")
-        if self.sinks is not None:
-            # README §1.8: the operator still rejects sinks; sink models keep
-            # FIA, which supports learnable_sink.
-            return _disabled("sinks is set")
-        if self.pcp_enabled:
-            # PCP re-slices q/k/v per rank before forward_impl; this path slices
-            # by the global actual_seq_lengths_q and would mis-read them.
-            return _disabled("prefill_context_parallel is enabled")
-        if self.enable_c8_quant:
-            return _disabled("c8 quant is enabled")
-        if self.kv_cache_dtype not in ("auto", "bfloat16", "float16"):
-            # The operator only accepts bf16/fp16 q/k/v.
-            return _disabled(f"kv_cache_dtype {self.kv_cache_dtype} is not bf16/fp16")
-        # Operator constraint: 1024 >= block_size >= 16, block_size % 16 == 0.
-        # The validated block size is the cache's block axis (the kernel block
-        # size, not the user's --block-size).
-        kernel_block_size = min(AscendAttentionBackend.get_supported_kernel_block_sizes())
-        if not (16 <= kernel_block_size <= 1024 and kernel_block_size % 16 == 0):
-            return _disabled(f"kernel_block_size {kernel_block_size} violates [16, 1024] and 16-alignment")
-        # Window layers are supported through mask_mode=4.
-        if self.attn_type != AttentionType.DECODER:
-            return _disabled(f"attn_type {self.attn_type} is not DECODER")
-        logger.info(
-            "[cann_ops.flash_attn] enabled: head_size=%d, heads=%d, kv_heads=%d, kv_cache_dtype=%s",
-            self.head_size,
-            self.num_heads,
-            self.num_kv_heads,
-            self.kv_cache_dtype,
-        )
-        return True
-
-    def _get_paged_kv_layout(self) -> str:
-        """Resolve the paged KV layout once from the actual cache view."""
-        if self._paged_kv_layout is None:
-            self._paged_kv_layout = _resolve_paged_kv_layout(self.key_cache, self.num_kv_heads)
-            _paged_kv_layout_by_spec.setdefault((self.num_kv_heads, self.head_size), self._paged_kv_layout)
-        return self._paged_kv_layout
-
-    def _cann_flash_attn_reuse_ready(
+    def _use_flash_attn(
         self,
         attn_metadata: AscendMetadata,
-        layout_kv: str,
-        mask_mode: int,
-        win_left: int,
-        win_right: int,
-        max_seqlen_q: int,
-        max_seqlen_kv: int,
+        key: torch.Tensor | None = None,
+        value: torch.Tensor | None = None,
     ) -> bool:
-        """Whether the builder's per-step description can be reused here.
-
-        The doc requires the metadata op and the main op to agree. The builder
-        stamps what a layer cannot derive from the group's KV cache spec, and
-        the layer reuses the description only when all of it matches its call.
-        """
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and (key is None or value is None):
+            # KV-sharing layers (k/v=None) have no TND input; keep the FIA
+            # path (required by the hybrid models of PR #14340).
+            return False
         return (
-            attn_metadata.cann_flash_attn_metadata is not None
-            and attn_metadata.cann_flash_attn_layout_kv == layout_kv
-            and attn_metadata.cann_flash_attn_mask_mode == mask_mode
-            and attn_metadata.cann_flash_attn_win_left == win_left
-            and attn_metadata.cann_flash_attn_win_right == win_right
-            and attn_metadata.cann_flash_attn_max_seqlen_q == max_seqlen_q
-            and attn_metadata.cann_flash_attn_max_seqlen_kv == max_seqlen_kv
-            and attn_metadata.cann_flash_attn_num_heads_q == self.num_heads
+            is_950()
+            and not self.enable_c8_quant
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and attn_metadata.flash_attn_metadata is not None
+            and attn_metadata.flash_attn_seq_lens is not None
         )
 
-    def _forward_cann_ops_flash_attn(
+    def _forward_flash_attn(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ) -> torch.Tensor | None:
-        """Eager GQA attention via cann_ops_transformer.flash_attn.
+        kv_cache: tuple[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """GQA attention via cann_ops_transformer.flash_attn (PR #15336).
 
-        The paged KV views are passed as-is: the operator reads the real
-        block-axis stride, so first-axis non-contiguous caches (PR #14340) work
-        without a copy. Returns None when the layer must fall back to FIA.
+        Eager runs and ACLGraph capture share this path: the main op reads
+        the builder-refreshed persistent buffers, so the captured op stays
+        correct at replay. The paged KV views are passed as-is: the operator
+        reads the real block-axis stride, so first-axis non-contiguous
+        caches (PR #14340) work without a copy.
         """
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        query = query[:num_tokens].contiguous()
-        batch_size = attn_metadata.seq_lens.shape[0]
-
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            if key is None or value is None:
-                # KV-sharing layers (k/v=None) have no TND input; keep FIA.
-                return None
-            # TND needs contiguous k/v + cu_seqlens_kv; value is a strided split
-            # view of the packed qkv (never roped), so it costs a real copy.
-            k = key[:num_tokens].contiguous()
-            v = value[:num_tokens].contiguous()
-            layout_kv = LAYOUT_KV_TND
+        num_tokens = attn_metadata.flash_attn_num_tokens
+        query = query[:num_tokens]
+        layout_kv = "TND" if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache else "PA_BBND"
+        block_table = None
+        if layout_kv == "TND":
+            key = key[:num_tokens]
+            value = value[:num_tokens].contiguous()
         else:
             if self.key_cache is None and kv_cache is not None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-            # Raw 4-D paged views: folding or copying them defeats the layout.
-            k = self.key_cache
-            v = self.value_cache
-            if k is None or v is None:
-                return None
-            # PA_BBND vs PA_BNBD by shape, resolved once for the whole run.
-            layout_kv = self._get_paged_kv_layout()
+                if (
+                    isinstance(kv_cache, torch.Tensor)
+                    and kv_cache.dim() > 0
+                    and kv_cache.shape[0] == 2
+                    or isinstance(kv_cache, (list, tuple))
+                    and len(kv_cache) >= 2
+                ):
+                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if self.key_cache is None or self.value_cache is None:
+                raise RuntimeError("A5 FlashAttention requires initialized paged KV caches.")
+            key = self.key_cache
+            value = self.value_cache
+            batch_size = attn_metadata.flash_attn_seq_lens.shape[0]
+            block_table = attn_metadata.block_tables[:batch_size]
 
-        if v is None or v.size(-1) != self.head_size:
-            # Asymmetric K/V (V head dim != QK): the metadata op would need
-            # head_dim_v, which the adapter does not pass. Checked on the tensor
-            # the op actually consumes (cache view or TND slice).
-            return None
-
-        mask_mode, win_left, win_right = _cann_flash_attn_mask_params(attn_metadata.causal, self.sliding_window)
-        attn_mask = get_causal_attn_mask(query.device) if mask_mode != 0 else None
-
-        # SeqLens group, host-derived (no sync): the installed operator wants the
-        # exact maxima, and both interfaces must see the same values.
-        cu_q_host = [0, *attn_metadata.actual_seq_lengths_q]
-        max_seqlen_q = max(curr - prev for prev, curr in zip(cu_q_host, cu_q_host[1:]))
-        if layout_kv == LAYOUT_KV_TND:
-            # TND: kv == q, so seq_lens.max() would under-report a padding
-            # dummy whose interval is longer than every real request.
-            max_seqlen_kv = max_seqlen_q
-        elif attn_metadata.seq_lens_cpu is not None:
-            max_seqlen_kv = int(attn_metadata.seq_lens_cpu.max())
+        mask_mode, win_left, win_right = _flash_attn_mask_config(self.sliding_window, attn_metadata.causal)
+        kwargs: dict[str, Any] = {
+            "block_table": block_table,
+            "cu_seqlens_q": attn_metadata.query_start_loc,
+            "sinks": self.sinks,
+            "attn_mask": attn_metadata.attn_mask if mask_mode != 0 else None,
+            "metadata": attn_metadata.flash_attn_metadata,
+            "softmax_scale": self.scale,
+            "mask_mode": mask_mode,
+            "win_left": win_left,
+            "win_right": win_right,
+            "max_seqlen_q": attn_metadata.flash_attn_max_query_len,
+            "max_seqlen_kv": attn_metadata.flash_attn_max_seq_len,
+            "layout_q": "TND",
+            "layout_kv": layout_kv,
+            "layout_out": "TND",
+            "return_softmax_lse": False,
+        }
+        if layout_kv == "TND":
+            kwargs["cu_seqlens_kv"] = attn_metadata.query_start_loc
         else:
-            max_seqlen_kv = int(attn_metadata.seq_lens.max())
-        if self._cann_flash_attn_reuse_ready(
-            attn_metadata, layout_kv, mask_mode, win_left, win_right, max_seqlen_q, max_seqlen_kv
-        ):
-            # Reuse the builder's description (one metadata op per step/group).
-            metadata = attn_metadata.cann_flash_attn_metadata
-            cu_seqlens_q = attn_metadata.cann_flash_attn_cu_seqlens_q
-            seqused_kv = attn_metadata.cann_flash_attn_seqused_kv
-            if layout_kv == LAYOUT_KV_TND:
-                cu_seqlens_kv = cu_seqlens_q
-                block_table = None
-            else:
-                cu_seqlens_kv = None
-                block_table = attn_metadata.cann_flash_attn_block_table
-        else:
-            # No usable builder description: build one here.
-            cu_seqlens_q = attn_metadata.query_start_loc
-            if cu_seqlens_q.dtype != torch.int32:
-                cu_seqlens_q = cu_seqlens_q.to(torch.int32)
-            block_table = None
-            cu_seqlens_kv = None
-            # The operator's SeqLens group wants seqused_kv for every layout,
-            # TND included (see _refresh_cann_flash_attn_buffers).
-            if attn_metadata.seq_lens_npu is not None:
-                seqused_kv = attn_metadata.seq_lens_npu
-            else:
-                seqused_kv = attn_metadata.seq_lens.to(dtype=torch.int32, device=query.device)
-            if layout_kv == LAYOUT_KV_TND:
-                cu_seqlens_kv = cu_seqlens_q
-            else:
-                block_table = attn_metadata.block_tables[:batch_size]
-                if block_table.dtype != torch.int32:
-                    block_table = block_table.to(torch.int32)
-            metadata = flash_attn_metadata_adapter(
-                num_heads_q=self.num_heads,
-                num_heads_kv=self.num_kv_heads,
-                head_dim=self.head_size,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
-                seqused_kv=seqused_kv,
-                batch_size=batch_size,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                mask_mode=mask_mode,
-                win_left=win_left,
-                win_right=win_right,
-                layout_kv=layout_kv,
-            )
-
-        attn_output, _ = flash_attn_adapter(
-            query,
-            key=k,
-            value=v,
-            block_table=block_table,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            seqused_kv=seqused_kv,
-            sinks=self.sinks,
-            metadata=metadata,
-            softmax_scale=self.scale,
-            mask_mode=mask_mode,
-            attn_mask=attn_mask,
-            win_left=win_left,
-            win_right=win_right,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            layout_kv=layout_kv,
-        )
-        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
-        output[:num_tokens] = attn_output[:num_tokens]
-        return output
-
-    def _forward_cann_ops_flash_attn_graph(
-        self,
-        query: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-    ) -> torch.Tensor | None:
-        """ACLGraph-capture path for cann_ops.flash_attn.
-
-        Only the main op is captured: it reads the persistent builder buffers
-        (`_refresh_cann_flash_attn_buffers` refreshes them every step), while
-        the metadata op stays eager — DSA's sas/qli discipline. Returns None to
-        keep the captured FIA paths (no buffers, or a stamp disagreement).
-        """
-        if attn_metadata.cann_flash_attn_metadata is None:
-            return None
-        if self.key_cache is None and kv_cache is not None:
-            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-        if self.key_cache is None:
-            return None
-        layout_kv = self._get_paged_kv_layout()
-
-        # Uniform-batch capture: query is the padded graph input buffer, so
-        # the token count baked here equals query.shape[0] at replay.
-        num_tokens = query.shape[0]
-        mask_mode, win_left, win_right = _cann_flash_attn_mask_params(attn_metadata.causal, self.sliding_window)
-        attn_mask = get_causal_attn_mask(query.device) if mask_mode != 0 else None
-        # max_seqlen_* cannot be baked into a captured op (they grow with the
-        # KV cache), so the capture only cross-checks the builder's values.
-        cu_q_host = [0, *attn_metadata.actual_seq_lengths_q]
-        max_seqlen_q = max(curr - prev for prev, curr in zip(cu_q_host, cu_q_host[1:]))
-        max_seqlen_kv = int(attn_metadata.seq_lens_cpu.max())
-        # The capture must match the description the builder keeps refreshing
-        # (run-constant, so the decision is stable at replay).
-        if not self._cann_flash_attn_reuse_ready(
-            attn_metadata, layout_kv, mask_mode, win_left, win_right, max_seqlen_q, max_seqlen_kv
-        ):
-            return None
-        attn_output, _ = flash_attn_adapter(
-            query,
-            key=self.key_cache,
-            value=self.value_cache,
-            block_table=attn_metadata.cann_flash_attn_block_table,
-            cu_seqlens_q=attn_metadata.cann_flash_attn_cu_seqlens_q,
-            seqused_kv=attn_metadata.cann_flash_attn_seqused_kv,
-            sinks=self.sinks,
-            metadata=attn_metadata.cann_flash_attn_metadata,
-            softmax_scale=self.scale,
-            mask_mode=mask_mode,
-            attn_mask=attn_mask,
-            win_left=win_left,
-            win_right=win_right,
-            layout_kv=layout_kv,
-        )
-        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
-        output[:num_tokens] = attn_output[:num_tokens]
-        return output
+            kwargs["seqused_kv"] = attn_metadata.flash_attn_seq_lens
+        attn_output, _ = run_flash_attn(query, key, value, **kwargs)
+        return attn_output.view(num_tokens, self.num_heads, self.head_size)
 
     def forward_fused_infer_attention(
         self,
@@ -2400,24 +2009,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # cann_ops_transformer.flash_attn handles all attention states
         # (prefill/decode/chunked) with first-axis non-contiguous paged
-        # caches. Eager runs call the adapter directly; during ACLGraph
-        # capture only the main op is captured on the builder-refreshed
-        # persistent buffers (metadata / cu_seqlens_q / seqused_kv /
-        # block_table), mirroring the DSA/SFA tiling-sink discipline.
-        if self._use_cann_ops_flash_attn:
-            if not getattr(_EXTRA_CTX, "capturing", False):
-                eager_output = self._forward_cann_ops_flash_attn(query, key, value, kv_cache, attn_metadata, output)
-                if eager_output is not None:
-                    return eager_output
-            else:
-                graph_output = self._forward_cann_ops_flash_attn_graph(query, kv_cache, attn_metadata, output)
-                if graph_output is not None:
-                    return graph_output
-            # Per-layer fallback (asymmetric K/V, or first-step graph layout
-            # disagreement with the builder's refresh): the captured graph
-            # keeps the FIA paths below.
-
-        if (
+        # caches, in both eager runs and ACLGraph capture: the main op reads
+        # the builder-refreshed persistent buffers, mirroring the DSA/SFA
+        # tiling-sink discipline (PR #15336).
+        if self._use_flash_attn(attn_metadata, key, value):
+            flash_output = self._forward_flash_attn(query, key, value, attn_metadata, kv_cache)
+            output[: attn_metadata.flash_attn_num_tokens] = flash_output
+        elif (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)

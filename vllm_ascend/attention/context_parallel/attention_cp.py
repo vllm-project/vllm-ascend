@@ -94,6 +94,10 @@ class AscendAttentionDCPMetadataBuilder(
 
     metadata_cls = AscendAttentionDCPMetadata
 
+    @property
+    def requires_exact_host_seq_lens(self) -> bool:
+        return True
+
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,

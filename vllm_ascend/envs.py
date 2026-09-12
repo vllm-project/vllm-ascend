@@ -77,9 +77,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
     # Whether to use cann_ops_transformer.flash_attn for GQA attention on
-    # Ascend A5. This operator natively supports first-axis (block axis)
-    # non-contiguous paged KV caches produced by hybrid models. "0" (default)
-    # keeps the npu_fused_infer_attention_score path; "1" opts in.
+    # Ascend A5 (PR #15336 integration). This operator natively supports
+    # first-axis (block axis) non-contiguous paged KV caches produced by
+    # hybrid models. "0" (default) keeps the
+    # npu_fused_infer_attention_score path; "1" opts in.
     "VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN": lambda: bool(int(os.getenv("VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN", "0"))),
 }
 
