@@ -27,6 +27,7 @@ import typing
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
@@ -144,11 +145,11 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
-        # The custom compressor op consumes ND weights directly.
+        # CANN Compressor consumes ND weights directly.
         self.wkv.skip_weight_nz_conversion = True
         self.wgate.skip_weight_nz_conversion = True
 
-        # The DSV4 compressor kernel only accepts FP32 norm_weight.
+        # Keep the post-compression RMSNorm and RoPE computation in FP32.
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
 
         state_dtype = torch.float32
@@ -207,18 +208,34 @@ class Compressor(nn.Module):
             self.wgate.weight,
             state_cache.squeeze(-2),
             self.ape,
-            self.norm.weight,
-            compress_sin.view(-1, compress_sin.shape[-1]),
-            compress_cos.view(-1, compress_cos.shape[-1]),
             state_block_table=state_metadata.block_table,
             cu_seqlens=compressor_metadata.query_start_loc,
             seqused=None,
             start_pos=compressor_metadata.start_pos,
-            rope_head_dim=self.rope_head_dim,
             cmp_ratio=self.compress_ratio,
             coff=2 if self.overlap else 1,
-            norm_eps=self.norm_eps,
-            rotary_mode=2,
             cache_mode=1,
         )
+        # The formal operator sizes its output from x and cu_seqlens. Metadata
+        # can exclude trailing graph-padding tokens; only those rows are used.
+        assert compressed_kv.shape[0] >= compress_cos.shape[0], "Compressor output is smaller than its metadata"
+        compressed_kv = compressed_kv[: compress_cos.shape[0]]
+        compressed_kv = self._postprocess(compressed_kv, compress_cos, compress_sin)
         return compressed_kv, slot_mapping
+
+    def _postprocess(self, compressed_kv: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        if compressed_kv.shape[0] == 0:
+            return compressed_kv
+        # CANN Compressor returns the raw weighted reduction in the input dtype.
+        # Restore the RMSNorm and partial interleave RoPE of the former fused op,
+        # without another low-precision round trip between these two stages.
+        output_dtype = compressed_kv.dtype
+        normalized, _ = torch_npu.npu_rms_norm(compressed_kv.float(), self.norm.weight, self.norm_eps)
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            normalized.unsqueeze(1),
+            cos.view(-1, 1, cos.shape[-1]),
+            sin.view(-1, 1, sin.shape[-1]),
+            rotary_mode="interleave",
+            partial_slice=[normalized.shape[-1] - self.rope_head_dim, normalized.shape[-1]],
+        )
+        return normalized.to(output_dtype)

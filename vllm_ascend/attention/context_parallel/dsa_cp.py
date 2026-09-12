@@ -1841,19 +1841,17 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 self.compressor_wgate.weight,
                 state_cache.squeeze(-2),
                 self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
                 state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
                 start_pos=req_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
                 cmp_ratio=self.compress_ratio,
                 coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
                 cache_mode=1,
+            )
+            assert self.compressor is not None
+            compressed_kv = self.compressor._postprocess(
+                compressed_kv[: compress_cos.shape[0]], compress_cos, compress_sin
             )
 
             if compressed_kv.numel() == 0:
@@ -1999,20 +1997,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.indexcom_wgate.weight,
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
-            self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
             state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
             start_pos=indexer_kv_scale_metadata.req_metadata.start_pos,
-            rope_head_dim=self.rope_head_dim,
             cmp_ratio=self.compress_ratio,
             coff=coff,
-            norm_eps=self.compressor_norm_eps,
-            rotary_mode=2,
             cache_mode=1,
         )
+        kv = self.indexer.compressor._postprocess(kv[: compressed_cos.shape[0]], compressed_cos, compressed_sin)
 
         if kv.numel() == 0:
             return

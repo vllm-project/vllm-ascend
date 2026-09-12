@@ -790,43 +790,46 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     return {y, expert_idx, out};
 }
 
-std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, const at::Tensor &norm_weight,
-                                                          const at::Tensor &rope_sin, int64_t cmp_ratio, int64_t coff)
+at::Tensor construct_compressor_output_tensor(const at::Tensor &x, const at::Tensor &wkv,
+                                             const c10::optional<at::Tensor> &cu_seqlens,
+                                             int64_t cmp_ratio, int64_t coff)
 {
-    constexpr int DIM_3 = 3;
-    auto x_dim = x.dim();
+    constexpr int BSH_RANK = 3;
     c10::SymDimVector cmp_kv_size;
-    at::Tensor cmp_kv;
-    c10::SymInt cmp_s(0);
-    if (x_dim == DIM_3) {
-        cmp_s = ceil_div(x.sym_size(1), cmp_ratio);
-        cmp_kv_size = {x.sym_size(0), cmp_s, norm_weight.sym_size(0)};
+    const auto head_dim = wkv.sym_size(0) / c10::SymInt(coff);
+    if (x.dim() == BSH_RANK) {
+        const auto cmp_s = ceil_div(x.sym_size(1), cmp_ratio);
+        cmp_kv_size = {x.sym_size(0), cmp_s, head_dim};
     } else {
-        cmp_s = rope_sin.sym_size(0);
-        cmp_kv_size = {cmp_s, norm_weight.sym_size(0)};
+        TORCH_CHECK(cu_seqlens.has_value(), "compressor TH layout requires cu_seqlens");
+        const auto batch_size = cu_seqlens->sym_size(0) - c10::SymInt(1);
+        const auto cmp_s = x.sym_size(0).min(x.sym_size(0) / c10::SymInt(cmp_ratio) + batch_size);
+        cmp_kv_size = {cmp_s, head_dim};
     }
-
-    cmp_kv = at::empty_symint(cmp_kv_size, x.options().dtype(x.dtype()));
-
-    return std::tuple<at::Tensor>(cmp_kv);
+    return at::empty_symint(cmp_kv_size, x.options());
 }
 
-std::tuple<at::Tensor>
+at::Tensor
 compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate, at::Tensor &state_cache,
-                const at::Tensor &ape, const at::Tensor &norm_weight, const at::Tensor &rope_sin,
-                const at::Tensor &rope_cos, const c10::optional<at::Tensor> &state_block_table,
+                const at::Tensor &ape, const c10::optional<at::Tensor> &state_block_table,
                 const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
-                const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio, int64_t coff,
-                double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+                const c10::optional<at::Tensor> &start_pos, int64_t cmp_ratio, int64_t coff, int64_t cache_mode)
 {
-    // construct the output tensor
-    auto x_dim = x.dim();
-    auto norm_weight_dim = norm_weight.dim();
-    auto rope_sin_dim = rope_sin.dim();
-
-    std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
-
-    return output;
+    constexpr int TH_RANK = 2;
+    constexpr int BSH_RANK = 3;
+    TORCH_CHECK(x.dim() == TH_RANK || x.dim() == BSH_RANK, "compressor x must have rank 2 or 3");
+    TORCH_CHECK(wkv.dim() == TH_RANK, "compressor wkv must have rank 2");
+    TORCH_CHECK(cmp_ratio > 0, "compressor cmp_ratio must be positive");
+    TORCH_CHECK(coff == 1 || coff == 2, "compressor coff must be 1 or 2");
+    TORCH_CHECK(wkv.sym_size(0) % c10::SymInt(coff) == 0, "compressor wkv rows must be divisible by coff");
+    TORCH_CHECK(state_cache.dim() == BSH_RANK, "compressor state_cache must have rank 3");
+    if (x.dim() == TH_RANK) {
+        TORCH_CHECK(cu_seqlens.has_value() && cu_seqlens->dim() == 1,
+                    "compressor TH layout requires a rank-1 cu_seqlens with B+1 entries");
+    } else {
+        TORCH_CHECK(!cu_seqlens.has_value(), "compressor BSH layout requires cu_seqlens=None");
+    }
+    return construct_compressor_output_tensor(x, wkv, cu_seqlens, cmp_ratio, coff);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
