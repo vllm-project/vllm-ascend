@@ -24,7 +24,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 Requires 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO:
 
-- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-8B-Instruct`: [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-8B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
 Requires 1 card on Ascend950DT series (96GB × 8) node.
 
@@ -32,7 +32,7 @@ Requires 1 card on Ascend950DT series (96GB × 8) node.
 
 Requires 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products:
 
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+- `Qwen3-VL-32B-Instruct`: [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-32B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
 
 Requires 1 card on Ascend950DT series (96GB × 8) node.
 

@@ -22,11 +22,11 @@ The support matrix records the maximum verified capability for this model. The s
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
-- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
-- `Qwen3.5-397B-A17B-w4a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp).
-- `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8)
-- `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4)
+- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3.5-397B-A17B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
+- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
+- `Qwen3.5-397B-A17B-w4a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp).
+- `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8)
+- `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4)
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 

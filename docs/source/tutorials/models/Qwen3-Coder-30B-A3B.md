@@ -22,8 +22,8 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                               | Hardware Requirement                                                                             | Download                                                                                |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct)          |
-| Qwen3-Coder-30B-A3B-Instruct-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
+| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-Coder-30B-A3B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct)          |
+| Qwen3-Coder-30B-A3B-Instruct-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
 | Eagle3 Draft Model                  | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)                           |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
