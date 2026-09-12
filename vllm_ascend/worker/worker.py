@@ -796,6 +796,12 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if (
+            getattr(self, "use_v2_model_runner", False)
+            and getattr(self.model_runner, "is_pooling_model", False)
+            and output is None
+        ):
+            output = self.model_runner.pool()
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 

@@ -247,6 +247,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.kv_cache_config = self.kv_cache_config
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -349,6 +350,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         attn_state = build_attn_state(
             self.vllm_config,
+            self.kv_cache_config,
             self.input_buffers.seq_lens_np,
             num_reqs,
             num_scheduled_tokens_np,
