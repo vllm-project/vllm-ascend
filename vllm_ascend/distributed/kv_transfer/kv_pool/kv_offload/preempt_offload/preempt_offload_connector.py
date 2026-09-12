@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""RecomputeCPUOffloadConnector: minimal CPU KV cache offloading."""
+"""PreemptOffloadConnector: minimal CPU KV cache offloading."""
 
 import math
 from collections.abc import Iterable
@@ -19,14 +19,14 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (
-    RecomputeCPUOffloadScheduler,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager import (
+    PreemptOffloadScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
-    RecomputeCPUOffloadMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
+    PreemptOffloadMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (
-    RecomputeCPUOffloadWorker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker import (
+    PreemptOffloadWorker,
 )
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
+class PreemptOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache preservation for recompute-preempted requests."""
 
     @staticmethod
@@ -91,11 +91,11 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
             extra_config, world_size
         )
 
-        self.scheduler_manager: RecomputeCPUOffloadScheduler | None = None
-        self.worker_handler: RecomputeCPUOffloadWorker | None = None
+        self.scheduler_manager: PreemptOffloadScheduler | None = None
+        self.worker_handler: PreemptOffloadWorker | None = None
 
         logger.info(
-            "RecomputeCPUOffloadConnector: role=%s, per_rank_bytes=%s, "
+            "PreemptOffloadConnector: role=%s, per_rank_bytes=%s, "
             "host_memory_ratio=%s, world_size=%d, offload_prefix_caching=%s",
             role.name,
             cpu_capacity_per_rank,
@@ -105,7 +105,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         )
 
         if role == KVConnectorRole.SCHEDULER:
-            self.scheduler_manager = RecomputeCPUOffloadScheduler(
+            self.scheduler_manager = PreemptOffloadScheduler(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
@@ -113,7 +113,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
                 offload_host_memory_ratio,
             )
         elif role == KVConnectorRole.WORKER:
-            self.worker_handler = RecomputeCPUOffloadWorker(
+            self.worker_handler = PreemptOffloadWorker(
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_per_rank,
@@ -132,7 +132,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         super().bind_connector_metadata(connector_metadata)
         if self.worker_handler is not None:
-            assert isinstance(connector_metadata, RecomputeCPUOffloadMetadata)
+            assert isinstance(connector_metadata, PreemptOffloadMetadata)
             self.worker_handler.bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
@@ -142,7 +142,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         if self.worker_handler is not None:
-            assert isinstance(kv_connector_metadata, RecomputeCPUOffloadMetadata)
+            assert isinstance(kv_connector_metadata, PreemptOffloadMetadata)
             self.worker_handler.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -180,7 +180,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
 
     # --- Scheduler-side methods ---
 
-    # NOTE: New API only for RecomputeCPUOffloadConnector.
+    # NOTE: New API only for PreemptOffloadConnector.
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         if self.scheduler_manager is not None:
             self.scheduler_manager.bind_gpu_block_pool(gpu_block_pool)
@@ -223,7 +223,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.build_connector_meta(scheduler_output)
-        return RecomputeCPUOffloadMetadata()
+        return PreemptOffloadMetadata()
 
     def update_connector_output(
         self,
@@ -250,7 +250,7 @@ class RecomputeCPUOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.request_finished_all_groups(request, block_ids)
         return False, None
 
-    # NOTE: New API only for RecomputeCPUOffloadConnector.
+    # NOTE: New API only for PreemptOffloadConnector.
     def has_pending_transfers(self) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_transfers()

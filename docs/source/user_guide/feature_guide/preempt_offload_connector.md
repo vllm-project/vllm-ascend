@@ -1,12 +1,12 @@
-# Recompute CPU Offload Guide
+# Preempt Offload Guide
 
 ## Overview
 
-`RecomputeCPUOffloadConnector` preserves the KV cache of requests that are
+`PreemptOffloadConnector` preserves the KV cache of requests that are
 preempted by the Decode-side recompute scheduler. When HBM KV blocks are not
 enough, `RecomputeScheduler` may preempt a running Decode request. Without this
 connector, the request falls back to the original recompute path and may be sent
-back to the Prefill node to run prefill again. With recompute CPU offload
+back to the Prefill node to run prefill again. With preempt offload
 enabled, the already-computed KV blocks are copied from HBM to CPU DRAM before
 the HBM blocks are reused, and copied back to HBM when the request is scheduled
 again.
@@ -26,7 +26,7 @@ full prompt recompute path when their KV state can be preserved locally.
 
 * **Recompute preemption**: When Decode-side HBM KV cache is exhausted,
   `RecomputeScheduler` can preempt a running request and later resume it.
-* **CPU DRAM preservation**: `RecomputeCPUOffloadConnector` stores the
+* **CPU DRAM preservation**: `PreemptOffloadConnector` stores the
   preempted request's computed KV blocks in CPU memory.
 * **H2D restore**: When the preempted request is scheduled again, the connector
   restores the preserved KV blocks before model forward.
@@ -35,15 +35,15 @@ full prompt recompute path when their KV state can be preserved locally.
   falls back to the original recompute behavior.
 * **`MultiConnector` integration**: In P/D disaggregation, use
   `MultiConnector` to combine the P/D connector, such as `MooncakeConnectorV1`,
-  with `RecomputeCPUOffloadConnector` on Decode nodes.
+  with `PreemptOffloadConnector` on Decode nodes.
 
 ## Configuration Parameters
 
-`RecomputeCPUOffloadConnector` is configured through `kv-transfer-config`.
+`PreemptOffloadConnector` is configured through `kv-transfer-config`.
 
 | Parameter | Description |
 | :--- | :--- |
-| `kv_connector` | Must be set to `RecomputeCPUOffloadConnector`. |
+| `kv_connector` | Must be set to `PreemptOffloadConnector`. |
 | `kv_role` | Set to `kv_consumer` on Decode nodes. |
 | `cpu_bytes_to_use_per_rank` | Optional. CPU memory budget in bytes used by each rank/card. This has the highest priority. |
 | `cpu_bytes_to_use` | Optional. Total CPU memory budget in bytes for this vLLM instance. The connector divides it by `world_size`. This is used when `cpu_bytes_to_use_per_rank` is absent. |
@@ -130,8 +130,8 @@ docker run --rm \
 ## Usage with P/D Disaggregation
 
 On Decode nodes, configure `MultiConnector` with both the P/D connector and
-`RecomputeCPUOffloadConnector`. The P/D connector handles KV transfer from
-Prefill to Decode, while `RecomputeCPUOffloadConnector` handles Decode-side
+`PreemptOffloadConnector`. The P/D connector handles KV transfer from
+Prefill to Decode, while `PreemptOffloadConnector` handles Decode-side
 preemption preservation and restore.
 
 The following example uses `MooncakeConnectorV1` for P/D KV transfer.
@@ -170,7 +170,7 @@ python3 -m vllm.entrypoints.openai.api_server \
             }
           },
           {
-            "kv_connector": "RecomputeCPUOffloadConnector",
+            "kv_connector": "PreemptOffloadConnector",
             "kv_role": "kv_consumer",
             "kv_connector_extra_config": {
               "cpu_bytes_to_use_per_rank": 17179869184,
@@ -190,22 +190,22 @@ connectors.
 
 ## Standalone Connector Example
 
-`RecomputeCPUOffloadConnector` must be used together with the vLLM-Ascend
+`PreemptOffloadConnector` must be used together with the vLLM-Ascend
 `RecomputeScheduler`. Because `RecomputeScheduler` is only supported on
-P/D-disaggregated Decode nodes, recompute CPU offload is currently only
+P/D-disaggregated Decode nodes, preempt offload is currently only
 available for P/D-disaggregated Decode nodes as well.
 
 The following standalone connector configuration is intended only as a minimal
 configuration fragment for validating the recompute-offload path on a
 P/D-disaggregated Decode node. It is not a PD-mixed deployment mode. In
-PD-mixed or normal non-P/D deployments, do not enable recompute CPU offload; the
+PD-mixed or normal non-P/D deployments, do not enable preempt offload; the
 engine uses the normal vLLM recompute behavior instead.
 
 ```python
 from vllm.config import KVTransferConfig
 
 kv_transfer_config = KVTransferConfig(
-    kv_connector="RecomputeCPUOffloadConnector",
+    kv_connector="PreemptOffloadConnector",
     kv_role="kv_consumer",
     kv_connector_extra_config={
         "cpu_bytes_to_use_per_rank": 17179869184,
@@ -220,7 +220,7 @@ For online serving:
 vllm serve /path/to/model \
     --additional-config '{"scheduler_config":{"recompute_scheduler_enable":true}}' \
     --kv-transfer-config '{
-        "kv_connector": "RecomputeCPUOffloadConnector",
+        "kv_connector": "PreemptOffloadConnector",
         "kv_role": "kv_consumer",
         "kv_connector_extra_config": {
             "cpu_bytes_to_use_per_rank": 17179869184,
@@ -266,7 +266,7 @@ allocated for the resumed request.
 * The feature is only intended for Decode nodes in P/D disaggregation. It is not
   supported in PD-mixed or normal non-P/D deployments.
 * Do not enable `scheduler_config.recompute_scheduler_enable` in PD-mixed deployments. Without
-  P/D-disaggregated Decode-side `RecomputeScheduler`, recompute CPU offload is
+  P/D-disaggregated Decode-side `RecomputeScheduler`, preempt offload is
   not active and vLLM follows the normal recompute path.
 * When running in Docker with a large per-rank offload budget, reserve enough
   shared memory. For typical A3 deployments with 16 GiB per-card offload, use
@@ -275,7 +275,7 @@ allocated for the resumed request.
 * Current D2H and H2D transfers use basic torch copy operations. They are
   correctness-oriented and not yet optimized for transfer throughput.
 * Qwen3.5 with async scheduling is not fully supported yet. Disable async
-  scheduling when using recompute CPU offload with Qwen3.5 models.
+  scheduling when using preempt offload with Qwen3.5 models.
 * If CPU memory capacity is insufficient, the connector skips offload for that
   request and the scheduler falls back to the original recompute behavior.
 
@@ -303,8 +303,8 @@ Look for logs similar to:
 
 ```text
 Recompute preemption offload enabled for request ...
-Created recompute offload state for request ...
-Prepared recompute offload H2D load for request ...
+Created preempt offload state for request ...
+Prepared preempt offload H2D load for request ...
 ```
 
 If offload cannot be prepared, logs may show that CPU cache free blocks are
@@ -313,10 +313,10 @@ insufficient, and the request will fall back to the original recompute path.
 ### Is this the same as KV Cache CPU Offload?
 
 No. `KV Cache CPU Offload` is a prefix-cache offload path for inactive KV cache
-blocks. `RecomputeCPUOffloadConnector` is specifically for preserving KV blocks
+blocks. `PreemptOffloadConnector` is specifically for preserving KV blocks
 of requests preempted by the Decode-side recompute scheduler.
 
 ## Reference
 
 For design background and implementation details, see
-[#10820: Recompute CPU Offload Connector](https://github.com/vllm-project/vllm-ascend/issues/10820).
+[#10820: Preempt Offload Connector](https://github.com/vllm-project/vllm-ascend/issues/10820).
