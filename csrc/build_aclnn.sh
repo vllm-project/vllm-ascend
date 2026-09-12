@@ -97,7 +97,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_sk"
-        "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
@@ -165,7 +164,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
-        "moe_grouped_matmul"
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"

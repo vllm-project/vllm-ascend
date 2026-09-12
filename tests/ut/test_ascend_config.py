@@ -182,6 +182,7 @@ class TestAscendConfig(TestBase):
     def test_vllm_independent_subconfigs_are_not_required(self):
         config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
 
+        self.assertEqual(config.kvpp_config.size, 1)
         self.assertFalse(config.xlite_graph_config.enabled)
         self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
         self.assertFalse(config.scheduler_config.short_request_first_config.enabled)
@@ -347,6 +348,55 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertTrue(ascend_compilation_config.enable_super_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_super_kernel_explicit_disable(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": False,
+            },
+            "refresh": True,
+        }
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self, _mock_profile):
+        cfg = AscendCompilationConfig(enable_static_kernel=True)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=False)
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=True, enable_super_kernel=False)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel="true")
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig()
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_ascend_compilation_config_rejects_super_kernel_without_static_kernel(self, _mock_profile):
+        with self.assertRaisesRegex(ValueError, "Super kernel generation requires static kernel to be enabled"):
+            AscendCompilationConfig(enable_static_kernel=False, enable_super_kernel=True)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -465,10 +515,16 @@ class TestAscendConfig(TestBase):
 
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
         self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
         self.assertIn(
             "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
+            warning_messages,
+        )
+        self.assertIn(
+            "super kernel requires static kernel, which is not supported by the current hardware profile. "
+            "Disabling it.",
             warning_messages,
         )
 
@@ -1431,3 +1487,65 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.additional_config = {"combine_quant_mode": "true"}
         with self.assertRaises(ValueError):
             init_ascend_config(vc)
+
+
+class TestKVPPConfig(TestBase):
+    def test_enable_switch_uses_tp_size(self):
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for additional, tp, expected in (
+            (None, 4, 1),
+            ({}, 4, 1),
+            ({"enable_kvpp": False}, 4, 1),
+            ({"enable_kvpp": "false"}, 4, 1),
+            ({"enable_kvpp": True}, 4, 4),
+            ({"enable_kvpp": "true"}, 4, 4),
+            ({"enable_kvpp": True}, 1, 1),
+        ):
+            with self.subTest(additional=additional, tp=tp):
+                config = make_kvpp_config(tp)
+                config.additional_config = additional
+                self.assertEqual(KVPPConfig.from_vllm_config(config).size, expected)
+        config.additional_config = {"enable_kvpp": "invalid"}
+        with self.assertRaisesRegex(ValueError, "enable_kvpp"):
+            KVPPConfig.from_vllm_config(config)
+
+    def test_supported_configuration_and_restrictions(self):
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+        from vllm_ascend.platform import _validate_parallel_config
+
+        config = make_kvpp_config()
+        KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config = None
+        KVPPConfig.from_vllm_config(config).validate(config)
+        restrictions = (
+            ("parallel_config", "prefill_context_parallel_size", 2, "PCP"),
+            ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
+            (None, "kv_transfer_config", object(), "transfer"),
+            ("model_config", "enforce_eager", False, "eager"),
+            ("model_config", "use_mla", False, "MLA"),
+            ("model_config", "is_hybrid", True, "MLA"),
+            ("speculative_config", "method", "dspark", "mtp"),
+            ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
+        )
+        for section, field, value, message in restrictions:
+            with self.subTest(field=field):
+                config = make_kvpp_config()
+                config.use_v2_model_runner = True
+                setattr(getattr(config, section) if section else config, field, value)
+                # Reach KVPP validation through the real platform entry point.
+                with self.assertRaisesRegex(ValueError, message):
+                    _validate_parallel_config(config)
+
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_config_factory_keeps_kvpp_enabled(self, _check_config):
+        clear_ascend_config()
+        self.addCleanup(clear_ascend_config)
+        self.addCleanup(clear_enable_sp)
+        config = VllmConfig()
+        config.parallel_config.tensor_parallel_size = 4
+        config.additional_config = {"enable_kvpp": True}
+        actual = init_ascend_config(config)
+        self.assertEqual(actual.kvpp_config.size, 4)

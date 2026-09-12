@@ -164,3 +164,10 @@ msgstr "| --prefiller-port | 所有预填充端口 |"
 
 msgid "| --decoder-ports | All decoder ports |"
 msgstr "| --decoder-ports | 所有解码端口 |"
+
+msgid ""
+"For P/D transfer priority settings, see [QoS "
+"Configuration](pd_disaggregation_mooncake_multi_node.md#qos-configuration)."
+msgstr ""
+"关于 P/D 传输优先级设置，请参阅 [QoS 配置](pd_disaggregation_mooncake_multi_node.md#qos-"
+"configuration)。"

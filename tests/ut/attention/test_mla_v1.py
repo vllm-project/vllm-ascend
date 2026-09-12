@@ -2274,6 +2274,88 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score_v2.assert_called_once()
 
+    def test_kvpp_waits_after_projection_before_cache_access(self):
+        from vllm_ascend.attention import mla_v1
+
+        hidden = torch.zeros(2, 4)
+        kv_cache = (torch.zeros(2, 1, 2), torch.zeros(2, 1, 2))
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
+        width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        decode, prefill = object(), object()
+        for decodes, prefills in ((1, 0), (0, 1), (1, 1)):
+            with self.subTest(decodes=decodes, prefills=prefills):
+                events.clear()
+
+                def project(_hidden):
+                    events.append("projection")
+                    return (torch.zeros(2, width),)
+
+                self.impl.fused_qkv_a_proj = project
+                self.impl.q_a_layernorm = torch.nn.Identity()
+                self.impl.layerwise_kv_cache_hook = SimpleNamespace(
+                    wait_for_layer=lambda name: events.append(("wait", name))
+                )
+                self.impl.mla_preprocess_decode = MagicMock(
+                    side_effect=lambda *_args: record_event("decode_cache", decode)
+                )
+                self.impl.mla_preprocess_prefill = MagicMock(
+                    side_effect=lambda *_args: record_event("prefill_cache", prefill)
+                )
+                metadata = SimpleNamespace(num_decodes=decodes, num_prefills=prefills)
+                with (
+                    patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
+                    patch.object(mla_v1, "notify_kv_cache_written"),
+                ):
+                    actual = self.impl._mla_preprocess("layer", hidden, kv_cache, metadata)
+                expected = ["projection", ("wait", "layer")]
+                if decodes:
+                    expected.append("decode_cache")
+                if prefills:
+                    expected.append("prefill_cache")
+                self.assertEqual(events, expected)
+                self.assertEqual(actual, (decode if decodes else None, prefill if prefills else None))
+
+    def test_kvpp_fused_decode_and_profile_hook(self):
+        from vllm_ascend.attention import mla_v1
+
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
+        self.impl.num_heads = 1
+        self.impl.v_head_dim = 2
+        self.impl.use_output_gate = False
+        self.impl.fa_quant_layer = False
+        self.impl.enable_mlapo = True
+        self.impl.use_mla_rope = True
+        self.impl.layerwise_kv_cache_hook = SimpleNamespace(wait_for_layer=lambda name: events.append(("wait", name)))
+        result = SimpleNamespace(ql_nope=None, q_pe=None, k_nope=None, k_pe=None, dequant_scale_q_nope=None)
+        self.impl.mla_preprocess_only_decode = MagicMock(
+            side_effect=lambda *_args: record_event("fused_cache", (result, None))
+        )
+        self.impl._forward_decode = MagicMock(return_value=torch.ones(2, 2))
+        self.impl.o_proj = MagicMock(side_effect=lambda x, **_kwargs: (x,))
+        hidden, output = torch.zeros(2, 4), torch.empty(2, 2)
+        metadata = SimpleNamespace(num_actual_tokens=2, num_decodes=2, num_prefills=0, num_decode_tokens=2)
+        with (
+            patch.object(mla_v1, "_EXTRA_CTX", SimpleNamespace(num_tokens=2)),
+            patch.object(mla_v1, "maybe_save_kv_layer_to_connector"),
+        ):
+            self.assertIs(self.impl.forward("layer", hidden, (torch.zeros(2, 1, 2),), metadata, output), output)
+            self.assertTrue(torch.all(output == 1))
+            self.assertEqual(events, [("wait", "layer"), "fused_cache"])
+            events.clear()
+            self.impl.forward("layer", hidden, (), None, output)
+        self.assertEqual(events, [])
+        self.assertEqual(torch.count_nonzero(output).item(), 0)
+
     def test_mla_preprocess(self):
         batch_size = 4
         seq_len = 8

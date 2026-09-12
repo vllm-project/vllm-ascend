@@ -22,16 +22,12 @@
 #                        most specific wins). Each entry has a ``default``
 #                        partition and an optional ``310p`` override for
 #                        files whose name contains ``_310p``.
-# - ``estimated_times:`` per-file estimated execution time in seconds, used
-#                        for load-balanced partitioning. Updated periodically
-#                        by the schedule_e2e_test workflow. Unlisted tests
-#                        default to 600s (10 minutes). File-level only:
-#                        bucketing and precision testing both work on files,
-#                        so ``::nodeid`` (method-level) entries are not
-#                        supported.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
+#
+# Per-file estimated execution times live in ``estimated_times.yaml`` so
+# timing-only updates do not force the full PR suite.
 #
 # A3 scheduling policy: the generic ``linux-aarch64-a3-N-`` labels are mixed
 # pools of 560T and 752T machines, i.e. scheduling on them picks a machine
@@ -44,6 +40,8 @@
 # === Curated Test Suites ===
 # Named test lists selected via ``select_tests.py --curated <name>``.
 curated_tests:
+  kvpp:
+    - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py

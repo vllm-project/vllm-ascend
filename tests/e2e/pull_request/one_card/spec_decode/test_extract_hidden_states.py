@@ -42,6 +42,8 @@ from vllm import LLM, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
 from vllm.inputs import TokensPrompt
 
+from vllm_ascend.utils import vllm_version_is
+
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 DENSE_MODEL = "Qwen/Qwen3-8B"
@@ -287,6 +289,9 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, m
             llm_kwargs["load_format"] = case.load_format
         if case.skip_tokenizer_init:
             llm_kwargs["skip_tokenizer_init"] = True
+
+        if case.use_v2_model_runner and vllm_version_is("0.28.0"):
+            pytest.skip("vLLM 0.28.0 does not support extract_hidden_states with MRV2")
 
         llm = LLM(**llm_kwargs)
 

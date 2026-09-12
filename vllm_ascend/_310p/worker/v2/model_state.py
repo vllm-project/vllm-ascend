@@ -79,6 +79,7 @@ class _Ascend310PModelStateMixin:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         if for_capture:
             self._record_capture_seq_lens(input_batch.seq_lens)
@@ -96,6 +97,7 @@ class _Ascend310PModelStateMixin:
             attn_groups,
             kv_cache_config,
             for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
         )
 
     def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
