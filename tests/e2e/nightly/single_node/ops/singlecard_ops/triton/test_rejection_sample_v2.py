@@ -9,9 +9,17 @@ import pytest
 import torch
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 
+from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 VOCAB_SIZE = 4096
+# Narrow vocab concentrates chi2 power per token (upstream #54282 regression).
+NARROW_VOCAB_SIZE = 16
+NARROW_NUM_TRIALS = 200_000
+# triton-ascend caps the flattened grid at 65535 and the block-stats kernel
+# launches num_logits programs, so large trial counts must be split into
+# batches (same constraint as the synthetic-mode test above).
+TRIALS_PER_CALL = 16_000
 
 pytest.importorskip("triton")
 if not (hasattr(torch, "npu") and torch.npu.is_available()):
@@ -725,6 +733,105 @@ def test_greedy_placeholder_emits_target_argmax():
     steps = torch.arange(K + 1, device=device).unsqueeze(0)
     emitted = sampled[steps < num_sampled.unsqueeze(1)]
     assert (emitted == target_argmax).all(), "Greedy sampling emitted a token that is not the target argmax"
+
+    gc.collect()
+    torch.npu.empty_cache()
+
+
+def _gumbel_drafted_tokens(
+    inputs: dict,
+    draft_logits_1d: torch.Tensor,
+    num_trials: int,
+    num_speculative_steps: int,
+) -> torch.Tensor:
+    """Proposals drawn with gumbel_sample, shaped like inputs["draft_sampled"].
+
+    _build_rejection_sample_inputs draws them with torch.multinomial, which is
+    independent of the resample noise by construction. Production drafts come
+    from gumbel_sample keyed by pos[t * (K + 1) + i] for step i of trial t --
+    the same entry _rejection_kernel and _resample_kernel read for that token --
+    so the draft and the residual compete for one noise stream.
+
+    NPU: pos is int32 (triton-ascend philox), matching the pos tensor built by
+    _build_rejection_sample_inputs.
+    """
+    k = num_speculative_steps
+    vocab_size = draft_logits_1d.shape[0]
+    device = draft_logits_1d.device
+    draft_tokens = gumbel_sample(
+        draft_logits_1d.unsqueeze(0).expand(num_trials * k, vocab_size).float(),
+        inputs["expanded_idx_mapping"].view(num_trials, k + 1)[:, :k].reshape(-1).contiguous(),
+        inputs["temperature"],
+        inputs["seed"],
+        inputs["pos"].view(num_trials, k + 1)[:, :k].reshape(-1).contiguous(),
+        apply_temperature=True,
+        is_drafting=True,
+    )
+    draft_sampled = torch.zeros(num_trials * (k + 1), dtype=torch.int64, device=device)
+    draft_sampled.view(num_trials, k + 1)[:, 1:] = draft_tokens.view(num_trials, k)
+    return draft_sampled
+
+
+@pytest.mark.parametrize("num_speculative_steps", [1, 3])
+@torch.inference_mode()
+def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int):
+    """The proposal and the residual resample must not share a noise vector.
+
+    Draws proposals on the same (seed, pos) stream the sampler verifies and
+    resamples with, then checks the output still follows the target. Conditioned
+    on a proposal winning the argmax, every other token's Gumbel is truncated
+    below that max -- most tightly for the tokens the draft ranked highest --
+    so a shared stream makes the residual under-weight exactly those tokens.
+
+    Runs narrow because the wide-vocab test above cannot resolve this: dropping
+    `is_drafting=True` in _gumbel_drafted_tokens takes position 0 from chi2 ~12
+    to ~1500 against a threshold of ~70 here, while leaving that test passing.
+    """
+    torch.manual_seed(42)
+    device = "npu"
+
+    # A draft that ranks tokens in exactly the opposite order rejects ~73% of
+    # proposals, so most trials reach the residual resample where the bias
+    # lives. The disagreement has to be constructed rather than sampled: two
+    # independent randn draws land close together often enough that the signal
+    # swings between chi2 ~14 and ~1900 depending on the seed. At temperature
+    # 1.0 the target needs no scaling before being passed in.
+    target_logits_1d = torch.randn(NARROW_VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = -target_logits_1d
+    k = num_speculative_steps
+
+    # Batched for the triton-ascend grid cap (see TRIALS_PER_CALL). Each batch
+    # offsets seed/pos so its noise stream is fresh, and the gumbel proposals
+    # are drawn AFTER the offset -- they must compete for the exact (seed, pos)
+    # stream that this batch's verification and resample kernels read.
+    sampled_parts = []
+    counts_parts = []
+    for start in range(0, NARROW_NUM_TRIALS, TRIALS_PER_CALL):
+        n = min(TRIALS_PER_CALL, NARROW_NUM_TRIALS - start)
+        batch = _build_rejection_sample_inputs(
+            target_logits_1d,
+            draft_logits_1d,
+            num_speculative_steps,
+            temperature=1.0,
+            num_trials=n,
+        )
+        batch["seed"] = batch["seed"] + start
+        batch["pos"] = batch["pos"] + start * (k + 1)
+        batch["draft_sampled"] = _gumbel_drafted_tokens(batch, draft_logits_1d, n, num_speculative_steps)
+        s, c = rejection_sample(**batch, num_speculative_steps=num_speculative_steps)
+        sampled_parts.append(s)
+        counts_parts.append(c)
+
+    sampled = torch.cat(sampled_parts)
+    num_sampled = torch.cat(counts_parts)
+
+    # Position 0 carries the power: every trial reaches it, while later
+    # positions are only reached on acceptance, which is rare by construction.
+    assert (num_sampled >= 1).all()
+    target_probs = torch.softmax(target_logits_1d, dim=0)
+    for pos in range(num_speculative_steps + 1):
+        accepted_mask = num_sampled >= pos + 1
+        _assert_distribution_match(sampled[accepted_mask, pos], target_probs, device, label=f"position {pos}")
 
     gc.collect()
     torch.npu.empty_cache()
