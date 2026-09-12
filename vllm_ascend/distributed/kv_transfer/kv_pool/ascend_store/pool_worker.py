@@ -402,7 +402,7 @@ class KVPoolWorker:
                 for layer_name in group_spec.layer_names
             }
             if physical_layers:
-                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                effective_num_layers = max(self.num_layers, len(physical_layers))
                 if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
@@ -463,10 +463,19 @@ class KVPoolWorker:
                 self.prefetch_layer_map = cache_layout.prefetch_layer_map
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
             else:
-                self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
-                self.independent_layers = self._layerwise_reuse_layout.independent_layers
-                self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
-                self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
+                layout = self._layerwise_reuse_layout
+                stage_globals = sorted(layout.layer_cache_specs)
+                if stage_globals:
+                    self.prefetch_layer_map, self.independent_layers = self._remap_layout_to_stage_local(
+                        layout.prefetch_layer_map,
+                        layout.independent_layers,
+                        stage_globals,
+                    )
+                else:
+                    self.prefetch_layer_map = layout.prefetch_layer_map
+                    self.independent_layers = layout.independent_layers
+                self.layerwise_offload = layout.has_layer_reuse
+                self.num_prefetch_layers = layout.num_prefetch_layers
         else:
             self.num_prefetch_layers = 1
             if self.use_layerwise:
@@ -486,6 +495,19 @@ class KVPoolWorker:
             self.num_layers,
             self.num_kv_cache_groups,
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
+        )
+
+    @staticmethod
+    def _remap_layout_to_stage_local(
+        prefetch_layer_map: dict[int, int],
+        independent_layers: list[int],
+        stage_globals: list[int],
+    ) -> tuple[dict[int, int], list[int]]:
+        """Translate a global-indexed reuse layout to stage-local indices."""
+        global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(stage_globals)}
+        return (
+            {global_to_local[layer]: global_to_local[source] for layer, source in prefetch_layer_map.items()},
+            [global_to_local[layer] for layer in independent_layers],
         )
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
@@ -1275,7 +1297,8 @@ class KVPoolWorker:
 
         Single-group models use the PR #11585 format (model@hash@rank) for
         backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups.
+        (model@group_id@hash@rank) to distinguish groups. PP stages also need
+        pp_rank because they share block hashes and TP/head rank numbering.
         """
         return self.layerwise_protocol.make_full_key(
             self.model_name,
@@ -1283,6 +1306,8 @@ class KVPoolWorker:
             block_hash_hex,
             self.head_or_tp_rank,
             self.num_kv_cache_groups,
+            self.pp_rank,
+            self.pp_size,
         )
 
     def _make_layerwise_partial_key(
@@ -1299,6 +1324,8 @@ class KVPoolWorker:
             block_index,
             end_token,
             self.head_or_tp_rank,
+            self.pp_rank,
+            self.pp_size,
         )
 
     def _refresh_allocated_gvas(self, keys: list[str]) -> None:
