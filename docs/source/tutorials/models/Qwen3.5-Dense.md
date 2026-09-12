@@ -4,9 +4,9 @@
 
 Qwen3.5-2B, Qwen3.5-4B, and Qwen3.5-9B are dense hybrid Mamba-Transformer language models in the Qwen3.5 family. They share the same hybrid attention design (GDN + full attention) and are suitable for general-purpose text generation tasks such as dialogue, content creation, and code generation.
 
-This document describes deployment and verification of these models on **Atlas 300I DUO** and **Atlas 200I Pro**, including environment preparation, Docker installation, single-node online deployment, functional verification, and tuning notes.
+This document describes deployment and verification of these models on **Atlas A2/A3 inference products**, **Atlas 300I DUO**, and **Atlas 200I Pro**, including environment preparation, Docker installation, single-node online deployment, functional verification, and tuning notes.
 
-It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. Support for Qwen3.5-2B/4B/9B on Atlas 300I DUO and Atlas 200I Pro starts from `vllm-ascend:v0.23.0rc1`.
+It is **strongly recommended to use the latest release candidate (rc) version or the latest official version** of `vllm-ascend`. Support for Qwen3.5-2B/4B/9B on Atlas 300I DUO and Atlas 200I Pro starts from `vllm-ascend:v0.23.0rc1`. For Atlas A2/A3 inference products, use the latest matching standard or `-a3` image.
 
 ## 2 Supported Features
 
@@ -18,11 +18,11 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-| Model | Version | Hardware Requirement | Download |
-|-------|---------|----------------------|----------|
-| Qwen3.5-2B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
-| Qwen3.5-4B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
-| Qwen3.5-9B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
+| Model | Atlas A2/A3 | Atlas 300I DUO / Atlas 200I Pro | Downloads |
+|-------|-------------|----------------------------------|-----------|
+| Qwen3.5-2B | BF16 | INT8 | [BF16](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) / [INT8](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
+| Qwen3.5-4B | BF16 | INT8 | [BF16](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) / [INT8](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
+| Qwen3.5-9B | BF16 | INT8 | [BF16](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) / [INT8](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
 
@@ -32,7 +32,79 @@ It is recommended to download the model weight to a local directory such as `/ro
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. As a minimum-version requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. Use the standard image for Atlas A2 inference products and the matching `-a3` image for Atlas A3 inference products. As a minimum-version requirement for Atlas 300I DUO and Atlas 200I Pro, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
+
+=== "Atlas A3 inference products"
+
+    Start the docker image on each node. Map only the devices that will be used if the machine is shared.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=16g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci8 \
+        --device /dev/davinci9 \
+        --device /dev/davinci10 \
+        --device /dev/davinci11 \
+        --device /dev/davinci12 \
+        --device /dev/davinci13 \
+        --device /dev/davinci14 \
+        --device /dev/davinci15 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
+=== "Atlas A2 inference products"
+
+    Start the docker image on each node. Map only the devices that will be used if the machine is shared.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=16g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 === "Atlas 300I DUO"
 
@@ -167,6 +239,55 @@ Expected result: The version information of `vllm-ascend` is displayed, confirmi
 
 ### 5.1 Single-Node Online Deployment
 
+#### Atlas A2/A3 inference products
+
+The following command provides a BF16 reference configuration for `Qwen3.5-9B`. The 2B and 4B variants use the same deployment pattern; replace `MODEL_PATH` and tune the memory-related arguments for the selected model and device capacity.
+
+```bash
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+# Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+export HCCL_BUFFSIZE=512
+# Whether OpenMP threads are bound to specific CPU cores
+export OMP_PROC_BIND=false
+# Number of OpenMP threads available for parallel regions
+export OMP_NUM_THREADS=1
+# Enables the Ascend task queue for asynchronous operator dispatch
+export TASK_QUEUE_ENABLE=1
+
+# Model weight path; can be a ModelScope model id or a local directory path
+export MODEL_PATH=Qwen/Qwen3.5-9B
+
+vllm serve $MODEL_PATH \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 1 \
+    --served-model-name qwen3.5 \
+    --max-num-seqs 32 \
+    --max-model-len 32768 \
+    --max-num-batched-tokens 8192 \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.90 \
+    --mamba-ssm-cache-dtype bfloat16 \
+    --dtype bfloat16 \
+    --no-enable-prefix-caching \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_cpu_binding": true}'
+```
+
+Key Parameter Descriptions:
+
+- `--dtype bfloat16` and `--mamba-ssm-cache-dtype bfloat16` select the BF16 path used by the GDN linear-attention layers on Atlas A2/A3.
+- `--tensor-parallel-size 1` is a simple single-device baseline. Increase TP only when the selected model dimensions and available devices support the requested degree of parallelism.
+- `--max-model-len`, `--max-num-batched-tokens`, `--max-num-seqs`, and `--gpu-memory-utilization` should be adjusted together according to the model size, workload, and available HBM.
+- Prefix caching is disabled in the reference command to provide a conservative baseline for the hybrid GDN/full-attention architecture. Enable it only after validating the selected Mamba cache mode for the workload.
+- MTP speculative decoding is optional. Enable `--speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}'` only when the checkpoint actually contains the Qwen3.5 MTP head. Some fine-tuned exports contain only the language-model backbone.
+
+#### Atlas 300I DUO / Atlas 200I Pro
+
 Single-node deployment completes both Prefill and Decode within the same node. `Qwen3.5-2B`, `Qwen3.5-4B`, and `Qwen3.5-9B` can be deployed on Atlas 300I DUO or Atlas 200I Pro.
 
 > **Parallelism note**: These platforms currently support the **TP** scenario. Choose **TP=1** or **TP=2** according to the available devices. On Atlas 200I Pro with a single visible NPU, use **TP=1**.
@@ -285,7 +406,7 @@ If the service starts successfully, the following startup log will be displayed:
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). If you used `--port 8080` or `-p 8080:8080`, adjust the URL accordingly.
+After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). The A2/A3 reference command uses port `8000`; the Atlas 300I DUO and Atlas 200I Pro examples use port `8080`. Adjust the URL according to the selected command and container network mode.
 
 **Completions API:**
 
@@ -377,6 +498,8 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are for reference only. The optimal configuration depends on model size, maximum input/output length, and actual device memory.
+>
+> **Atlas A2/A3**: Start from BF16 with TP=1 for Qwen3.5-2B/4B/9B, then increase TP or concurrency only after validating HBM usage and latency for the target workload. Configure `--max-model-len`, `--max-num-batched-tokens`, `--max-num-seqs`, and `--gpu-memory-utilization` together.
 >
 > **Atlas 300I DUO / Atlas 200I Pro**: Currently only the TP scenario is supported. Prefer **TP=1** on Atlas 200I Pro. On Atlas 300I DUO, **TP=1** and **TP=2** are both supported; choose according to the available devices. Configure `--max-model-len`, `--max-num-seqs`, and `--gpu-memory-utilization` based on the actual device memory; setting them too high may cause OOM.
 
