@@ -19,22 +19,23 @@
 #ifndef MSA_BLOCK_MMAD_H
 #define MSA_BLOCK_MMAD_H
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/gemm/helper.hpp"
-#include "catlass/gemm/tile/tile_copy.hpp"
-#include "catlass/gemm/tile/tile_mmad.hpp"
+#include "catlass/msa_catlass.hpp"
+#include "catlass/arch/msa_arch.hpp"
+#include "catlass/arch/msa_resource.hpp"
+#include "catlass/msa_coord.hpp"
+#include "catlass/msa_matrix_coord.hpp"
+#include "catlass/msa_gemm_coord.hpp"
+#include "catlass/layout/msa_layout.hpp"
+#include "catlass/gemm/msa_gemm_helper.hpp"
+#include "catlass/gemm/tile/msa_tile_copy.hpp"
+#include "catlass/gemm/tile/msa_tile_mmad.hpp"
 
 #include "../msa_index_score_common.h"
 
 namespace MsaIndexScoreNs {
 
-template <class AType_, class BType_, class CType_, uint32_t STAGES_IN = 3, bool USE_UNIT_FLAG_ = false>
+template <class AType_, class BType_, class CType_, uint32_t STAGES_IN = MSA_L1B_STAGES_FP16,
+          bool USE_UNIT_FLAG_ = false>
 class MsaBlockMmad {
 public:
     using ArchTag = Catlass::Arch::AtlasA2;
@@ -63,9 +64,8 @@ public:
     using L1BAlignHelper = Catlass::Gemm::helper::L1AlignHelper<ElementB, LayoutB>;
 
     // K (B) 的 L1 流水级数。非量化 3 级：fixpipe 减半（fp16 S）后 MTE2 的逐页延迟
-    // （~390ns，L2 命中）会成为新的关键路径，加深一级让 MTE2 提前两页预取。
-    // int8 保持 2 级：K 源是每 stile 复用的 per-core scratch，AIV 下一 stile 的 cast
-    // 会重写该区，更深的预取与 cast 重写产生竞态（实测 STAGES=3 下 int8 崩溃）。
+    // 会成为新的关键路径，加深一级让 MTE2 提前两页预取。
+    // A2/A3 int8 双槽 scratch 后同样 3 级：AIC 消费 slot[i] 时 AIV 只写 slot[i^1]。
     // L1 占用：A 32KB + 3×32KB B = 128KB / 512KB。
     static constexpr uint32_t STAGES = STAGES_IN;
     // 非量化路径开 unit flag：mmad 与 fixpipe 的依赖交给硬件互锁，省掉每页

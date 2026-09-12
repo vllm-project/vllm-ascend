@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file msa_index_score_epilogue.h
+ * \file msa_seg_row_max_epilogue.h
  * \brief AIV 侧 Epilogue：可选反量化列乘 -> atten_mask -> 分段 RowMax -> local_mask -> 写回。
  *
  * 数值路径：
@@ -18,16 +18,15 @@
  * local_mask 由 start_loc（query 所在逻辑 block）+ init/local_blocks 生成强制 +∞。
  */
 
-#ifndef MSA_INDEX_SCORE_EPILOGUE_H
-#define MSA_INDEX_SCORE_EPILOGUE_H
+#ifndef MSA_SEG_ROW_MAX_EPILOGUE_H
+#define MSA_SEG_ROW_MAX_EPILOGUE_H
 
 #include "kernel_operator.h"
 
-#include "catlass/arch/arch.hpp"
-#include "catlass/arch/resource.hpp"
+#include "catlass/arch/msa_arch.hpp"
+#include "catlass/arch/msa_resource.hpp"
 
 #include "../msa_index_score_common.h"
-#include "../msa_index_score_debug.h"
 #include "msa_index_score_task.h"
 
 namespace MsaIndexScoreNs {
@@ -41,8 +40,9 @@ public:
 
     // score 暂存容量：1 AIC : 2 AIV 下每个 subcore 最多拿到半个 M-tile 的行；
     // 一次 flush 覆盖 MSA_STAGE_BLOCKS 个 block（= 每行 1KB 连续写回）。
-    static constexpr uint32_t MSA_STAGE_ROWS = MSA_ROW_TILE_M / 2;
-    static constexpr uint32_t MSA_STAGE_BLOCKS = 256;
+    // int8：缩到 160，给 UB 尾部腾出整页 cast（48KB）；非量化保持 256。
+    static constexpr uint32_t MSA_STAGE_ROWS = MSA_ROW_TILE_M / MSA_AIV_PER_AIC;
+    static constexpr uint32_t MSA_STAGE_BLOCKS = IS_QUANT ? 160 : 256;
     static_assert(MSA_STAGE_BLOCKS % MSA_BLOCKS_PER_STILE == 0, "stage window must hold whole S-tiles");
 
     // UB 手工布局（字节偏移），catlass 不提供 UB allocator。
@@ -53,24 +53,26 @@ public:
     static constexpr uint32_t UB_OFF_T8 = UB_OFF_T64 + UB_SIZE_T64;
     static constexpr uint32_t UB_SIZE_T8 = MSA_REDUCE_ROWS * MSA_FP32_PER_BLOCK * sizeof(float);
     static constexpr uint32_t UB_OFF_ROWMAX = UB_OFF_T8 + UB_SIZE_T8;
-    static constexpr uint32_t UB_SIZE_ROWMAX = 512;
+    static constexpr uint32_t UB_SIZE_ROWMAX = MSA_REDUCE_ROWS * sizeof(float);
     // 反量化 scale 一页：block_size 个 fp32 = 512B。
     static constexpr uint32_t UB_OFF_DEQ = UB_OFF_ROWMAX + UB_SIZE_ROWMAX;
     static constexpr uint32_t UB_SIZE_DEQ = MSA_BLOCK_SIZE * sizeof(float);
     // 非量化：WholeReduceMax 的 fp16 输出（每 pass MSA_REDUCE_ROWS 个 half）。
     static constexpr uint32_t UB_OFF_RED16 = UB_OFF_DEQ + UB_SIZE_DEQ;
     static constexpr uint32_t UB_SIZE_RED16 = MSA_REDUCE_ROWS * sizeof(half);
-    // score 暂存：本 subcore 的行 × 一次 flush 覆盖的 block 数。逐 pass 只写 32B 到 GM
-    // 会把 MTE3 压到 ~9GB/s；改为在 UB 内按行累积、整行（≥1KB）一次写回。
-    static constexpr uint32_t UB_OFF_STAGE = ((UB_OFF_RED16 + UB_SIZE_RED16 + 511U) / 512U) * 512U;
+    // score 暂存：本 subcore 的行 × 一次 flush 覆盖的 block 数。
+    // 在 UB 内按行累积、整行（≥1KB）一次写回。
+    static constexpr uint32_t UB_OFF_STAGE =
+        ((UB_OFF_RED16 + UB_SIZE_RED16 + MSA_UB_ALIGN_BYTES - 1U) / MSA_UB_ALIGN_BYTES) * MSA_UB_ALIGN_BYTES;
     static constexpr uint32_t UB_SIZE_STAGE = MSA_STAGE_ROWS * MSA_STAGE_BLOCKS * sizeof(float);
     // 非量化：S16（fp16 载入缓冲）复用量化路径的 fp32 S 区（64KB = 两级 32KB 乒乓）。
-    // v0.7 PipeUtilization：aiv_mte2_wait_ratio≈0.84、aiv_mte2_ratio≈0.33、aiv_vec_ratio≈0.57，
     // 说明 GM→UB 与归约串行；两级缓冲让下一 pass 的 MTE2 叠在当前 pass 的 V 上。
     static constexpr uint32_t UB_OFF_S16 = UB_OFF_S;
     static constexpr uint32_t UB_SIZE_S16 = MSA_ROWS_PER_PASS * MSA_BLOCKS_PER_STILE * MSA_BLOCK_SIZE * sizeof(half);
     static constexpr uint32_t S16_STAGES = 2;
     static constexpr uint32_t UB_TOTAL = UB_OFF_STAGE + UB_SIZE_STAGE;
+    static constexpr uint32_t UB_OFF_TAIL =
+        ((UB_TOTAL + MSA_UB_ALIGN_BYTES - 1U) / MSA_UB_ALIGN_BYTES) * MSA_UB_ALIGN_BYTES;
     static_assert(UB_TOTAL <= ArchTag::UB_SIZE, "MsaSegRowMaxEpilogue UB out of bounds");
     static_assert(UB_OFF_S16 + S16_STAGES * UB_SIZE_S16 <= UB_OFF_T64, "S16 ping-pong overlaps T64");
 
@@ -149,39 +151,62 @@ public:
         }
     }
 
+    __aicore__ inline uint32_t SubRows() const
+    {
+        return mSub_;
+    }
+
+    __aicore__ inline uint32_t SubOff() const
+    {
+        return mOff_;
+    }
+
+    __aicore__ inline void BeginSTile(uint32_t blkBase)
+    {
+        if (mSub_ == 0U) {
+            return;
+        }
+        if (stageOn_ && (blkBase >= stageBlkBase_ + MSA_STAGE_BLOCKS)) {
+            FlushStage();
+            stageBlkBase_ = blkBase;
+            stageBlkEnd_ = blkBase;
+        }
+    }
+
+    __aicore__ inline void FinishSTile(uint32_t blkBase)
+    {
+        if (mSub_ == 0U) {
+            return;
+        }
+        stageBlkEnd_ = blkBase + MSA_BLOCKS_PER_STILE;
+    }
+
+    __aicore__ inline void ProcessOnePass(const AscendC::GlobalTensor<ElementS> &gS, const MsaTask &task,
+                                          uint32_t blkBase, uint32_t rowOff, uint32_t rows)
+    {
+        ProcessPass(gS, task, blkBase, rowOff, rows);
+    }
+
     /// 处理一个 S tile（MSA_BLOCKS_PER_STILE 个 sparse block）中属于本 subcore 的行。
     __aicore__ inline void ProcessSTile(const AscendC::GlobalTensor<ElementS> &gS, const MsaTask &task,
-                                        uint32_t blkBase, uint32_t subIdx, uint32_t subBlockNum, bool dumpDebug = false)
+                                        uint32_t blkBase)
     {
         if (mSub_ == 0U) {
             return;
         }
         const uint32_t mOff = mOff_;
         const uint32_t mSub = mSub_;
-        if (stageOn_ && (blkBase >= stageBlkBase_ + MSA_STAGE_BLOCKS)) {
-            FlushStage();
-            stageBlkBase_ = blkBase;
-            stageBlkEnd_ = blkBase;
-        }
-
-#if MSA_INDEX_SCORE_DEBUG
-        if (dumpDebug) {
-            AscendC::printf("[MSA_DBG][AIV] ProcessSTile blkBase=%u subIdx=%u mOff=%u mSub=%u "
-                            "fullEndBlk=%u visibleEndBlk=%u isQuant=%u\n",
-                            blkBase, subIdx, mOff, mSub, task.fullEndBlk, task.visibleEndBlk,
-                            static_cast<uint32_t>(isQuant_));
-        }
-#endif
+        BeginSTile(blkBase);
 
         if constexpr (IS_QUANT) {
             for (uint32_t p0 = 0; p0 < mSub; p0 += MSA_ROWS_PER_PASS) {
                 const uint32_t rows = MsaMinU32(MSA_ROWS_PER_PASS, mSub - p0);
-                ProcessPass(gS, task, blkBase, mOff + p0, rows, dumpDebug && (p0 == 0));
+                ProcessPass(gS, task, blkBase, mOff + p0, rows);
             }
         } else if (blkBase >= task.visibleEndBlk) {
             for (uint32_t p0 = 0; p0 < mSub; p0 += MSA_ROWS_PER_PASS) {
                 const uint32_t rows = MsaMinU32(MSA_ROWS_PER_PASS, mSub - p0);
-                ProcessPass(gS, task, blkBase, mOff + p0, rows, false);
+                ProcessPass(gS, task, blkBase, mOff + p0, rows);
             }
         } else {
             // 非量化可见 tile：pass i 的 MTE2 与 pass i-1 的 mask/reduce/stage 重叠。
@@ -196,7 +221,7 @@ public:
                 IssueS16(gS, rowOff, rows, stage);
                 if (hasPrev) {
                     WaitS16(prevStage);
-                    ProcessPass(gS, task, blkBase, prevRowOff, prevRows, dumpDebug && (prevRowOff == mOff), true);
+                    ProcessPass(gS, task, blkBase, prevRowOff, prevRows, true);
                     ReleaseS16(prevStage);
                 }
                 hasPrev = true;
@@ -207,11 +232,11 @@ public:
             }
             if (hasPrev) {
                 WaitS16(prevStage);
-                ProcessPass(gS, task, blkBase, prevRowOff, prevRows, false, true);
+                ProcessPass(gS, task, blkBase, prevRowOff, prevRows, true);
                 ReleaseS16(prevStage);
             }
         }
-        stageBlkEnd_ = blkBase + MSA_BLOCKS_PER_STILE;
+        FinishSTile(blkBase);
     }
 
 private:
@@ -248,23 +273,10 @@ private:
     /// 处理一个 pass（最多 MSA_ROWS_PER_PASS 行 × MSA_BLOCKS_PER_STILE 个 block）。
     /// sLoaded：非量化乒乓路径已把 S 搬进 ubS16_，跳过本函数内的 GM→UB。
     __aicore__ inline void ProcessPass(const AscendC::GlobalTensor<ElementS> &gS, const MsaTask &task, uint32_t blkBase,
-                                       uint32_t rowOff, uint32_t rows, bool dumpDebug, bool sLoaded = false)
+                                       uint32_t rowOff, uint32_t rows, bool sLoaded = false)
     {
         const bool allInvalid = (blkBase >= task.visibleEndBlk);
 
-#if MSA_INDEX_SCORE_DEBUG
-        if (dumpDebug) {
-            AscendC::printf("[MSA_DBG][AIV] ProcessPass rowOff=%u rows=%u allInvalid=%u STILE_WIDTH=%u\n", rowOff, rows,
-                            static_cast<uint32_t>(allInvalid), STILE_WIDTH);
-        }
-#endif
-
-#if MSA_INDEX_SCORE_DEBUG
-        uint32_t sDumpN = MSA_DEBUG_DUMP_ELEMS;
-        if (task.kvLen > 0 && task.kvLen <= 8) {
-            sDumpN = static_cast<uint32_t>(task.kvLen) + 3U;
-        }
-#endif
         if (!allInvalid) {
             if (!sLoaded) {
                 // 短 pass 只拷了部分行；SegRowMax 固定按 16 行归约，未写入区域必须是 -inf。
@@ -290,116 +302,24 @@ private:
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             }
 
-#if MSA_INDEX_SCORE_DEBUG
-            if (dumpDebug) {
-                AscendC::printf("[MSA_DBG][AIV] after DOT load S ub (row0, blk0 first %u fp32):\n", sDumpN);
-                MsaDumpUbSample(ubS_, MSA_DUMP_DESC_S_DOT, sDumpN);
-                AscendC::printf("[MSA_DBG][AIV] S_after_dot:");
-                MsaPrintUbFloats(ubS_, sDumpN);
-            }
-#endif
-
             if (isQuant_) {
                 ApplyDequantScale(task, blkBase, MSA_ROWS_PER_PASS);
-#if MSA_INDEX_SCORE_DEBUG
-                if (dumpDebug) {
-                    AscendC::printf("[MSA_DBG][AIV] S_after_dequant:");
-                    MsaPrintUbFloats(ubS_, sDumpN);
-                }
-#endif
             }
 
             ApplyMask(task, blkBase, rowOff, rows);
-
-#if MSA_INDEX_SCORE_DEBUG
-            if (dumpDebug) {
-                AscendC::printf("[MSA_DBG][AIV] after MASK S ub (row0, blk0 first %u fp32), "
-                                "maskRange=[fullEndBlk,visibleEndBlk)=[%u,%u):\n",
-                                sDumpN, task.fullEndBlk, task.visibleEndBlk);
-                MsaDumpUbSample(ubS_, MSA_DUMP_DESC_S_MASK, sDumpN);
-                AscendC::printf("[MSA_DBG][AIV] S_after_mask:");
-                MsaPrintUbFloats(ubS_, sDumpN);
-
-                // 逐行打印本 pass 的 validCount，核对 MASK 切分点。
-                for (uint32_t r = 0; r < rows && r < 8U; ++r) {
-                    const uint32_t rowInReq = task.mStart + rowOff + r;
-                    const uint32_t tOff = rowInReq / numQHeads_;
-                    const int32_t visibleKeyEnd = VisibleKeyEnd(task, static_cast<int32_t>(tOff));
-                    const uint32_t blk = blkBase; // 小用例通常只有 blk0
-                    int32_t validCount = visibleKeyEnd - static_cast<int32_t>(blk * MSA_BLOCK_SIZE);
-                    if (validCount < 0) {
-                        validCount = 0;
-                    }
-                    if (validCount > static_cast<int32_t>(MSA_BLOCK_SIZE)) {
-                        validCount = static_cast<int32_t>(MSA_BLOCK_SIZE);
-                    }
-                    AscendC::printf("[MSA_DBG][AIV] row r=%u flat=%u tokenOff=%u visibleEnd=%d validCount=%d\n", r,
-                                    rowInReq, tOff, visibleKeyEnd, validCount);
-                    if (validCount < static_cast<int32_t>(MSA_BLOCK_SIZE) && validCount >= 0) {
-                        const uint32_t base = (r * MSA_BLOCKS_PER_STILE) * MSA_BLOCK_SIZE;
-                        const uint32_t lo = (validCount >= 2) ? static_cast<uint32_t>(validCount - 2) : 0U;
-                        const uint32_t hi = static_cast<uint32_t>(validCount) + 3U;
-                        AscendC::printf("[MSA_DBG][AIV]   S_after_mask[%u:%u]:", lo, hi);
-                        AscendC::PipeBarrier<PIPE_ALL>();
-                        for (uint32_t i = lo; i < hi && i < MSA_BLOCK_SIZE; ++i) {
-                            AscendC::printf(" %f", ubS_.GetValue(base + i));
-                        }
-                        AscendC::printf("\n");
-                    }
-                }
-            }
-#endif
 
             if constexpr (IS_QUANT) {
                 SegRowMax();
             } else {
                 SegRowMaxWhole();
             }
-
-#if MSA_INDEX_SCORE_DEBUG
-            if (dumpDebug) {
-                AscendC::printf("[MSA_DBG][AIV] after MAX rowmax (rows[0:%u) x %u blocks):\n", rows,
-                                MSA_BLOCKS_PER_STILE);
-                MsaDumpUbSample(ubRowMax_, MSA_DUMP_DESC_SCORE_MAX, rows * MSA_BLOCKS_PER_STILE);
-                for (uint32_t r = 0; r < rows && r < 8U; ++r) {
-                    AscendC::printf("[MSA_DBG][AIV] score_after_max[r=%u]:", r);
-                    AscendC::PipeBarrier<PIPE_ALL>();
-                    for (uint32_t j = 0; j < MSA_BLOCKS_PER_STILE; ++j) {
-                        AscendC::printf(" %f", ubRowMax_.GetValue(r * MSA_BLOCKS_PER_STILE + j));
-                    }
-                    AscendC::printf("\n");
-                }
-            }
-#endif
         } else {
             AscendC::Duplicate(ubRowMax_, MSA_FILL_VALUE, MSA_REDUCE_ROWS);
             AscendC::PipeBarrier<PIPE_V>();
-#if MSA_INDEX_SCORE_DEBUG
-            if (dumpDebug) {
-                AscendC::printf("[MSA_DBG][AIV] allInvalid stile -> fill score with -inf\n");
-            }
-#endif
         }
 
         FillInvalidBlocks(task, blkBase);
         ApplyLocalMaskUb(task, blkBase, rows);
-
-#if MSA_INDEX_SCORE_DEBUG
-        if (dumpDebug) {
-            AscendC::printf("[MSA_DBG][AIV] final score before store (after fillInvalid+localMask), "
-                            "rows[0:%u) x %u blocks:\n",
-                            rows, MSA_BLOCKS_PER_STILE);
-            MsaDumpUbSample(ubRowMax_, MSA_DUMP_DESC_SCORE_FINAL, rows * MSA_BLOCKS_PER_STILE);
-            for (uint32_t r = 0; r < rows && r < 8U; ++r) {
-                AscendC::printf("[MSA_DBG][AIV] score_final[r=%u]:", r);
-                AscendC::PipeBarrier<PIPE_ALL>();
-                for (uint32_t j = 0; j < MSA_BLOCKS_PER_STILE; ++j) {
-                    AscendC::printf(" %f", ubRowMax_.GetValue(r * MSA_BLOCKS_PER_STILE + j));
-                }
-                AscendC::printf("\n");
-            }
-        }
-#endif
 
         if (stageOn_) {
             StageScore(blkBase, rowOff - mOff_, rows);
@@ -535,7 +455,7 @@ private:
             for (uint32_t g = 0; g < MSA_FP32_PER_REPEAT / MSA_BLOCKS_PER_STILE; ++g) {
                 bits |= (initBits << (g * MSA_BLOCKS_PER_STILE));
             }
-            uint64_t mask[2] = {bits, 0};
+            uint64_t mask[MSA_VEC_MASK_WORDS] = {bits, 0};
             AscendC::Duplicate<float>(ubRowMax_, MSA_LOCAL_SCORE_INIT, mask, repeats, 1,
                                       MSA_FP32_PER_REPEAT / MSA_FP32_PER_BLOCK);
             AscendC::PipeBarrier<PIPE_V>();
@@ -545,7 +465,7 @@ private:
             for (uint32_t g = 0; g < MSA_FP32_PER_REPEAT / MSA_BLOCKS_PER_STILE; ++g) {
                 bits |= (localBits << (g * MSA_BLOCKS_PER_STILE));
             }
-            uint64_t mask[2] = {bits, 0};
+            uint64_t mask[MSA_VEC_MASK_WORDS] = {bits, 0};
             AscendC::Duplicate<float>(ubRowMax_, MSA_LOCAL_SCORE_LOCAL, mask, repeats, 1,
                                       MSA_FP32_PER_REPEAT / MSA_FP32_PER_BLOCK);
             AscendC::PipeBarrier<PIPE_V>();
@@ -567,7 +487,7 @@ private:
             const uint32_t repeatBase = base + (validCount / MSA_FP32_PER_REPEAT) * MSA_FP32_PER_REPEAT;
             const uint32_t lane = validCount % MSA_FP32_PER_REPEAT;
             uint64_t bits = (lane == 0) ? ~0ULL : (~0ULL << lane);
-            uint64_t mask[2] = {bits, 0};
+            uint64_t mask[MSA_VEC_MASK_WORDS] = {bits, 0};
             AscendC::Duplicate<float>(ubS_[repeatBase], MSA_FILL_VALUE, mask, 1, 1,
                                       MSA_FP32_PER_REPEAT / MSA_FP32_PER_BLOCK);
         }
@@ -589,7 +509,7 @@ private:
         } else {
             hi = ~0ULL << (validCount - MSA_HALF_PER_MASK_WORD);
         }
-        uint64_t mask[2] = {lo, hi};
+        uint64_t mask[MSA_VEC_MASK_WORDS] = {lo, hi};
         AscendC::Duplicate<half>(ubS16_[base], FILL_VALUE_H, mask, 1, 1, MSA_BLOCK_SIZE / MSA_HALF_PER_BLOCK);
     }
 
@@ -631,7 +551,7 @@ private:
             }
             if (nValidScale > 0) {
                 const uint32_t bytes = nValidScale * static_cast<uint32_t>(sizeof(float));
-                if ((bytes % 32U) == 0U) {
+                if ((bytes % MSA_DATABLOCK_BYTES) == 0U) {
                     AscendC::DataCopy(ubDeqScale_, gScale_[scaleOff], nValidScale);
                 } else {
                     AscendC::DataCopyExtParams params;
@@ -723,7 +643,7 @@ private:
         for (uint32_t g = 0; g < MSA_FP32_PER_REPEAT / MSA_BLOCKS_PER_STILE; ++g) {
             bits |= (groupBits << (g * MSA_BLOCKS_PER_STILE));
         }
-        uint64_t mask[2] = {bits, 0};
+        uint64_t mask[MSA_VEC_MASK_WORDS] = {bits, 0};
         AscendC::Duplicate<float>(ubRowMax_, MSA_FILL_VALUE, mask,
                                   static_cast<uint8_t>(MSA_REDUCE_ROWS / MSA_FP32_PER_REPEAT), 1,
                                   MSA_FP32_PER_REPEAT / MSA_FP32_PER_BLOCK);
@@ -782,4 +702,4 @@ private:
 
 } // namespace MsaIndexScoreNs
 
-#endif // MSA_INDEX_SCORE_EPILOGUE_H
+#endif // MSA_SEG_ROW_MAX_EPILOGUE_H

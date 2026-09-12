@@ -51,6 +51,23 @@ def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activ
     )
 
 
+def _gmm_situ_quant_fusion_enabled(
+    use_mxfp_quant: bool,
+    mxfp_quant_dtype: QuantType | None,
+    activation: str | MoEActivation | None,
+    group_list_type: int,
+    is_per_channel_weight: bool,
+) -> bool:
+    return (
+        ASCEND_DEVICE_TYPE == AscendDeviceType.A5
+        and use_mxfp_quant
+        and mxfp_quant_dtype == QuantType.W4A8MXFP
+        and activation == MoEActivation.SITU
+        and group_list_type in (0, 1)
+        and not is_per_channel_weight
+    )
+
+
 def cumsum_group_list(
     group_list: torch.Tensor, src_list_type: int, dst_list_type: int, active_num: int = 0, expert_num: int = 0
 ) -> torch.Tensor:
@@ -221,6 +238,13 @@ def quant_apply_mlp(
     situ_beta = 1.0 if activation_situ_beta is None else activation_situ_beta
     act_name = getattr(activation, "value", activation)
     is_situ_activation = activation == MoEActivation.SITU
+    use_gmm_situ_quant_fusion = _gmm_situ_quant_fusion_enabled(
+        use_mxfp_quant,
+        mxfp_quant_dtype,
+        activation,
+        group_list_type,
+        use_w4a8_per_channel_gmm_swiglu,
+    )
     quantize_situ_output = is_situ_activation and mxfp_quant_dtype != QuantType.W4A16MXFP
     use_gmm_swiglu_quant_fusion = _gmm_swiglu_quant_fusion_enabled(
         use_mxfp_quant,
@@ -458,7 +482,21 @@ def quant_apply_mlp(
             # TODO w4a8 scene: dynamic acquisition of dtype in the future
             _output_dtype = torch.bfloat16
 
-        if (
+        if use_gmm_situ_quant_fusion:
+            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_situ_quant(
+                x=hidden_states,
+                weight=w1,
+                weight_scale=w1_scale,
+                x_scale=pertoken_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                beta=situ_beta,
+                linear_beta=activation_situ_linear_beta or 0.0,
+                mxfp_quant_dtype=mxfp_quant_dtype,
+            )
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
+        elif (
             use_w4a8_per_channel_gmm_swiglu
             and enable_custom_op()
             and activation != MoEActivation.SWIGLUSTEP

@@ -1,426 +1,1226 @@
-# Kimi-K3
+# Kimi-K3 (Experimental)
 
 ## 1 Introduction
 
-Kimi-K3 is a multimodal mixture-of-experts model that combines Kimi Delta
-Attention (KDA), gated Multi-head Latent Attention (MLA), attention residuals,
-SiTU activations, and latent MoE layers.
+!!! warning "Experimental support"
+    Kimi K3 support in vLLM-Ascend `v0.27.1rc` is an initial experimental release. It is intended for evaluation and validation with the fixed deployment configurations in this guide. Supported scenarios, performance, and configuration interfaces may evolve in later releases; do not treat this guide as a production support commitment.
 
-This tutorial covers model preparation, installation, online serving, and
-accuracy and performance evaluation for the full W4A8 checkpoint on Atlas A3.
-This tutorial is based on **vLLM-Ascend main with vLLM 0.27.1**. Use a
-main-branch build with Kimi-K3 support and its matching vLLM revision.
+Kimi K3 is a native multimodal Mixture-of-Experts (MoE) model. Its language backbone combines Kimi Delta Attention (KDA) with periodic Gated Multi-head Latent Attention (MLA), and uses Stable LatentMoE for expert computation. The model also integrates a MoonViT vision encoder and supports text, image understanding, reasoning, and tool calling.
+
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, multi-node deployment on Atlas 800 A3, Atlas 800 A2, and Atlas 950DT, functional verification, and AISBench evaluation.
+
+This document is validated and written based on **vLLM-Ascend `v0.27.1rc`**.
+
+The current release includes a subset of the Kimi K3 optimization features that have been validated for this version. To provide a reproducible and supportable baseline, this guide uses fixed deployment configurations instead of exposing every tunable optimization.
+
+These configurations position Kimi K3 for native multimodal inference, reasoning and tool calling, and multi-node mixed Prefill/Decode or PD separation deployments on Atlas 800 A3, A2, and Atlas 950DT. Additional optimization features and configuration guidance will be added in later releases after validation.
 
 ## 2 Supported Features
 
-Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)
-for the model support matrix and the
-[Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
-`FULL_DECODE_ONLY` ACL Graph, and DSpark with a matching draft checkpoint.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
-### 3.1 Model Weights and Hardware
+### 3.1 Model Weight
 
-| Model | Download | Purpose | Requirements |
-| --- | --- | --- | --- |
-| Eco-Tech/Kimi-K3-w4a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
-| RadixArk/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/RadixArk/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft | Set `num_speculative_tokens` to `7` |
-| Inferact/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
-| Inferact/Kimi-K3-DSpark-Block5 | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
+Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) ModelSlim W4A8 quantized weight from ModelScope. This guide includes the following validated deployment configurations:
 
-Download weights, tokenizer, and processor files before starting the service.
-Mount them at identical paths on every node, for example under `/path/to/models`.
-The weight size is a storage requirement, not an estimate of runtime NPU memory;
-KV cache, activations, communication buffers, and the optional draft also need
-memory.
+| Platform                     | Deployment                                 | Topology                  |
+| ---------------------------- | ------------------------------------------ | ------------------------- |
+| 4 × Atlas 800 A3 (64G × 16)  | Mixed Prefill/Decode deployment            | DP4/TP16/EP64             |
+| 8 × Atlas 800 A3 (64G × 16)  | Four Prefill nodes and four Decode nodes   | DP4/TP16/PP1 on each side |
+| 8 × Atlas 800 A2 (64G × 8)   | Mixed Prefill/Decode deployment            | DP8/TP8/EP64              |
+| 4 × Atlas 950DT (8 devices)   | Mixed Prefill/Decode deployment            | DP4/TP8/EP32              |
+| 8 × Atlas 950DT (8 devices)   | Four Prefill nodes and four Decode nodes   | DP4/TP8/PP1 on each side  |
 
-### 3.2 Verify Multi-Node Communication
+The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
-Before launching the four-node service, follow
-[Verify Multi-Node Communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-Use a reachable address and the correct communication interface on each node.
-All nodes must use the same model revision and compatible software stack.
+For DSpark speculative decoding in mixed or PD separation deployments, download the [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) GQA draft-model checkpoint in addition to the target-model checkpoint.
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node).
 
 ## 4 Installation
 
-The Kimi-K3 installation and deployment instructions in this tutorial apply
-only to the Atlas A3 series.
-
 ### 4.1 Docker Image Installation
 
-Follow the [installation requirements](../../getting_started/installation.md#installation-requirements) for
-the host driver and firmware. Start the A3 container below on every node.
+Select an image based on your host operating system and start it on every node. For more container options, refer to [installation requirements](../../getting_started/installation.md#installation-requirements).
 
-The example uses the main-branch nightly image for the vLLM 0.27-based stack.
-Check that the image includes Kimi-K3 support and the matching vLLM version.
-Pin its digest for reproducible deployments.
-To build an image from the selected source revision, follow Section 4.2.
+=== "A3 series"
 
-```shell
-export IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
-export MODEL_ROOT="/path/to/models"
+    Kimi K3 is validated on Atlas 800 A3 (64G × 16).
 
-docker run --rm -it \
-  --name vllm-kimi-k3 \
-  --net=host \
-  --shm-size=1g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci8 \
-  --device /dev/davinci9 \
-  --device /dev/davinci10 \
-  --device /dev/davinci11 \
-  --device /dev/davinci12 \
-  --device /dev/davinci13 \
-  --device /dev/davinci14 \
-  --device /dev/davinci15 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v "$MODEL_ROOT:$MODEL_ROOT" \
-  "$IMAGE" bash
-```
+    === "Ubuntu"
 
-Verify the installed revisions before starting the service:
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a3
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci8 \
+            --device /dev/davinci9 \
+            --device /dev/davinci10 \
+            --device /dev/davinci11 \
+            --device /dev/davinci12 \
+            --device /dev/davinci13 \
+            --device /dev/davinci14 \
+            --device /dev/davinci15 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
 
-```shell
-python -m pip show vllm vllm-ascend
-```
+    === "openEuler"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a3-openeuler
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci8 \
+            --device /dev/davinci9 \
+            --device /dev/davinci10 \
+            --device /dev/davinci11 \
+            --device /dev/davinci12 \
+            --device /dev/davinci13 \
+            --device /dev/davinci14 \
+            --device /dev/davinci15 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    After a successful `docker run`, verify the container with `docker ps`.
+
+=== "A2 series"
+
+    Kimi K3 is validated on Atlas 800 A2 (64G × 8).
+
+    === "Ubuntu"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    === "openEuler"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-openeuler
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    After a successful `docker run`, verify the container with `docker ps`.
+
+=== "Atlas 950DT"
+
+    Kimi K3 is validated on Atlas 950DT with eight devices per node.
+
+    === "Ubuntu"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a5
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    === "openEuler"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a5-openeuler
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    After a successful `docker run`, verify the container with `docker ps`.
 
 ### 4.2 Source Code Installation
 
-To build the A3 image from source, run the following on an A3 build host.
-The Dockerfile installs the matching CANN/PyTorch/TorchNPU stack and compiles
-the Ascend operators; `VLLM_COMMIT` selects the upstream revision verified for
-the chosen vLLM-Ascend checkout.
+If you don't want to use the docker image as above, you can also build all from source:
 
-```shell
-git clone --branch main https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-git submodule update --init --recursive
-docker build -f Dockerfile.a3 \
-  --build-arg VLLM_COMMIT="$(cat .github/vllm-main-verified.commit)" \
-  -t vllm-ascend-kimi-k3:main .
-export IMAGE=vllm-ascend-kimi-k3:main
-```
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
-Use the resulting image on every node with the container command in Section 4.1,
-replacing its `IMAGE` value. Record the source revision and image digest.
-For an installation outside Docker, follow the
-[source installation guide](../../getting_started/installation.md#installation-existing-cann-install), using
-the selected main checkout and its verified vLLM commit instead of the older
-release versions in the generic examples.
+If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsing are registered by vLLM-Ascend. Use a vLLM and vLLM-Ascend source revision that matches the validated version in this document.
 
-### 5.1 Four-Node Online Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
-The full checkpoint uses four Atlas 800 A3 nodes in a DP4/TP16/EP64 mixed
-deployment. Start Node 0 first. Each worker owns one global DP rank and joins
-Node 0 through the DP RPC address.
+The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
 
-Set these variables on every node:
+### 5.1 Mixed Prefill/Decode Deployment
 
-```shell
-export MODEL_PATH="<KIMI_K3_FULL_W4A8_PATH>"
-export TOKENIZER_PATH="<KIMI_K3_TOKENIZER_PATH>"
-export LOCAL_IP="<CURRENT_NODE_IP>"
-export NODE0_IP="<NODE0_IP>"
-export NIC_NAME="<CURRENT_NODE_NIC>"
-export SERVICE_PORT=8000
-export RPC_PORT=13345
-export DP_SIZE=4
-export TP_SIZE=16
+=== "Atlas 800 A3 (four-node)"
 
-export HCCL_IF_IP=$LOCAL_IP
-export GLOO_SOCKET_IFNAME=$NIC_NAME
-export TP_SOCKET_IFNAME=$NIC_NAME
-export HCCL_SOCKET_IFNAME=$NIC_NAME
-export VLLM_ENGINE_READY_TIMEOUT_S=7200
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=1024
-export HCCL_BUFFSIZE_EP=2048
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-export HCCL_OP_EXPANSION_MODE=AIV
-export OMP_PROC_BIND=false
-export OPENBLAS_NUM_THREADS=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-```
+    The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all 16 NPUs in the node. The resulting topology is DP4/TP16/EP64.
 
-Run on Node 0:
+    On Atlas 800 A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
-```shell
-vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 \
-  --port $SERVICE_PORT \
-  --served-model-name kimi-k3 \
-  --tokenizer "$TOKENIZER_PATH" \
-  --tokenizer-mode kimi_k3 \
-  --quantization ascend \
-  --safetensors-load-strategy lazy \
-  --tensor-parallel-size $TP_SIZE \
-  --data-parallel-size $DP_SIZE \
-  --data-parallel-size-local 1 \
-  --data-parallel-address $LOCAL_IP \
-  --data-parallel-rpc-port $RPC_PORT \
-  --enable-expert-parallel \
-  --enable-prefix-caching \
-  --max-model-len 133120 \
-  --max-num-seqs 16 \
-  --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.85 \
-  --reasoning-parser kimi_k3 \
-  --tool-call-parser kimi_k3 \
-  --enable-auto-tool-choice \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-```
+    Before starting the service:
 
-Run on Nodes 1 through 3. Set `DP_START_RANK` to 1, 2, or 3 respectively:
+    - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
+    - `NIC_NAME` must be the interface that owns `LOCAL_IP`.
+    - Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 3 must equal `LOCAL_IP` on Node 0.
+    - Assign `--data-parallel-start-rank` values `1`, `2`, and `3` to Nodes 1, 2, and 3 respectively.
 
-```shell
-export DP_START_RANK="<1_OR_2_OR_3>"
+    === "Node 0"
 
-vllm serve "$MODEL_PATH" \
-  --headless \
-  --host 0.0.0.0 \
-  --port $SERVICE_PORT \
-  --served-model-name kimi-k3 \
-  --tokenizer "$TOKENIZER_PATH" \
-  --tokenizer-mode kimi_k3 \
-  --quantization ascend \
-  --safetensors-load-strategy lazy \
-  --tensor-parallel-size $TP_SIZE \
-  --data-parallel-size $DP_SIZE \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank $DP_START_RANK \
-  --data-parallel-address $NODE0_IP \
-  --data-parallel-rpc-port $RPC_PORT \
-  --enable-expert-parallel \
-  --enable-prefix-caching \
-  --max-model-len 133120 \
-  --max-num-seqs 16 \
-  --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.85 \
-  --reasoning-parser kimi_k3 \
-  --tool-call-parser kimi_k3 \
-  --enable-auto-tool-choice \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-```
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<NODE0_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
 
-Key parameter descriptions:
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-- `--data-parallel-size 4` and `--data-parallel-size-local 1` create one DP
-  rank per node. `--tensor-parallel-size 16` uses all 16 local logical NPUs;
-  `--enable-expert-parallel` distributes experts across the 64-rank EP group.
-- `--data-parallel-start-rank` identifies each worker's global DP rank.
-  `--headless` workers join Node 0 without serving a separate HTTP endpoint.
-- `--max-model-len` bounds input plus output tokens;
-  `--max-num-batched-tokens` bounds tokens scheduled per iteration, and
-  `--max-num-seqs` bounds concurrent sequences per engine.
-- `--gpu-memory-utilization` controls the model executor's device-memory
-  budget. Check capacity with the actual checkpoint before increasing sequence
-  length, concurrency, or adding a draft.
-- `--tokenizer-mode kimi_k3`, `--reasoning-parser kimi_k3`, and
-  `--tool-call-parser kimi_k3` select the Kimi-K3 request/response format.
-  `--enable-auto-tool-choice` enables automatic tool selection.
-- `FULL_DECODE_ONLY` captures decode execution; `--enable-prefix-caching`
-  enables reuse of cached prefixes.
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
 
-Wait for all ranks to finish weight loading and graph compilation before
-running the request in Section 6. For general startup issues, see the
-[Public FAQ](../../faqs.md).
+        vllm serve $MODEL_PATH \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 16 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-address $LOCAL_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
 
-### 5.2 Speculative Decoding with DSpark
+    === "Nodes 1-3"
 
-Choose a GQA or MLA draft from the [model weights](#31-model-weights-and-hardware)
-listed in Section 3.1 and download it to the same path on every node.
-The following configuration uses seven speculative tokens for
-`RadixArk/Kimi-K3-DSpark` or `Inferact/Kimi-K3-DSpark`. For
-`Inferact/Kimi-K3-DSpark-Block5`, select that checkpoint's path and change
-`num_speculative_tokens` to `5`.
+        Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the current node and set `DP_START_RANK` to `1`, `2`, or `3`.
 
-Add the same speculative configuration to the Node 0 and headless worker commands:
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<WORKER_LOCAL_IP>
+        export NODE0_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<WORKER_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_START_RANK=<1_OR_2_OR_3>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
 
-```shell
---speculative-config \
-'{
-  "method": "dspark",
-  "model": "<DSPARK_DRAFT_PATH>",
-  "num_speculative_tokens": 7,
-  "draft_tensor_parallel_size": 16,
-  "max_model_len": 4096,
-  "draft_sample_method": "greedy",
-  "enforce_eager": true
-}'
-```
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-The example proposes seven draft tokens in one query block, followed by
-target-model verification.
-Set `draft_tensor_parallel_size` to the topology used to shard the draft model.
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
+
+        vllm serve $MODEL_PATH \
+            --headless \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 16 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank $DP_START_RANK \
+            --data-parallel-address $NODE0_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
+
+    The following values differ between the master and worker nodes:
+
+    | Setting                       | Node 0         | Nodes 1-3         | Description                                            |
+    | ----------------------------- | -------------- | ----------------- | ------------------------------------------------------ |
+    | `LOCAL_IP`                    | Node 0 IP      | Current worker IP | Each node uses its own IP address.                     |
+    | `NODE0_IP`                    | Not required   | Node 0 IP         | Workers use this address to join the DP group.         |
+    | `--headless`                  | Omitted        | Enabled           | Workers do not expose the API endpoint.                |
+    | `--data-parallel-address`     | `$LOCAL_IP`    | `$NODE0_IP`       | Always resolves to Node 0.                             |
+    | `--data-parallel-start-rank`  | `0` by default | `1`, `2`, or `3`  | Every node must own a unique DP rank.                  |
+
+    Key deployment parameters:
+
+    | Parameter                                   | Description                                                      |
+    | ------------------------------------------- | ---------------------------------------------------------------- |
+    | `--tensor-parallel-size 16`                 | Uses all 16 NPUs in one A3 node for tensor parallelism.          |
+    | `--data-parallel-size 4`                    | Creates four global DP ranks across four nodes.                  |
+    | `--data-parallel-size-local 1`              | Runs one DP rank on the current node.                            |
+    | `--data-parallel-start-rank`                | Selects the global starting DP rank for a worker node.           |
+    | `--data-parallel-rpc-port`                  | Must be identical and reachable on every node.                   |
+    | `--enable-expert-parallel`                  | Enables expert parallelism for the MoE layers.                   |
+    | `--max-model-len 131072`                    | Sets the maximum combined input and output length.               |
+    | `--max-num-seqs 16`                         | Sets the maximum active sequences for each DP group.             |
+    | `--max-num-batched-tokens 24576`            | Controls the scheduler token budget.                             |
+    | `--enable-prefix-caching`                   | Enables automatic prefix caching.                                |
+    | `--compilation-config`                      | Uses `FULL_DECODE_ONLY` ACL Graph replay.                        |
+    | `--tokenizer-mode kimi_k3`                  | Uses the Kimi K3 tokenizer mode.                                 |
+    | `--additional-config`                       | Enables Ascend CPU binding and FlashComm1.                         |
+    | `HCCL_IF_IP` and socket interface variables | Bind HCCL and Gloo communication to the selected interface.      |
+
+    !!! note
+        Serving a 1M-token context requires at least eight Atlas 800 A3 (64G × 16) nodes. Change the following parameters on every node:
+
+        | Parameter                  | Four-node default | Eight-node (1M context) |
+        | -------------------------- | ----------------- | ----------------------- |
+        | `--data-parallel-size`     | `4`               | `8`                     |
+        | `--max-model-len`          | `131072`          | `1048576`               |
+        | `--max-num-batched-tokens` | `24576`           | `8192`                  |
+
+        Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
+
+    If a worker exits immediately, confirm that Node 0 is already running, `--data-parallel-address` resolves to Node 0, and every worker uses a unique `--data-parallel-start-rank`.
+
+    Verify the service through Node 0:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "The future of AI is"
+                }]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing generated text.
+
+=== "Atlas 800 A2 (eight-node)"
+
+    The validated Atlas 800 A2 deployment uses eight nodes with eight NPUs per node. Each node runs one DP rank and uses all eight local NPUs for tensor parallelism. Every DP rank handles both Prefill and Decode, resulting in a DP8/TP8/EP64 topology. Node 0 runs the API server and DP rank 0, while Nodes 1 through 7 run headless DP workers. This baseline serves the language model only.
+
+    Before starting the service:
+
+    - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
+    - `NIC_NAME` must be the interface that owns `LOCAL_IP`.
+    - Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 7 must equal `LOCAL_IP` on Node 0.
+    - Assign a unique `DP_START_RANK` from `1` through `7` to each worker node.
+    - Ensure proxy bypass settings include all API and communication IP addresses used by the eight nodes.
+
+    === "Node 0"
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<NODE0_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh
+        source /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export HCCL_BUFFSIZE=256
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_INTRA_ROCE_ENABLE=1
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_LOGGING_LEVEL=INFO
+        export TIKTOKEN_CACHE_DIR=/root/.cache/tiktoken-k3
+
+        vllm serve $MODEL_PATH \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --served-model-name kimi-k3 \
+            --trust-remote-code \
+            --language-model-only \
+            --mm-encoder-tp-mode data \
+            --skip-mm-profiling \
+            --limit-mm-per-prompt '{"vision_chunk":2}' \
+            --data-parallel-size 8 \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank 0 \
+            --data-parallel-address $LOCAL_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --tensor-parallel-size 8 \
+            --enable-expert-parallel \
+            --dtype bfloat16 \
+            --max-model-len 262144 \
+            --gpu-memory-utilization 0.90 \
+            --enable-prefix-caching \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}' \
+            --tokenizer-mode kimi_k3 \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --additional-config '{"enable_flashcomm1":false,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true}'
+        ```
+
+    === "Nodes 1-7"
+
+        Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the current node and set `DP_START_RANK` to a unique value from `1` through `7`.
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<WORKER_LOCAL_IP>
+        export NODE0_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<WORKER_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_START_RANK=<1_TO_7>
+
+        source /usr/local/Ascend/ascend-toolkit/set_env.sh
+        source /vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer/bin/set_env.bash
+
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+        export HCCL_BUFFSIZE=256
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_INTRA_ROCE_ENABLE=1
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export VLLM_LOGGING_LEVEL=INFO
+        export TIKTOKEN_CACHE_DIR=/root/.cache/tiktoken-k3
+
+        vllm serve $MODEL_PATH \
+            --headless \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --served-model-name kimi-k3 \
+            --trust-remote-code \
+            --language-model-only \
+            --mm-encoder-tp-mode data \
+            --skip-mm-profiling \
+            --limit-mm-per-prompt '{"vision_chunk":2}' \
+            --data-parallel-size 8 \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank $DP_START_RANK \
+            --data-parallel-address $NODE0_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --tensor-parallel-size 8 \
+            --enable-expert-parallel \
+            --dtype bfloat16 \
+            --max-model-len 262144 \
+            --gpu-memory-utilization 0.90 \
+            --enable-prefix-caching \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}' \
+            --tokenizer-mode kimi_k3 \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --additional-config '{"enable_flashcomm1":false,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true}'
+        ```
+
+    The following values differ between the master and worker nodes:
+
+    | Setting                      | Node 0       | Nodes 1-7                         | Description                                      |
+    | ---------------------------- | ------------ | --------------------------------- | ------------------------------------------------ |
+    | `LOCAL_IP`                   | Node 0 IP    | Current worker IP                 | Each node uses its own communication IP address. |
+    | `NODE0_IP`                   | Not required | Node 0 IP                         | Workers use this address to join the DP group.   |
+    | `--headless`                 | Omitted      | Enabled                           | Workers do not expose an API endpoint.           |
+    | `--data-parallel-address`    | `$LOCAL_IP`  | `$NODE0_IP`                       | Always resolves to Node 0.                       |
+    | `--data-parallel-start-rank` | `0`          | Unique value from `1` through `7` | Every node owns one global DP rank.              |
+
+    Key A2 deployment parameters:
+
+    | Parameter                      | Description                                                                     |
+    | ------------------------------ | ------------------------------------------------------------------------------- |
+    | `--tensor-parallel-size 8`     | Uses all eight NPUs in one A2 node for tensor parallelism.                      |
+    | `--data-parallel-size 8`       | Creates eight global DP ranks across eight nodes.                               |
+    | `--data-parallel-size-local 1` | Runs one DP rank on the current node.                                           |
+    | `--language-model-only`        | Disables the multimodal encoder for this validated A2 baseline.                 |
+    | `--max-model-len 262144`       | Sets a 256K combined input and output context limit.                            |
+    | `--compilation-config`         | Uses `FULL_DECODE_ONLY` graph replay with capture sizes `1`, `2`, `4`, and `8`. |
+    | `--additional-config`          | Enables NPU graph execution and CPU binding while keeping FlashComm1 disabled.  |
+
+    Do not set `HCCL_OP_EXPANSION_MODE=AIV` for this baseline. Start Node 0 first, then start Nodes 1 through 7 as soon as possible. If a worker exits immediately, verify that Node 0 is running, all nodes use the same RPC port, `--data-parallel-address` resolves to Node 0, and every worker has a unique DP start rank.
+
+=== "Atlas 950DT (four-node)"
+
+    The validated mixed deployment uses four Atlas 950DT nodes with eight devices per node. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all eight devices in the node. The resulting topology is DP4/TP8/EP32.
+
+    The Atlas 950DT feature set and service options are the same as A3, except that Atlas 950DT uses TP8 and exposes eight devices per node. Leave `HCCL_OP_EXPANSION_MODE` unset for this mixed Prefill/Decode deployment.
+
+    Before starting the service:
+
+    - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
+    - `NIC_NAME` must be the interface that owns `LOCAL_IP`.
+    - Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 3 must equal `LOCAL_IP` on Node 0.
+    - Assign `--data-parallel-start-rank` values `1`, `2`, and `3` to Nodes 1, 2, and 3 respectively.
+
+    === "Node 0"
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<NODE0_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
+
+        vllm serve $MODEL_PATH \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 8 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-address $LOCAL_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
+
+    === "Nodes 1-3"
+
+        Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the current node and set `DP_START_RANK` to `1`, `2`, or `3`.
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<WORKER_LOCAL_IP>
+        export NODE0_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<WORKER_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_START_RANK=<1_OR_2_OR_3>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
+
+        vllm serve $MODEL_PATH \
+            --headless \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 8 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank $DP_START_RANK \
+            --data-parallel-address $NODE0_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
+
+    The following values differ between the master and worker nodes:
+
+    | Setting                       | Node 0         | Nodes 1-3         | Description                                            |
+    | ----------------------------- | -------------- | ----------------- | ------------------------------------------------------ |
+    | `LOCAL_IP`                    | Node 0 IP      | Current worker IP | Each node uses its own IP address.                     |
+    | `NODE0_IP`                    | Not required   | Node 0 IP         | Workers use this address to join the DP group.         |
+    | `--headless`                  | Omitted        | Enabled           | Workers do not expose the API endpoint.                |
+    | `--data-parallel-address`     | `$LOCAL_IP`    | `$NODE0_IP`       | Always resolves to Node 0.                             |
+    | `--data-parallel-start-rank`  | `0` by default | `1`, `2`, or `3`  | Every node must own a unique DP rank.                  |
+
+    Key deployment parameters:
+
+    | Parameter                                   | Description                                                      |
+    | ------------------------------------------- | ---------------------------------------------------------------- |
+    | `--tensor-parallel-size 8`                  | Uses all eight devices in one Atlas 950DT node for tensor parallelism. |
+    | `--data-parallel-size 4`                    | Creates four global DP ranks across four nodes.                  |
+    | `--data-parallel-size-local 1`              | Runs one DP rank on the current node.                            |
+    | `--data-parallel-start-rank`                | Selects the global starting DP rank for a worker node.           |
+    | `--data-parallel-rpc-port`                  | Must be identical and reachable on every node.                   |
+    | `--enable-expert-parallel`                  | Enables expert parallelism for the MoE layers.                   |
+    | `--max-model-len 131072`                    | Sets the maximum combined input and output length.               |
+    | `--max-num-seqs 16`                         | Sets the maximum active sequences for each DP group.             |
+    | `--max-num-batched-tokens 24576`            | Controls the scheduler token budget.                             |
+    | `--enable-prefix-caching`                   | Enables automatic prefix caching.                                |
+    | `--compilation-config`                      | Uses `FULL_DECODE_ONLY` ACL Graph replay.                        |
+    | `--tokenizer-mode kimi_k3`                  | Uses the Kimi K3 tokenizer mode.                                 |
+    | `--additional-config`                       | Enables Ascend CPU binding and FlashComm1.                        |
+    | `HCCL_IF_IP` and socket interface variables | Bind HCCL and Gloo communication to the selected interface.      |
+
+    !!! note
+        Serving a 1M-token context requires at least eight Atlas 950DT nodes. Change the following parameters on every node:
+
+        | Parameter                  | Four-node default | Eight-node (1M context) |
+        | -------------------------- | ----------------- | ----------------------- |
+        | `--data-parallel-size`     | `4`               | `8`                     |
+        | `--max-model-len`          | `131072`          | `1048576`               |
+        | `--max-num-batched-tokens` | `24576`           | `8192`                  |
+
+        Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
+
+    If a worker exits immediately, confirm that Node 0 is already running, `--data-parallel-address` resolves to Node 0, and every worker uses a unique `--data-parallel-start-rank`.
+
+    Verify the service through Node 0:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "The future of AI is"
+                }]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing generated text.
+
+### 5.2 Eight-Node PD Separation Deployment
+
+The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. A3 uses DP4/TP16/PP1 on each side, while Atlas 950DT uses DP4/TP8/PP1 on each side.
+
+Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
+
+Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html) for the KV Cache Pool startup method and the Mooncake configuration file.
+
+On Atlas 800 A3 and Atlas 950DT, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
+
+This deployment supports DSpark speculative decoding. Configure the same `RadixArk/Kimi-K3-DSpark` GQA draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
+
+#### 5.2.1 Create the engine templates
+
+=== "Prefill"
+
+    ```shell
+    KV_PORT=36000
+    LOOKUP_RPC_PORT=0
+
+    unset ftp_proxy FTP_PROXY
+    unset https_proxy HTTPS_PROXY
+    unset http_proxy HTTP_PROXY
+
+    nic_name=<PREFILL_NIC_NAME>
+    local_ip=<PREFILL_LOCAL_IP>
+
+    export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=${local_ip}
+    export HCCL_SOCKET_IFNAME=${nic_name}
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=${nic_name}
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+
+    SPECULATIVE_CONFIG="$(
+      printf \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      "$DRAFT_MODEL_PATH"
+    )"
+
+    vllm serve <KIMI_K3_MODEL_PATH> \
+        --host 0.0.0.0 \
+        --port $2 \
+        --enable-auto-tool-choice \
+        --reasoning-parser kimi_k3 \
+        --tool-call-parser kimi_k3 \
+        --tokenizer-mode kimi_k3 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name kimi-k3 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 16 \
+        --enforce-eager \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config "$SPECULATIVE_CONFIG" \
+        --quantization ascend \
+        --mm-encoder-tp-mode data \
+        --skip-mm-profiling \
+        --safetensors_load_strategy prefetch \
+        --mamba-cache-mode align \
+        --enable-prefix-caching \
+        --additional-config '{"recompute_scheduler_enable":false,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
+        --limit-mm-per-prompt '{"vision_chunk": 2}' \
+        --kv-transfer-config \
+        '{
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_producer",
+          "kv_load_failure_policy": "recompute",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "'"$KV_PORT"'",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
+                  "backend": "mooncake"
+                }
+              }
+            ]
+          }
+        }'
+    ```
+
+=== "Decode"
+
+    ```shell
+    KV_PORT=36200
+    LOOKUP_RPC_PORT=1
+
+    unset ftp_proxy FTP_PROXY
+    unset https_proxy HTTPS_PROXY
+    unset http_proxy HTTP_PROXY
+
+    nic_name=<DECODE_NIC_NAME>
+    local_ip=<DECODE_LOCAL_IP>
+
+    export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=${local_ip}
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=${nic_name}
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=${nic_name}
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    SPECULATIVE_CONFIG="$(
+      printf \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      "$DRAFT_MODEL_PATH"
+    )"
+
+    vllm serve <KIMI_K3_MODEL_PATH> \
+        --host 0.0.0.0 \
+        --port $2 \
+        --enable-auto-tool-choice \
+        --reasoning-parser kimi_k3 \
+        --tool-call-parser kimi_k3 \
+        --tokenizer-mode kimi_k3 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name kimi-k3 \
+        --max-model-len 133120 \
+        --max-num-batched-tokens 8192 \
+        --max-num-seqs 16 \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config "$SPECULATIVE_CONFIG" \
+        --quantization ascend \
+        --mm-encoder-tp-mode data \
+        --skip-mm-profiling \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --safetensors_load_strategy prefetch \
+        --mamba-cache-mode align \
+        --enable-prefix-caching \
+        --additional-config '{"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true}' \
+        --limit-mm-per-prompt '{"vision_chunk":2}' \
+        --kv-transfer-config \
+        '{
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_consumer",
+          "kv_load_failure_policy": "recompute",
+          "kv_connector_extra_config": {
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "'"$KV_PORT"'",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
+                  "load_async": true,
+                  "backend": "mooncake"
+                }
+              }
+            ]
+          }
+        }'
+    ```
+
+#### 5.2.2 Start the engines
+
+Deploy `launch_online_dp.py` and the corresponding engine template on every node. Pass `0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` as the template's first argument on A3 and `0,1,2,3,4,5,6,7` on Atlas 950DT.
+
+=== "Atlas 800 A3"
+
+    ```shell
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 16 \
+        --dp-size-local 1 \
+        --dp-rank-start <LOCAL_DP_RANK> \
+        --dp-address <PD_MASTER_IP> \
+        --dp-rpc-port <DP_RPC_PORT> \
+        --vllm-start-port <VLLM_START_PORT>
+    ```
+
+=== "Atlas 950DT"
+
+    ```shell
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 8 \
+        --pp-size 1 \
+        --dp-size-local 1 \
+        --dp-rank-start <LOCAL_DP_RANK> \
+        --dp-address <PD_MASTER_IP> \
+        --dp-rpc-port <DP_RPC_PORT> \
+        --vllm-start-port <VLLM_START_PORT>
+    ```
+
+Use ranks `0` through `3` for each four-node side. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
+
+After the engines start, configure and start the load-balancing proxy as described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service).
+
+Key PD settings:
+
+| Setting                      | Value                        | Description                                             |
+| ---------------------------- | ---------------------------- | ------------------------------------------------------- |
+| Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
+| `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
+| `--tp-size`                  | `16` on A3; `8` on Atlas 950DT | Uses all devices in a node.                           |
+| `--pp-size`                  | `1`                          | One pipeline stage per engine.                          |
+| `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
+| `KV_PORT`                    | `36000` for P, `36200` for D | Separates producer and consumer KV traffic.             |
+| `recompute_scheduler_enable` | `false`                      | Matches the validated Prefill and Decode configuration. |
 
 ## 6 Functional Verification
 
-Once all four nodes have completed model loading and graph compilation, send
-a request to the Node 0 service from a host in the serving network.
+### 6.1 Mixed Deployment Functional Verification
 
-```shell
-curl "http://$NODE0_IP:8000/v1/chat/completions" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "kimi-k3",
-    "messages": [
-      {"role": "user", "content": "Explain why prefix caching helps repeated long prompts."}
-    ],
-    "temperature": 0,
-    "max_tokens": 128
-  }'
-```
+=== "Atlas 800 A3"
 
-Expected result: HTTP 200 with a JSON response containing a non-null choice and
-generated text. Generation may stop before `max_tokens` when a stop token is
-reached.
+    After an A3 mixed or PD service is ready, send a multimodal request to the API endpoint:
 
-For a multimodal smoke test, replace the message content with an image and a
-text instruction:
+    ```shell
+    curl http://<SERVICE_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "<IMAGE_URL_OR_DATA_URL>"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe the image."
+                    }
+                ]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
 
-```json
-{
-  "role": "user",
-  "content": [
-    {"type": "image_url", "image_url": {"url": "<IMAGE_URL_OR_DATA_URL>"}},
-    {"type": "text", "text": "Describe the image."}
-  ]
-}
-```
+    The service should return HTTP 200 and a `choices` field containing the image description. The current implementation supports image inputs but does not support video inputs.
 
-For automatic tool selection, keep `--enable-auto-tool-choice` and
-`--tool-call-parser kimi_k3` in the startup command and include `tools` and
-`tool_choice: "auto"` in the chat request.
+=== "Atlas 800 A2"
+
+    The validated A2 deployment uses `--language-model-only`. After all eight DP ranks are ready, send a text request to the Node 0 API endpoint:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": "Explain data parallelism in one sentence."
+            }],
+            "max_tokens": 64
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing generated text. Nodes 1 through 7 are headless workers and do not accept HTTP requests directly.
+
+    `X-data-parallel-rank` is an optional HTTP request header that pins a request to a specific DP rank. Without this header, the internal vLLM load balancer on Node 0 selects an available rank. For this DP8 deployment, use an integer from `0` through `7` only when validating one rank, troubleshooting a worker, or testing rank-local prefix-cache behavior:
+
+    ```shell
+    -H "X-data-parallel-rank: 0" \
+    ```
+
+    Production traffic should normally omit this header so that requests remain balanced across all DP ranks. The request is always sent to the Node 0 API endpoint, even when a worker rank is selected.
+
+=== "Atlas 950DT"
+
+    After an Atlas 950DT mixed or PD service is ready, send a multimodal request to the API endpoint:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "<IMAGE_URL_OR_DATA_URL>"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe the image."
+                    }
+                ]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing the image description. The current implementation supports image inputs but does not support video inputs.
 
 ## 7 Accuracy Evaluation
 
-Use the full 93-layer, 896-expert checkpoint with the four-node service in
-Section 5.1.
+Here is one accuracy evaluation method for Kimi K3.
 
-### Using AISBench
+| dataset | version | metric | mode | vllm-api-general-chat | note |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| GPQA | - | accuracy | gen | 92.42 | 8 Atlas 800 A3 (64GB × 16) |
+| OCRBench | - | accuracy | gen | 0.88 | 8 Atlas 800 A3 (64GB × 16) |
+| GPQA | - | accuracy | gen | 93.5 | 1 Atlas 950DT |
+| OCRBench | - | accuracy | gen | 0.891 | 1 Atlas 950DT |
 
-Follow [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) to
-configure the `kimi-k3` chat-completions endpoint and run GPQA. Keep the model
-and tokenizer revisions, chat rendering, reasoning mode, sampling parameters,
-dataset, and evaluator revisions fixed when comparing results. Record completed,
-failed, missing, and unparsed samples alongside the score.
+### 7.1 Using AISBench
 
-### Using Language Model Evaluation Harness
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for the environment setup and evaluation procedure.
 
-See [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for
-evaluator setup. Use the same full checkpoint and serving configuration when
-comparing results across backends.
+2. Run AISBench against the Kimi K3 service and collect the generated result files. Keep the model and tokenizer revisions, chat template, sampling settings, dataset, and evaluator revision fixed when comparing results.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
-Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
-for configuration and execution instructions.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for the environment setup and evaluation procedure.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
-After the service in Section 5.1 is ready, run the following from a load generator
-in the serving network with the same vLLM version and tokenizer files. Set
-`NODE0_IP` and `TOKENIZER_PATH` to the service address and local tokenizer path.
+Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128K-input, 1K-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ```shell
-export NODE0_IP="<NODE0_IP>"
-export TOKENIZER_PATH="<KIMI_K3_TOKENIZER_PATH>"
+export DATA_NUM=8
+export CONCURRENCY=8
 
 vllm bench serve \
-  --backend openai-chat \
-  --base-url "http://$NODE0_IP:8000" \
-  --endpoint /v1/chat/completions \
+  --base-url http://<SERVICE_HOST>:<SERVICE_PORT> \
+  --endpoint /v1/completions \
   --model kimi-k3 \
-  --tokenizer "$TOKENIZER_PATH" \
+  --tokenizer <KIMI_K3_MODEL_PATH> \
   --tokenizer-mode kimi_k3 \
-  --dataset-name random \
-  --random-input-len 1024 \
-  --random-output-len 128 \
-  --random-range-ratio 0.0 \
-  --num-prompts 100 \
-  --max-concurrency 4 \
+  --trust-remote-code \
+  --dataset-name custom \
+  --dataset-path <DATASET_PATH> \
+  --custom-output-len 1024 \
+  --skip-chat-template \
+  --num-prompts ${DATA_NUM} \
   --request-rate inf \
+  --max-concurrency ${CONCURRENCY} \
   --ignore-eos \
+  --temperature 0 \
+  --seed 0 \
+  --disable-shuffle \
   --save-result \
-  --result-dir ./benchmark-results
+  --result-dir <RESULT_DIR>
 ```
-
-This example measures 100 requests with at most four in flight, using random
-1024-token inputs and 128-token outputs. The chat format can add input tokens;
-`--ignore-eos` prevents early EOS from shortening the requested output length.
-`--request-rate inf` sends requests as soon as concurrency slots are available.
-Check that all 100 measured requests succeed and review throughput, TTFT, and
-TPOT in the console and saved JSON results. Adjust lengths and concurrency for
-the intended workload; this example is not a peak-performance configuration.
-See the [vLLM benchmark tools](https://docs.vllm.ai/en/latest/benchmarking/)
-for additional options.
-
-Record the checkpoint revision, topology, graph mode, Prefix Cache setting,
-input/output lengths, concurrency, completed requests, and error count together
-with throughput and latency. Report cold-prefix and prefix-hit workloads
-separately. With DSpark, also record the draft checkpoint and speculative-token
-count.
 
 ## 9 Performance Tuning
 
-### 9.1 Reference Configuration
+### 9.1 Recommended Configurations
 
-The following is the configuration used by the full-checkpoint commands above,
-not a claim of optimal throughput or latency for every workload.
+The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](#5-online-service-deployment).
 
-| Deployment | Nodes | Total logical NPUs | TP per DP rank | Global DP / EP | Max Num Seqs per Engine | Max Num Batched Tokens | Max Model Len | Graph Mode |
-| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
-| Full W4A8, mixed prefill/decode | 4 A3 | 64 | 16 | 4 / 64 | 16 | 8192 | 133120 | `FULL_DECODE_ONLY` |
+### 9.2 Tuning Guide
 
-Optional DSpark uses draft TP16 and draft `max_model_len=4096`, as shown in
-Section 5.2. Use seven speculative tokens for the RadixArk GQA draft or the
-Inferact seven-token MLA draft, and five for `Inferact/Kimi-K3-DSpark-Block5`.
-Account for its extra memory before enabling it.
+Use the validated deployment values above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
 
-### 9.2 Tuning Guidelines
-
-| Goal | Parameters to evaluate | Check before adopting a change |
-| --- | --- | --- |
-| Higher throughput | Increase `--max-num-seqs` or `--max-num-batched-tokens` gradually | Memory headroom, completed requests, and tail latency |
-| Lower latency | Compare the baseline with a matching DSpark draft | End-to-end latency, draft acceptance, and accuracy on the same workload |
-| Longer context | Adjust `--max-model-len` together with concurrency and the token budget | Target/draft compatibility and available hybrid KV-cache capacity |
-| Repeated prompts | Enable Prefix Cache and compare cold and cached requests separately | Cache-hit metrics and output correctness |
-
-Refer to the [public performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for
-general tuning methods.
+Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to
-the [Public FAQ](../../faqs.md). This section covers Kimi-K3-specific questions.
+For common environment, installation, and general parameter issues, refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
-### Which checkpoint should I use with DSpark?
-
-Use a draft that matches the target architecture, tokenizer, and quantization
-variant. Section 3.1 lists the RadixArk GQA draft and both Inferact MLA drafts,
-together with their `num_speculative_tokens` values. For QuaRot checkpoints,
-retain the checkpoint's quantization metadata and bundled rotation tensors on
-every node.
+- **Q: Which multimodal inputs are supported by the current Kimi K3 implementation?**
+A: The current local processor accepts image inputs. Video inputs are not supported.
+- **Q: Which server options are required for Kimi K3 reasoning and tool calling?**
+A: Configure `--tokenizer-mode kimi_k3`, `--enable-auto-tool-choice`, `--reasoning-parser kimi_k3`, and `--tool-call-parser kimi_k3` together.
+- **Q: How should TP size be selected?**
+A: TP size must divide the checkpoint's attention-head count. It also affects KDA state layout and expert placement, so validate memory capacity and communication performance together.
+- **Q: How is DSpark enabled in PD separation?**
+A: Download `RadixArk/Kimi-K3-DSpark`, set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes, and pass the same `--speculative-config` to both. Prefill must retain `--enforce-eager`.

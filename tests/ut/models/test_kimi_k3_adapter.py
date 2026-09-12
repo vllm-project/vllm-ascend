@@ -18,6 +18,24 @@ from vllm_ascend.models.kimi_k3_dspark import (
 )
 
 
+def test_kimi_moe_leaves_routed_input_transform_to_runner():
+    moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
+    nn.Module.__init__(moe)
+    hidden_states = torch.randn(4, 8)
+    router_logits = torch.randn(4, 16)
+    output = torch.randn(4, 8)
+    moe.gate = MagicMock(return_value=(router_logits, None))
+    moe.experts = MagicMock(return_value=output)
+
+    result = moe.forward(hidden_states)
+
+    moe.experts.assert_called_once()
+    call_kwargs = moe.experts.call_args.kwargs
+    torch.testing.assert_close(call_kwargs["hidden_states"], hidden_states)
+    torch.testing.assert_close(call_kwargs["router_logits"], router_logits)
+    torch.testing.assert_close(result, output)
+
+
 def test_ascend_attn_res_calls_native_op(monkeypatch):
     prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
     block_residual = torch.randn(2, 3, 4, dtype=torch.bfloat16)
@@ -125,6 +143,35 @@ def test_kimi_model_declares_fused_bfg_checkpoint_mapping():
         "f_a_proj",
         "g_proj",
     ]
+
+
+def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
+    mlp = kimi_k3.AscendKimiMLP.__new__(kimi_k3.AscendKimiMLP)
+    nn.Module.__init__(mlp)
+    mlp.use_sequence_parallel = True
+    calls = []
+
+    def fake_all_gather(hidden_states):
+        calls.append(("gather", hidden_states.clone()))
+        return torch.cat((hidden_states, hidden_states + 10), dim=0)
+
+    def fake_mlp_forward(_self, hidden_states):
+        calls.append(("mlp", hidden_states.clone()))
+        return hidden_states + 1
+
+    def fake_reduce_scatter(hidden_states):
+        calls.append(("reduce_scatter", hidden_states.clone()))
+        return hidden_states.chunk(2, dim=0)[0]
+
+    monkeypatch.setattr(kimi_k3, "sp_all_gather", fake_all_gather)
+    monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
+    monkeypatch.setattr(kimi_k3.KimiMLP, "forward", fake_mlp_forward)
+
+    output = mlp(torch.tensor([[1.0], [2.0]]))
+
+    assert [name for name, _ in calls] == ["gather", "mlp", "reduce_scatter"]
+    torch.testing.assert_close(calls[1][1], torch.tensor([[1.0], [2.0], [11.0], [12.0]]))
+    torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
 
 
 def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):

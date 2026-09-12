@@ -31,6 +31,27 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
+# Note: Install CANN A3 ops-transformer package
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            OPS_TRANSFORMER_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/cann-A3-ops-transformer_9.2.0_linux-aarch64.run"; \
+            OPS_TRANSFORMER_EXP_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/260904/cann-ops-transformer-experimental_910_93_linux-aarch64.run" ;; \
+        "linux/amd64"|"x86_64") \
+            OPS_TRANSFORMER_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/cann-A3-ops-transformer_9.2.0_linux-x86_64.run"; \
+            OPS_TRANSFORMER_EXP_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/temp_ops-transformer/260907/build_out/cann-ops-transformer-experimental_910_93_linux-x86_64.run" ;; \
+        *) echo "Skipping unsupported architecture: $ARCH" && exit 0 ;; \
+    esac && \
+    wget --quiet "$OPS_TRANSFORMER_URL" -O /tmp/cann-A3-ops-transformer.run && \
+    chmod +x /tmp/cann-A3-ops-transformer.run && \
+    /tmp/cann-A3-ops-transformer.run --full --quiet --install-for-all && \
+    rm -f /tmp/cann-A3-ops-transformer.run && \
+    wget --quiet "$OPS_TRANSFORMER_EXP_URL" -O /tmp/cann-ops-transformer-experimental_910_93.run && \
+    chmod +x /tmp/cann-ops-transformer-experimental_910_93.run && \
+    /tmp/cann-ops-transformer-experimental_910_93.run --quiet --install-for-all --force && \
+    rm -f /tmp/cann-ops-transformer-experimental_910_93.run
+
 # Install clang-15 (for triton-ascend) and Mooncake
 ARG MOONCAKE_TAG=0.3.11.post1
 RUN if [ -n "$APTMIRROR" ]; then \
@@ -63,6 +84,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
+
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \

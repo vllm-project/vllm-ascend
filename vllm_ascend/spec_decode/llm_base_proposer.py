@@ -112,6 +112,23 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Expose the draft runner type during model construction.
+
+        ``_get_model`` calls this hook before ``get_model`` installs the
+        returned config as the current vLLM config. Attention constructors can
+        then identify the draft model from ``runner_type="draft"``.
+
+        Keep the target-derived model config otherwise unchanged. Replacing it
+        with ``draft_model_config`` changes how generic proposers construct
+        their layers and can invalidate target parallel settings.
+        """
+        draft_vllm_config = super()._create_draft_vllm_config()
+        draft_vllm_config = copy.copy(draft_vllm_config)
+        draft_vllm_config.model_config = copy.copy(draft_vllm_config.model_config)
+        draft_vllm_config.model_config.runner_type = self.speculative_config.draft_model_config.runner_type
+        return draft_vllm_config
+
     @staticmethod
     def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
         if model_name in [
@@ -162,6 +179,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_sequence_parallel_moe = enable_sp(vllm_config)
 
         self.dcp_size = self.runner.dcp_size
+        self.dcp_rank = self.runner.dcp_rank
 
         self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
 
@@ -871,7 +889,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
 
@@ -1040,7 +1058,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,

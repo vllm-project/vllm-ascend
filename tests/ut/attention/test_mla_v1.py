@@ -1124,6 +1124,7 @@ class TestAscendMLAImpl(TestBase):
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
+        model_config.runner_type = "generate"
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
@@ -1191,9 +1192,49 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(self.impl.kv_a_proj_with_mqa)
         self.assertIsNotNone(self.impl.kv_a_layernorm)
         self.assertEqual(self.impl.num_queries_per_kv, 32)
+        self.assertFalse(self.impl.is_draft_model)
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
+
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_draft_model_disables_mlapo_at_init(self, mock_get_current_vllm_config, mock_enabling_mlapo):
+        self.impl.vllm_config.model_config.runner_type = "draft"
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        impl = AscendMLAImpl(
+            num_heads=self.impl.num_heads,
+            head_size=self.impl.head_size,
+            scale=self.impl.scale,
+            num_kv_heads=self.impl.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.impl.kv_cache_dtype,
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            kv_lora_rank=self.impl.kv_lora_rank,
+            qk_nope_head_dim=self.impl.qk_nope_head_dim,
+            qk_rope_head_dim=self.impl.qk_rope_head_dim,
+            qk_head_dim=self.impl.qk_head_dim,
+            v_head_dim=self.impl.v_head_dim,
+            q_lora_rank=self.impl.q_lora_rank,
+            q_proj=self.impl.q_proj,
+            q_b_proj=self.impl.q_proj,
+            kv_b_proj=self.impl.kv_b_proj,
+            o_proj=self.impl.o_proj,
+            kv_a_proj_with_mqa=self.impl.kv_a_proj_with_mqa,
+            fused_qkv_a_proj=self.impl.fused_qkv_a_proj,
+            kv_a_layernorm=self.impl.kv_a_layernorm,
+            rotary_emb=self.impl.rotary_emb,
+            g_proj=None,
+            use_mla_rope=True,
+        )
+
+        self.assertTrue(impl.is_draft_model)
+        self.assertFalse(impl.enable_mlapo)
+        mock_enabling_mlapo.assert_not_called()
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
@@ -1232,8 +1273,8 @@ class TestAscendMLAImpl(TestBase):
             **kwargs,
         )
         self.assertEqual(impl.num_heads, 20)
-        self.assertEqual(impl.num_heads_padded, 32)  # next power of 2
-        self.assertEqual(impl.head_padding, 12)  # 32 - 20
+        self.assertEqual(impl.num_heads_padded, 32)
+        self.assertEqual(impl.head_padding, 12)
 
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
@@ -1644,7 +1685,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_prefill_non_power_of_two_heads(self, mock_fia, mock_device_operator, mock_get_current_vllm_config):
-        """Test prefill with non-power-of-2 heads uses concat instead of query_rope/key_rope kwargs."""
+        """Test prefill passes RoPE tensors for non-power-of-two heads."""
         mock_get_current_vllm_config.return_value = MagicMock()
         num_heads = 20
         kwargs = {
@@ -1702,11 +1743,13 @@ class TestAscendMLAImpl(TestBase):
 
         result = impl._forward_prefill(q_nope, q_pe, k_nope, k_pe, value, kv_c_and_k_pe_cache, attn_metadata)
 
-        # FIA should be called without query_rope/key_rope when head_padding > 0
         mock_fia.assert_called_once()
+        call_args = mock_fia.call_args
         call_kwargs = mock_fia.call_args.kwargs
-        self.assertNotIn("query_rope", call_kwargs)
-        self.assertNotIn("key_rope", call_kwargs)
+        self.assertEqual(call_args.args[0].shape, q_nope.shape)
+        self.assertEqual(call_args.args[1].shape, k_nope.shape)
+        self.assertEqual(call_kwargs["query_rope"].shape, q_pe.shape)
+        self.assertEqual(call_kwargs["key_rope"].shape, k_pe.shape)
         self.assertEqual(call_kwargs.get("num_heads"), num_heads)
         self.assertEqual(result.shape, (batch_size, num_heads * impl.v_head_dim))
 
@@ -2059,9 +2102,12 @@ class TestAscendMLAImpl(TestBase):
         out, lse = impl._compute_prefill_context(q_nope, q_pe, kv_cache, 32, meta, prefix_out, prefix_lse)
 
         mock_fia.assert_called_once()
+        call_args = mock_fia.call_args
         call_kwargs = mock_fia.call_args.kwargs
-        self.assertNotIn("query_rope", call_kwargs)
-        self.assertNotIn("key_rope", call_kwargs)
+        self.assertEqual(call_args.args[0].shape, q_nope.shape)
+        self.assertEqual(call_args.args[1].shape[-1], impl.qk_nope_head_dim)
+        self.assertEqual(call_kwargs["query_rope"].shape, q_pe.shape)
+        self.assertEqual(call_kwargs["key_rope"].shape[-1], impl.qk_rope_head_dim)
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -2315,7 +2361,7 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_decode_non_power_of_two_heads(
         self, mock_npu_fused_infer_attention_score_v2, mock_get_forward_context, mock_get_current_vllm_config
     ):
-        """Test decode with non-power-of-2 heads pads to next power of 2 and slices output."""
+        """Test speculative decode passes native non-power-of-two head shapes."""
         mock_get_current_vllm_config.return_value = MagicMock()
         num_heads = 20
         kwargs = {
@@ -2368,9 +2414,8 @@ class TestAscendMLAImpl(TestBase):
         impl.enable_kv_nz = True
         impl.fa_quant_layer = False
 
-        # Return padded output so slice logic works
         mock_npu_fused_infer_attention_score_v2.return_value = [
-            torch.randn(impl.num_heads_padded, B, impl.kv_lora_rank),
+            torch.randn(num_heads, B, impl.kv_lora_rank),
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
@@ -2380,10 +2425,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[1], num_heads)
         self.assertEqual(result.shape[2], HD)
 
-        # Verify num_query_heads passed to FIA is padded
+        # Verify v2 receives the model's native head count and unpadded Q.
         mock_npu_fused_infer_attention_score_v2.assert_called_once()
+        call_args = mock_npu_fused_infer_attention_score_v2.call_args
         call_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
-        self.assertEqual(call_kwargs.get("num_query_heads"), impl.num_heads_padded)
+        self.assertEqual(call_args.args[0].shape, (B, num_heads, impl.qk_nope_head_dim))
+        self.assertEqual(call_kwargs["query_rope"].shape, (B, num_heads, impl.qk_rope_head_dim))
+        self.assertEqual(call_kwargs.get("num_query_heads"), num_heads)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -2391,7 +2439,7 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_decode_non_power_of_two_heads_normal(
         self, mock_npu_fused_infer_attention_score_v2, mock_get_forward_context, mock_get_current_vllm_config
     ):
-        """Test normal decode (BNSD_NBSD) with non-power-of-2 heads pads q and slices output."""
+        """Test normal decode passes native non-power-of-two head shapes."""
         mock_get_current_vllm_config.return_value = MagicMock()
         num_heads = 20
         kwargs = {
@@ -2447,7 +2495,7 @@ class TestAscendMLAImpl(TestBase):
         impl.speculative_config = None
 
         mock_npu_fused_infer_attention_score_v2.return_value = [
-            torch.randn(impl.num_heads_padded, B, 1, impl.kv_lora_rank),
+            torch.randn(num_heads, B, 1, impl.kv_lora_rank),
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
@@ -2458,8 +2506,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], HD)
 
         mock_npu_fused_infer_attention_score_v2.assert_called_once()
+        call_args = mock_npu_fused_infer_attention_score_v2.call_args
         call_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
-        self.assertEqual(call_kwargs.get("num_query_heads"), impl.num_heads_padded)
+        self.assertEqual(call_args.args[0].shape, (B, num_heads, 1, impl.qk_nope_head_dim))
+        self.assertEqual(call_kwargs["query_rope"].shape, (B, num_heads, 1, impl.qk_rope_head_dim))
+        self.assertEqual(call_kwargs.get("num_query_heads"), num_heads)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")

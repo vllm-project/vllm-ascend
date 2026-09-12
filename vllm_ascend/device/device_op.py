@@ -36,6 +36,10 @@ if HAS_TRITON:
 else:
     triton_q_rms = None  # type: ignore
 
+_GMM_SITU_DEQUANT_MODE_MX_JOINT = 1
+_GMM_SITU_DEQUANT_DTYPE_BF16 = 0
+_GMM_SITU_QUANT_MODE_DYNAMIC_MX = 1
+
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -229,6 +233,21 @@ class BaseDeviceAdaptor:
             bias=bias,
             swiglu_limit=swiglu_limit,
         )
+
+    @staticmethod
+    def npu_grouped_matmul_situ_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        group_list: torch.Tensor,
+        group_list_type: int,
+        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        x_scale: torch.Tensor,
+        beta: float,
+        linear_beta: float,
+        mxfp_quant_dtype: QuantType | None = None,
+    ):
+        raise RuntimeError("GMM-SiTU quant fusion is only supported on Ascend A5.")
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -1059,6 +1078,88 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 x_scale_dtype=torch_npu.float8_e8m0fnu,
             )
         return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
+
+    @staticmethod
+    def npu_grouped_matmul_situ_quant(
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        group_list: torch.Tensor,
+        group_list_type: int,
+        weight_scale: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        x_scale: torch.Tensor,
+        beta: float,
+        linear_beta: float,
+        mxfp_quant_dtype: QuantType | None = None,
+    ):
+        if mxfp_quant_dtype != QuantType.W4A8MXFP:
+            raise RuntimeError("GMM-SiTU quant fusion requires W4A8 MXFP quantization.")
+
+        weight = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight, torch.float4_e2m1fn_x2)
+        weight_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
+        x_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
+
+        is_list = isinstance(weight, (list, tuple))
+        if isinstance(weight, torch.Tensor) and not weight.is_contiguous():
+            weight = weight.transpose(1, 2)
+        if isinstance(weight_scale, (list, tuple)):
+            weight_scale = [
+                scale if scale.is_contiguous() else A5DeviceAdaptor._align_gmm_situ_weight_scale(scale)
+                for scale in weight_scale
+            ]
+        elif not weight_scale.is_contiguous():
+            weight_scale = A5DeviceAdaptor._align_gmm_situ_weight_scale(weight_scale)
+
+        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+        if is_list:
+            op = op.list
+        out, out_scale = op(
+            x,
+            weight,
+            weight_scale,
+            None,
+            None,
+            x_scale,
+            None,
+            group_list,
+            _GMM_SITU_DEQUANT_MODE_MX_JOINT,
+            _GMM_SITU_DEQUANT_DTYPE_BF16,
+            _GMM_SITU_QUANT_MODE_DYNAMIC_MX,
+            group_list_type,
+            None,
+            beta,
+            linear_beta,
+        )
+        return out, out_scale, None
+
+    @staticmethod
+    def _align_gmm_situ_weight_scale(scale: torch.Tensor) -> torch.Tensor:
+        scale = scale.transpose(-3, -2)
+        if not scale.is_contiguous():
+            raise ValueError(
+                "weight_scale must be the transposed view of N-major bytes "
+                f"or an already-contiguous N-major tensor; got shape {tuple(scale.shape)} "
+                f"and strides {tuple(scale.stride())}"
+            )
+        return scale
+
+    @staticmethod
+    def _restore_mxfp_semantic_dtype(
+        tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        semantic_dtype: torch.dtype,
+    ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
+        def restore_dtype(tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.dtype != torch.uint8:
+                return tensor
+            if isinstance(tensor, torch.Tensor) and int(torch_npu.get_npu_format(tensor)) != int(torch_npu.Format.ND):
+                return tensor
+            return tensor.view(semantic_dtype)
+
+        if isinstance(tensors, list):
+            return [restore_dtype(tensor) for tensor in tensors]
+        if isinstance(tensors, tuple):
+            return tuple(restore_dtype(tensor) for tensor in tensors)
+        return restore_dtype(tensors)
 
     @staticmethod
     def get_quant_gmm2_kwargs(

@@ -39,13 +39,16 @@ void CheckMsaIndexScoreParams(
 {
     TORCH_CHECK(query.dim() == QUERY_DIM_NUM,
                 "query must use TND layout [T,N,D]");
-    TORCH_CHECK(query.scalar_type() == at::kHalf ||
-                    query.scalar_type() == at::kBFloat16,
-                "query dtype must be float16 or bfloat16");
+    const auto queryDtype = query.scalar_type();
+    TORCH_CHECK(queryDtype == at::kHalf || queryDtype == at::kBFloat16 ||
+                    queryDtype == at::kFloat8_e5m2 ||
+                    queryDtype == at::kFloat8_e4m3fn,
+                "query dtype must be float16, bfloat16, float8_e5m2, "
+                "or float8_e4m3fn");
     TORCH_CHECK(key.dim() == KEY_CACHE_DIM_NUM ||
                     key.dim() == KEY_CACHE_WITH_HEAD_DIM_NUM,
                 "key must be [block_num,128,D] or [block_num,128,1,D]");
-    TORCH_CHECK(key.scalar_type() == query.scalar_type(),
+    TORCH_CHECK(key.scalar_type() == queryDtype,
                 "non-quantized key dtype must match query dtype");
     TORCH_CHECK(layoutKey == "BBND", "only BBND key layout is supported");
     TORCH_CHECK(blockTable.dim() == BLOCK_TABLE_DIM_NUM &&

@@ -155,7 +155,13 @@ class AscendMlaDCPMetadataBuilder(
                 end=self.num_decodes,
             ).tolist()
         decode_metadata.actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
-        decode_metadata.dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
+        # DCP metadata is prepared before attention metadata splits a mixed
+        # batch into decode and prefill sub-batches. Keep the mask batch
+        # dimension aligned with the decode sub-batch, just like cp_seq_len.
+        dcp_mtp_attn_mask = dcp_metadata.dcp_mtp_attn_mask
+        decode_metadata.dcp_mtp_attn_mask = (
+            dcp_mtp_attn_mask[: self.num_decodes] if dcp_mtp_attn_mask is not None else None
+        )
         return decode_metadata
 
 
@@ -523,7 +529,19 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             src_token_idx += padded_local_chunk_seq_len
         reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
         reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
-        assert reorganized_kv_c_normed.shape[0] == sum_seq_len
+        assert reorganized_kv_c_normed.shape[0] == sum_seq_len, (
+            "DCP MLA KV reorg length mismatch: "
+            f"actual={reorganized_kv_c_normed.shape[0]}, "
+            f"expected={sum_seq_len}, chunk_idx={chunk_idx}, "
+            f"toks={toks}, chunk_size={chunk_size}, "
+            f"padded_local_chunk_seq_lens="
+            f"{padded_local_chunk_seq_lens_lst}, "
+            f"local_context_lens_allranks="
+            f"{local_context_lens_allranks}, "
+            f"cu_seq_lens={chunked_context.cu_seq_lens_lst[chunk_idx]}, "
+            f"max_seq_len={max_seq_len}, "
+            f"max_seq_len_check={max_seq_len_check}"
+        )
         assert reorganized_k_pe.shape[0] == sum_seq_len
         assert max_seq_len_check == max_seq_len
         return reorganized_kv_c_normed, reorganized_k_pe

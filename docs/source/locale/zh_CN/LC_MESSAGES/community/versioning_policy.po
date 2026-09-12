@@ -275,15 +275,6 @@ msgstr ""
 "| v0.18.0     | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  /"
 " 2.9.0.post1+git4c901a4 | 3.2.0.dev20260322 | v0.3.9       |"
 
-msgid ""
-"|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | "
-"{{main_python_version}}   | {{main_cann_version}} | "
-"{{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |"
-msgstr ""
-"|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | "
-"{{main_python_version}}   | {{main_cann_version}} | "
-"{{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |"
-
 msgid "| 2026.06.30 | Release candidates, v0.22.1rc1            |"
 msgstr "| 2026.06.30 | 发布候选版本，v0.22.1rc1            |"
 
@@ -720,3 +711,12 @@ msgstr ""
 
 msgid "| 2026.08.16 | v0.23.0 Final release, v0.23.0            |"
 msgstr "| 2026.08.16 | v0.23.0 最终发布版本，v0.23.0            |"
+
+msgid ""
+"|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | "
+"{{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_version}}"
+" / {{main_torch_npu_version}} | {{main_triton_ascend_version}} |"
+msgstr ""
+"|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | "
+"{{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_version}}"
+" / {{main_torch_npu_version}} | {{main_triton_ascend_version}} |"
