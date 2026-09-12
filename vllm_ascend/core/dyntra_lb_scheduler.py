@@ -35,13 +35,13 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import DyntraLBConfig
-
+# adwadwawdawd
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler as _SchedulerBase
 else:
     _SchedulerBase = object
 
-
+#test_for_git
 def get_dyntra_lb_block_size(scheduler: Any) -> int:
     """Return the effective attention block size used as DyntraLB load unit."""
     block_size = scheduler.cache_config.block_size
