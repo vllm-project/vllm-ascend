@@ -551,12 +551,19 @@ def test_hang():
         print(f"Output tokens: {output_tokens}")
 
 
+@pytest.mark.parametrize("is_model_runner_v2", [True, False])
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    is_model_runner_v2,
 ):
+    if is_model_runner_v2:
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    else:
+        os.environ.pop("VLLM_USE_V2_MODEL_RUNNER", None)
+
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -592,7 +599,9 @@ def test_dflash2_acceptance(
         "num_speculative_tokens": num_speculative_tokens,
     }
 
-    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
+    compilation_config = (
+        None if is_model_runner_v2 else CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[9])
+    )
 
     with VllmRunner(
         main_model_name,
@@ -604,6 +613,7 @@ def test_dflash2_acceptance(
         gpu_memory_utilization=0.9,
         speculative_config=speculative_config,
         compilation_config=compilation_config,
+        enforce_eager=is_model_runner_v2,
         enable_prefix_caching=False,
     ) as llm:
         outputs = llm.model.generate(prompts, sampling_params)
