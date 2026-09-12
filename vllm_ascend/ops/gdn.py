@@ -67,7 +67,7 @@ def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
         original_weight_loader(checkpoint_layout, loaded_weight, *args, **kwargs)
 
     weight.weight_loader = width_major_weight_loader
-    setattr(weight, "_causal_conv1d_weight_prepared", True)
+    weight._causal_conv1d_weight_prepared = True
 
 
 def try_rearrange_single_token_mixed_qkv(
