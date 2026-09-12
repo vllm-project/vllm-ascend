@@ -22,9 +22,28 @@ from pytest_mock import MockerFixture
 from tests.ut.base import PytestBase
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _gather_along_first_dim,
+    _get_cann_mega_moe_quant_settings,
     async_all_to_all,
     gather_from_sequence_parallel_region,
 )
+from vllm_ascend.quantization.quant_type import QuantType
+
+
+class TestMegaMoeQuantSettings(PytestBase):
+    @pytest.mark.parametrize(
+        "quant_type, expected",
+        [
+            (QuantType.NONE, (0, None, None)),
+            (QuantType.W8A8, (2, 258, 258)),
+            (QuantType.W4A8, (2, 258, 285)),
+        ],
+    )
+    def test_supported_quant_types(self, quant_type, expected):
+        assert _get_cann_mega_moe_quant_settings(quant_type) == expected
+
+    def test_unsupported_quant_type_reports_supported_bf16(self):
+        with pytest.raises(RuntimeError, match=r"BF16 \(none quant\)"):
+            _get_cann_mega_moe_quant_settings(QuantType.W8A8FP)
 
 
 class TestDistributedCommunication(PytestBase):
