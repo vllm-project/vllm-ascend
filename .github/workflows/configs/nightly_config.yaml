@@ -274,6 +274,9 @@ a3:
       - name: kimi25_w4a8_step_3_7
         os: linux-aarch64-nightly-a3-16
         config_file_path: kimi25_w4a8_step_3_7.yaml
+      - name: minimax-m3-w8a8-eagle3-a3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MiniMax-M3-W8A8-EAGLE3-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
