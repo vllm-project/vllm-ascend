@@ -876,16 +876,25 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     torch.testing.assert_close(output, expected)
 
 
-def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
+def _make_quantized_situ_shared_experts(
+    quant_type,
+    gate_up_proj,
+    down_proj,
+    expert_gate=None,
+):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,
+        expert_gate=expert_gate,
     )
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = quant_type
     with set_current_vllm_config(VllmConfig()):
-        shared_experts.situ_activation = SituAndMul(beta=4.0, linear_beta=25.0)
+        shared_experts.situ_activation = SituAndMul(
+            beta=4.0,
+            linear_beta=25.0,
+        )
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(
         return_value=SharedExpertParallelMode.TENSOR_PARALLEL,
@@ -914,8 +923,22 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
         weight=torch.ones(2, 4, dtype=torch.int8),
         weight_scale=torch.ones(2),
     )
-    shared_experts = _make_quantized_situ_shared_experts(QuantType.W8A8, gate_up_proj, down_proj)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    expert_gate = MagicMock(
+        return_value=(
+            torch.zeros(
+                (*hidden_states.shape[:-1], 1),
+                dtype=hidden_states.dtype,
+            ),
+            None,
+        )
+    )
+    shared_experts = _make_quantized_situ_shared_experts(
+        QuantType.W8A8,
+        gate_up_proj,
+        down_proj,
+        expert_gate,
+    )
     quantized_input = torch.ones(2, 4, dtype=torch.int8)
     input_scale = torch.ones(2)
     gate_up_out = torch.ones(2, 4, dtype=torch.int32)
@@ -924,10 +947,26 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     expected = torch.randn(2, 2, dtype=torch.bfloat16)
     dequant_situ_quant = MagicMock(return_value=(quantized_situ, situ_scale))
 
-    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
-    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
-    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
-    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        shared_experts_module,
+        "has_lora",
+        lambda _: False,
+    )
+    monkeypatch.setattr(
+        shared_experts_module,
+        "npu_stream_switch",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        shared_experts_module,
+        "shared_experts_calculation_stream",
+        MagicMock(),
+    )
+    monkeypatch.setattr(
+        shared_experts_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
     monkeypatch.setattr(
         shared_experts_module.torch_npu,
         "npu_dynamic_quant",
@@ -945,9 +984,15 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
         SimpleNamespace(dequant_situ_quant=dequant_situ_quant),
     )
 
-    output = shared_experts.forward(hidden_states, _make_shared_expert_events())
+    output = shared_experts.forward(
+        hidden_states,
+        _make_shared_expert_events(),
+    )
 
-    assert output is expected
+    expert_gate.assert_called_once()
+    assert expert_gate.call_args.args[0] is hidden_states
+    torch.testing.assert_close(output, expected * 0.5)
+
     situ_kwargs = dequant_situ_quant.call_args.kwargs
     assert situ_kwargs["x"] is gate_up_out
     assert situ_kwargs["beta"] == 4.0

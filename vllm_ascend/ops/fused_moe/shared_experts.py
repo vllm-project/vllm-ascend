@@ -297,6 +297,9 @@ class AscendSharedExperts:
                 if not input_is_gathered:
                     maybe_wait_event(fused_moe_evts.before_routed_experts)
                     hidden_states = self._gather_sp_input(hidden_states)
+
+            shared_expert_input = hidden_states
+
             # Only used for int quantization
             has_quantized_shared_without_lora = (
                 not has_lora(self.lora_context)
@@ -408,6 +411,22 @@ class AscendSharedExperts:
                 # Execute the down projection concurrently with combine.
                 maybe_wait_event(down_projection_ready)
                 shared_out = self.part2(hidden_states, shared_act)
+
+            # Quantized fast paths bypass part2(), which normally applies the
+            # model-specific shared-expert gate.
+            if (
+                has_quantized_shared_without_lora
+                and self.quant_type
+                in (
+                    QuantType.W8A8,
+                    QuantType.W4A8,
+                    QuantType.W4A8MXFP,
+                )
+                and hasattr(self.layer, "expert_gate")
+                and self.layer.expert_gate is not None
+            ):
+                gate_out, _ = self.layer.expert_gate(shared_expert_input)
+                shared_out = F.sigmoid(gate_out) * shared_out
 
         if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
             # Keep the shared-expert output collective on the auxiliary stream,
