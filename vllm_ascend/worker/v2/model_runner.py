@@ -331,10 +331,14 @@ class NPUModelRunner(GPUModelRunner):
 
         req_ids = batch_req_state.req_ids
 
-        self._update_seq_lens_cpu(scheduler_output, req_ids)
-
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
+        self._update_seq_lens_cpu(
+            scheduler_output,
+            req_ids,
+            idx_mapping_np,
+            num_scheduled_tokens_np,
+        )
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
@@ -704,6 +708,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         req_ids: list[str],
+        idx_mapping_np: np.ndarray | None = None,
+        num_scheduled_tokens_np: np.ndarray | None = None,
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
@@ -717,10 +723,24 @@ class NPUModelRunner(GPUModelRunner):
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
         # update seq_lens_cpu
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        num_reqs = len(req_ids)
+        if idx_mapping_np is None:
+            idx_mapping_np = np.fromiter(
+                (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+        if num_scheduled_tokens_np is None:
+            num_scheduled_tokens_np = np.fromiter(
+                (num_scheduled_tokens[req_id] for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+        np.add(
+            self.req_states.num_computed_tokens_np[idx_mapping_np],
+            num_scheduled_tokens_np,
+            out=self.input_buffers.seq_lens_np[:num_reqs],
+        )
 
     def _pad_query_start_loc_for_fia(
         self,
