@@ -63,7 +63,7 @@ ACCEPTANCE_RATE_TOLERANCE = 0.03
 
 def _run_test(
     model: str,
-    minimum_rates: list[float],
+    minimum_rates: list[float] | None,
     speculative_config: dict,
     compilation_config: dict,
     expected_output_prefixes: dict[str, str],
@@ -112,6 +112,10 @@ def _run_test(
         Counter,
         Vector,
     )
+    print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
+    if minimum_rates is None:
+        return
+
     assert len(acceptance_rates) == len(minimum_rates), (
         f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
     )
@@ -150,7 +154,6 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     )
 
 
-@pytest.mark.skip(reason="Temporarily skip DSpark until the acceptance issue is resolved.")
 @pytest.mark.e2e_model(DSPARK_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -167,7 +170,8 @@ def test_deepseek_v4_dsa_pcp_dspark() -> None:
     """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
     _run_test(
         DSPARK_MODEL,
-        minimum_rates=DSPARK_MIN_ACCEPTANCE_RATES,
+        # Skip acceptance checks until the DSpark acceptance issue is resolved.
+        minimum_rates=None,
         expected_output_prefixes=DSPARK_EXPECTED_OUTPUT_PREFIXES,
         speculative_config={
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
