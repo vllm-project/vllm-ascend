@@ -16,6 +16,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import 
     ExternalDPConfig,
     RankInfo,
 )
+from tests.e2e.env_logging import format_env_prefix, log_full_environment
 from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     build_task_entry,
     extract_hardware,
@@ -30,22 +31,17 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import ServerCommand
 
-SENSITIVE_ENV_TOKENS = ("TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY")
-
-
 def format_server_cmd(cmd: list[str], env: dict[str, str] | None = None) -> str:
-    env_parts: list[str] = []
-    for key, value in sorted((env or {}).items()):
-        display_value = "***" if any(token in key.upper() for token in SENSITIVE_ENV_TOKENS) else str(value)
-        env_parts.append(f"{key}={shlex.quote(display_value)}")
+    env_parts = format_env_prefix(env or {})
     return " ".join([*env_parts, shlex.join(cmd)])
 
 
 def start_logged_process(cmd: list[str], env: dict[str, str], log_file: Path) -> subprocess.Popen:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     merged_env = {**os.environ, **env}
+    log_full_environment(merged_env, logger, prefix=f"[{log_file.name}] ")
     with log_file.open("ab") as f:
-        f.write(f"Starting command: {format_server_cmd(cmd, env)}\n".encode())
+        f.write(f"Starting command: {format_server_cmd(cmd, merged_env)}\n".encode())
         f.flush()
         return subprocess.Popen(
             cmd,
