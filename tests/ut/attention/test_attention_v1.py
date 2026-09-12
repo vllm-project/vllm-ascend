@@ -51,6 +51,20 @@ class TestAttentionGraphHelpers(TestBase):
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
+    def test_full_graph_fia_sparse_config_follows_causality(self):
+        cases = (
+            (False, None, (0, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX)),
+            (False, 0, (0, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX)),
+            (False, 2048, (0, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX)),
+            (True, 2048, (4, 2048, 0)),
+            (True, 0, (3, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX)),
+            (True, None, (3, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX)),
+        )
+
+        for causal, sliding_window, expected in cases:
+            with self.subTest(causal=causal, sliding_window=sliding_window):
+                self.assertEqual(attn_module._get_full_graph_fia_sparse_config(causal, sliding_window), expected)
+
     def test_large_head_uses_paged_attention_on_a2(self):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
