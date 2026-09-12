@@ -116,23 +116,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
-        # Internal-router gates recompute logits in FP32. Resolve the weight
-        # choice here (the old forward-time
-        # `weight_fp32 if hasattr else weight.to(fp32)` judgment) so ACLGraph
-        # capture never emits a per-forward aclop Cast.
-        # Use the ctor `gate` arg (same as is_internal_router): nn.Module.__getattr__
-        # can shadow `@property is_internal_router` / `gate` while __init__ runs,
-        # which breaks cpu-ut construction stubs that only set `_gate`.
-        if gate is not None:
-            if hasattr(gate, "weight_fp32"):
-                # Already materialized (e.g. DeepSeek-V4 sets it itself).
-                pass
-            else:
-                # Request load-time refresh, then seed weight_fp32 so the hot
-                # path can read it even before process_weights_after_loading.
-                # precast overwrites this buffer with checkpoint values on load.
-                gate.precast_fp32_weight = True
-                gate.weight_fp32 = gate.weight.to(torch.float32)
+        # Internal-router: seed weight_fp32 + precast for load refresh (avoid hot-path Cast).
+        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
+        if gate is not None and not hasattr(gate, "weight_fp32"):
+            gate.precast_fp32_weight = True
+            gate.weight_fp32 = gate.weight.to(torch.float32)
 
         self.ascend_shared_experts = None
         if shared_experts is not None:
@@ -326,7 +314,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states_fp32 = (
                         router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
                     )
-                    # weight_fp32 is ensured in __init__ (precast / already present).
                     router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
@@ -349,7 +336,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
                 )
                 before_routed_experts = torch.npu.current_stream().record_event()
-                # weight_fp32 is ensured in __init__ (precast / already present).
                 router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
