@@ -195,6 +195,7 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
+from vllm_ascend.worker.cpu_gpu_buffer import AscendCpuGpuBuffer
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
@@ -1135,6 +1136,11 @@ class NPUModelRunner(GPUModelRunner):
             self.tmp_encoder_cache[mm_hash] = output
 
         self.maybe_save_ec_to_connector({mm_hash: output}, mm_hash)
+
+    def _make_buffer(
+        self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
+    ) -> AscendCpuGpuBuffer:
+        return AscendCpuGpuBuffer(*size, dtype=dtype, device=self.device, with_numpy=numpy)
 
     def _snapshot_num_computed_tokens(self, num_reqs: int) -> torch.Tensor:
         # The next batch can update or condense the persistent CPU array while
