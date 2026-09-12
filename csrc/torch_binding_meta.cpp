@@ -114,6 +114,13 @@ void device_print_tensor_meta(const at::Tensor& tensor)
     (void)tensor;
 }
 
+int64_t get_physical_device_id_meta(int64_t user_device_id)
+{
+    // A Meta kernel cannot query the runtime device mapping. Preserve the
+    // scalar schema for tracing; production calls run before model tracing.
+    return user_device_id;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
@@ -2024,6 +2031,7 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
 // Pybind on Ascend 310P
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     // causal_conv1d_310
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
     // npu_recurrent_gated_delta_rule_310
@@ -2044,6 +2052,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 // Pybind on other platform
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation

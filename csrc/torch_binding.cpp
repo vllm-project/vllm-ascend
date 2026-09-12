@@ -81,6 +81,26 @@
 
 namespace vllm_ascend {
 
+// user_device_id is the ordinal passed to torch.npu.set_device/aclrtSetDevice,
+// not a vLLM local rank or an ASCEND_RT_VISIBLE_DEVICES entry.
+int64_t get_physical_device_id(int64_t user_device_id)
+{
+    TORCH_CHECK(user_device_id >= 0 && user_device_id <= std::numeric_limits<int32_t>::max(),
+                "Invalid NPU user device ID: ", user_device_id);
+#ifdef CANN_DEVICE_ID_MAPPING
+    int32_t physical_device_id = -1;
+    auto ret = aclrtGetPhyDevIdByUserDevId(static_cast<int32_t>(user_device_id), &physical_device_id);
+    TORCH_CHECK(ret == ACL_SUCCESS, "aclrtGetPhyDevIdByUserDevId failed for user device ",
+                user_device_id, ", error code: ", ret);
+    TORCH_CHECK(physical_device_id >= 0, "CANN returned an invalid physical device ID: ", physical_device_id);
+    return physical_device_id;
+#else
+    TORCH_CHECK(false, "NPU physical device lookup requires a vllm-ascend extension built with CANN "
+                       "aclrtGetPhyDevIdByUserDevId support. "
+                       "Upgrade CANN and rebuild vllm-ascend.");
+#endif
+}
+
 // Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
 thread_local char g_hashBuf[kHashBufSize];
 thread_local int g_hashOffset = 0;
@@ -2690,6 +2710,7 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("get_physical_device_id(int user_device_id) -> int", &vllm_ascend::get_physical_device_id);
     ops.def(
         "npu_causal_conv1d_310(Tensor x, "
         "                         Tensor weight, "
@@ -2747,6 +2768,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    // No tensor arguments: register a catch-all implementation, not PrivateUse1.
+    ops.def("get_physical_device_id(int user_device_id) -> int", &vllm_ascend::get_physical_device_id);
 
     // vLLM-Ascend custom ops
     // Gemma RmsNorm
