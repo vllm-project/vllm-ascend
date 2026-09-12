@@ -57,6 +57,7 @@ REG_OP(InplacePartialRotaryMul)
     .OUTPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16, DT_FLOAT16, DT_BFLOAT16}))
     .ATTR(mode, Int, 0)
     .ATTR(partial_slice, ListInt, {0, 0})
+    .ATTR(negate_sin, Bool, false)
     .OP_END_FACTORY_REG(InplacePartialRotaryMul)
 
 } // namespace ge

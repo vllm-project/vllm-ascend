@@ -130,7 +130,7 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
         device_metadata_executor=executor,
         dcp_manager=None,
         input_batch=SimpleNamespace(lora_id_to_lora_request={}),
-        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, None, None),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, torch.tensor(1), None),
         dynamic_eplb=False,
         eplb_heat_collection_status=False,
     )
@@ -140,7 +140,6 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
     proposer.hidden_size = 4
     proposer.use_cuda_graph = False
-    proposer.dp_rank = 0
     proposer.dcp_size = 1
     proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=True))
     proposer.draft_window_size = None
@@ -154,7 +153,9 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.parallel_drafting = True
     proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
     proposer.enable_enpu = False
+    proposer.draft_attn_groups = [MagicMock()]
     proposer._update_full_graph_params_if_needed = MagicMock()
+    proposer._maybe_update_metadata = MagicMock()
     proposer.set_inputs_first_pass = MagicMock()
     proposer.build_draft_attn_metadata = MagicMock()
 

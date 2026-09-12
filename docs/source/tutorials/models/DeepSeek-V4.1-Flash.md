@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash (Experimental)
+# DeepSeek-V4.1-Flash
 
 ## 1 Introduction
 
@@ -16,9 +16,9 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-Support on vLLM Ascend is experimental. This guide documents W8A8 colocated
-deployment on either two Atlas 800 A3 servers or four Atlas 800 A2 servers.
-Prefill-Decode disaggregation is not covered by this guide.
+vLLM Ascend supports W8A8 colocated deployment on either two Atlas 800 A3
+servers or four Atlas 800 A2 servers. Prefill-Decode disaggregation and Engram
+host offloading are not covered by this guide.
 
 ## 2 Supported Features
 
@@ -79,7 +79,7 @@ images.
     servers.
 
     ```shell
-    export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:deepseek-v4.1-flash-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash-a3
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -124,7 +124,7 @@ images.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:deepseek-v4.1-flash
+    export IMAGE=quay.io/ascend/vllm-ascend:deepseek-v4.1-flash
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
@@ -398,17 +398,16 @@ true
 
 Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md)
 to evaluate the deployed service. No vLLM Ascend task-level accuracy result is
-published for this experimental configuration yet. When reporting results,
-record the checkpoint, prompt encoder, reasoning effort, sampling parameters,
-dataset version, and whether DSpark is enabled.
+published for this configuration yet. When reporting results, record the
+checkpoint, prompt encoder, reasoning effort, sampling parameters, dataset
+version, and whether DSpark is enabled.
 
 ## 8 Performance Evaluation
 
 Refer to the
 [AISBench performance evaluation guide](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
 or the [vLLM benchmark guide](https://docs.vllm.ai/en/latest/benchmarking/).
-No production performance baseline is published for this experimental
-configuration.
+No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 

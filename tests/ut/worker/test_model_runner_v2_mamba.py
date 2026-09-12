@@ -182,7 +182,7 @@ def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_m
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
     spec = _mamba_spec()
@@ -222,7 +222,7 @@ def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     attention_spec = FullAttentionSpec(
@@ -349,7 +349,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
 )
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     _mock_config,

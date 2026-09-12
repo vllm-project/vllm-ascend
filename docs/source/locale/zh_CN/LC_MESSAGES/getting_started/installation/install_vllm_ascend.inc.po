@@ -18,14 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "First, install the system dependencies and configure the pip mirror."
-msgstr "首先，安装系统依赖并配置 pip 镜像。"
-
-msgid ""
-"Optional: If you are working on an x86 machine or using a TorchNPU "
-"development version, configure pip's `extra-index`:"
-msgstr "可选：如果您在 x86 机器上工作或使用 TorchNPU 开发版本，请配置 pip 的 `extra-index`："
-
 msgid ""
 "Choose one of the following methods to install `vllm` and `vllm-ascend`. "
 "PyTorch and TorchNPU are installed automatically as dependencies during this"
@@ -98,9 +90,6 @@ msgid ""
 "which weakens protection against man-in-the-middle attacks. Use it only when"
 " you trust the network and cannot fix the certificate configuration."
 msgstr "此选项告诉 pip 即使在 HTTPS 验证失败时也信任该主机，这会削弱对中间人攻击的保护。仅在您信任网络且无法修复证书配置时使用。"
-
-msgid "Check the device build type:"
-msgstr "检查设备构建类型："
 
 msgid "=== \"uv installation\""
 msgstr "=== \"uv 安装\""
@@ -203,3 +192,14 @@ msgid ""
 msgstr ""
 "Atlas 300I DUO 和 Atlas 200I Pro 不支持 `triton` 或 `triton-"
 "ascend`。如果环境中已安装任一软件包，请将其卸载，并且不要重新安装 `triton-ascend`："
+
+msgid ""
+"First, install the system dependencies for the container operating system "
+"and configure the pip mirror."
+msgstr "首先，安装容器操作系统的系统依赖，并配置 pip 镜像源。"
+
+msgid "For Ubuntu:"
+msgstr "对于 Ubuntu："
+
+msgid "For openEuler:"
+msgstr "对于 openEuler："

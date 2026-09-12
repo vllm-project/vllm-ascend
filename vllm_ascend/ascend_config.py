@@ -56,6 +56,42 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
+@config(config=ConfigDict(frozen=True))
+class KVPPConfig:
+    """Configuration for KV layer parallelism on Ascend."""
+
+    size: int = 1
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> KVPPConfig:
+        additional_config = vllm_config.additional_config or {}
+        enabled = validate_additional_config_bool(
+            additional_config.get("enable_kvpp", False), "additional_config.enable_kvpp"
+        )
+        return cls(size=vllm_config.parallel_config.tensor_parallel_size if enabled else 1)
+
+    def validate(self, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size != 1:
+            raise ValueError("KVPP does not support PCP yet.")
+        if parallel_config.decode_context_parallel_size != 1:
+            raise ValueError("KVPP and DCP cannot be enabled at the same time.")
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError("KVPP broadcast does not support KV transfer connectors yet.")
+
+        model_config = vllm_config.model_config
+        if not model_config.enforce_eager:
+            raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")
+        if not model_config.use_mla or model_config.is_hybrid:
+            raise ValueError("KVPP currently supports only non-hybrid MLA models.")
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.method != "mtp":
+                raise ValueError("KVPP currently supports speculative decoding only with method='mtp'.")
+            if speculative_config.num_speculative_tokens_per_batch_size:
+                raise ValueError("KVPP currently supports only a fixed number of MTP speculative tokens.")
+
+
 @config
 class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
@@ -468,6 +504,7 @@ class AscendConfig:
     dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
+    kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -1042,13 +1079,10 @@ class FinegrainedTPConfig:
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
         )
-        self.max_finegrained_tp_size = 1
         for field_name in size_fields:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
-            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
-
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
@@ -1463,6 +1497,7 @@ def init_ascend_config(vllm_config):
     sparse_kv = SparseKVOffloadConfig.from_additional_config(
         vllm_config, additional_config.get("sparse_kv_offload_config", {})
     )
+    kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
@@ -1479,6 +1514,9 @@ def init_ascend_config(vllm_config):
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        # Factory-injected: derived from additional_config.enable_kvpp + TP.
+        "enable_kvpp",
+        "kvpp_config",
         # Factory-only input: materialized by _resolve_dump_config_path and
         # replaced with the validated dump_config_path field below.
         "dump_config",
@@ -1520,6 +1558,7 @@ def init_ascend_config(vllm_config):
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
+        kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
         **kwargs,
     )

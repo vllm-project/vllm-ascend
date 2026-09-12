@@ -8,7 +8,6 @@ import torch
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -19,7 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
-from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
+from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
@@ -48,7 +47,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=k_cache.nbytes + v_cache.nbytes,
                 layers=["layer.0"],
                 layer_stride=k_cache.nbytes + v_cache.nbytes,
@@ -97,7 +96,7 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     config = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=raw_cache.nbytes,
                 layers=["layer.0"],
                 layer_stride=raw_cache.nbytes,
@@ -152,7 +151,7 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=cache.nbytes,
                 layers=["layer.0.indexer"],
                 layer_stride=cache.nbytes,
@@ -194,7 +193,7 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
     config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=64,
                 layers=["layer.0"],
                 layer_stride=64,

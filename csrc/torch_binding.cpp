@@ -677,38 +677,6 @@ at::Tensor npu_causal_conv1d_custom(
     return output;
 }
 
-// It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
-std::vector<at::Tensor> moe_grouped_matmul(
-    at::Tensor x,
-    at::Tensor weight,
-    const at::Tensor& group_list,
-    int64_t split_item,
-    int64_t group_type,
-    int64_t group_list_type
-)
-{
-    bool transpose_weight = false;
-    bool weight_nz = true;
-
-    at::TensorList x_list = at::TensorList(x);
-    at::TensorList weight_list = at::TensorList(weight);
-    std::vector<at::Tensor> y;
-    c10::TensorOptions options = x_list[0].options().dtype(x[0].scalar_type());
-    auto m = x_list[0].sizes()[0];
-    auto n = weight_list[0].sizes()[1];
-    if (!transpose_weight) {
-        n = weight_list[0].sizes()[2];
-    }
-    at::Tensor y_0 = at::empty(at::IntArrayRef{m, n}, options);
-    y.emplace_back(y_0);
-    at::TensorList result = at::TensorList(y);
-
-    EXEC_NPU_CMD(aclnnMoeGroupedMatmulWeightNz,
-                x_list, weight_list, group_list, transpose_weight, result);
-
-    return y;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     const at::Tensor& x,
     int64_t k,
@@ -1516,7 +1484,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_v2_npu(
     return run_hc_pre_fusion(x, hc_fn, hc_scale, hc_base, hc_mult, hc_sinkhorn_iters, norm_eps, hc_eps);
 }
 
-void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice)
+void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice, bool negate_sin)
 {
     constexpr int BSND_DIM_NUM = 4;
     static const std::unordered_map<std::string, int> mode_map = {
@@ -1533,7 +1501,7 @@ void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const 
     }
     auto origin_dim_num = x.dim();
     TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
-    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, it->second, partial_slice);
+    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, it->second, partial_slice, negate_sin);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
@@ -3148,18 +3116,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
-    ops.def(
-        "moe_grouped_matmul("
-            "Tensor x,"
-            "Tensor weight,"
-            "Tensor group_list,"
-            "int split_item,"
-            "int group_type,"
-            "int group_list_type)"
-
-        "-> Tensor[]"
-    );
-    ops.impl("moe_grouped_matmul", torch::kPrivateUse1,&vllm_ascend::moe_grouped_matmul);
 
     ops.def(
         "moe_gating_top_k_hash("
@@ -3378,7 +3334,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "inplace_partial_rotary_mul("
-            "Tensor(a!) x, Tensor r1, Tensor r2, str rotary_mode, int[] partial_slice"
+            "Tensor(a!) x, Tensor r1, Tensor r2, str rotary_mode, int[] partial_slice, bool negate_sin=False"
         ") -> ()"
     );
     ops.impl("inplace_partial_rotary_mul", torch::kPrivateUse1, &vllm_ascend::inplace_partial_rotary_mul_npu);
