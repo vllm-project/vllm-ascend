@@ -46,7 +46,6 @@ def _ascend_gdn_init(self, *args, **kwargs) -> None:
     prepare_causal_conv1d_weight_for_loading(self.conv1d)
 
 
-
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
     return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")

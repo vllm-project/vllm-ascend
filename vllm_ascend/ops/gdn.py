@@ -52,22 +52,15 @@ def prepare_causal_conv1d_weight_for_loading(conv1d: torch.nn.Module) -> None:
     """
     weight = conv1d.weight
     if weight.ndim != 3 or weight.shape[1] != 1:
-        raise ValueError(
-            "Expected causal conv1d weight shape [channels, 1, width], "
-            f"but got {tuple(weight.shape)}"
-        )
+        raise ValueError(f"Expected causal conv1d weight shape [channels, 1, width], but got {tuple(weight.shape)}")
     if not hasattr(weight, "weight_loader"):
         raise AttributeError("Causal conv1d weight does not have a weight_loader")
 
     original_weight_loader = weight.weight_loader
     channels, _, width = weight.shape
-    weight.data = torch.empty(
-        (width, channels), dtype=weight.dtype, device=weight.device
-    )
+    weight.data = torch.empty((width, channels), dtype=weight.dtype, device=weight.device)
 
-    def width_major_weight_loader(
-        param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs
-    ) -> None:
+    def width_major_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor, *args, **kwargs) -> None:
         checkpoint_layout = param.data.transpose(0, 1).unsqueeze(1)
         original_weight_loader(checkpoint_layout, loaded_weight, *args, **kwargs)
 

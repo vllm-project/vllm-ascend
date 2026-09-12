@@ -24,9 +24,7 @@ from vllm_ascend.ops.gdn import prepare_causal_conv1d_weight_for_loading
 def test_prepare_causal_conv1d_weight_for_loading() -> None:
     weight = torch.nn.Parameter(torch.empty(6, 1, 4), requires_grad=False)
 
-    def sharded_loader(
-        param: torch.Tensor, loaded_weight: torch.Tensor, offset: int
-    ) -> None:
+    def sharded_loader(param: torch.Tensor, loaded_weight: torch.Tensor, offset: int) -> None:
         param.data.copy_(loaded_weight[offset : offset + param.shape[0]])
 
     weight.weight_loader = sharded_loader
