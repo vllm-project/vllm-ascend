@@ -63,16 +63,12 @@ jobs:
       target: a2
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   build-a3:
     if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
@@ -81,16 +77,12 @@ jobs:
       target: a3
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   build-310p:
     if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
@@ -99,16 +91,12 @@ jobs:
       target: 310p
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
   build-a5:
     if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
@@ -116,13 +104,9 @@ jobs:
       target: a5
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
