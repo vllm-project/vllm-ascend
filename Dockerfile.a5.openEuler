@@ -53,7 +53,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.27.1
+ARG VLLM_TAG=v0.28.0
 RUN if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
     git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.

@@ -34,6 +34,7 @@ from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import KpoolTailSpec
 from vllm_ascend.models.glm5next.ops.kpool_compress import fwht128_quant_fp8
 from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
+from vllm_ascend.utils import vllm_version_is
 
 # Paged MQA page sizes the kpool tail cache aligns against. Upstream reads this
 # from `vllm.utils.deep_gemm`, which is a CUDA-only module on Ascend.
@@ -77,13 +78,13 @@ def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
 class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     """Indexer K cache that stores kpool-compressed entries.
 
-    Setting ``tokens_per_state = index_kpool`` on the KV cache spec makes vLLM's
-    indexer metadata builder emit pool-granular ``slot_mapping`` /
-    ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free, and shrinks the
-    cache allocation store one state per ``index_kpool`` tokens. The pool
-    *content* (softmax-weighted sum vs keep-every-Nth) is computed by the
-    kpool compress kernel inside the indexer op — the cache only provides the
-    addressing, which is identical for both schemes.
+    Setting ``compress_ratio`` / ``tokens_per_state`` (= index_kpool) on the KV
+    cache spec makes vLLM's indexer metadata builder emit pool-granular
+    ``slot_mapping`` / ``seq_lens`` / ``cu_seq_lens`` / ``page_table`` for free,
+    and shrinks the cache allocation store one state per ``index_kpool`` tokens.
+    The pool *content* (softmax-weighted sum vs keep-every-Nth) is computed by
+    the kpool compress kernel inside the indexer op — the cache only provides
+    the addressing, which is identical for both schemes.
 
     The indexer shares one block with the co-located MLA (a single
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
@@ -121,10 +122,13 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         from dataclasses import replace
 
         spec = super().get_kv_cache_spec(vllm_config)
-        # ``tokens_per_state`` is the KV-spec representation of kpool
-        # compression in the current cache-layout API.
+        # vLLM #51718 renamed MLAAttentionSpec.compress_ratio to
+        # AttentionSpec.tokens_per_state on main; both express kpool compression.
         assert isinstance(spec, MLAAttentionSpec)
-        spec = replace(spec, tokens_per_state=self._index_kpool)
+        if vllm_version_is("0.28.0"):
+            spec = replace(spec, compress_ratio=self._index_kpool)
+        else:
+            spec = replace(spec, tokens_per_state=self._index_kpool)
 
         # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
         # (= block_size // index_kpool) is virtually split into pool pages of

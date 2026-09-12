@@ -33,6 +33,8 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
+For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a relevant PR change trigger it automatically. See [Run doctest](../developer_guide/contribution/testing.md#run-doctest) for supported cases and local commands.
+
 Tests are run against both the community vLLM version and the latest release.
 
 ### `/nightly`
@@ -159,7 +161,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | Cancelled | Not cancelled |
 |---|---|
 | `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
-| `labeled_doctest.yaml` | `/rerun` command runs |
+| `schedule_doctest.yaml` | `/rerun` command runs |
 | `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
 | `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
 | `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |

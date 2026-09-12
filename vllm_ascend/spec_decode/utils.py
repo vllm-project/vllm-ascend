@@ -232,7 +232,6 @@ class DynamicSpecScheduler:
         self,
         *,
         method: str,
-        policy: str = "confidence_budget",
         method_params: dict[str, Any],
         max_batch_size: int,
         num_speculative_tokens: int,
@@ -241,12 +240,6 @@ class DynamicSpecScheduler:
         if method not in ("dflash", "dspark"):
             raise ValueError(f"Unsupported dynamic speculative method: {method}")
 
-        if policy != "confidence_budget":
-            raise ValueError(
-                "The legacy V1 scheduler supports only confidence_budget. "
-                "Use V2 DSpark with enable_adaptive_verification=true "
-                "for hardware_aware physical K."
-            )
         self.method = method
 
         self.max_batch_size = max_batch_size
@@ -352,7 +345,6 @@ class DynamicSpecScheduler:
 
             token_probs = self._compute_dflash_token_probs(
                 logits,
-                num_reqs=num_reqs,
             )
         elif self.method == "dspark":
             if num_reqs is None:
@@ -372,7 +364,6 @@ class DynamicSpecScheduler:
     def _compute_dflash_token_probs(
         self,
         logits: torch.Tensor,
-        num_reqs: int | None = None,
     ) -> torch.Tensor:
         """Estimate DFlash token acceptance probabilities.
 
@@ -386,26 +377,12 @@ class DynamicSpecScheduler:
             token_probs: [B, D]
         """
         num_rows = logits.shape[0]
-        if num_reqs is None:
-            num_draft_tokens = self.num_speculative_tokens
-            num_reqs = num_rows // max(num_draft_tokens, 1)
-        else:
-            num_reqs = int(num_reqs)
-            num_draft_tokens = num_rows // max(num_reqs, 1)
-        if num_reqs <= 0 or num_draft_tokens <= 0:
-            return self._token_probs_buffer[:0, :0]
+        num_draft_tokens = self.num_speculative_tokens
+        num_reqs = num_rows // num_draft_tokens
 
-        token_probs = self._token_probs_buffer[:num_reqs, :num_draft_tokens]
+        token_probs = self._token_probs_buffer[:num_reqs]
         # max(softmax(logits)) per row; PyTorch keeps this ACLGraph-safe.
-        raw_probs = (
-            torch.softmax(logits.float(), dim=-1)
-            .max(dim=-1)
-            .values.view(
-                num_reqs,
-                num_draft_tokens,
-            )
-        )
-        token_probs.copy_(raw_probs)
+        token_probs.copy_(torch.softmax(logits.float(), dim=-1).max(dim=-1).values.view(num_reqs, num_draft_tokens))
         token_probs.clamp_(
             min=1e-6,
             max=1.0,
@@ -428,10 +405,8 @@ class DynamicSpecScheduler:
         Output:
             token_probs: [B, D]
         """
-        num_draft_tokens = max(int(draft_token_ids.shape[1]) - 1, 0)
+        num_draft_tokens = self.num_speculative_tokens
         num_tokens = num_reqs * num_draft_tokens
-        if num_reqs <= 0 or num_draft_tokens <= 0:
-            return self._token_probs_buffer[:0, :0]
 
         flat_hidden = last_hidden_states.reshape(
             num_tokens,
@@ -459,9 +434,15 @@ class DynamicSpecScheduler:
             flat_markov,
         )
 
-        token_probs = self._token_probs_buffer[:num_reqs, :num_draft_tokens]
+        token_probs = self._token_probs_buffer[:num_reqs]
 
-        token_probs.copy_(confidence.reshape(num_reqs, num_draft_tokens))
+        token_probs.copy_(
+            confidence.reshape(
+                num_reqs,
+                num_draft_tokens,
+            )
+        )
+
         token_probs.clamp_(
             min=1e-6,
             max=1.0,
@@ -476,7 +457,7 @@ class DynamicSpecScheduler:
         """Run the shared dynamic speculative scheduling pipeline."""
         num_reqs, num_draft_tokens = token_probs.shape
 
-        survival = self._survival_buffer[:num_reqs, :num_draft_tokens]
+        survival = self._survival_buffer[:num_reqs]
 
         # survival[b, i] estimates the probability that request b reaches
         # and accepts the draft prefix through position i.
@@ -555,18 +536,17 @@ class DynamicSpecScheduler:
 
         keep_lens = self._num_verify_tokens_buffer[:num_reqs]
 
-        min_k = min(self.min_k, num_draft_tokens)
-        keep_lens.fill_(min_k)
+        keep_lens.fill_(self.min_k)
 
         extra_budget_per_req = max(
-            self.budget_k - min_k,
+            self.budget_k - self.min_k,
             0,
         )
 
         # Positions [0:min_k] have already been guaranteed.
         candidate_window = survival[
             :,
-            min_k:,
+            self.min_k :,
         ]
 
         num_candidates = candidate_window.numel()
@@ -577,7 +557,7 @@ class DynamicSpecScheduler:
         )
 
         if num_budget_tokens > 0:
-            candidate_cols = num_draft_tokens - min_k
+            candidate_cols = num_draft_tokens - self.min_k
 
             flat_survival = candidate_window.reshape(-1)
 
@@ -601,7 +581,7 @@ class DynamicSpecScheduler:
             )
 
         keep_lens.clamp_(
-            min=min_k,
+            min=self.min_k,
             max=num_draft_tokens,
         )
 

@@ -1,7 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -583,6 +583,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
+    _request_capacity_factor: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -667,9 +669,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cache_group_key = layer_names[0]
         self.hadamard = None
         self._init_hadamard(layer_names)
-        self.start_pos_prefill: torch.Tensor = torch.zeros(
-            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
-        )
+        max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
+        self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
@@ -681,7 +682,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # during graph replay. Full-decode graphs pad the request count beyond
         # max_num_seqs (cudagraph capture sizes plus the FIA dummy request), so
         # size the per-request buffers for the graph-mode maximum.
-        max_qli_reqs = scheduler_config.max_num_seqs
+        max_qli_reqs = max_num_reqs
         compilation_config = self.vllm_config.compilation_config
         if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
             max_qli_reqs = max(max_qli_reqs, compilation_config.max_cudagraph_capture_size)
@@ -728,6 +729,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(
+                speculative_config, "enable_adaptive_verification",
+                False,
+            )
+        ):
+          return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -1343,9 +1354,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     indices_output=dspark_swa_indices,
                 )
             else:
-                dspark_swa_indices, _ = build_dspark_swa_indices(
-                    *dspark_swa_args, buffer=self.dspark_swa_indices_buffer
-                )
+                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
@@ -1896,6 +1905,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # communication status, their quantize() outputs are equivalent.
         # Share the result instead of calling quantize() twice on the same input.
         # - W8A8 no-comm: saves one npu_dynamic_quant (full-tensor read + absmax).
+        # - MXFP8 no-comm: saves one npu_dynamic_mx_quant (full-tensor read +
+        #   per-group scale).
         # - W4A8 no-comm: saves one no-op pass-through (kernel launch + ref).
         # - TP comm: both return (hidden_states, None); shareable when custom_op
         #   types match (same communication path).
@@ -1937,9 +1948,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
         else:
-            qr = self.q_norm(wq_a_result)
-            q_b_quant, q_b_scale = qr, None
-            qr_pertoken_scale = None
+            # MXFP8: the split-out quantize() (Vector) overlaps with kv_matmul
+            # (Cube) in Part2, and the pair is returned for the Indexer to
+            # reuse. Non-splittable schemes (W4A8, bf16) keep the pass-through
+            # (scale stays None).
+            q_b_quant, q_b_scale = self.cv_wq_b.quantize(self.q_norm(wq_a_result))
+            qr, qr_pertoken_scale = q_b_quant, q_b_scale
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()

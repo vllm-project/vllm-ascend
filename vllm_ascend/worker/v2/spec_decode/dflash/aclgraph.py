@@ -5,7 +5,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -22,7 +21,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
-    enable_draft_graph_debug,
     extend_capture_descriptors,
     physical_k_capture_scope,
     v2_varlen_physical_k_enabled,
@@ -63,7 +61,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # both capture and replay to keep them consistent).
         if super().needs_capture():
             set_draft_graph_params(self.capture_sizes)
-        enable_draft_graph_debug(self, logger)
 
     def capture(
         self,

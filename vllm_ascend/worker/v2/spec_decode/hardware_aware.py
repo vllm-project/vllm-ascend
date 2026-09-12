@@ -11,11 +11,8 @@ vLLM. Runner call sites keep their explicit input/attention ordering.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from functools import wraps
-from time import perf_counter
 from types import MethodType
 from typing import Any
 
@@ -29,7 +26,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.dynamic_spec import resolve_method_params, v2_physical_k_enabled
+from vllm_ascend.dynamic_spec import resolve_physical_k, v2_physical_k_enabled
 
 # Runtime physical widths and persistent buffers.
 
@@ -51,8 +48,8 @@ def v2_varlen_physical_k_enabled(vllm_config: Any) -> bool:
 def configured_capture_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
     """Return the physical K values for which V2 FULL graphs are captured."""
 
-    params = resolve_method_params(_dynamic_config(vllm_config))
-    configured = params.get("v2_varlen_capture_k")
+    params = resolve_physical_k(_dynamic_config(vllm_config)) or {}
+    configured = params.get("capture_k")
     if configured is None:
         values = range(1, max_k + 1)
     elif isinstance(configured, (list, tuple)):
@@ -276,7 +273,6 @@ class IndexedConfidenceBuffer:
 def initialize_dspark_physical_k(self) -> None:
     """Initialize DSpark only after upstream has finalized sample_from_anchor."""
     self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
-    self._physical_k_log_count = 0
     # DSpark changes ``sample_from_anchor`` after DFlash initialization,
     # so initialize the width-dependent anchor indices only now.
     initialize_physical_k_buffers(self)
@@ -557,28 +553,6 @@ def physical_k_capture_scope(self, forward_fn: Callable):
             dflash_cudagraph_module._prepare_dflash_inputs_to_capture = original_prepare_inputs
 
 
-def enable_draft_graph_debug(manager, logger) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
-        return
-    original = manager.dispatch
-    logger.debug("ASCEND_DRAFT_CAPTURES descriptors=%s", manager._capture_descs)
-
-    @wraps(original)
-    def traced(*args, **kwargs):
-        result = original(*args, **kwargs)
-        # Only descriptor metadata is logged, never device tensor contents.
-        logger.debug(
-            "ASCEND_DRAFT_DISPATCH mode=%s tokens=%s batch=%s width=%s",
-            getattr(result, "cg_mode", None),
-            getattr(result, "num_tokens", None),
-            getattr(result, "num_reqs", None),
-            getattr(result, "uniform_token_count", None),
-        )
-        return result
-
-    manager.dispatch = traced
-
-
 # PIECEWISE profiling and upstream verification-manager adaptation.
 
 
@@ -640,7 +614,6 @@ def configure_piecewise_manager(
     manager.set_initial_cost_curves = MethodType(  # type: ignore[method-assign]
         set_initial_cost_curves, manager
     )
-    enable_budget_debug(manager, logger)
     return manager
 
 
@@ -661,24 +634,6 @@ def adaptive_verification_gate_wrapper(runner_module):
     if original_factory is None:
         yield
         return
-
-    # Keep the allocator algorithm from vLLM PR #47808, but do not use its
-    # torch.compile wrapper on Ascend.  The compiled NPU graph corrupts the
-    # in-place ``capacities`` result for dynamic request counts (for example a
-    # budget of 2 has produced [1, 0, 10]); the identical eager function has
-    # exact budget conservation across the same NPU shape matrix.  Runtime
-    # ``reallocate_drafts`` resolves this module global on every call, so the
-    # Ascend plugin can replace only the execution wrapper without forking the
-    # confidence or prefix-allocation logic.
-    from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_mod
-
-    if adaptive_mod._assign_draft_token_budget_compiled is not adaptive_mod._assign_draft_token_budget:
-        adaptive_mod._assign_draft_token_budget_compiled = adaptive_mod._assign_draft_token_budget
-        logger.warning(
-            "Adaptive verification on Ascend uses the upstream eager prefix "
-            "allocator because its torch.compile wrapper corrupts dynamic "
-            "capacity outputs on NPU."
-        )
 
     from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
         AdaptiveVerificationManager,
@@ -749,30 +704,3 @@ def adaptive_verification_gate_wrapper(runner_module):
         yield
     finally:
         runner_module.maybe_create_adaptive_verification_manager = original_factory
-
-
-def enable_budget_debug(manager, logger) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
-        return
-    original = manager.get_num_tokens
-
-    @wraps(original)
-    def traced(*args, **kwargs):
-        start = perf_counter()
-        result = original(*args, **kwargs)
-        state = manager._batch_budget
-        if state is not None:
-            capacities, non_drafts, budget = state
-            logger.debug(
-                "ASCEND_AV_BUDGET batch=%d available=%d budget=%d min_k=%d max_k=%d non_drafts=%d cpu_ms=%.3f",
-                len(capacities),
-                sum(capacities.values()),
-                budget,
-                min(capacities.values(), default=0),
-                max(capacities.values(), default=0),
-                sum(non_drafts.values()),
-                (perf_counter() - start) * 1000,
-            )
-        return result
-
-    manager.get_num_tokens = traced

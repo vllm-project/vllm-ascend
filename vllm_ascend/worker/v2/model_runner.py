@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import os
 from contextlib import contextmanager
 
 import numpy as np
@@ -25,7 +24,6 @@ import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
-from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -44,7 +42,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
-
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import _assign_draft_token_budget
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -59,7 +57,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens
+from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -269,19 +267,6 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
     ):
         self._cpp_execution_time_ms = None
-        if (
-            not dummy_run
-            and not is_profile
-            and getattr(self, "adaptive_verification", None) is not None
-            and self.update_stream is not None
-        ):
-            # Adaptive verification rewrites the shared per-step buffers
-            # (query_start_loc / cu_num_logits / capacities) in prepare_inputs.
-            # FULL-graph param updates for the previous step run on
-            # ``update_stream`` and are never joined back into the main stream,
-            # so fence here to keep those async reads/writes from racing with
-            # the in-place reallocation of this step.
-            torch.npu.current_stream().wait_stream(self.update_stream)
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -322,6 +307,67 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
+
+    def _reallocate_drafts_ascend(
+        self,
+        adaptive_verification,
+        req_ids: list[str],
+        idx_mapping: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """
+        Ascend replacement for AdaptiveVerificationManager.reallocate_drafts().
+
+        vLLM's implementation uses async_copy_to_gpu() for temporary CPU->device
+        arrays. On Ascend those copies can execute on another stream while the
+        following cumsum/compiled allocator consumes the destination buffers.
+
+        Keep the upstream AV algorithm unchanged, but make these two H2D copies
+        synchronous/current-stream ordered.
+        """
+        batch_budget = adaptive_verification._batch_budget
+        adaptive_verification._batch_budget = None
+        assert batch_budget is not None
+
+        (num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget) = batch_budget
+        num_reqs = idx_mapping.shape[0]
+        scheduled_drafts = np.fromiter((num_drafts_per_req[req_id] for req_id in req_ids), dtype=np.int32, count=num_reqs)
+        num_non_draft_tokens = np.fromiter((num_non_draft_tokens_per_req[req_id] for req_id in req_ids), dtype=np.int32, count=num_reqs)
+        num_tokens = (int(num_non_draft_tokens.sum()) + draft_budget)
+        # exact draft capacities
+        capacities = (adaptive_verification._batch_draft_capacity[:num_reqs])
+        if draft_budget == 0:
+            capacities.zero_()
+        else:
+            scheduled_drafts_cpu = torch.from_numpy(scheduled_drafts)
+            capacities.copy_(scheduled_drafts_cpu, non_blocking=False)
+
+            if draft_budget < int(scheduled_drafts.sum()):
+                _assign_draft_token_budget(
+                    adaptive_verification._confidence_probs,
+                    idx_mapping,
+                    capacities,
+                    draft_budget,
+                    adaptive_verification.num_speculative_steps,
+                )
+        capacities_cpu = capacities.cpu().numpy()
+        cap_sum = int(capacities_cpu.sum())
+
+        if cap_sum != draft_budget:
+            raise RuntimeError("[AV-CAPACITY] mismatch")
+        # non-draft token counts (scheduled_tokens - draft_tokens)
+        num_non_draft_tokens_gpu = (adaptive_verification._num_non_draft_tokens[:num_reqs])
+        num_non_draft_tokens_cpu = torch.from_numpy(num_non_draft_tokens)
+        num_non_draft_tokens_gpu.copy_(num_non_draft_tokens_cpu, non_blocking=False)
+        adaptive_verification._cu_num_logits[:1].zero_()
+
+        torch.cumsum(capacities + adaptive_verification.num_bonus_tokens, dim=0, out=adaptive_verification._cu_num_logits[1 : num_reqs + 1])
+
+        adaptive_verification.query_start_loc[:1].zero_()
+        torch.cumsum(capacities + num_non_draft_tokens_gpu, dim=0, out=adaptive_verification.query_start_loc[1 : num_reqs + 1])
+
+        adaptive_verification.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+
+        return (adaptive_verification._cu_num_logits[: num_reqs + 1], adaptive_verification.query_start_loc, draft_budget)
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -382,53 +428,78 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
-        num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
-        adaptive_verification = self.adaptive_verification if num_draft_tokens_per_req is not None else None
+        adaptive_verification = (self.adaptive_verification if num_draft_tokens_per_req is not None else None)
+        num_scheduled_tokens_upper_bound = num_scheduled_tokens_np.copy()
         if adaptive_verification is not None:
-            # Preserve non-draft counts above; compact only the speculative suffix.
-            num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification.compact_batch(
-                num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
+            (
+                num_scheduled_tokens_np,
+                cu_num_logits_np,
+            ) = adaptive_verification.compact_batch(
+                num_draft_tokens_per_req,
+                num_scheduled_tokens_np,
+                cu_num_logits_np,
             )
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
+        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
+        if (adaptive_verification is None and batch_desc.cg_mode == CUDAGraphMode.FULL):
+            # av uses varlen full graphs for its entire lifecycle including prefills before first draft block exists
+            if self.adaptive_verification is not None:
+                query_start_loc_np, num_reqs_padded = self._pad_adaptive_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                )
+            else:
+                query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                    batch_desc.cg_mode,
+                    batch_desc.num_reqs,
+                )
 
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if adaptive_verification is not None:
-            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification.reallocate_drafts(
-                req_ids, idx_mapping
-            )
-            total_num_logits = num_reqs * self.model_state.num_new_sampled_tokens_per_step + total_num_draft_tokens
-            if num_reqs_padded > num_reqs:
-                # Restore graph padding without overwriting per-request allocation.
-                async_copy_to_gpu(
-                    query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1],
-                    out=query_start_loc[num_reqs + 1 : num_reqs_padded + 1],
+            cu_num_logits, query_start_loc, total_num_draft_tokens = self._reallocate_drafts_ascend(
+                adaptive_verification, 
+                req_ids, 
+                idx_mapping,
                 )
-            # Ascend builders read host boundaries. Copy the manager's actual
-            # result, not a possibly stale input-buffer allocation.
-            self.input_buffers.query_start_loc_cpu.copy_(query_start_loc)
-            query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
+            # exact number of verifier logits after device-side allocation
+            total_num_logits = (num_reqs * num_bonus_tokens + total_num_draft_tokens)
+            query_start_loc_np[: num_reqs + 1] = (query_start_loc[: num_reqs + 1].cpu().numpy())
+            exact_av_end = int(query_start_loc_np[num_reqs])
+            # remove the provisional CPU tail
+            query_start_loc_np[num_reqs + 1 :] = exact_av_end
+            # start again from the graph descriptor's request shape
+            num_reqs_padded = batch_desc.num_reqs or num_reqs
+
+            # Call _pad_query_start_loc_for_fia only after
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                (
+                    query_start_loc_np,
+                    num_reqs_padded,
+                ) = self._pad_adaptive_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                )
+                async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+                query_start_loc = self.input_buffers.query_start_loc
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -467,8 +538,19 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
+        # prepare_pos_seq_lens() operates only on the real requests and clears seq_lens[num_reqs:] to zero.
+        # _pad_query_start_loc_for_fia() may append one graph-only request for a mixed/AV FULL batch
+        # give that dummy row the corresponding query length as well.
+        if (self.adaptive_verification is not None and num_reqs_padded > num_reqs):
+            dummy_seq_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(np.int32, copy=False)
+            self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = dummy_seq_lens_np
+            self.input_buffers.seq_lens[num_reqs:num_reqs_padded].copy_(torch.from_numpy(dummy_seq_lens_np), non_blocking=False)
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
+        # ascend also consumes the CPU seq_lens metadata.
+        # scheduler-side values are only upper bounds for AV, copy the exact final real-request seq_lens back from the device
+        if adaptive_verification is not None:
+            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
@@ -558,17 +640,31 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
 
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
+        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
+        if vllm_version_is("0.28.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+            )
+        else:
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
         input_batch._vllm_ascend_physical_draft_k = int(scheduler_output.num_spec_tokens_to_schedule)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    
+    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if self.pcp_manager is None:
+            return super().prepare_dummy_attn(input_batch)
+        return self.pcp_manager.prepare_dummy_attn(input_batch)
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.
@@ -683,17 +779,6 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
         """
-        if (
-            getattr(self, "adaptive_verification", None) is not None
-            and int(os.environ.get("VLLM_ASCEND_DEBUG_ADAPTIVE_OOB", "0")) > 0
-        ):
-            self._debug_probe_adaptive_post_update(
-                idx_mapping,
-                sampled_tokens,
-                num_sampled,
-                num_rejected,
-                query_start_loc,
-            )
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
@@ -705,136 +790,6 @@ class NPUModelRunner(GPUModelRunner):
         # Without MTP, update_requests writes the shared NumPy/torch CPU state.
         if self.speculator is not None:
             self._copy_num_computed_tokens_to_cpu()
-
-    def _debug_probe_adaptive_post_update(
-        self,
-        idx_mapping,
-        sampled_tokens,
-        num_sampled,
-        num_rejected,
-        query_start_loc=None,
-    ):
-        """Temporary ADAPTIVE-verification probe (remove after triage).
-
-        Replicates every address ``vllm input_batch._post_update_kernel``
-        touches and logs the first step where any goes out of bounds, so the
-        device-side aivec fault can be tied to concrete per-request values.
-        Gated by ``VLLM_ASCEND_DEBUG_ADAPTIVE_OOB``.
-        """
-        rows = idx_mapping.shape[0]
-        ns_len = num_sampled.shape[0]
-        nr_len = num_rejected.shape[0]
-        token_row = sampled_tokens.shape[1] if sampled_tokens.ndim == 2 else 1
-        all_token_row = self.req_states.all_token_ids.gpu.shape[1]
-        num_req_states = self.req_states.num_computed_tokens.gpu.shape[0]
-        qsl_len = query_start_loc.shape[0] if query_start_loc is not None else 0
-
-        torch.accelerator.synchronize()
-        idx = idx_mapping.cpu().numpy().reshape(-1)
-        ns = num_sampled.cpu().numpy().reshape(-1)
-        nr = num_rejected.cpu().numpy().reshape(-1)
-        qsl = query_start_loc.cpu().numpy().reshape(-1) if query_start_loc is not None else None
-        smp = sampled_tokens.cpu().numpy()
-        total_len = self.req_states.total_len.gpu.cpu().numpy()
-        num_computed = self.req_states.num_computed_tokens.gpu.cpu().numpy()
-
-        obc_shape = None
-        penalties = getattr(self.sampler, "penalties_state", None)
-        if penalties is not None:
-            obc_t = penalties.output_bin_counts
-            if obc_t is not None:
-                obc_shape = obc_t.shape
-
-        step = getattr(self, "_dbg_probe_step", 0) + 1
-        self._dbg_probe_step = step
-
-        issues = []
-        for r in range(rows):
-            req = int(idx[r])
-            if req < 0:
-                continue
-            if not (0 <= req < num_req_states):
-                issues.append(
-                    (r, req, f"idx_mapping out of req-state range [0,{num_req_states})")
-                )
-                continue
-            if r >= ns_len or r >= nr_len:
-                issues.append(
-                    (
-                        r,
-                        req,
-                        f"row {r} beyond sampler arrays "
-                        f"(ns_len={ns_len} nr_len={nr_len})",
-                    )
-                )
-                continue
-            if qsl is None or r + 1 >= qsl_len:
-                issues.append(
-                    (r, req, f"query_start_loc too short (qsl_len={qsl_len})")
-                )
-                continue
-            s = int(ns[r])
-            j = int(nr[r])
-            qlen = int(qsl[r + 1]) - int(qsl[r])
-            total = int(total_len[req])
-            if s < 0 or s > token_row:
-                issues.append(
-                    (r, req, f"num_sampled={s} outside row width {token_row}")
-                )
-                continue
-            if total < 0 or total + s > all_token_row:
-                issues.append(
-                    (
-                        r,
-                        req,
-                        f"all_token_ids overflow: total_len={total} + "
-                        f"num_sampled={s} > row {all_token_row}",
-                    )
-                )
-            delta = qlen - j
-            if num_computed[req] + delta < 0:
-                issues.append(
-                    (
-                        r,
-                        req,
-                        f"num_computed underflow: nc={int(num_computed[req])} "
-                        f"delta=qlen({qlen})-num_rejected({j})={delta}",
-                    )
-                )
-            if obc_shape is not None and s > 0:
-                vocab = obc_shape[1]
-                for i in range(s):
-                    tid = int(smp[r, i])
-                    if not (0 <= tid < vocab):
-                        issues.append(
-                            (
-                                r,
-                                req,
-                                f"output_bin_counts token_id={tid} out of "
-                                f"[0,{vocab}) at sampled pos {i}",
-                            )
-                        )
-                        break
-            if step <= 3 and r < 8:
-                toks = [int(t) for t in smp[r, :s]] if s else []
-                logger.warning(
-                    "[OOB-PROBE step=%d row=%d req=%d] qlen=%d ns=%d nr=%d "
-                    "total=%d tokens=%s",
-                    step,
-                    r,
-                    req,
-                    qlen,
-                    s,
-                    j,
-                    total,
-                    toks,
-                )
-
-        logger.warning(
-            "[OOB-PROBE step=%d] rows=%d issues=%d", step, rows, len(issues)
-        )
-        for r, req, msg in issues:
-            logger.warning("[OOB-PROBE step=%d row=%d req=%d] %s", step, r, req, msg)
 
     def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
@@ -872,6 +827,30 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
 
+    def _pad_adaptive_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
+        """
+        slippers
+        """
+        assert num_reqs <= num_reqs_padded <= self.max_num_reqs
+        num_padding_reqs = num_reqs_padded - num_reqs
+
+        if num_padding_reqs == 0:
+            query_start_loc_np[num_reqs] = num_tokens_padded
+            return query_start_loc_np, num_reqs_padded
+        last_loc = int(query_start_loc_np[num_reqs])
+        num_padding_tokens = num_tokens_padded - last_loc
+        assert num_padding_tokens>0
+
+        cummulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cummulative_padding
+        return query_start_loc_np, num_reqs_padded
+
     def _pad_query_start_loc_for_fia(
         self,
         num_tokens_padded: int,
@@ -887,28 +866,33 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
+        # This checks query lengths, not request phase: short prefills can also
+        # match. Graph dispatch is responsible for excluding incompatible prefills.
+        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        matches_uniform_decode_graph_shape = (
+            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
+        )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and not matches_uniform_decode_graph_shape
         ):
             num_reqs_padded = num_reqs
         else:
-            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
+            # Preserve the captured request shape for uniform decode graphs.
+            # GDN full graphs capture metadata at request granularity, so
+            # collapsing all padded tokens into one request changes the graph
+            # topology between capture and replay.
+            num_reqs_padded = descriptor_num_reqs
 
-        runtime_query_len = self.decode_query_len
-        if num_reqs_padded > 0 and num_tokens_padded % num_reqs_padded == 0:
-            runtime_query_len = num_tokens_padded // num_reqs_padded
-        is_uniform_batch = (
-            num_tokens_padded == num_reqs_padded * runtime_query_len
-            and query_start_loc_np[num_reqs] == num_reqs * runtime_query_len
-        )
-        if is_uniform_batch:
+        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * runtime_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded

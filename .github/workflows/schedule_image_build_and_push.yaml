@@ -46,6 +46,7 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.27.1rc
           - releases/v0.26.0rc
           - releases/v0.25.1rc
           - releases/v0.24.0rc
@@ -106,6 +107,7 @@ permissions:
 jobs:
   setup-matrix:
     runs-on: linux-amd64-cpu-2-hk
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'image-build' }}
     outputs:
       build_meta: ${{ steps.filter.outputs.build_meta }}
     steps:
@@ -142,7 +144,7 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
       base_os: ${{ matrix.build_meta.base_os }}
-      cann_image_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0' }}
+      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
       cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       
       # ===== Dynamic SWR repositories based on build_type =====
@@ -194,7 +196,7 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
       base_os: ${{ matrix.build_meta.base_os }}
-      cann_image_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0' }}
+      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
       cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
       swr_temp_repo: ${{ inputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}

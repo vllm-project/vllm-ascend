@@ -2264,6 +2264,9 @@ class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
 class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
     """Build rank-local attention and canonical global cache metadata."""
 
+    # DualChunkSwap expands each prefill into at most two local rows.
+    _request_capacity_factor: ClassVar[int] = 2
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -2276,14 +2279,6 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             layer_names,
             vllm_config,
             device,
-        )
-        # DualChunkSwap can expand each scheduler-global prefill request into
-        # two rank-local rows. Keep this in sync with PCPManager's local input
-        # buffers, which are sized to ``2 * max_num_seqs``. The canonical
-        # global builder below must retain the scheduler-global capacity.
-        max_num_local_reqs = 2 * vllm_config.scheduler_config.max_num_seqs
-        self.start_pos_prefill = self.start_pos_prefill.new_zeros(
-            max_num_local_reqs,
         )
         self._global_metadata_builder = dsa_v1.AscendDSAMetadataBuilder(
             kv_cache_spec,

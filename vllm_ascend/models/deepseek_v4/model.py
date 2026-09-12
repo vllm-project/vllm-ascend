@@ -27,7 +27,6 @@ import math
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -76,9 +75,6 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-if TYPE_CHECKING:
-    from vllm.v1.attention.backend import AttentionBackend
-
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
@@ -88,12 +84,9 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    bootstrap_custom_op_env,
     enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
-    get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
 from vllm_ascend.worker.v2.pp_utils import (
@@ -114,15 +107,11 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         dtype: torch.dtype,
         prefix: str,
         cache_config: CacheConfig,
-        backend_cls: "type[AttentionBackend] | None" = None,
     ):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         self.dtype = dtype
-        # Optional backend override injected by the caller (mirrors upstream
-        # ``swa_backend_cls``); defaults to the Ascend DSA SWA backend.
-        self.backend_cls = backend_cls
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
@@ -145,8 +134,6 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        if self.backend_cls is not None:
-            return self.backend_cls
         from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
 
         return AscendDSASWABackend
@@ -745,17 +732,6 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            # A5 only enables a vetted subset of custom operators. Load the
-            # extension lazily after device initialization for this op.
-            bootstrap_custom_op_env()
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-            return torch.ops._C_ascend.npu_rms_norm_cast(
-                hidden_states,
-                self.post_attention_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-            )
         if enable_custom_op():
             return torch.ops._C_ascend.npu_rms_norm_cast(
                 hidden_states,

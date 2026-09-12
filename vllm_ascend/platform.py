@@ -226,7 +226,6 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        use_dcp = getattr(attn_selector_config, "use_dcp", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
         # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
@@ -240,9 +239,6 @@ class NPUPlatform(Platform):
             pass
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
-
-        if attn_selector_config.use_pcp and use_dcp:
-            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
 
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
@@ -1519,10 +1515,15 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
 
     sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
     if sfa_dcp_replicated_indexer:
-        if parallel_config.decode_context_parallel_size != parallel_config.tensor_parallel_size:
+        pcp_size = parallel_config.prefill_context_parallel_size
+        full_dcp_size = parallel_config.tensor_parallel_size * pcp_size
+        supported_dcp_sizes = {pcp_size, full_dcp_size}
+        if parallel_config.decode_context_parallel_size not in supported_dcp_sizes:
             raise AssertionError(
-                f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
-                f"== tp_size({parallel_config.tensor_parallel_size})."
+                "DCP for SFA with replicated indexer is only supported when "
+                f"dcp_size({parallel_config.decode_context_parallel_size}) "
+                f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
+                f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
         if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
             raise NotImplementedError(

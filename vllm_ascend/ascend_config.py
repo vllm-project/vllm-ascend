@@ -26,7 +26,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.dynamic_spec import resolve_method_params
+from vllm_ascend.dynamic_spec import resolve_physical_k
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -952,21 +952,16 @@ class DynamicSpecConfig:
 
     # None disables the dynamic speculative-length path.
     method: str | None = None
-    # Legacy/advanced method parameters. Existing defaults remain unchanged;
-    # new configurations should use physical_k instead of its legacy switches.
+    # Parameters consumed by the selected upstream dynamic method.
     method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
     # An object opts into physical K, automatic V2 support and hybrid. Example:
     # {"min_k": 3, "capture_k": [3, 5]}. Advanced knobs are slack, percentile,
     # and hybrid.{enabled,min_batch_size,acceptance_threshold,low_steps,
     # high_steps,probe_interval}. None retains the legacy configuration path.
     physical_k: dict[str, Any] | None = None
-    # ``confidence_budget`` preserves the original dynamic policy, while
-    # ``hardware_aware`` adds physical K control over upstream verification.
+    # ``hardware_aware`` adds Ascend physical K control over upstream
+    # confidence-based adaptive verification.
     policy: str = "confidence_budget"
-    # Batch-level proposal gate. It is opt-in so existing dynamic speculative
-    # decoding keeps its current behaviour.
-    proposal_gate_enabled: bool = False
-    proposal_gate_params: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate(self):
@@ -984,22 +979,10 @@ class DynamicSpecConfig:
                 f"got {type(self.method_params).__name__}: "
                 f"{self.method_params}"
             )
-        if self.policy == "hardware_aware" and not self.method_params.get("reuse_upstream_adaptive_verification", True):
-            raise ValueError(
-                "reuse_upstream_adaptive_verification=false was removed; "
-                "hardware_aware now always uses the upstream verification manager."
-            )
-        if not isinstance(self.proposal_gate_params, dict):
-            raise TypeError(
-                "dynamic_spec_config.proposal_gate_params must be a dict, "
-                f"got {type(self.proposal_gate_params).__name__}: "
-                f"{self.proposal_gate_params}"
-            )
-        resolve_method_params(
+        resolve_physical_k(
             {
                 "method": self.method,
                 "policy": self.policy,
-                "method_params": self.method_params,
                 "physical_k": self.physical_k,
             }
         )

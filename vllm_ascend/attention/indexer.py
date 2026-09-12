@@ -25,7 +25,7 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
 
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
     from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]

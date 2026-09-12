@@ -172,6 +172,8 @@ def _probabilistic_rejection_kernel(
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
+                    # Match the temperature-scaled block statistics.
+                    draft_logit = draft_logit / temp
                     draft_lse = _compute_global_lse(
                         draft_local_max_ptr,
                         draft_local_max_stride,

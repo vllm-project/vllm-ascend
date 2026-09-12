@@ -53,7 +53,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.dynamic_spec import validate_v1_dynamic_policy
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
@@ -64,7 +63,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -161,10 +160,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
-
-        # Share the V1 policy guard without changing either child constructor.
-        # Hardware-aware execution uses V2, not this legacy budget scheduler.
-        validate_v1_dynamic_policy(self.method, get_ascend_config().dynamic_spec_config)
 
         # Assign runner before it's used in the methods below
         self.runner = runner
@@ -884,16 +879,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # handled just below.
         self.num_speculative_tokens = num_speculative_tokens
 
-        # DSpark keeps max-sized query buffers, but its query metadata used to
-        # remain fixed at the configured maximum K.  When adaptive physical K
-        # is enabled, update the logical query width as well so the draft
-        # forward does not execute the unused suffix.  Backing buffers remain
-        # max-sized, so this does not invalidate graph/profile allocations.
-        if self.method == "dspark" and hasattr(self, "sample_from_anchor"):
-            self.num_query_per_req = (
-                self.num_speculative_tokens if self.sample_from_anchor else 1 + self.num_speculative_tokens
-            )
-
         # Dynamic SD may schedule K == 0 draft tokens for the current batch
         # size. Return an empty [batch_size, 0] draft so downstream copy/unpack
         # paths (which key off ``draft_token_ids.shape[1]``) stay consistent.
@@ -1451,10 +1436,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # Dynamic verify-length path for head-free DFlash only.
                 if hasattr(self, "dynamic_spec") and self.dynamic_spec is not None:
-                    current_k = max(int(self.num_speculative_tokens), 1)
                     self.dynamic_spec.update(
                         logits=logits,
-                        num_reqs=logits.shape[0] // current_k,
                     )
 
         # Early exit if there is only one draft token to be generated.
@@ -1805,13 +1788,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            return bool(
-                {
-                    "DeepSeekMTPModel",
-                    "DeepseekV32MTPModel",
-                    "KimiK3MTPModel",
-                }.intersection(architectures)
-            )
+            if vllm_version_is("0.28.0"):
+                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
+            else:
+                return bool(
+                    {
+                        "DeepSeekMTPModel",
+                        "DeepseekV32MTPModel",
+                        "KimiK3MTPModel",
+                    }.intersection(architectures)
+                )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(

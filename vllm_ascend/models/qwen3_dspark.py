@@ -2,11 +2,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import torch
-from torch import nn
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
@@ -43,30 +40,6 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
-class DSparkConfidenceHead(nn.Module):
-    def __init__(self, config, prefix: str) -> None:
-        super().__init__()
-
-        rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
-        self.proj = ReplicatedLinear(
-            config.hidden_size + rank,
-            1,
-            bias=True,  # released dspark_qwen3_*_block7 ckpt has confidence_head.proj.bias
-            params_dtype=torch.float32,
-            quant_config=None,
-            prefix=maybe_prefix(prefix, "proj"),
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        markov_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        x = torch.cat([hidden_states, markov_embeds], dim=-1)
-        confidence, _ = self.proj(x.float())  # ReplicatedLinear returns (output, bias)
-        return confidence.squeeze(-1)
-
-
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -75,18 +48,6 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
         self.target_model_path = Path(vllm_config.model_config.model)
-
-    @staticmethod
-    def _get_confidence_relative_name(
-        checkpoint_name: str,
-    ) -> str | None:
-        marker = "confidence_head."
-        marker_pos = checkpoint_name.find(marker)
-
-        if marker_pos == -1:
-            return None
-
-        return checkpoint_name[marker_pos + len(marker) :]
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
@@ -109,8 +70,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 processed_weights.append((name, loaded_weight))
             all_weights = processed_weights
 
-        # main (cdc4824a21): upstream load_weights already manages
-        # confidence_head (vllm#47808).
+        # Upstream load_weights already manages confidence_head (vllm#47808).
         result = super().load_weights(all_weights)
 
         if rotation_weight is not None:

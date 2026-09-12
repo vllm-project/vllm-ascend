@@ -30,11 +30,7 @@ from itertools import chain
 
 from vllm.logger import logger
 
-from vllm_ascend.dynamic_spec import (
-    install_output_fields,
-    install_scheduler_policy,
-    update_dynamic_feedback,
-)
+from vllm_ascend.dynamic_spec import install_scheduler_policy
 
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
@@ -65,6 +61,30 @@ def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
     if not use_pp or _is_pd_prefill_node(vllm_config):
         return False
     return not getattr(vllm_config, "use_v2_model_runner", False)
+
+
+def _patch_model_runner_output() -> None:
+    from vllm.v1 import outputs as outputs_mod
+
+    model_runner_output_cls = outputs_mod.ModelRunnerOutput
+    fields = getattr(model_runner_output_cls, "__dataclass_fields__", {})
+    if "spec_token_ids" not in fields:
+        model_runner_output_cls.spec_token_ids = None
+        original_init = model_runner_output_cls.__init__
+        if getattr(original_init, "_vllm_ascend_pp_mtp_patched", False):
+            return
+
+        @wraps(original_init)
+        def _patched_init(self, *args, spec_token_ids=None, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.spec_token_ids = spec_token_ids
+
+        _patched_init._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
+        model_runner_output_cls.__init__ = _patched_init
+
+    empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
+    if not hasattr(empty_output, "spec_token_ids"):
+        empty_output.spec_token_ids = None
 
 
 def _patch_engine_core() -> None:
@@ -222,38 +242,6 @@ def _patch_scheduler_update_from_output() -> None:
     if getattr(Scheduler.update_from_output, "_vllm_ascend_pp_mtp_patched", False):
         return
 
-    # vLLM commit 6ec76df8 added this field and the corresponding scheduler
-    # plumbing.  Older vLLM checkouts can still execute the Ascend worker if we
-    # install the small side-channel update here instead of modifying vLLM.
-    from vllm.v1 import outputs as outputs_mod
-
-    has_native_proposal_lengths = "proposal_lengths" in getattr(
-        outputs_mod.ModelRunnerOutput, "__dataclass_fields__", {}
-    )
-
-    if has_native_proposal_lengths:
-        # Newer vLLM versions already consume proposal_lengths.  Keep the
-        # native bookkeeping untouched and add only the adaptive-K feedback
-        # side channel, so existing deployments do not pay the legacy PP/MTP
-        # compatibility work on every output.
-        original_update_from_output = Scheduler.update_from_output
-
-        @wraps(original_update_from_output)
-        def _patched_native_update_from_output(self, scheduler_output, model_runner_output):
-            engine_core_outputs = original_update_from_output(
-                self,
-                scheduler_output,
-                model_runner_output,
-            )
-            update_dynamic_feedback(
-                self, scheduler_output, model_runner_output, native_proposal_lengths=True
-            )
-            return engine_core_outputs
-
-        _patched_native_update_from_output._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-        Scheduler.update_from_output = _patched_native_update_from_output
-        return
-
     original_update_from_output = Scheduler.update_from_output
 
     @wraps(original_update_from_output)
@@ -286,13 +274,6 @@ def _patch_scheduler_update_from_output() -> None:
             self,
             scheduler_output,
             model_runner_output,
-        )
-
-        # Apply the newly proposed logical width for the *next* schedule.  The
-        # current output still uses the width that was scheduled before the
-        # worker executed, so this must happen after upstream bookkeeping.
-        update_dynamic_feedback(
-            self, scheduler_output, model_runner_output, native_proposal_lengths=False
         )
 
         if use_pp_ipc_runtime_patch:
@@ -359,9 +340,9 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
-    install_output_fields()
-    _patch_engine_core()
     install_scheduler_policy()
+    _patch_model_runner_output()
+    _patch_engine_core()
     _patch_scheduler_update_after_schedule()
     _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
