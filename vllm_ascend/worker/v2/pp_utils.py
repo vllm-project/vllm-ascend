@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from vllm.config import VllmConfig
@@ -138,10 +138,36 @@ class PPTransportDataType(str, Enum):
 
 
 def make_empty_intermediate_tensors(
-    model: _PPAuxHiddenStateModel,
+    model: _PPAuxHiddenStateModel | _PPTopKModel,
     tensor_factory: Callable[[int, torch.dtype, torch.device], IntermediateTensors],
+    data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.AUX_HIDDEN_STATES,),
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
-    """Wrap a model's PP tensor factory with auxiliary receive buffers."""
+    """Wrap a model's PP tensor factory with typed receive buffers."""
+    if len(set(data_types)) != len(data_types):
+        raise ValueError(f"Duplicate PP transport data types: {data_types}.")
+    supported_data_types = {
+        PPTransportDataType.AUX_HIDDEN_STATES,
+        PPTransportDataType.TOPK_INDICES,
+    }
+    unsupported_data_types = set(data_types) - supported_data_types
+    if unsupported_data_types:
+        raise ValueError(f"Unsupported PP transport data types: {unsupported_data_types}.")
+
+    topk_indices_buffer: torch.Tensor | None = None
+    receive_pp_topk_indices = False
+    if PPTransportDataType.TOPK_INDICES in data_types:
+        topk_model = cast(_PPTopKModel, model)
+        topk_model.receive_pp_topk_indices = False
+        topk_model.send_pp_topk_indices = False
+        topk_indices_buffer = topk_model.topk_indices_buffer
+        if topk_indices_buffer is not None:
+            receive_pp_topk_indices = pp_stage_requires_topk_indices(
+                topk_model.config, topk_model.start_layer
+            )
+            topk_model.receive_pp_topk_indices = receive_pp_topk_indices
+            topk_model.send_pp_topk_indices = pp_stage_requires_topk_indices(
+                topk_model.config, topk_model.end_layer
+            )
 
     def wrapped_tensor_factory(
         batch_size: int,
@@ -149,18 +175,35 @@ def make_empty_intermediate_tensors(
         device: torch.device,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
-        return add_pp_transport_buffers(
-            intermediate_tensors,
-            PPTransportDataType.AUX_HIDDEN_STATES,
-            num_incoming_aux_layers,
-            (batch_size, model.config.hidden_size),
-            dtype,
-            device,
-        )
+        for data_type in data_types:
+            if data_type == PPTransportDataType.AUX_HIDDEN_STATES:
+                aux_model = cast(_PPAuxHiddenStateModel, model)
+                num_incoming_aux_layers = sum(
+                    layer_idx <= aux_model.start_layer
+                    for layer_idx in aux_model.aux_hidden_state_layers
+                )
+                intermediate_tensors = add_pp_transport_buffers(
+                    intermediate_tensors,
+                    data_type,
+                    num_incoming_aux_layers,
+                    (batch_size, aux_model.config.hidden_size),
+                    dtype,
+                    device,
+                )
+            elif receive_pp_topk_indices:
+                assert topk_indices_buffer is not None
+                if batch_size > topk_indices_buffer.shape[0]:
+                    raise ValueError(
+                        "PP Top-K receive buffer exceeds the model buffer capacity: "
+                        f"requested {batch_size} tokens, capacity "
+                        f"{topk_indices_buffer.shape[0]}."
+                    )
+                intermediate_tensors = add_pp_transport_tensors(
+                    intermediate_tensors, data_type, [topk_indices_buffer[:batch_size]]
+                )
+        return intermediate_tensors
 
     return wrapped_tensor_factory
-
 
 def _get_transport_key_prefix(data_type: PPTransportDataType) -> str:
     return f"{_PP_TRANSPORT_PREFIX}_{data_type.value}_"
@@ -207,46 +250,6 @@ def add_pp_transport_buffers(
     """Add empty receive buffers for one PP transport data type."""
     tensors = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(count)]
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
-
-
-def configure_pp_topk_transport(model: _PPTopKModel) -> None:
-    """Configure Top-K index transport for a model split across PP stages."""
-    model.receive_pp_topk_indices = False
-    model.send_pp_topk_indices = False
-    topk_indices_buffer = model.topk_indices_buffer
-    if topk_indices_buffer is None:
-        return
-
-    model.receive_pp_topk_indices = pp_stage_requires_topk_indices(model.config, model.start_layer)
-    model.send_pp_topk_indices = pp_stage_requires_topk_indices(model.config, model.end_layer)
-    if not model.receive_pp_topk_indices:
-        return
-
-    tensor_factory = model.make_empty_intermediate_tensors
-
-    def wrapped_tensor_factory(
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        if batch_size > topk_indices_buffer.shape[0]:
-            raise ValueError(
-                "PP Top-K receive buffer exceeds the model buffer capacity: "
-                f"requested {batch_size} tokens, capacity "
-                f"{topk_indices_buffer.shape[0]}."
-            )
-        intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        # GPUModelRunner copies every received PP tensor into this persistent
-        # factory buffer before graph replay. Alias it to the model-level Top-K
-        # buffer so FULL_DECODE reads the current payload directly, instead of
-        # relying on an in-graph copy into separately captured storage.
-        return add_pp_transport_tensors(
-            intermediate_tensors,
-            PPTransportDataType.TOPK_INDICES,
-            [topk_indices_buffer[:batch_size]],
-        )
-
-    model.make_empty_intermediate_tensors = wrapped_tensor_factory
 
 
 def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:

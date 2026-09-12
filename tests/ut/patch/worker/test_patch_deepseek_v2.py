@@ -7,6 +7,7 @@ import torch
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
+import vllm_ascend.worker.v2.pp_utils as pp_utils
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
     _deepseek_v2_model_init_with_pp_topk_transport,
     _patched_forward,
@@ -16,6 +17,7 @@ from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
+    make_empty_intermediate_tensors,
 )
 
 
@@ -137,3 +139,70 @@ def test_pp_forward_propagates_aliased_topk_indices(monkeypatch):
     )
     assert len(transported) == 1
     torch.testing.assert_close(transported[0], received_topk_indices)
+
+
+def _empty_tensor_factory(batch_size, dtype, device):
+    return IntermediateTensors(
+        {"hidden_states": torch.zeros((batch_size, 4), dtype=dtype, device=device)}
+    )
+
+
+def test_make_empty_intermediate_tensors_aux_only():
+    model = SimpleNamespace(
+        config=SimpleNamespace(hidden_size=4),
+        start_layer=2,
+        aux_hidden_state_layers=(1, 2, 5),
+    )
+    factory = make_empty_intermediate_tensors(model, _empty_tensor_factory)
+    result = factory(3, torch.bfloat16, torch.device("cpu"))
+    buffers = get_pp_transport_tensors(result, PPTransportDataType.AUX_HIDDEN_STATES)
+    assert len(buffers) == 2
+    assert all(buffer.shape == (3, 4) for buffer in buffers)
+
+
+def test_make_empty_intermediate_tensors_indexcache_only(monkeypatch):
+    monkeypatch.setattr(
+        pp_utils, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4}
+    )
+    topk_buffer = torch.zeros((8, 2), dtype=torch.int32)
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_hidden_layers=8, use_index_cache=True),
+        start_layer=2, end_layer=4, topk_indices_buffer=topk_buffer,
+    )
+    factory = make_empty_intermediate_tensors(
+        model, _empty_tensor_factory, (PPTransportDataType.TOPK_INDICES,)
+    )
+    result = factory(3, torch.bfloat16, torch.device("cpu"))
+    assert model.receive_pp_topk_indices and model.send_pp_topk_indices
+    buffers = get_pp_transport_tensors(result, PPTransportDataType.TOPK_INDICES)
+    assert len(buffers) == 1
+    assert buffers[0].data_ptr() == topk_buffer.data_ptr()
+
+
+@pytest.mark.parametrize("topk_mode", ["indexshare", "indexcache"])
+def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
+    topk_buffer = torch.zeros((8, 2), dtype=torch.int32)
+    config = SimpleNamespace(num_hidden_layers=8, hidden_size=4)
+    if topk_mode == "indexshare":
+        config.indexer_types = [
+            "full", "full", "shared", "full", "shared", "full", "full", "full"
+        ]
+    else:
+        config.use_index_cache = True
+        monkeypatch.setattr(
+            pp_utils, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4}
+        )
+    model = SimpleNamespace(
+        config=config, start_layer=2, end_layer=4,
+        aux_hidden_state_layers=(1, 2, 5), topk_indices_buffer=topk_buffer,
+    )
+    factory = make_empty_intermediate_tensors(
+        model, _empty_tensor_factory,
+        (PPTransportDataType.AUX_HIDDEN_STATES, PPTransportDataType.TOPK_INDICES),
+    )
+    result = factory(3, torch.bfloat16, torch.device("cpu"))
+    assert model.receive_pp_topk_indices and model.send_pp_topk_indices
+    aux = get_pp_transport_tensors(result, PPTransportDataType.AUX_HIDDEN_STATES)
+    topk = get_pp_transport_tensors(result, PPTransportDataType.TOPK_INDICES)
+    assert len(aux) == 2 and len(topk) == 1
+    assert topk[0].data_ptr() == topk_buffer.data_ptr()
