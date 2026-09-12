@@ -180,9 +180,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
-                shared_by=[layer_name],
+                # Both supported versions use the #51718 layer descriptor.
                 layers=[layer_name],
             )
         ],
@@ -230,7 +228,6 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=4096,
-                shared_by=layer_names,
                 layers=layer_names,
             )
         ],
@@ -449,9 +446,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
-                shared_by=["model.layers.0.self_attn"],
+                # Both supported versions use the #51718 layer descriptor.
                 layers=["model.layers.0.self_attn"],
             )
         ],
@@ -525,7 +520,6 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=spec.page_size_bytes * 100,
-                shared_by=layer_names,
                 layers=layer_names,
             )
         ],
