@@ -45,6 +45,7 @@ from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, Indexe
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
+from vllm_ascend.overlap.streams import get_stream_registry
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQuantLatent
@@ -184,9 +185,11 @@ def build_compressor_metadata_out(
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
+    # The stream object is owned by the stream registry; this accessor keeps
+    # the historical module-level entry point for existing call sites.
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
-        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+        _DSV4_DSA_OVERLAP_STREAM = get_stream_registry().get_stream("dsa_overlap")
     return _DSV4_DSA_OVERLAP_STREAM
 
 
