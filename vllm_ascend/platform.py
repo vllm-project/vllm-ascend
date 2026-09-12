@@ -73,8 +73,6 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Delete after the driver is released; temporarily hard-coded to 4
-MAX_REDUCED_CAPTURE_SIZES = 4
 
 
 class NPUPlatform(Platform):
@@ -1205,9 +1203,6 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
             ]
         )
-        # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
-            _prune_reduced_capture_sizes(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
@@ -1448,25 +1443,6 @@ def _config_deprecated_logging():
             warnings_logger.addHandler(handler)
 
     warnings_logger.propagate = False
-
-
-def _prune_reduced_capture_sizes(vllm_config):
-    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-    if not original_sizes:
-        return
-    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
-        return
-    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
-    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
-    indices[0], indices[-1] = 0, len(original_sizes) - 1
-    sampled_sizes = [original_sizes[i] for i in indices]
-    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-    logger.warning(
-        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
-        "and this warning will be cleared soon.",
-        len(original_sizes),
-        MAX_REDUCED_CAPTURE_SIZES,
-    )
 
 
 def _get_recompute_scheduler_cls(
