@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -24,7 +25,11 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -174,6 +179,21 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
+    def test_kimi_k3_gqa_dspark_uses_dedicated_layout_without_dcp(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dcp_size = 1
+        runner._draft_uses_qwen3_gqa_dspark = MagicMock(return_value=True)
+        runner.model_config = SimpleNamespace(
+            architecture="KimiK3ForConditionalGeneration",
+            architectures=["KimiK3ForConditionalGeneration"],
+            hf_config=SimpleNamespace(
+                model_type="kimi_k3",
+                architectures=["KimiK3ForConditionalGeneration"],
+            ),
+        )
+
+        self.assertTrue(runner._uses_dcp_replicated_dspark_draft_kv())
+
     def _build_runner(
         self,
         *,
@@ -197,6 +217,14 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         runner = self._build_runner(
             model_type="qwen3",
             architecture="Qwen3DSparkModel",
+        )
+
+        self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_legacy_qwen3_gqa_dspark_uses_materialized_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="DSparkDraftModel",
         )
 
         self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
@@ -235,6 +263,47 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         )
         runner.num_accepted_tokens_event = MagicMock()
         return runner
+
+    def test_folded_state_copy_uses_packed_device_indices_for_every_layer(self):
+        runner = self._build_runner()
+        runner._folded_prefill_rows = (5,)
+        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["kda0", "kda1"])])
+        runner.compilation_config = SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(kv_cache=(torch.empty(1), torch.empty(1))) for name in ("kda0", "kda1")
+            }
+        )
+        metadata = SimpleNamespace(
+            folded_prefill_state_copies=((2, 1, 4),),
+            spec_state_indices_tensor=torch.tensor([[4, 3, 2, 1], [13, 9, 7, 11]]),
+        )
+        copies = []
+
+        def copy_states(conv, recurrent, indices, count):
+            # State selectors must not be published before all layers finish.
+            assert runner._folded_prefill_rows == ()
+            copies.append((indices.tolist(), count))
+
+        with patch("vllm_ascend.worker.model_runner_v1.canonicalize_folded_prefill_state", side_effect=copy_states):
+            runner._canonicalize_folded_prefill_states({"kda0": metadata, "kda1": metadata})
+        assert copies == [([13, 9, 7, 11], 4), ([13, 9, 7, 11], 4)]
+        assert runner._folded_prefill_rows == (2,)
+
+    def test_folded_prompt_count_is_published_only_after_canonicalization(self):
+        for asynchronous in (False, True):
+            runner = self._build_runner()
+            runner.use_async_scheduling = asynchronous
+            runner.cache_config.mamba_cache_mode = "none"
+            runner._folded_prefill_rows = (0,)
+            runner.input_batch.req_ids = ["prompt", "decode"]
+            runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+            # Prompt output can be discarded; real decode accepted 3 tokens.
+            output = torch.tensor([[-1, -1, -1], [5, 6, 7]])
+            runner._update_states_after_model_execute(output, SimpleNamespace())
+            target = runner.num_accepted_tokens.np if asynchronous else runner.input_batch.num_accepted_tokens_cpu
+            np.testing.assert_array_equal(target[:2], [1, 3])
+            runner._canonicalize_folded_prefill_states({})
+            assert runner._folded_prefill_rows == ()
 
     def test_snapshot_survives_request_replacement_and_backend_reorder(self):
         runner = self._build_runner()
@@ -583,6 +652,84 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_dcp_replicated_draft_cache_allocates_physical_lane_pages(self):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [16]
+        base_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+            page_size_padded=1024,
+        )
+        replication_size = 4
+        spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+            base_spec,
+            replication_size,
+        )
+        self.assertEqual(spec.lane_page_size_bytes, base_spec.unpadded_page_size_bytes)
+        self.assertEqual(
+            spec.page_size_bytes,
+            replication_size * base_spec.unpadded_page_size_bytes,
+        )
+        mamba_spec = MambaSpec(
+            block_size=16,
+            shapes=((256,),),
+            dtypes=(torch.float32,),
+            page_size_padded=base_spec.page_size_bytes,
+            mamba_cache_mode="align",
+        )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "target_attn": base_spec,
+                "draft_attn": spec,
+            }
+        )
+        self.assertIsNotNone(mixed_spec)
+        assert mixed_spec is not None
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=base_spec.page_size_bytes * 2,
+                    shared_by=["target_attn", "target_mamba"],
+                ),
+                KVCacheTensor(
+                    size=spec.page_size_bytes * 2,
+                    shared_by=["draft_attn"],
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["target_attn", "draft_attn"],
+                    kv_cache_spec=mixed_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=["target_mamba"],
+                    kv_cache_spec=mamba_spec,
+                ),
+            ],
+        )
+        raw = runner._allocate_kv_cache_tensors(config)
+        self.assertIs(raw["target_attn"], raw["target_mamba"])
+        self.assertIsInstance(raw["draft_attn"], torch.Tensor)
+        self.assertEqual(raw["draft_attn"].numel(), spec.page_size_bytes * 2)
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=["draft_attn"],
+            )
+        ]
+
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(config, raw)["draft_attn"]
+
+        expected_shape = (2 * replication_size, 16, 2, 4)
+        self.assertEqual(k_cache.shape, expected_shape)
+        self.assertEqual(v_cache.shape, expected_shape)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(

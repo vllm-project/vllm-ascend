@@ -291,6 +291,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.draft_window_size = None
         self.sliding_window = None
 
+    def _get_draft_dcp_manager(self):
+        """Return the target DCP manager only for a DCP-aware drafter."""
+        if self.dcp_size <= 1:
+            return None
+        return getattr(self.runner, "dcp_manager", None)
+
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
             self.speculative_config.disable_padded_drafter_batch
@@ -639,7 +645,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        dcp_manager = getattr(self.runner, "dcp_manager", None)
+        dcp_manager = self._get_draft_dcp_manager()
 
         multi_steps_attn_metadata = []
         if not self.use_cuda_graph:
@@ -888,7 +894,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_decode_reqs=num_decode_reqs,
         )
         assert self.runner is not None
-        dcp_manager = getattr(self.runner, "dcp_manager", None)
+        dcp_manager = self._get_draft_dcp_manager()
         if dcp_manager is not None and not self.parallel_drafting:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
@@ -1611,7 +1617,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.input_ids[token_indices_to_sample] = next_token_ids
 
             assert self.runner is not None
-            dcp_manager = getattr(self.runner, "dcp_manager", None)
+            dcp_manager = self._get_draft_dcp_manager()
             long_seq_args = None
             if dcp_manager is not None:
                 first_pass_inputs = dcp_manager.prepare_spec_decode_first_pass_inputs(
@@ -1891,7 +1897,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             common_attn_metadata.positions[:batch_size].copy_(clamped_positions)
 
-        dcp_manager = getattr(self.runner, "dcp_manager", None)
+        dcp_manager = self._get_draft_dcp_manager()
         if dcp_manager is not None:
             kv_cache_spec = getattr(attn_group, "kv_cache_spec", self.draft_attn_groups[0].kv_cache_spec)
             # update slot_mapping

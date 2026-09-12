@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 
 import torch
 from typing_extensions import Self
@@ -172,6 +172,76 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
+    """Full-attention draft cache replicated over the target DCP lanes.
+
+    The scheduler still owns one DCP-sharded logical block.  The worker backs
+    that block with ``dcp_replication_size`` consecutive physical pages so a
+    DCP-unaware GQA drafter can address the complete sequence on every rank.
+    """
+
+    dcp_replication_size: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.dcp_replication_size < 1:
+            raise ValueError(f"dcp_replication_size must be positive, got {self.dcp_replication_size}.")
+
+    @property
+    def _lane_spec(self) -> FullAttentionSpec:
+        # Evaluate on a base instance: v0.27.1 page sizing dispatches through
+        # self.real_page_size_bytes, which must not re-enter replicated sizing.
+        return FullAttentionSpec(**{field.name: getattr(self, field.name) for field in fields(FullAttentionSpec)})
+
+    @property
+    def lane_page_size_bytes(self) -> int:
+        """Effective K/V bytes of one physical lane, without target padding."""
+        return self._lane_spec.unpadded_page_size_bytes
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.dcp_replication_size * self.lane_page_size_bytes
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        return self.dcp_replication_size * self._lane_spec.real_page_size_bytes
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        return self.dcp_replication_size * self._lane_spec.unpadded_page_size_bytes
+
+    @classmethod
+    def from_full_attention_spec(
+        cls,
+        spec: FullAttentionSpec,
+        dcp_replication_size: int,
+    ) -> "AscendDCPReplicatedDraftAttentionSpec":
+        kwargs = {field.name: getattr(spec, field.name) for field in fields(FullAttentionSpec)}
+        # Replicated GQA has an independent allocation in the K3 mixed plan.
+        # Target/Mamba page padding is not live GQA data and is not replicated.
+        kwargs["page_size_padded"] = None
+        return cls(
+            **kwargs,
+            dcp_replication_size=dcp_replication_size,
+        )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in specs), (
+            "All replicated draft layers must use the replicated draft spec."
+        )
+        replication_sizes = {spec.dcp_replication_size for spec in specs}
+        assert len(replication_sizes) == 1, (
+            "All replicated draft layers in one KV cache group must use the same DCP replication size."
+        )
+        merged = super().merge(specs)
+        return replace(
+            merged,
+            dcp_replication_size=replication_sizes.pop(),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     """Sliding window attention with MLA cache format."""
 
@@ -232,6 +302,11 @@ def register_ascend_kv_cache_specs() -> None:
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSFAIndexerCacheSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendDCPReplicatedDraftAttentionSpec,
         manager_class=FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )

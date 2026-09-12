@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from dataclasses import replace
+from dataclasses import make_dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +25,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+    AscendMLAAttentionSpec,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -34,7 +37,9 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kimi_k3_replicated_dspark_kv_cache_config,
     _get_kv_cache_config_deepseek_v4,
+    _unify_kv_cache_spec_page_size,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -72,11 +77,13 @@ def _make_hybrid_kv_cache_config(
 def _make_kimi_k3_dspark_kv_cache_specs(
     *,
     block_size: int = 384,
+    mamba_block_size: int | None = None,
     page_size: int = 488448,
     target_layer_count: int = 24,
     draft_layer_count: int = 5,
     mamba_layer_count: int = 69,
     draft_uses_mla: bool = False,
+    draft_replication_size: int = 1,
 ) -> dict:
     target_mla_spec = AscendMLAAttentionSpec(
         block_size=block_size,
@@ -104,8 +111,13 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             dtype=torch.bfloat16,
             page_size_padded=page_size,
         )
+        if draft_replication_size > 1:
+            draft_attention_spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                draft_attention_spec,
+                draft_replication_size,
+            )
     mamba_spec = MambaSpec(
-        block_size=block_size,
+        block_size=mamba_block_size or block_size,
         shapes=((10, 2304), (6, 128, 128)),
         dtypes=(torch.bfloat16, torch.float32),
         page_size_padded=page_size,
@@ -413,11 +425,109 @@ def test_kimi_k3_mixed_attention_still_requires_same_block_size() -> None:
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
 
 
+@pytest.mark.parametrize("replication_size", [1, 2, 8])
+@pytest.mark.parametrize("block_size", [128, 384])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("head_size_v", [64, 128])
+def test_replicated_draft_page_sizes_match_base_spec(replication_size, block_size, padded, head_size_v):
+    base = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=8,
+        head_size=64,
+        head_size_v=head_size_v,
+        dtype=torch.bfloat16,
+    )
+    if padded:
+        base = replace(base, page_size_padded=base.unpadded_page_size_bytes + 4096)
+    spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(base, replication_size)
+    assert spec.block_size == block_size
+    assert spec.lane_page_size_bytes == base.unpadded_page_size_bytes
+    assert spec.page_size_bytes == replication_size * base.unpadded_page_size_bytes
+    assert spec.real_page_size_bytes == replication_size * base.real_page_size_bytes
+    assert spec.unpadded_page_size_bytes == replication_size * base.unpadded_page_size_bytes
+
+
+@pytest.mark.parametrize("legacy_config", [False, True])
+def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
+    monkeypatch,
+    legacy_config,
+) -> None:
+    if legacy_config:
+        # v0.27.1 predates prefix_cache_retention_interval on KVCacheConfig.
+        monkeypatch.setattr(
+            "vllm_ascend.patch.platform.patch_kv_cache_utils.KVCacheConfig",
+            make_dataclass("LegacyKVCacheConfig", ["num_blocks", "kv_cache_tensors", "kv_cache_groups"]),
+        )
+    replication_size = 8
+    page_size = 488448
+    specs = _make_kimi_k3_dspark_kv_cache_specs(
+        page_size=page_size,
+        draft_replication_size=replication_size,
+    )
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
+    assert groups is not None
+    expected_num_blocks = 100
+    draft_page_size = 384 * 1 * (64 + 64) * 2 * replication_size
+    bytes_per_block = page_size * 24 + draft_page_size * 5
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+    config = _get_kimi_k3_replicated_dspark_kv_cache_config(
+        SimpleNamespace(cache_config=SimpleNamespace()),
+        groups,
+        bytes_per_block * expected_num_blocks,
+    )
+
+    assert config is not None
+    assert config.num_blocks == expected_num_blocks
+    assert len(config.kv_cache_tensors) == 29
+    assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
+    assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
+    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [draft_page_size * expected_num_blocks] * 5
+    assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
+
+
+def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=4)
+    for name, spec in list(specs.items()):
+        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
+            specs[name] = replace(spec, page_size_padded=122112)
+
+    unified = _unify_kv_cache_spec_page_size(specs)
+
+    assert unified is not specs
+    assert {spec.block_size for spec in unified.values()} == {384}
+    assert {
+        spec.page_size_bytes for spec in unified.values() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+    } == {4 * 384 * 128 * 2}
+
+
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
     specs["unrecognized.layer"] = next(iter(specs.values()))
 
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
+def test_kimi_k3_dcp_replicated_pages_allow_independent_mamba_block_size() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs(
+        block_size=128,
+        mamba_block_size=3072,
+        page_size=3907584,
+        target_layer_count=3,
+        draft_layer_count=5,
+        mamba_layer_count=2,
+        draft_replication_size=2,
+    )
+
+    unified = _unify_kv_cache_spec_page_size(specs)
+
+    attention_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, FullAttentionSpec)}
+    mamba_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, MambaSpec)}
+    assert attention_block_sizes == {128}
+    assert mamba_block_sizes == {3072}
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(unified) is not None
 
 
 def test_kimi_k3_dspark_group_count_is_derived_from_layer_ratio() -> None:

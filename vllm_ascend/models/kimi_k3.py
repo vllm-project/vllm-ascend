@@ -765,6 +765,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.output_attn_res_norm,
             attn_res_block_num,
         )
+        # The loop captures layer inputs and excludes end_layer. Capture the
+        # final requested state after materializing the output residual.
+        if self.dspark_aux_capture_materialized and self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
