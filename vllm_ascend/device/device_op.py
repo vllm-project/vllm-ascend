@@ -1250,10 +1250,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
         output_dtype = gmm2_kwargs.pop("output_dtype")
 
-        if isinstance(weight, list) and len(weight) != 1:
-            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-        if isinstance(weight_scale, list) and len(weight_scale) != 1:
-            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
+        # W4A8MXFP EPLB keeps one independent NZ tensor per physical expert,
+        # and the A5 GMM operator accepts the resulting multi-tensor list.
+        # Other MXFP paths still require a packed tensor.
+        if mxfp_quant_dtype != QuantType.W4A8MXFP:
+            if isinstance(weight, list) and len(weight) != 1:
+                raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
+            if isinstance(weight_scale, list) and len(weight_scale) != 1:
+                raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
         gmm2_weight = weight if isinstance(weight, list) else [weight]
         gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
 
@@ -1272,7 +1276,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
             gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
+            gmm2_kwargs.update({"antiquant_scale": weight_scale if isinstance(weight_scale, list) else [weight_scale]})
 
         return torch_npu.npu_grouped_matmul(
             x=[hidden_states],
