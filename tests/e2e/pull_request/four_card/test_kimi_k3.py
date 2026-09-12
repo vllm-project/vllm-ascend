@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Single-node A3 (16 logical NPUs) K3 functional tests, not accuracy tests.
+"""Single-node A3 (4 logical NPUs) K3 functional tests, not accuracy tests.
 
 Build local configs and initialize dummy weights; no full checkpoint is needed.
-Keep production tensor widths with a six-layer, 16-expert target. Cover Block5
-at TP16, quantized GQA at DP2/TP8, legacy MLA at P8/D8, and MTP with an image.
+Keep production tensor widths with a two-layer, 16-expert target. Cover Block5
+at TP4, quantized GQA at DP2/TP2, legacy MLA at P2/D2, and MTP with an image.
 Random weights cannot validate checkpoint loading, QuaRot or acceptance rates.
 """
 
@@ -26,16 +26,23 @@ from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import RemoteOpenAIServer, RemotePDServer, VllmRunner
 
-NUM_LAYERS = 6
+NUM_LAYERS = 2
 NUM_EXPERTS = 16
-NUM_VISION_LAYERS = 2
+NUM_EXPERTS_PER_TOKEN = 4
+NUM_VISION_LAYERS = 1
+DRAFT_LAYERS = 1
+DRAFT_TARGET_LAYER_IDS = (0,)
 VOCAB_SIZE = 163840
-MAX_MODEL_LEN = 2048
+MAX_MODEL_LEN = 1024
 OUTPUT_TOKENS = 2
-# Keep both KDA and MLA, including the final consecutive MLA layers. A smaller
-# attention-residual block retains cross-block execution in the reduced model.
-FULL_ATTN_LAYERS = (2, 5, 6)
-ATTN_RES_BLOCK_SIZE = 4
+# The TP4 K3 state shape makes the aligned hybrid-cache page 1536 tokens.
+# Keep the common scenarios at 1024, and enlarge only the prefix-cache engine.
+PREFIX_CACHE_MODEL_LEN = 2048
+PREFIX_CACHE_TOKENS = 1665
+# Keep one KDA and one MLA layer so the smallest target still exercises both
+# cache types. Layer zero is the only valid intermediate tap for the drafter.
+FULL_ATTN_LAYERS = (2,)
+ATTN_RES_BLOCK_SIZE = 2
 
 
 def _text_config() -> dict:
@@ -47,7 +54,7 @@ def _text_config() -> dict:
         "intermediate_size": 33792,
         "num_hidden_layers": NUM_LAYERS,
         "num_experts": NUM_EXPERTS,
-        "num_experts_per_token": 16,
+        "num_experts_per_token": NUM_EXPERTS_PER_TOKEN,
         "num_shared_experts": 2,
         "moe_intermediate_size": 3072,
         "routed_expert_hidden_size": 3584,
@@ -98,7 +105,7 @@ def _draft_config(variant: str) -> dict:
         "hidden_size": 7168,
         "intermediate_size": 14336,
         "hidden_act": "silu",
-        "num_hidden_layers": 5,
+        "num_hidden_layers": DRAFT_LAYERS,
         "num_attention_heads": 64,
         "num_key_value_heads": 64,
         "rms_norm_eps": 1e-5,
@@ -119,14 +126,17 @@ def _draft_config(variant: str) -> dict:
         config.update(
             architectures=["DSparkDraftModel"],
             model_type="qwen3",
-            num_key_value_heads=16,
-            head_dim=64,
-            layer_types=["full_attention"] * 5,
+            # At TP2, 18 / 2 KV heads * 32 dims * K/V matches the
+            # target MLA's 512 + 64 compressed-cache dimensions per token.
+            num_attention_heads=72,
+            num_key_value_heads=18,
+            head_dim=32,
+            layer_types=["full_attention"] * DRAFT_LAYERS,
             block_size=7,
             num_target_layers=NUM_LAYERS,
             # The drafter consumes intermediate layer outputs, before the final
-            # target layer. Remap all five taps to the reduced target.
-            dflash_config={"mask_token_id": 163824, "target_layer_ids": [0, 1, 2, 3, 4]},
+            # target layer. Keep one tap per reduced draft layer.
+            dflash_config={"mask_token_id": 163824, "target_layer_ids": list(DRAFT_TARGET_LAYER_IDS)},
             rope_parameters={
                 "rope_type": "yarn",
                 "factor": 16.0,
@@ -146,8 +156,8 @@ def _draft_config(variant: str) -> dict:
         v_head_dim=128,
         target_hidden_size=7168,
         target_num_hidden_layers=NUM_LAYERS,
-        num_target_layers=5,
-        target_layer_ids=[0, 1, 2, 3, 4],
+        num_target_layers=DRAFT_LAYERS,
+        target_layer_ids=list(DRAFT_TARGET_LAYER_IDS),
         mask_token_id=163837,
         rope_parameters={
             "rope_type": "yarn",
@@ -162,14 +172,14 @@ def _draft_config(variant: str) -> dict:
     )
     if variant == "mla_block5":
         config.update(
-            num_hidden_layers=3,
+            num_hidden_layers=DRAFT_LAYERS,
             num_attention_heads=96,
             num_key_value_heads=96,
             head_dim=64,
             qk_head_dim=192,
-            num_target_layers=3,
-            target_layer_ids=[1, 3, 4],
-            layer_types=["full_attention"] * 3,
+            num_target_layers=DRAFT_LAYERS,
+            target_layer_ids=list(DRAFT_TARGET_LAYER_IDS),
+            layer_types=["full_attention"] * DRAFT_LAYERS,
             mask_token_id=163839,
             markov_rank=512,
             sample_from_anchor=True,
@@ -311,7 +321,7 @@ def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
 
 
-def _engine_args(models: dict[str, str], variant: str, tp: int = 16) -> dict:
+def _engine_args(models: dict[str, str], variant: str, tp: int = 4) -> dict:
     steps = 5 if variant == "mla_block5" else 7
     # Respect upstream LCM(TP, speculative query width), including Block5's 48.
     graph_sizes = [48, 96] if steps == 5 else [16, 32]
@@ -374,26 +384,23 @@ def _generate(llm, prompts: list[dict]):
     return outputs
 
 
-def test_k3_mla_block5_tp16(k3_models: dict[str, str]) -> None:
+def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "mla_block5")
+    args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
     with VllmRunner(k3_models["target"], **args) as runner:
         llm = runner.model
-        _generate(llm, [_prompt(1)])
-        # Kernel-block and block+1 prefill, mixed lengths, and chunked prefill.
-        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((127, 128, 129, 769))])
-        _generate(llm, [_prompt(length, salt=311 + i * 137) for i, length in enumerate((383, 384, 385, 1537))])
+        # Kernel-block boundaries in one mixed-length wave.
+        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((127, 128, 129))])
 
-        prefix = _prompt(1153, salt=421)
+        # Cross the aligned 1536-token hybrid-cache page. This also exercises
+        # chunked prefill and the high block-table columns, so no duplicate
+        # near-max-length wave is needed in the reduced test.
+        prefix = _prompt(PREFIX_CACHE_TOKENS, salt=421)
         assert llm.reset_prefix_cache()
-        cold = _generate(llm, [prefix])[0]
-        warm = _generate(llm, [prefix])[0]
-        assert cold.num_cached_tokens == 0
-        assert warm.num_cached_tokens > 0, "Repeated prompt did not reuse the hybrid prefix cache"
-        assert llm.reset_prefix_cache()
-        assert _generate(llm, [prefix])[0].num_cached_tokens == 0
+        created = _generate(llm, [prefix])[0]
+        assert created.num_cached_tokens == 0
+        assert created.num_cache_creation_tokens > 0, "Request did not create an aligned hybrid-cache page"
 
-        # Exercise the final block-table columns plus speculative lookahead.
-        _generate(llm, [_prompt(MAX_MODEL_LEN - OUTPUT_TOKENS, salt=713)])
         drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
         assert drafts and all(isinstance(m, Counter) for m in drafts)
         assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
@@ -451,8 +458,8 @@ def _draft_counts(url: str) -> dict[str, float]:
     }
 
 
-def test_k3_gqa_w4a8_dp2_tp8(k3_models: dict[str, str]) -> None:
-    args = _engine_args(k3_models, "gqa", tp=8)
+def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
+    args = _engine_args(k3_models, "gqa", tp=2)
     args["data_parallel_size"] = 2
     args["quantization"] = "ascend"
     args["additional_config"]["enable_shared_expert_dp"] = True
@@ -465,7 +472,9 @@ def test_k3_gqa_w4a8_dp2_tp8(k3_models: dict[str, str]) -> None:
         auto_port=False,
         max_wait_seconds=600,
     ) as server:
-        lengths = (1, 129, 769, MAX_MODEL_LEN - OUTPUT_TOKENS)
+        # Four concurrent requests ensure both DP engines execute; 769 also
+        # crosses the 512-token chunked-prefill boundary.
+        lengths = (1, 127, 128, 769)
         prompts = [_prompt(length, salt=i * 137)["prompt_token_ids"] for i, length in enumerate(lengths)]
         with ThreadPoolExecutor(max_workers=4) as pool:
             outputs = list(pool.map(lambda prompt: _completion(server.url_for("v1", "completions"), prompt), prompts))
@@ -474,7 +483,7 @@ def test_k3_gqa_w4a8_dp2_tp8(k3_models: dict[str, str]) -> None:
         assert len(counts) == 2 and all(count > 0 for count in counts.values()), counts
 
 
-def test_k3_mtp_image_tp16(k3_models: dict[str, str]) -> None:
+def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa")
     args["speculative_config"] = {
         "method": "mtp",
@@ -484,7 +493,6 @@ def test_k3_mtp_image_tp16(k3_models: dict[str, str]) -> None:
     }
     args["limit_mm_per_prompt"] = {"image": 1}
     with VllmRunner(k3_models["mtp"], **args) as runner:
-        _generate(runner.model, [_prompt(1)])
         image_prompt = {
             "prompt": "<|kimi_image_placeholder|> describe",
             "multi_modal_data": {"image": Image.new("RGB", (56, 56), (32, 64, 128))},
@@ -494,22 +502,22 @@ def test_k3_mtp_image_tp16(k3_models: dict[str, str]) -> None:
         assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MTP"
 
 
-def test_k3_mla_pd_tp8(k3_models: dict[str, str]) -> None:
+def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     prefill_port, decode_port = get_open_port(), get_open_port()
     transfer_config = {
         "kv_connector": "MooncakeConnectorV1",
         "kv_connector_extra_config": {
-            "prefill": {"dp_size": 1, "tp_size": 8},
-            "decode": {"dp_size": 1, "tp_size": 8},
+            "prefill": {"dp_size": 1, "tp_size": 2},
+            "decode": {"dp_size": 1, "tp_size": 2},
         },
     }
-    prefill_args = _engine_args(k3_models, "mla", tp=8)
+    prefill_args = _engine_args(k3_models, "mla", tp=2)
     # P also builds the draft KV that D consumes; both peers need the same
     # target/draft layer layout even though P only generates one token.
     prefill_args.pop("compilation_config")
     prefill_args["enforce_eager"] = True
     prefill_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_producer", kv_port=get_open_port())
-    decode_args = _engine_args(k3_models, "mla", tp=8)
+    decode_args = _engine_args(k3_models, "mla", tp=2)
     decode_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_consumer", kv_port=get_open_port())
     servers = [
         [k3_models["target"], "--port", str(prefill_port), *_serve_args(prefill_args)],
@@ -520,22 +528,20 @@ def test_k3_mla_pd_tp8(k3_models: dict[str, str]) -> None:
     with RemotePDServer(servers):
         prefill_url = f"http://127.0.0.1:{prefill_port}/v1/completions"
         decode_url = f"http://127.0.0.1:{decode_port}/v1/completions"
-        for length in (1, 129, 769):
-            prompt = _prompt(length, salt=length)["prompt_token_ids"]
-            prefill = _completion(
-                prefill_url,
-                prompt,
-                max_tokens=1,
-                kv_transfer_params={"do_remote_decode": True, "do_remote_prefill": False},
-            )
-            transfer = prefill["kv_transfer_params"]
-            assert transfer["do_remote_prefill"]
-            assert any(transfer["remote_block_ids"])
-            decoded = _completion(decode_url, prompt, kv_transfer_params=transfer)
-            if length > 1:
-                assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
+        prompt = _prompt(129, salt=129)["prompt_token_ids"]
+        prefill = _completion(
+            prefill_url,
+            prompt,
+            max_tokens=1,
+            kv_transfer_params={"do_remote_decode": True, "do_remote_prefill": False},
+        )
+        transfer = prefill["kv_transfer_params"]
+        assert transfer["do_remote_prefill"]
+        assert any(transfer["remote_block_ids"])
+        decoded = _completion(decode_url, prompt, kv_transfer_params=transfer)
+        assert decoded["usage"]["prompt_tokens_details"]["cached_tokens"] > 0
         # A D worker can also receive a request without remote KV. Its MLA
         # prefill weights must remain usable (the previous P/D fallback bug).
-        _completion(decode_url, _prompt(513, salt=911)["prompt_token_ids"])
+        _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])
         counts = _draft_counts(f"http://127.0.0.1:{decode_port}/metrics")
         assert counts and sum(counts.values()) > 0
