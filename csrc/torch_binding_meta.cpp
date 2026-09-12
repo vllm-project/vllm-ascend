@@ -1174,7 +1174,8 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
     const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
     const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
     const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
-    const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio)
+    const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
+    const c10::string_view device)
 {
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
@@ -1195,9 +1196,15 @@ at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
             c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
             torch::dtype(torch::kInt32).device(seqused_q.value().device()));
     } else {
+        auto deviceOri = at::Device(std::string(device));
+        std::string device_str = "meta";
+        if (deviceOri.has_index()) {
+            device_str += ":";
+            device_str += std::to_string(deviceOri.index());
+        }
         output = at::empty_symint(
             c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(at::kMeta));
+            torch::dtype(torch::kInt32).device(at::Device(device_str)));
     }
 
     return output;
@@ -2210,6 +2217,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);
+    ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);

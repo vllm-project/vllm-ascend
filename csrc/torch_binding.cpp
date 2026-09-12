@@ -3079,12 +3079,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "npu_quant_lightning_indexer_v2_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "
         "int quant_mode, *, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_k=None, Tensor? seqused_q=None, "
         "Tensor? seqused_k=None, Tensor? cmp_residual_k=None, int batch_size=0, int max_seqlen_q=0, "
-        "int max_seqlen_k=0, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, int cmp_ratio=1) -> Tensor"
+        "int max_seqlen_k=0, str layout_q='TND', str layout_k='PA_BBND', int mask_mode=3, int cmp_ratio=1, "
+        "str device='npu') -> Tensor"
     );
     ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kPrivateUse1,
-             &vllm_ascend::qli_v2::QuantLightningIndexerMetadata);
-    ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kMeta,
-             &vllm_ascend::qli_v2::QuantLightningIndexerMetadata);
+             &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu);
     ops.def(
         "npu_quant_lightning_indexer_v2(Tensor query, Tensor key, Tensor weights, "
         "Tensor query_dequant_scale, Tensor key_dequant_scale, int topk, int quant_mode, *, "
