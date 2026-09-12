@@ -548,6 +548,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks
+        self._decode_sink_actual_seq_qlen: torch.Tensor | None = None
+        if self.sinks is not None:
+            max_decode_reqs = self.vllm_config.scheduler_config.max_num_seqs + 1
+            self._decode_sink_actual_seq_qlen = torch.arange(1, max_decode_reqs + 1, dtype=torch.int64)
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
         # attn_metadata during graph replay. Record the captured layer name only
@@ -863,7 +867,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
+                actual_seq_qlen = self._decode_sink_actual_seq_qlen[: len(attn_metadata.seq_lens_list)]
             if self.sliding_window is not None:
                 sparse_mode = 4
             else:

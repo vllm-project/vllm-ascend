@@ -328,6 +328,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_vllm_config.scheduler_config.max_num_seqs = 64
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
@@ -700,7 +701,29 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl_swa.forward(layer, query, key, value, kv_cache, metadata, output)
         print(output.shape)
         mock_fused_infer_attention_score.assert_called_once()
+        self.assertIs(
+            mock_fused_infer_attention_score.call_args.kwargs["actual_seq_lengths"],
+            metadata.actual_seq_lengths_q,
+        )
         assert output.shape == (10, 8, 64)
+
+    def test_decode_sink_actual_seq_qlen_cache_shape_and_values(self):
+        self.assertIsNone(self.impl_swa._decode_sink_actual_seq_qlen)
+        self.assertEqual(
+            self.impl_swa_sink._decode_sink_actual_seq_qlen.numel(),
+            self.mock_vllm_config.scheduler_config.max_num_seqs + 1,
+        )
+
+        for num_reqs in (1, 2, 63, 64, 65):
+            actual_seq_qlen = self.impl_swa_sink._decode_sink_actual_seq_qlen[:num_reqs]
+
+            self.assertEqual(actual_seq_qlen.dtype, torch.int64)
+            self.assertEqual(actual_seq_qlen.device.type, "cpu")
+            self.assertEqual(actual_seq_qlen.shape, (num_reqs,))
+            self.assertTrue(actual_seq_qlen.is_contiguous())
+            self.assertEqual(actual_seq_qlen.storage_offset(), 0)
+            self.assertEqual(actual_seq_qlen.stride(), (1,))
+            torch.testing.assert_close(actual_seq_qlen, torch.arange(1, num_reqs + 1, dtype=torch.int64))
 
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
     @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
@@ -734,6 +757,92 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score_v2.return_value = (torch.ones(10, 8, 64), 1)
         output = self.impl_swa_sink.forward(layer, query, key, value, kv_cache, metadata, output)
         mock_fused_infer_attention_score_v2.assert_called_once()
+        actual_seq_qlen = mock_fused_infer_attention_score_v2.call_args.kwargs["actual_seq_qlen"]
+        self.assertEqual(
+            actual_seq_qlen.untyped_storage().data_ptr(),
+            self.impl_swa_sink._decode_sink_actual_seq_qlen.untyped_storage().data_ptr(),
+        )
+        self.assertEqual(actual_seq_qlen.storage_offset(), 0)
+        torch.testing.assert_close(
+            actual_seq_qlen,
+            torch.arange(1, len(metadata.seq_lens_list) + 1, dtype=torch.int64),
+        )
+        mock_reshape_and_cache.assert_called_once()
+        assert output.shape == (10, 8, 64)
+
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_swa_sink_prefill_uses_metadata_actual_seq_qlen(
+        self, mock_fused_infer_attention_score_v2, mock_reshape_and_cache, mock_extra_ctx
+    ):
+        mock_extra_ctx.capturing = False
+
+        query = torch.randn(10, 8 * 64)
+        key = torch.randn(10, 8 * 64)
+        value = torch.randn(10, 8 * 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty(10, 8, 64)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillCacheHit
+        metadata.seq_lens = torch.tensor([10])
+        metadata.seq_lens_list = [10]
+        metadata.actual_seq_lengths_q = [10]
+        metadata.attn_mask = torch.randn(1, 1, 10, 10)
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 10
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.num_decodes = 0
+        metadata.num_prefills = 1
+        metadata.causal = True
+        metadata.model_runner_type = None
+        layer = self.layer_no_quant
+        mock_fused_infer_attention_score_v2.return_value = (torch.ones(10, 8, 64), 1)
+
+        output = self.impl_swa_sink.forward(layer, query, key, value, kv_cache, metadata, output)
+
+        mock_fused_infer_attention_score_v2.assert_called_once()
+        self.assertIs(
+            mock_fused_infer_attention_score_v2.call_args.kwargs["actual_seq_qlen"],
+            metadata.actual_seq_lengths_q,
+        )
+        mock_reshape_and_cache.assert_called_once()
+        assert output.shape == (10, 8, 64)
+
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score_v2")
+    def test_forward_swa_sink_capture_uses_full_graph_fia_v2(
+        self, mock_fused_infer_attention_score_v2, mock_reshape_and_cache, mock_extra_ctx
+    ):
+        mock_extra_ctx.capturing = True
+
+        query = torch.randn(10, 8 * 64)
+        key = torch.randn(10, 8 * 64)
+        value = torch.randn(10, 8 * 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
+        output = torch.empty(10, 8, 64)
+
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.seq_lens = torch.tensor([10] * 10)
+        metadata.seq_lens_list = [10] * 10
+        metadata.actual_seq_lengths_q = [10]
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 100
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        metadata.num_decodes = 10
+        metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = None
+        layer = self.layer_no_quant
+        self.impl_swa_sink.full_graph_fia_v2 = MagicMock(return_value=(torch.ones(10, 8, 64), 1))
+
+        output = self.impl_swa_sink.forward(layer, query, key, value, kv_cache, metadata, output)
+
+        self.impl_swa_sink.full_graph_fia_v2.assert_called_once_with(query, key, value, metadata, output)
+        mock_fused_infer_attention_score_v2.assert_not_called()
         mock_reshape_and_cache.assert_called_once()
         assert output.shape == (10, 8, 64)
 
