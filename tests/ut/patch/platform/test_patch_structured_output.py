@@ -42,6 +42,33 @@ class FakeGuidanceBackend(FakeBackend):
     pass
 
 
+class FakeMaskRow:
+    def __init__(self):
+        self.value = None
+
+    def fill_(self, value):
+        self.value = value
+
+
+class FakeMask:
+    def __init__(self, size):
+        self.rows = [FakeMaskRow() for _ in range(size)]
+
+    @property
+    def shape(self):
+        return (len(self.rows),)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            result = FakeMask(0)
+            result.rows = self.rows[index]
+            return result
+        return self.rows[index]
+
+    def numpy(self):
+        return [row.value for row in self.rows]
+
+
 def make_manager() -> StructuredOutputManager:
     manager = object.__new__(StructuredOutputManager)
     manager.backend = None
@@ -231,3 +258,105 @@ def test_failed_first_backend_does_not_lock_manager(monkeypatch):
 
     assert isinstance(manager.backend, FakeXgrammarBackend)
     assert getattr(manager, patch_structured_output._BACKEND_ATTR) == "xgrammar"
+
+
+def test_grammar_bitmask_validates_post_reasoning_drafts_before_accepting():
+    marker = 9
+
+    class FakeGrammar:
+        def __init__(self):
+            self.accepted = []
+            self.rolled_back = None
+
+        def fill_bitmask(self, bitmask, index):
+            bitmask[index].fill_(index)
+
+        def is_terminated(self):
+            return False
+
+        def validate_tokens(self, token_ids):
+            return token_ids if token_ids != [7] else []
+
+        def accept_tokens(self, _request_id, token_ids):
+            self.accepted.extend(token_ids)
+            return True
+
+        def rollback(self, count):
+            self.rolled_back = count
+
+    grammar = FakeGrammar()
+    reasoner = SimpleNamespace(is_reasoning_end_streaming=lambda _all_ids, delta_ids: list(delta_ids) == [marker])
+    manager = object.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
+    manager.vllm_config = SimpleNamespace(
+        num_speculative_tokens=3,
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        model_config=SimpleNamespace(is_diffusion=False),
+    )
+    manager.backend = SimpleNamespace(allocate_token_bitmask=FakeMask)
+    manager._grammar_bitmask = None
+    manager._full_mask = -1
+    manager.fill_bitmask_parallel_threshold = 100
+    manager.should_fill_bitmask = lambda _request: False
+    manager._get_reasoner = lambda _request: reasoner
+
+    request = SimpleNamespace(
+        all_token_ids=[1, 2],
+        structured_output_request=SimpleNamespace(grammar=grammar),
+    )
+    result = manager.grammar_bitmask(
+        {"req": request},
+        ["req"],
+        {"req": [marker, 7, 8]},
+    )
+
+    assert len(result) == 4
+    assert grammar.accepted == [8]
+    assert grammar.rolled_back == 1
+
+
+def test_grammar_bitmask_preserves_normal_fsm_advance_path():
+    class FakeGrammar:
+        def __init__(self):
+            self.accepted = []
+            self.validate_calls = []
+
+        def fill_bitmask(self, bitmask, index):
+            bitmask[index].fill_(index)
+
+        def is_terminated(self):
+            return False
+
+        def validate_tokens(self, token_ids):
+            self.validate_calls.append(token_ids)
+            return token_ids
+
+        def accept_tokens(self, _request_id, token_ids):
+            self.accepted.extend(token_ids)
+            return True
+
+        def rollback(self, _count):
+            pass
+
+    grammar = FakeGrammar()
+    manager = object.__new__(StructuredOutputManager)
+    manager.vllm_config = SimpleNamespace(
+        num_speculative_tokens=1,
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        model_config=SimpleNamespace(is_diffusion=False),
+    )
+    manager.backend = SimpleNamespace(allocate_token_bitmask=FakeMask)
+    manager._grammar_bitmask = None
+    manager._full_mask = -1
+    manager.fill_bitmask_parallel_threshold = 100
+    manager.should_fill_bitmask = lambda _request: True
+    manager._get_reasoner = lambda _request: None
+
+    request = SimpleNamespace(
+        all_token_ids=[1, 2],
+        structured_output_request=SimpleNamespace(grammar=grammar),
+    )
+    manager.grammar_bitmask({"req": request}, ["req"], {"req": [8]})
+
+    assert grammar.accepted == [8]
+    assert grammar.validate_calls == []
