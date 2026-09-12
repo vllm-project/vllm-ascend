@@ -2354,6 +2354,77 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
 
+    def _make_kv_b_proj_layer(self):
+        # dispose_layer walks real module attributes; a MagicMock confuses
+        # dir()/getattr, so use a real Linear module (no-grad weight, like a
+        # loaded inference parameter) with an UnquantizedLinearMethod stub.
+        layer = torch.nn.Linear(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            dtype=torch.float32,
+            bias=False,
+        )
+        layer.weight.requires_grad_(False)
+        layer.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        return layer
+
+    def _configure_kv_transfer(self, is_kv_consumer: bool):
+        kv_transfer_config = MagicMock()
+        kv_transfer_config.is_kv_consumer = is_kv_consumer
+        self.impl.vllm_config.kv_transfer_config = kv_transfer_config
+        self.impl.vllm_config.weight_transfer_config = None
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_disposes_kv_b_proj_on_kv_consumer(self, mock_format_cast):
+        layer = self._make_kv_b_proj_layer()
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+        self._configure_kv_transfer(is_kv_consumer=True)
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        # The absorbed W_UK_T/W_UV stay resident while the original
+        # kv_b_proj weight is freed (0-numel storage).
+        self.assertEqual(layer.weight.numel(), 0)
+        self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_keeps_kv_b_proj_without_kv_transfer(self, mock_format_cast):
+        layer = self._make_kv_b_proj_layer()
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+        self.impl.vllm_config.kv_transfer_config = None
+        self.impl.vllm_config.weight_transfer_config = None
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        # Nodes that may still prefill keep the original weight.
+        self.assertEqual(
+            layer.weight.numel(),
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim) * self.impl.kv_lora_rank,
+        )
+
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_keeps_kv_b_proj_for_weight_transfer(self, mock_format_cast):
+        layer = self._make_kv_b_proj_layer()
+        self.impl.kv_b_proj = layer
+        mock_format_cast.return_value = layer.weight
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = False
+        self._configure_kv_transfer(is_kv_consumer=True)
+        # RL weight transfer reloads checkpoint values into the original
+        # parameter storage, so the weight must stay allocated.
+        self.impl.vllm_config.weight_transfer_config = MagicMock()
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertGreater(layer.weight.numel(), 0)
+
     def test_compute_prefill_context_none(self):
         batch_size = 4
         kv_cache = torch.randn(10, 1, 1, 192)

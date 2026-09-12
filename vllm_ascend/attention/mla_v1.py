@@ -57,6 +57,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    dispose_layer,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -1102,6 +1103,35 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+
+        self._maybe_dispose_kv_b_proj()
+
+    def _maybe_dispose_kv_b_proj(self):
+        """Drop the original kv_b_proj weight once W_UK_T/W_UV are resident.
+
+        kv_b_proj is only dereferenced by the prefill paths
+        (``_compute_prefill_context`` chunked-context loop and
+        ``mla_preprocess_prefill``); decode steps read the absorbed
+        W_UK_T/W_UV instead. On KV-consumer (decode-only PD) nodes no prefill
+        can occur, so the original weight is dead memory and can be freed,
+        mirroring the SFA backend's dispose of kv_b_proj.
+
+        Two conditions must hold before freeing:
+        - The worker must be a KV consumer. Nodes that still prefill
+          (recompute / fallback / preempt on producer or hybrid workers)
+          call kv_b_proj; freeing it there crashes with UndefinedTensorImpl.
+        - No RL weight transfer engine may be configured. Layerwise reload
+          copies checkpoint values back into the original parameter storage,
+          which a disposed (0-numel) tensor cannot hold.
+        """
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.is_kv_consumer
+            and self.vllm_config.weight_transfer_config is None
+        ):
+            dispose_layer(self.kv_b_proj)
+            torch.npu.empty_cache()
 
     def _load_fa_quant_scales(self):
         layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
