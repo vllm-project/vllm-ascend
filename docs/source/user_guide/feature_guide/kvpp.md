@@ -1,10 +1,10 @@
-# KVPP User Guide
+# KVPP
 
 ## Overview
 
 KVPP (KV layer parallelism) distributes historical KV caches that would otherwise be replicated across TP ranks by layer for non-hybrid MLA/SFA models. This reduces persistent cache storage per rank, allowing the same HBM capacity to accommodate more context tokens or concurrent requests.
 
-When a layer executes, the rank responsible for its cache broadcasts the complete cache to the other ranks in the group. Model computation retains its TP/EP/PP configuration. With PP enabled, each stage assigns caches and broadcasts within its own TP group.
+When a layer executes, the rank responsible for its cache broadcasts the complete cache to the other ranks in the group. Model computation retains its TP/EP/PP configuration. With PP enabled, each stage assigns caches and broadcasts within its own cache-replica group. The group spans TP ranks, or PCP × TP ranks when PCP is enabled on Model Runner V2, and never crosses DP replicas or PP stages.
 
 ## Use Cases
 
@@ -28,7 +28,7 @@ vllm serve <model-path> \
     --additional-config '{"enable_kvpp": true}'
 ```
 
-Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP and requires no separate setting. TP=1 provides no cache-sharing benefit across ranks.
+Replace `<model-path>` with a supported MLA/SFA model path and select TP according to model size and available devices. The KVPP group size follows TP × PCP and requires no separate setting. With PCP disabled, TP=1 provides no cache-sharing benefit across ranks.
 
 If the launch command already contains `--additional-config`, merge `enable_kvpp` into the existing JSON object.
 
@@ -51,6 +51,8 @@ vllm serve <model-path> \
 
 Adjust the token budget and maximum number of sequences to device capacity and workload.
 
+For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks; Model Runner V1 does not support KVPP with PCP.
+
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
 Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
@@ -59,7 +61,7 @@ Fixed-step MTP can be combined with KVPP, but MTP caches remain independently al
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP. |
+| `additional_config.enable_kvpp` | `false` | Enables KVPP; the group size follows TP × PCP. |
 | `--enforce-eager` | Not enabled | Required for KVPP; graph execution is not currently supported. |
 
 KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP parallel size needs to be configured.
@@ -73,7 +75,7 @@ KVPP broadcasts each full layer once. No broadcast granularity or separate KVPP 
 | KV cache layouts | Allocated from actual specifications, including LI-C8 and SFA-C8 |
 | Speculative decoding | Fixed-step MTP; variable-step MTP and other speculative decoding methods are not supported |
 | Execution mode | Eager mode only; graph execution is not supported |
-| Context parallelism | PCP and DCP are not supported |
+| Context parallelism | PCP requires Model Runner V2; DCP is not supported |
 | KV transfer | Integration is complete but is not included in this submission; it will be merged in a follow-up submission |
 
 Feature combinations must also meet the requirements of the model and the individual features.

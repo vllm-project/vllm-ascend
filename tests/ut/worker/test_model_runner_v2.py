@@ -268,6 +268,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
         parent.assert_called_once_with(dummy, valid_state_slots=False)
 
 
+@pytest.mark.parametrize("pcp", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
@@ -278,7 +279,9 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
         ([0, 4, 0, 0], False, True, False),
     ],
 )
-def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
+def test_kvpp_history_ignores_padding_and_dummy_work(
+    monkeypatch, computed, dummy_run, is_profile, expected, enabled, pcp
+):
     from vllm_ascend.worker.v2.model_states import default
 
     runner = _make_runner(need_timing=False)
@@ -309,6 +312,16 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         positions=torch.arange(2),
         attn_state=None,
     )
+    if pcp:
+        state.vllm_config.parallel_config.prefill_context_parallel_size = 2
+        # Local segment offsets can be positive on the first global prefill,
+        # or zero on a rank while another global request already has history.
+        global_batch = SimpleNamespace(num_reqs=2, num_computed_tokens_np=np.array(computed))
+        batch.num_computed_tokens_np = np.array([0, 0, 0, 0] if expected else [8, 16, 0, 0])
+        state.pcp_manager = SimpleNamespace(
+            global_batch=global_batch,
+            build_attention_context=lambda *_args: None,
+        )
     if not enabled:
         batch.num_computed_tokens_np = None  # Disabled KVPP must not inspect history.
     metadata = object()
