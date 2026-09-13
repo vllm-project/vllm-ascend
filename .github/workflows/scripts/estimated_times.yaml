@@ -14,7 +14,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
   tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 480
   tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 330
-  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 340
+  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 600
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 170
