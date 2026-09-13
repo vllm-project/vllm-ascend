@@ -26,3 +26,8 @@ msgid ""
 "Ascend. Developers can refer to this guide to understand how vLLM Ascend "
 "works."
 msgstr "本节概述了 vLLM Ascend 中实现的功能。开发者可参考本指南了解 vLLM Ascend 的工作原理。"
+
+msgid ""
+"- [KVPP: KV Cache Layer Parallelism](kvpp.md) — Physical cache placement, "
+"full-layer broadcast, and test design."
+msgstr "- [KVPP：KV 缓存层并行](kvpp.md) — 物理缓存放置、全层广播与测试设计。"
