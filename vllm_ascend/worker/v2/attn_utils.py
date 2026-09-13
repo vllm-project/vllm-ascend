@@ -355,7 +355,9 @@ def build_attn_state(
             # need to supports seq_len=1
             attn_state = AscendAttentionState.SpecDecoding
     # Speculative decoding.
-    elif np.all(num_valid_tokens == 1):
+    elif (num_valid_tokens is not num_scheduled_tokens or type(num_scheduled_tokens) is not np.ndarray) and np.all(
+        num_valid_tokens == 1
+    ):
         if vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp":
             attn_state = AscendAttentionState.SpecDecoding
         else:
