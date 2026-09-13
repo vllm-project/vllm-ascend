@@ -512,9 +512,7 @@ def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
     data_parallel_size = get_size(data_parallel_arg)
     pipeline_parallel_size = get_size("--pipeline-parallel-size")
     prefill_context_parallel_size = get_size("--prefill-context-parallel-size")
-    return (
-        tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size
-    )
+    return tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size
 
 
 class RemotePDServer(RemoteOpenAIServer):
@@ -567,9 +565,7 @@ class RemotePDServer(RemoteOpenAIServer):
             server_env = copy.deepcopy(self.env_dict)
             end_device_id = start_device_id + required_devices
             if available_device_ids is None:
-                assigned_device_ids = [
-                    str(device_id) for device_id in range(start_device_id, end_device_id)
-                ]
+                assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
             else:
                 assigned_device_ids = available_device_ids[start_device_id:end_device_id]
                 if len(assigned_device_ids) != required_devices:

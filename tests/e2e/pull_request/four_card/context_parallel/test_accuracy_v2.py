@@ -29,6 +29,8 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
+
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
     "cudagraph_mode": "FULL_DECODE_ONLY",
