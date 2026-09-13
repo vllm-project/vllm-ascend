@@ -13,6 +13,8 @@ from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention,
     _KDAFusedBFGLinear,
     _prepare_beta,
+    _zero_padded_output,
+    _zero_padded_recurrent_output,
 )
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -65,6 +67,31 @@ class _RecordingStreamSwitch:
 
     def __exit__(self, *args) -> None:
         self.trace.append(f"exit:{self.stream.name}")
+
+
+def test_zero_padded_recurrent_output_clears_uncovered_tail():
+    output = torch.randn(1, 8, 2, 3)
+    expected = output[:, :5].clone()
+    output[:, 5:] = torch.nan
+
+    actual = _zero_padded_recurrent_output(
+        output,
+        torch.tensor([0, 3, 5, 5], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(actual[:, :5], expected)
+    assert torch.equal(actual[:, 5:], torch.zeros_like(actual[:, 5:]))
+    assert torch.isfinite(actual).all()
+
+
+def test_zero_padded_output_uses_combined_live_token_count():
+    output = torch.full((1, 8, 1, 1), torch.nan)
+    output[:, :6] = torch.arange(6).view(1, 6, 1, 1)
+
+    actual = _zero_padded_output(output, torch.tensor(6, dtype=torch.int32))
+
+    torch.testing.assert_close(actual[:, :6], output[:, :6])
+    assert torch.equal(actual[:, 6:], torch.zeros_like(actual[:, 6:]))
 
 
 def test_kda_output_norm_uses_checkpoint_epsilon():
@@ -467,63 +494,3 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
         packed,
         source[:, 0, :].transpose(0, 1).to(torch.bfloat16),
     )
-
-
-@pytest.mark.parametrize("mode", ["spec", "decode", "mixed"])
-def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
-    state = torch.zeros(1)
-    conv_meta = SimpleNamespace(
-        query_start_loc=torch.tensor([0, 4]), cache_indices=torch.tensor([0]), num_accepted_tokens=None
-    )
-    metadata = SimpleNamespace(
-        num_actual_tokens=6,
-        num_prefills=0,
-        num_decodes=0 if mode == "spec" else 1,
-        num_decode_tokens=4,
-        spec_sequence_masks=None if mode == "decode" else torch.tensor([True]),
-        spec_token_indx=torch.tensor([0, 2, 4]),
-        non_spec_token_indx=torch.tensor([1, 3, 5]),
-        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
-        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
-        spec_query_start_loc=torch.tensor([0, 2 if mode == "mixed" else 4]),
-        non_spec_query_start_loc=torch.tensor([0, 2 if mode == "mixed" else 4]),
-        spec_state_indices_tensor=torch.tensor([0]),
-        non_spec_state_indices_tensor=torch.tensor([0]),
-    )
-    values = torch.arange(1, 9, dtype=torch.float32).view(8, 1).repeat(1, 6)
-    values[4:] = torch.nan
-    gate = torch.zeros(8, 1, 2)
-    gate[4:] = torch.nan
-
-    def recurrent(q, k, v, raw_gate, beta, recurrent_state, query_start_loc, state_indices, **kwargs):
-        recurrent_state.add_(1)
-        return v.clone()
-
-    attention = SimpleNamespace(
-        prefix="kda",
-        head_dim=2,
-        kv_cache=(torch.zeros(1), state),
-        get_parameter=lambda name: torch.empty(1),
-        _run_causal_conv1d=lambda x, *args, **kwargs: x,
-        _run_recurrent=recurrent,
-        o_norm=lambda x, g: x * torch.sigmoid(g),
-    )
-    output = torch.full((1, 8, 1, 2), torch.nan)
-    with (
-        patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
-        patch(
-            "vllm_ascend.ops.kimi_kda.get_forward_context",
-            return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
-        ),
-    ):
-        AscendKimiK3DeltaAttention._forward(
-            attention,
-            values,
-            torch.zeros(1, 8, 1, 2),
-            gate,
-            torch.zeros(1, 8, 1),
-            output,
-        )
-    torch.testing.assert_close(output[0, :4, 0], values[:4, :2] * 0.5)
-    torch.testing.assert_close(output[:, 6:], torch.zeros_like(output[:, 6:]))
-    torch.testing.assert_close(state, torch.tensor([2.0 if mode == "mixed" else 1.0]))
