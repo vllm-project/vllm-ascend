@@ -119,6 +119,16 @@ if(SOC_VERSION MATCHES "ascend910_93.*")
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+if(SOC_VERSION MATCHES "ascend950")
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE)
+    target_include_directories(vllm_ascend_C PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/grouped_matmul_situ_quant
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/grouped_matmul_situ_quant/utils
+        ${ASCEND_HOME_PATH}/include/experiment/platform
+        ${ASCEND_HOME_PATH}/include/experiment/runtime
+    )
+endif()
+
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
 # in vllm_ascend/envs.py, forwarded by setup.py as a CMake variable):
