@@ -71,10 +71,9 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertTrue(indexer.use_torch_npu_lightning_indexer)
 
     @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
-    @patch("vllm_ascend.attention.indexer.get_current_hardware_profile")
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, mock_get_hw_profile, _mock_enable_dsa_cp):
+    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
@@ -87,14 +86,12 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "fp8"
         with patch.dict(STR_DTYPE_TO_TORCH_DTYPE, {"fp8": torch.float8_e4m3fn}):
-            mock_get_hw_profile.return_value.supports.return_value = True
             indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
             self.assertTrue(indexer.enable_sparse_li_c8)
             self.assertEqual(indexer.c8_k_cache_dtype, torch.float8_e4m3fn)
             self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float32)
 
         mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
-        mock_get_hw_profile.return_value.supports.return_value = False
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
         self.assertEqual(indexer.c8_k_cache_dtype, torch.int8)
         self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float16)
