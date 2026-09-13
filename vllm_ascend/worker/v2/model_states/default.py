@@ -73,8 +73,16 @@ class AscendModelState(DefaultModelState):
         num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
         if self.kvpp_runtime is not None and self.kvpp_runtime.scheduler is not None:
+            # PCP-local offsets include earlier chunks of this same forward.
+            # Use prior-forward history shared by every PCP x TP group member.
+            history_batch = (
+                self.pcp_manager.global_batch
+                if self.pcp_manager is not None and not self.kvpp_is_dummy_run
+                else input_batch
+            )
             self.kvpp_runtime.prepare_forward(
-                not self.kvpp_is_dummy_run and bool(np.any(input_batch.num_computed_tokens_np[:num_actual_reqs] > 0))
+                not self.kvpp_is_dummy_run
+                and bool(np.any(history_batch.num_computed_tokens_np[: history_batch.num_reqs] > 0))
             )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)

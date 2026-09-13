@@ -1511,6 +1511,23 @@ class TestKVPPConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "enable_kvpp"):
             KVPPConfig.from_vllm_config(config)
 
+    def test_pcp_replica_domain_requires_v2(self):
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for tp, pcp in ((1, 2), (2, 4), (4, 2)):
+            config = make_kvpp_config(tp)
+            config.parallel_config.prefill_context_parallel_size = pcp
+            config.use_v2_model_runner = True
+            actual = KVPPConfig.from_vllm_config(config)
+            self.assertEqual(actual.size, tp * pcp)
+            actual.validate(config)
+            config.use_v2_model_runner = False
+            with self.assertRaisesRegex(ValueError, "Model Runner V2"):
+                actual.validate(config)
+            config.additional_config = {"enable_kvpp": False}
+            self.assertEqual(KVPPConfig.from_vllm_config(config).size, 1)
+
     def test_supported_configuration_and_restrictions(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -1521,7 +1538,6 @@ class TestKVPPConfig(TestBase):
         config.speculative_config = None
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
-            ("parallel_config", "prefill_context_parallel_size", 2, "PCP"),
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
             (None, "kv_transfer_config", object(), "transfer"),
             ("model_config", "enforce_eager", False, "eager"),

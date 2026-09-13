@@ -68,12 +68,17 @@ class KVPPConfig:
         enabled = validate_additional_config_bool(
             additional_config.get("enable_kvpp", False), "additional_config.enable_kvpp"
         )
-        return cls(size=vllm_config.parallel_config.tensor_parallel_size if enabled else 1)
+        parallel_config = vllm_config.parallel_config
+        # With DCP disabled, MLA caches are replicated after PCP's KV gather.
+        # Share layer ownership over that replica domain, not across DP or PP.
+        return cls(
+            size=parallel_config.tensor_parallel_size * parallel_config.prefill_context_parallel_size if enabled else 1
+        )
 
     def validate(self, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size != 1:
-            raise ValueError("KVPP does not support PCP yet.")
+        if parallel_config.prefill_context_parallel_size != 1 and not vllm_config.use_v2_model_runner:
+            raise ValueError("KVPP with PCP requires Model Runner V2.")
         if parallel_config.decode_context_parallel_size != 1:
             raise ValueError("KVPP and DCP cannot be enabled at the same time.")
         if vllm_config.kv_transfer_config is not None:

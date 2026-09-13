@@ -32,6 +32,20 @@ def test_pp_local_owners_and_bundles(tp, owners, with_mtp):
     assert layer_name(17) not in plan.layer_owner_ranks
 
 
+@pytest.mark.parametrize("tp,pcp", [(2, 4), (1, 2)])
+def test_pcp_layer_owners_span_replica_domain(tp, pcp):
+    config = make_kvpp_config(tp)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.use_v2_model_runner = True
+    specs = make_kvpp_specs()
+    plans = [placement.create_kvpp_cache_allocation_plan(config, specs, rank) for rank in range(tp * pcp)]
+    owners = plans[0].layer_owner_ranks
+    assert set(owners.values()) == set(range(tp * pcp))
+    assert owners[indexer_name(11)] == owners[layer_name(11)]
+    assert all(plan.layer_owner_ranks == owners for plan in plans)
+    assert layer_name(17) not in owners  # MTP remains replicated.
+
+
 @pytest.mark.parametrize(
     "packed,scale_dtype,expected_sizes,expected_layout,total",
     [

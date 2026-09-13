@@ -924,3 +924,30 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
         make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
     )
     assert_attention_cache_views(caches, raw, packed)
+
+
+@pytest.mark.parametrize("scale_dim", [0, 1])
+def test_kvpp_indexer_preserves_component_tuple(monkeypatch, scale_dim):
+    from vllm_ascend.ascend_config import KVPPConfig
+    from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        scale_dim=scale_dim,
+        scale_dtype=torch.float16,
+    )
+    indexer_parts = (torch.zeros(8, dtype=torch.int8),)
+    if scale_dim:
+        indexer_parts += (torch.zeros(4, dtype=torch.int8),)
+    main = torch.zeros(16, dtype=torch.int8)
+    config = object()
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=2))
+    monkeypatch.setattr(attn_utils, "_get_layer_kv_cache_specs", lambda _: {"indexer": spec, "main": object()})
+    monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", lambda *_: {"indexer": indexer_parts, "main": (main,)})
+    caches = attn_utils._allocate_kv_cache(object(), {}, torch.device("cpu"))
+    assert caches["indexer"] is indexer_parts
+    assert caches["main"] is main
