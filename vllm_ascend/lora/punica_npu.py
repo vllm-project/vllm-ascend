@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import torch
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -206,6 +207,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
+    def _should_use_prefill(self) -> bool:
+        if not self.is_prefill:
+            return False
+        return not (
+            is_forward_context_available()
+            and bool(get_forward_context().capturing)
+            and get_ascend_device_type() == AscendDeviceType._310P
+        )
+
     def _apply_expand(
         self,
         y: torch.Tensor,
@@ -221,7 +231,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode
+        expand_slice_fun: Callable = (
+            self._expand_slice_prefill if self._should_use_prefill() else self._expand_slice_decode
+        )
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
@@ -235,7 +247,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = self._shrink_prefill if self.is_prefill else self._shrink_decode
+        shrink_fun: Callable = self._shrink_prefill if self._should_use_prefill() else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
@@ -329,7 +341,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = self._expand_prefill if self.is_prefill else self._expand_decode
+        expand_fun: Callable = self._expand_prefill if self._should_use_prefill() else self._expand_decode
         x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
