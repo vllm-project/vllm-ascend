@@ -226,7 +226,7 @@ class DeepseekV41Indexer(nn.Module):
             raise RuntimeError("V4.1 QLI metadata was not built")
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
         mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
-        selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+        selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
             quantized_query,
             key,
             weights,

@@ -389,7 +389,7 @@ class DeepseekV41DecoderLayer(DeepseekV2DecoderLayer):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
-        return torch.ops._C_ascend.npu_hc_pre_v2(
+        return torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
             hc_scale,

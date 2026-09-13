@@ -146,7 +146,7 @@ def _invoke(data, layout, ratio, mode, *, candidates=None, blocks=64, mask=3, re
         },
         flush=True,
     )
-    output, values, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+    output, values, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         query,
         key,
         weights,
@@ -222,7 +222,7 @@ def test_fake_qli_shapes(mode):
     k = torch.empty(16, 64, 1, 128, device="meta", dtype=torch.int8)
     w = torch.empty(3, 32, device="meta", dtype=torch.float16)
     ks = torch.empty(16, 64, 1, device="meta", dtype=torch.float16)
-    out, values, candidates = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+    out, values, candidates = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(
         q, k, w, w, ks, 128, 2, candidate_mode=mode, candidate_topk_blocks=64
     )
     assert out.shape == (3, 1, 128) and out.dtype == torch.int32

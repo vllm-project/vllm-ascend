@@ -762,16 +762,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         return hidden_states, hidden_states.float()
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        y, post, comb, _ = torch.ops._C_ascend.npu_hc_pre_v2(
-            x,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            None,
-            hc_mult=self.hc_mult,
-            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
-            norm_eps=self.norm_eps,
-            hc_eps=self.hc_eps,
+        y, post, comb = torch.ops._C_ascend.npu_hc_pre_v2(
+            x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
         )
         return y, post, comb
 

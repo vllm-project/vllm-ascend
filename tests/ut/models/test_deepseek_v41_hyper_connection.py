@@ -36,7 +36,7 @@ def test_v41_hc_pre_dispatches_fused_operator_with_pre_mix():
 
     with patch.object(
         torch.ops._C_ascend,
-        "npu_hc_pre_v2",
+        "npu_hc_pre_v3",
         create=True,
         return_value=expected,
     ) as op:
