@@ -16,14 +16,14 @@ from vllm_ascend.ops.triton.triton_utils import (
 )
 
 
-@triton.jit(do_not_specialize=["N"])
+@triton.jit(do_not_specialize=["num_tokens"])
 def _apply_attn_res_kernel(
     block_residual_ptr,
     prefix_sum_ptr,
     norm_w_ptr,
     proj_w_ptr,
     out_ptr,
-    N,
+    num_tokens,
     H: tl.constexpr,
     B: tl.constexpr,
     BLOCK_CAPACITY: tl.constexpr,
@@ -32,12 +32,12 @@ def _apply_attn_res_kernel(
     NB: tl.constexpr,
 ):
     tl.static_assert(NB >= B + 1, "NB must include all block residuals and prefix_sum")
-    block_size = (N - 1) // NUM_CORES + 1
+    block_size = (num_tokens - 1) // NUM_CORES + 1
     pid = tl.program_id(0)
     tok0 = pid * block_size
-    if tok0 >= N:
+    if tok0 >= num_tokens:
         return
-    tok1 = tl.minimum(tok0 + block_size, N)
+    tok1 = tl.minimum(tok0 + block_size, num_tokens)
 
     cols = tl.arange(0, H)
     s_idx = tl.arange(0, NB)
@@ -104,7 +104,7 @@ def apply_attn_res(
         norm_w,
         proj_w,
         out,
-        N=num_tokens,
+        num_tokens=num_tokens,
         H=hidden_size,
         B=num_valid_blocks,
         BLOCK_CAPACITY=block_capacity,
