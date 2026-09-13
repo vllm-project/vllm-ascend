@@ -45,6 +45,14 @@ from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
+
+def create_ascend_fused_moe_router(*args, **kwargs):
+    """Load Ascend router ops only when a model constructs its MoE."""
+    from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router as factory
+
+    return factory(*args, **kwargs)
+
+
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
 
@@ -157,10 +165,6 @@ def _ascend_FusedMoE(
     hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
     enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
-        # Loading the global patches must not initialize the active Triton
-        # backend. Defer Ascend ops until a model actually builds its MoE.
-        from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
-
         router = create_ascend_fused_moe_router(
             top_k=top_k,
             global_num_experts=num_experts + num_redundant_experts,
