@@ -127,7 +127,7 @@ class NodeShardedEngram(nn.Module):
         # the threshold as a local rollback knob for future kernel changes.
         self.use_triton_int8 = True
         self.triton_int8_min_rows = 1
-        self.offload_pinned = storage_format in ("fp8", "mxfp8")
+        self.offload_pinned = storage_format in ("fp8", "mxfp8") and torch.npu.is_available()
         self._offload_buffers = OrderedDict()
         self._offload_buffer_bytes = 0
         self._offload_buffer_bytes_limit = _OFFLOAD_BUFFER_BYTES_LIMIT

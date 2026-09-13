@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 def collect_indexer_warmup_token_counts(topk: int, num_cores: int, max_tokens: int) -> list[int]:
     """One token count per reachable ``BLOCK_ROWS`` in index postprocessing."""
     # Match the 128 KiB, eight-buffer sort budget in prepare_indexer_indices.
-    max_block_rows = 128 * 1024 // (triton.next_power_of_2(topk) * 4 * 8)
+    padded_topk = 1 << (topk - 1).bit_length()
+    max_block_rows = 128 * 1024 // (padded_topk * 4 * 8)
     token_counts = [1]
     block_rows = 1
     while block_rows < max_block_rows:

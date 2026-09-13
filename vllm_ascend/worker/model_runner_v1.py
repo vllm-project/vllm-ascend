@@ -4387,7 +4387,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         if any(
-            isinstance(self.compilation_config.static_forward_context[name], DeepseekV41CacheLayer)
+            isinstance(self.compilation_config.static_forward_context.get(name), DeepseekV41CacheLayer)
             for name in kv_caches
         ):
             if self.kv_caches:

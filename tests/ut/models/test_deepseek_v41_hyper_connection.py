@@ -145,12 +145,15 @@ def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
     norm.variance_epsilon = 1e-6
     layer.post_attention_layernorm = norm
 
-    with patch.object(
-        torch.ops._C_ascend,
-        "npu_rms_norm_cast",
-        create=True,
-        return_value=(normalized, normalized_fp32),
-    ) as op:
+    with (
+        patch("vllm_ascend.models.deepseek_v4.model.enable_custom_op", return_value=True),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_rms_norm_cast",
+            create=True,
+            return_value=(normalized, normalized_fp32),
+        ) as op,
+    ):
         actual, actual_fp32 = layer.rms_norm_cast(x)
 
     assert actual is normalized

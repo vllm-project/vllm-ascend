@@ -1362,8 +1362,9 @@ class MooncakeConnectorScheduler:
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
+        kv_cache_specs = getattr(self, "kv_cache_specs", ())
         for i, blocks in enumerate(block_ids):
-            if all(is_circular_spec(spec) for spec in self.kv_cache_specs[i]):
+            if i < len(kv_cache_specs) and all(is_circular_spec(spec) for spec in kv_cache_specs[i]):
                 transfer_block_ids.append(blocks)
                 continue
             group_token_len = prompt_len

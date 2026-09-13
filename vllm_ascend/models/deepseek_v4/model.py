@@ -978,7 +978,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if pp_group.is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         moe_input_ids = input_ids
-        if self.needs_moe_input_ids:
+        if getattr(self, "needs_moe_input_ids", False):
             moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
