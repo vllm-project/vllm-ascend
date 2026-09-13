@@ -12,8 +12,6 @@ import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
 
-from vllm_ascend.ops.triton.engram_int8 import gather_dequantize_engram_int8
-
 _OFFLOAD_BUFFER_CACHE_SIZE = 8
 _OFFLOAD_BUFFER_BYTES_LIMIT = 512 * 1024 * 1024
 _BF16_BYTES = 2
@@ -127,7 +125,7 @@ class NodeShardedEngram(nn.Module):
         # the threshold as a local rollback knob for future kernel changes.
         self.use_triton_int8 = True
         self.triton_int8_min_rows = 1
-        self.offload_pinned = storage_format in ("fp8", "mxfp8") and torch.npu.is_available()
+        self.offload_pinned = storage_format in ("fp8", "mxfp8")
         self._offload_buffers = OrderedDict()
         self._offload_buffer_bytes = 0
         self._offload_buffer_bytes_limit = _OFFLOAD_BUFFER_BYTES_LIMIT
@@ -185,7 +183,7 @@ class NodeShardedEngram(nn.Module):
         else:
             self.weight.data[start:end].copy_(rows)
 
-    def lookup_local(self, ids):
+    def lookup_local(self, ids, *, pin_output=False):
         # Idle DP replicas still enter routing collectives, but must not launch
         # gather/dequant kernels for an empty owner request.
         if ids.numel() == 0:
@@ -200,6 +198,10 @@ class NodeShardedEngram(nn.Module):
                 and flat_ids.device.type == "npu"
                 and flat_ids.shape[0] >= self.triton_int8_min_rows
             ):
+                # Importing the ops package initializes the active Triton
+                # backend, so keep it out of CPU-only routing and test workers.
+                from vllm_ascend.ops.triton.engram_int8 import gather_dequantize_engram_int8
+
                 rows = gather_dequantize_engram_int8(self.weight, self.weight_scale, flat_ids)
             else:
                 codes = torch.index_select(self.weight, 0, flat_ids)
@@ -213,7 +215,7 @@ class NodeShardedEngram(nn.Module):
             scales = torch.index_select(self.weight_scale, 0, flat_ids)
             decoded.mul_(scales.float().unsqueeze(-1))
             decoded = decoded.reshape(-1, self.width)
-            if self.offload_pinned:
+            if self.offload_pinned and pin_output:
                 key = decoded.shape[0]
                 slots = self._offload_buffers.get(key)
                 if slots is None:
@@ -372,7 +374,10 @@ class NodeShardedEngram(nn.Module):
                 dist.all_to_all_single(returned, packed.flatten(), wire_send, wire_recv, group=q.group)
                 returned = unpack_engram_int8_rows(returned.reshape(total_requests, wire_width), self.width)
             else:
-                local_values = self.lookup_local(local_ids.cpu() if self.weight.device.type == "cpu" else local_ids)
+                local_values = self.lookup_local(
+                    local_ids.cpu() if self.weight.device.type == "cpu" else local_ids,
+                    pin_output=device.type == "npu",
+                )
                 source_ptr = local_values.data_ptr()
                 values = local_values.to(
                     device=device, dtype=torch.bfloat16, non_blocking=self.offload_pinned
