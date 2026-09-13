@@ -349,9 +349,6 @@ class KVPoolWorker:
         # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
         # (A3 fabric memory), and Memcache requires device_sdma protocol.
         backend_kwargs["lazy_init"] = self.use_compress
-        # The connector's extra_config (with MultiConnector the child's own
-        # config, not the top-level one) carries the QoS the backends inject.
-        backend_kwargs["extra_config"] = extra_config
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
             **backend_kwargs,
