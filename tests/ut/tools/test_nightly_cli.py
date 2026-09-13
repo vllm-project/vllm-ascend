@@ -28,6 +28,7 @@ class NightlyCLITest(unittest.TestCase):
         model.parent.mkdir(parents=True)
         model.write_text(
             """models = [dict(
+    abbr='vllm-api-stream-chat', attr='service',
     model='', path='', host_ip='localhost', host_port=8080,
     max_out_len=512, batch_size=1, request_rate=0,
     trust_remote_code=False,
@@ -41,7 +42,15 @@ class NightlyCLITest(unittest.TestCase):
         model.write_text(model.read_text().replace(", ", ",\n    "), encoding="utf-8")
         dataset = configs / "datasets/gsm8k/gsm8k_gen_0_shot_cot_str_perf.py"
         dataset.parent.mkdir(parents=True)
-        dataset.write_text("gsm8k_datasets = [dict(\n    path='original',\n)]\n", encoding="utf-8")
+        dataset.write_text("gsm8k_datasets = [dict(\n    abbr='gsm8k',\n    path='original',\n)]\n", encoding="utf-8")
+        summarizer = configs / "summarizers/perf/default_perf.py"
+        summarizer.parent.mkdir(parents=True)
+        summarizer.write_text(
+            "summarizer = dict(attr='performance', type='DefaultPerfSummarizer', "
+            "calculator=dict(type='DefaultPerfMetricCalculator', "
+            "stats_list=['Average', 'Min', 'Max', 'Median', 'P75', 'P90', 'P99']))\n",
+            encoding="utf-8",
+        )
         self.templates = {path: path.read_bytes() for path in configs.rglob("*.py")}
         self.guard = self.root / "guard"
         self.guard.mkdir()
@@ -133,6 +142,22 @@ sys.addaudithook(prohibit)
         self.assertEqual((model["host_ip"], model["host_port"], model["path"]), ("192.0.2.8", 18123, "/models/local"))
         self.assertEqual(model["generation_kwargs"], {"temperature": 0, "ignore_eos": True})
         self.assertEqual(namespace["datasets"][0]["path"], "/datasets/local")
+        # The native positional-config checker requires nonempty lists of dicts
+        # with abbr plus a nonempty summarizer dict with attr. Its perf workflow
+        # supplies infer defaults; the official summarizer supplies calculator.
+        for field in ("models", "datasets"):
+            self.assertIsInstance(namespace[field], list)
+            self.assertTrue(namespace[field])
+            for entry in namespace[field]:
+                self.assertIsInstance(entry, dict)
+                self.assertTrue(entry["abbr"])
+        self.assertEqual(namespace["summarizer"]["attr"], "performance")
+        self.assertEqual(namespace["summarizer"]["type"], "DefaultPerfSummarizer")
+        self.assertEqual(namespace["summarizer"]["calculator"]["type"], "DefaultPerfMetricCalculator")
+        self.assertEqual(
+            namespace["summarizer"]["calculator"]["stats_list"],
+            ["Average", "Min", "Max", "Median", "P75", "P90", "P99"],
+        )
         self.assertTrue((output / "benchmark.sh").read_text().splitlines()[-1].startswith("exec ais_bench "))
         self.assertEqual(self.templates, {path: path.read_bytes() for path in self.templates})
 

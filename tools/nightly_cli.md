@@ -50,8 +50,11 @@ python -m tools.nightly_cli prepare \
 
 This reads the installed AISBench request/dataset templates and writes a complete
 `benchmark.py`, `benchmark.sh`, and `manifest.json` outside `benchmark-home`.
-The templates are not modified. Both `models` and `datasets` are present in the
-generated configuration, including the existing dataset pre/postprocessors.
+The templates are not modified. The generated configuration includes `models`,
+`datasets`, and the fixed checkout's official `summarizers/perf/default_perf.py`
+configuration, preserving its calculator and statistics along with dataset
+pre/postprocessors. The native performance workflow supplies its inference
+defaults; preparation does not instantiate or execute that workflow.
 The generated command is equivalent to:
 
 ```bash

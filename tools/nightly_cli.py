@@ -54,6 +54,7 @@ def prepare(args, case, config):
     base = "ais_bench/benchmark/configs/"
     model = template(home, base + "models/vllm_api/" + config["request_conf"] + ".py")
     dataset = template(home, base + "datasets/" + config["dataset_conf"] + ".py")
+    summarizer = template(home, base + "summarizers/perf/default_perf.py")
     options = dict(
         config,
         model=case["model"],
@@ -90,7 +91,7 @@ def prepare(args, case, config):
     selected = "datasets" if "datasets" in names else names[0] if len(names) == 1 else None
     if selected is None:
         raise ValueError("Dataset template must expose one datasets list")
-    content = model + "\n" + dataset + "\ndatasets = " + selected + "\n"
+    content = model + "\n" + dataset + "\ndatasets = " + selected + "\n" + summarizer
     ast.parse(content)
     configuration = write_private(output, "benchmark.py", content)
     argv = ["ais_bench", configuration, "--mode", "perf"]
