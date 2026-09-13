@@ -81,3 +81,9 @@ can approach or exceed a 3600-second environment budget on a slow node/network;
 an actual deadline failure must remain a failure and be reviewed before retry.
 Git may use a task-local, verified source cache, but neither global Git config
 nor another user's Python environment is modified by this helper.
+
+Run the isolated interface checks without an NPU runtime:
+
+```bash
+python -m unittest tests.ut.tools.test_nightly_environment tests.ut.tools.test_nightly_cli
+```
