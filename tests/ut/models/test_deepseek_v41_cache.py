@@ -3,6 +3,7 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -528,7 +529,7 @@ def test_c2_builder_prepares_shared_store_mask(
         is_prefilling=torch.tensor([True, False, True]),
     )
     original_slots = common.slot_mapping.clone()
-    shared = {}
+    shared: dict[str, Any] = {}
     metadata = [
         builder.build(
             0, common, num_actual_reqs=num_actual_reqs, full_graph_mode=full_graph_mode, common_v41_metadata=shared
@@ -708,7 +709,7 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
         max_seq_len=4,
         is_prefilling=torch.tensor([True]),
     )
-    full_group_metadata = {}
+    full_group_metadata: dict[str, Any] = {}
     long_metadata = DeepseekV41MetadataBuilder(
         specs["model.layers.2.self_attn.long_kv_cache"],
         ["model.layers.2.self_attn.long_kv_cache"],
@@ -793,7 +794,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
     groups = make_cache_config(17).kv_cache_groups
     builders = []
     for group in groups:
-        layers_by_spec = {}
+        layers_by_spec: dict[Any, list[str]] = {}
         for name, spec in group.kv_cache_spec.kv_cache_specs.items():
             layers_by_spec.setdefault(spec, []).append(name)
         builders.append(
@@ -827,7 +828,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
             builder._device_metadata_enabled = deferred
 
     def build_batch(lengths, block_offset=0, idle=False):
-        batch_shared = {}
+        batch_shared: dict[str, Any] = {}
         results, tasks = [], []
         positions = torch.tensor(
             [*range(lengths[0] - query_len, lengths[0]), *range(lengths[1] - query_len, lengths[1]), 0]
@@ -858,7 +859,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
                 max_seq_len=max(lengths),
                 is_prefilling=torch.tensor([query_len > 1, query_len > 1, False]),
             )
-            group_shared = {}
+            group_shared: dict[str, Any] = {}
             group_results = []
             for builder in group_builders:
                 metadata = builder.build(

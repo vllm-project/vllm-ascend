@@ -3,6 +3,7 @@
 """Exercise shared V4.1 metadata with native operators and changed-input replay."""
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -38,7 +39,7 @@ METADATA_TENSORS = (
 def _builders(runtime, device, deferred):
     result = []
     for group in make_cache_config(17).kv_cache_groups:
-        layers_by_spec = {}
+        layers_by_spec: dict[Any, list[str]] = {}
         for name, spec in group.kv_cache_spec.kv_cache_specs.items():
             layers_by_spec.setdefault(spec, []).append(name)
         group_builders = []
@@ -63,9 +64,10 @@ def _build(builders, lengths, query_len, *, shared, block_offset=0, idle=False):
     seq_lens_cpu = torch.tensor([*lengths, 0], dtype=torch.int32)
     query_start_loc = query_start_loc_cpu.to(device)
     seq_lens = seq_lens_cpu.to(device)
-    batch_shared, metadata, tasks = {}, [], []
+    batch_shared: dict[str, Any] = {}
+    metadata, tasks = [], []
     for gid, group_builders in enumerate(builders):
-        group_shared = {}
+        group_shared: dict[str, Any] = {}
         blocks = torch.tensor([gid + 1 + block_offset, gid + 2 + block_offset, 0], device=device, dtype=torch.int32)
         slots = torch.cat(
             (

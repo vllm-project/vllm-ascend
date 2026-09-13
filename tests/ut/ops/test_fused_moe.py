@@ -1845,6 +1845,7 @@ def test_internal_router_reuses_fused_fp32_input(monkeypatch, has_shared_experts
     assert routed_kwargs["input_ids"] is input_ids
     torch.testing.assert_close(routed_kwargs["router_logits"], hidden_states.float() @ weight.T)
     if has_shared_experts:
+        assert runner.ascend_shared_experts is not None
         runner.ascend_shared_experts.prepare_input_before_routed_experts.assert_not_called()
         runner.ascend_shared_experts.forward.assert_called_once()
 

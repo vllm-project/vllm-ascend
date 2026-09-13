@@ -173,7 +173,7 @@ def _invoke(data, layout, ratio, mode, *, candidates=None, blocks=64, mask=3, re
 def test_native_qli_candidate(ratio, length, mode):
     layout = "TND"
     data = _data(length)
-    score, visible = _scores(*data[:5], ratio, ratio - 1)
+    score, visible = _scores(data[0], data[1], data[2], data[3], data[4], ratio, ratio - 1)
     candidate_in = None
     if mode == 2:
         _, candidate_in = _invoke(data, layout, ratio, 1)
@@ -181,7 +181,7 @@ def test_native_qli_candidate(ratio, length, mode):
         # A different consumer query must rerank within source blocks.
         other = _data(length, seed=17)
         data = (other[0], data[1], other[2], other[3], *data[4:])
-        score, visible = _scores(*data[:5], ratio, ratio - 1)
+        score, visible = _scores(data[0], data[1], data[2], data[3], data[4], ratio, ratio - 1)
         block_ids = candidate_in.cpu().reshape(data[0].shape[0], -1)
         membership = (torch.arange(length)[None, None, :] // 8 == block_ids[:, :, None]).any(1)
         _mask_non_candidates(score, membership)
@@ -195,7 +195,7 @@ def test_native_qli_candidate(ratio, length, mode):
 
 def test_native_qli_supports_bsnd_query_layout():
     data = _data(513)
-    score, _ = _scores(*data[:5], 1, 0)
+    score, _ = _scores(data[0], data[1], data[2], data[3], data[4], 1, 0)
     output, _ = _invoke(data, "BSND", 1, 3)
     _check_topk(score, output, 128)
 
@@ -210,7 +210,7 @@ def test_native_qli_supports_bsnd_query_layout():
 )
 def test_candidate_boundaries(ratio, residual, qlen, length, blocks):
     data = _data(length, qlen=qlen)
-    score, visible = _scores(*data[:5], ratio, residual)
+    score, visible = _scores(data[0], data[1], data[2], data[3], data[4], ratio, residual)
     output, candidates = _invoke(data, "TND", ratio, 1, residual=residual, blocks=blocks)
     _check_topk(score, output, min(128, length))
     _check_candidates(score, visible, candidates, blocks)
@@ -395,7 +395,7 @@ def test_empty_compressed_cache():
 @pytest.mark.parametrize("ratio", [1, 2])
 def test_64_head_candidate_consumer(ratio):
     data = _data(1025, qlen=1, heads=64)
-    score, visible = _scores(*data[:5], ratio, ratio - 1)
+    score, visible = _scores(data[0], data[1], data[2], data[3], data[4], ratio, ratio - 1)
     output, candidates = _invoke(data, "TND", ratio, 1)
     _check_topk(score, output, 128)
     _check_candidates(score, visible, candidates, 64)
@@ -409,7 +409,7 @@ def test_64_head_candidate_consumer(ratio):
 @pytest.mark.parametrize("topk", [512, 2048])
 def test_position_topk_width(topk):
     data = _data(4097, qlen=1)
-    score, visible = _scores(*data[:5], 2, 1)
+    score, visible = _scores(data[0], data[1], data[2], data[3], data[4], 2, 1)
     output, candidates = _invoke(data, "TND", 2, 1, topk=topk)
     _check_topk(score, output, topk)
     _check_candidates(score, visible, candidates, 64)
@@ -426,7 +426,7 @@ def test_position_topk_width(topk):
 def test_candidate_shortfall_keeps_reachable_indices(length, qlen, strided):
     topk = 2048
     data = _data(length, qlen=qlen, strided=strided)
-    score, visible = _scores(*data[:5], 1, 0)
+    score, visible = _scores(data[0], data[1], data[2], data[3], data[4], 1, 0)
     block_ids = torch.arange(64, dtype=torch.int32).repeat(qlen, 1)
     block_ids[:, 9:11] = -1
     block_ids[block_ids >= (length + 7) // 8] = -1

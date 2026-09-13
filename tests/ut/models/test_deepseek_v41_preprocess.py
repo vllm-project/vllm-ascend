@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -34,7 +35,7 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
 @torch.inference_mode()
 def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant, num_tokens, cp):
     """Check Q/qr/cache parity and the cross-stream producer/consumer ordering."""
-    trace = []
+    trace: list[tuple[str, str, str]] = []
     active = "main"
 
     class Stream:
@@ -148,7 +149,7 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
     expected_cache = cache.clone()
     cache.zero_()
     trace.clear()
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if cp:
         impl.role = SimpleNamespace(is_kv_source=False)
         attn.rotary_emb = SimpleNamespace(layername="layer")

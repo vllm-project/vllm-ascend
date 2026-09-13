@@ -29,6 +29,7 @@ def test_deepseek_v41_model_call_sites_use_compiled_operator_layouts():
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "common" for target in node.targets)
     )
+    assert isinstance(common, ast.Call)
     layouts = {kw.arg: ast.literal_eval(kw.value) for kw in common.keywords if kw.arg in ("layout_q", "layout_k")}
     assert layouts == {"layout_q": "TND", "layout_k": "PA_BBND"}
 

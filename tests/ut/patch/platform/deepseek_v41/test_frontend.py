@@ -9,11 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from PIL import Image
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
+from tokenizers import Tokenizer  # type: ignore[import-untyped]
+from tokenizers.models import WordLevel  # type: ignore[import-untyped]
 from transformers import PreTrainedTokenizerFast
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.parser_manager import ParserManager
@@ -32,7 +33,7 @@ from vllm_ascend.patch.platform.patch_deepseek_v41_frontend.renderer import Deep
 from vllm_ascend.patch.platform.patch_deepseek_v41_frontend.tokenizer import get_deepseek_v41_tokenizer
 
 FIXTURES = Path(__file__).parent / "fixtures"
-TOOL = {
+TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "lookup",
@@ -116,7 +117,7 @@ def test_chat_mode_matches_parser_initial_state(tokenizer, kwargs):
 
 
 def test_tools_follow_existing_system_and_preserve_history(tokenizer):
-    messages = [
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "a", "reasoning": "old thought"},
