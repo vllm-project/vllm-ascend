@@ -141,15 +141,7 @@ class KVTransferProcess:
                 if getattr(worker, "use_layerwise", False)
                 else None
             ),
-            tp_mismatch=(
-                dict(
-                    block_size=worker.block_size,
-                    num_sub_keys=worker.num_sub_keys,
-                    sub_size_bytes=worker.sub_size_bytes,
-                )
-                if getattr(worker, "tp_mismatch", False)
-                else None
-            ),
+            tp_mismatch=(dict(num_sub_keys=worker.num_sub_keys) if getattr(worker, "tp_mismatch", False) else None),
         )
         try:
             self.client.call("register", payload)

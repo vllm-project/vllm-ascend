@@ -226,9 +226,7 @@ def test_child_handlers_match_thread_keys_and_roundtrip_buffer_contents(monkeypa
         parent.close()
 
 
-def test_child_tp_mismatch_handler_reuses_worker_business_logic(monkeypatch):
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
+def test_child_tp_mismatch_handler_roundtrips_strided_slices(monkeypatch):
     tensor = torch.arange(16, dtype=torch.uint8).view(4, 2, 2)
     db = ChunkedTokenDatabase([KeyMetadata("test", 0, 0, 0, 0)], [2], None, hash_block_size=2)
     db.set_group_buffers({0: [tensor.data_ptr()]}, {0: [4]}, {0: [4]})
@@ -242,9 +240,7 @@ def test_child_tp_mismatch_handler_reuses_worker_business_logic(monkeypatch):
         group_layer_cache_entry_offsets={0: [0]},
         group_uses_align_state=[False],
         tp_mismatch=True,
-        block_size=2,
         num_sub_keys=2,
-        sub_size_bytes=1,
     )
     config = dict(
         backend="mooncake",
@@ -255,7 +251,7 @@ def test_child_tp_mismatch_handler_reuses_worker_business_logic(monkeypatch):
         dcp_size=1,
         put_step=1,
         kv_role="kv_producer",
-        enable_kv_events=False,
+        enable_kv_events=True,
         lazy_init=False,
     )
     backend = MemoryBackend()
@@ -263,30 +259,21 @@ def test_child_tp_mismatch_handler_reuses_worker_business_logic(monkeypatch):
         monkeypatch, config, backend, worker, {"layer.0": tensor}, [tensor.data_ptr()], [tensor.nbytes]
     )
     try:
-        original_backend = MemoryBackend()
-        original_worker = KVPoolWorker.__new__(KVPoolWorker)
-        original_worker.tp_mismatch = True
-        original_worker.m_store = original_backend
-        original_worker.token_database = db
-        original_worker.group_kv_caches_base_addr = db.group_kv_caches_base_addr
-        original_worker.group_block_len = worker.group_block_len
-        original_worker.group_block_stride = worker.group_block_stride
-        original_worker.block_size = worker.block_size
-        original_worker.num_sub_keys = worker.num_sub_keys
-        original_worker.sub_size_bytes = worker.sub_size_bytes
-        original_worker.tp_rank = config["tp_rank"]
-        original_worker.enable_kv_events = False
-        original = KVCacheStoreSendingThread(original_backend, db, [2], 0, 2, 1, worker=original_worker)
-        original_worker.kv_send_thread = original
-        req = request()
-        original.add_stored_request(req.req_id)
-        original.request_queue.put(req)
-        original.request_queue.get_nowait()
-        original._handle_request(req)
+        register_payload = parent.client.call.call_args.args[1]
+        assert register_payload["tp_mismatch"] == {"num_sub_keys": 2}
 
+        req = request()
+        req.token_ids = [1, 2, 3, 4]
+        req.original_block_size = 2
         result = run_transfer(runtime, parent, "store", req)
         assert result["finished"]
-        assert backend.writes == original_backend.writes
+        assert len(backend.writes) == 4
+        assert {key.split("@head_or_tp_rank:")[1].split("@", 1)[0] for key, _ in backend.writes} == {"0", "1"}
+        assert len(result["events"]) == 2
+
+        result = run_transfer(runtime, parent, "store", req)
+        assert result["finished"] and result["events"] == []
+        assert len(backend.writes) == 4
 
         req.block_ids_by_group = [[0, 2]]
         req.load_spec = LoadSpec(0, 4, True, token_len=4)
@@ -295,6 +282,10 @@ def test_child_tp_mismatch_handler_reuses_worker_business_logic(monkeypatch):
         assert [(operation, keys) for operation, _duration, keys in result["operations"]] == [("load_get", 4)]
         assert tensor[0].tolist() == tensor[1].tolist()
         assert tensor[2].tolist() == tensor[3].tolist()
+
+        backend.values.clear()
+        result = run_transfer(runtime, parent, "load", req)
+        assert sorted(result["invalid_blocks"]) == [0, 2]
     finally:
         runtime.close()
         parent.close()
