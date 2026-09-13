@@ -539,6 +539,24 @@ def test_scheduler_split_patch_clears_and_restores_both_drop_attributes():
     assert scheduler.use_eagle_block_drop == "dedicated-original"
 
 
+def test_scheduler_split_patch_handles_producer_without_drop_attribute():
+    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
+    del scheduler.use_eagle
+
+    def _attribute_free_split(self, request, num_new_tokens, nlc=0, nec=0):
+        self.calls.append((num_new_tokens, nlc, nec))
+        return ("split", num_new_tokens)
+
+    cls._mamba_block_aligned_split = _attribute_free_split
+    mod._install_producer_mamba_block_aligned_split_patch(cls)
+
+    assert scheduler._mamba_block_aligned_split("req", 1600) == ("split", 1600)
+    assert scheduler.observed_drop_bits == []
+    assert scheduler.calls == [(1600, 0, 0)]
+    assert not hasattr(scheduler, "use_eagle")
+    assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
 def test_scheduler_split_patch_noop_without_split_method():
     class _BareScheduler:
         pass
