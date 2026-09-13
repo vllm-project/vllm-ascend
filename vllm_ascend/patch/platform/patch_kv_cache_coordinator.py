@@ -636,3 +636,115 @@ vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordi
 _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
 if _kv_cache_manager is not None:
     _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+
+
+def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None) -> None:
+    """Suppress the EAGLE-block-drop backoff in ``_mamba_block_aligned_split``
+    on a PD prefill producer.
+
+    This is the scheduler-side companion of the producer drop exemption in
+    ``AscendHybridKVCacheCoordinator`` above.
+
+    ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
+    mamba-align page off by one block (and, on newer vLLM revisions, shifts
+    the partial-tail checkpoint boundary) whenever the EAGLE block drop is
+    active. Consequently a producer prefill can never end a chunk at its
+    final full-page boundary. In mamba "align" mode the recurrent state of a
+    page is only materialized across a chunk boundary (copy-on-write in
+    ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
+    final full state page unhashed. Hybrid coordinator hits reconcile to the
+    per-group minimum: even with the full-attention group fixed by the
+    coordinator exemption above, the mamba groups report one full page less
+    (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
+    align pages) - the observed MTP prefix-cache kill band.
+
+    Rather than copy the scheduler method (its body moves between vLLM
+    revisions), invoke the original with the drop bit temporarily cleared:
+    every read of the bit inside the method exists solely to compensate for
+    the block drop, and on the producer matched blocks are always verified
+    prompt blocks and the coordinator never drops. Scheduling is
+    single-threaded per scheduler instance, so the temporary toggle is safe.
+    vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
+    dedicated ``use_eagle_block_drop`` knob.
+
+    The wrapper is installed unconditionally and self-gates at call time on
+    ``self.vllm_config.kv_transfer_config`` (the same PD role source used by
+    the coordinator tag and the neighboring mamba split patch), so consumers
+    and standalone instances pass straight through with upstream behavior.
+
+    Installation nests behind the neighboring PD consumer mamba-split patch
+    when it is present: that patch delegates its fallthrough path to a
+    module-global original, so wrapping the global keeps its wrapper as the
+    method registered on the scheduler class (call order: consumer wrapper,
+    producer wrapper, upstream).
+    """
+    if scheduler_cls is None:
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        scheduler_cls = Scheduler
+
+    if not hasattr(scheduler_cls, "_mamba_block_aligned_split"):
+        return
+    registered_split = scheduler_cls._mamba_block_aligned_split
+    if getattr(registered_split, "_ascend_producer_no_eagle_drop", False):
+        # Idempotent under module reload.
+        return
+
+    # The consumer patch is imported before this module in
+    # vllm_ascend.patch.platform. When the registered method is its wrapper,
+    # wrap the upstream original held in its module global instead of the
+    # class attribute; otherwise wrap the registered method directly.
+    consumer_patch = sys.modules.get("vllm_ascend.patch.platform.patch_mamba_block_aligned_split")
+    consumer_wrapper = getattr(consumer_patch, "_mamba_block_aligned_split", None)
+    nested = consumer_wrapper is not None and consumer_wrapper is registered_split
+    if nested:
+        original_split = consumer_patch._original_mamba_block_aligned_split  # type: ignore[union-attr,attr-defined]
+    else:
+        original_split = registered_split
+    if getattr(original_split, "_ascend_producer_no_eagle_drop", False):
+        # Idempotent when both nesting sites are patched more than once.
+        return
+
+    @functools.wraps(original_split)
+    def _producer_mamba_block_aligned_split(
+        self,
+        request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        if not _is_pure_kv_producer(getattr(self, "vllm_config", None)):
+            return original_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+        drop_attr = "use_eagle_block_drop" if hasattr(self, "use_eagle_block_drop") else "use_eagle"
+        original_drop = getattr(self, drop_attr)
+        setattr(self, drop_attr, False)
+        try:
+            return original_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+        finally:
+            setattr(self, drop_attr, original_drop)
+
+    _producer_mamba_block_aligned_split._ascend_producer_no_eagle_drop = True  # type: ignore[attr-defined]
+    if nested:
+        consumer_patch._original_mamba_block_aligned_split = (  # type: ignore[union-attr,attr-defined]
+            _producer_mamba_block_aligned_split
+        )
+    else:
+        scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
+
+
+# The wrapper self-gates on the PD role at call time, so installation is
+# unconditional (mirrors the other scheduler-side patch imported earlier in
+# this package).
+_install_producer_mamba_block_aligned_split_patch()
