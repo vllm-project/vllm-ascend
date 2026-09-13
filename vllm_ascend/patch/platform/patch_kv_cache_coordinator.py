@@ -676,11 +676,11 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
     the coordinator tag and the neighboring mamba split patch), so consumers
     and standalone instances pass straight through with upstream behavior.
 
-    Installation nests behind the neighboring PD consumer mamba-split patch
-    when it is present: that patch delegates its fallthrough path to a
-    module-global original, so wrapping the global keeps its wrapper as the
-    method registered on the scheduler class (call order: consumer wrapper,
-    producer wrapper, upstream).
+    The producer wrapper is always installed around the method currently
+    registered on ``Scheduler``.  This ordering is important: the neighboring
+    consumer/sparse-index patch has early-return paths which never delegate to
+    its saved original.  An inner producer wrapper would therefore leave the
+    EAGLE drop enabled on those paths.
     """
     if scheduler_cls is None:
         from vllm.v1.core.sched.scheduler import Scheduler
@@ -694,20 +694,7 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
         # Idempotent under module reload.
         return
 
-    # The consumer patch is imported before this module in
-    # vllm_ascend.patch.platform. When the registered method is its wrapper,
-    # wrap the upstream original held in its module global instead of the
-    # class attribute; otherwise wrap the registered method directly.
-    consumer_patch = sys.modules.get("vllm_ascend.patch.platform.patch_mamba_block_aligned_split")
-    consumer_wrapper = getattr(consumer_patch, "_mamba_block_aligned_split", None)
-    nested = consumer_wrapper is not None and consumer_wrapper is registered_split
-    if nested:
-        original_split = consumer_patch._original_mamba_block_aligned_split  # type: ignore[union-attr,attr-defined]
-    else:
-        original_split = registered_split
-    if getattr(original_split, "_ascend_producer_no_eagle_drop", False):
-        # Idempotent when both nesting sites are patched more than once.
-        return
+    original_split = registered_split
 
     @functools.wraps(original_split)
     def _producer_mamba_block_aligned_split(
@@ -725,9 +712,16 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
                 num_new_local_computed_tokens,
                 num_external_computed_tokens,
             )
-        drop_attr = "use_eagle_block_drop" if hasattr(self, "use_eagle_block_drop") else "use_eagle"
-        original_drop = getattr(self, drop_attr)
-        setattr(self, drop_attr, False)
+        # vLLM 0.28.x and newer revisions use different names.  Some
+        # transitional scheduler implementations expose both and different
+        # wrapper layers consult different attributes, so clear every
+        # attribute that exists and restore all of them after the call.
+        drop_attrs = tuple(
+            name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name)
+        )
+        original_drop_values = {name: getattr(self, name) for name in drop_attrs}
+        for name in drop_attrs:
+            setattr(self, name, False)
         try:
             return original_split(
                 self,
@@ -737,15 +731,11 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
                 num_external_computed_tokens,
             )
         finally:
-            setattr(self, drop_attr, original_drop)
+            for name, value in original_drop_values.items():
+                setattr(self, name, value)
 
     _producer_mamba_block_aligned_split._ascend_producer_no_eagle_drop = True  # type: ignore[attr-defined]
-    if nested:
-        consumer_patch._original_mamba_block_aligned_split = (  # type: ignore[union-attr,attr-defined]
-            _producer_mamba_block_aligned_split
-        )
-    else:
-        scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
+    scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
 
 
 # The wrapper self-gates on the PD role at call time, so installation is

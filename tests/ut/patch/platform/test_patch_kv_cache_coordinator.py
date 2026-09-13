@@ -495,40 +495,48 @@ def test_scheduler_split_patch_is_idempotent():
     assert cls._mamba_block_aligned_split is wrapped_once
 
 
-def test_scheduler_split_patch_nests_behind_consumer_wrapper():
-    # When the registered method is the neighboring PD consumer patch's
-    # wrapper, the producer wrapper must replace that patch's module-global
-    # original instead of the class attribute (outer identity stays intact).
-    from vllm_ascend.patch.platform import (
-        patch_mamba_block_aligned_split as consumer_mod,
-    )
-
+def test_scheduler_split_patch_wraps_consumer_early_return_path():
+    # Model the neighboring consumer/sparse-index wrapper's early return: it
+    # consults use_eagle but deliberately never calls its saved original.
+    # The producer wrapper must be outermost for this path to see False.
     cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    record = cls._mamba_block_aligned_split
-    saved_original = consumer_mod._original_mamba_block_aligned_split
-    try:
-        consumer_mod._original_mamba_block_aligned_split = record
-        cls._mamba_block_aligned_split = consumer_mod._mamba_block_aligned_split
-        mod._install_producer_mamba_block_aligned_split_patch(cls)
-        # The consumer wrapper remains the registered class method.
-        assert cls._mamba_block_aligned_split is consumer_mod._mamba_block_aligned_split
-        # The module global now points at the producer wrapper around record.
-        inner = consumer_mod._original_mamba_block_aligned_split
-        assert inner is not record
-        assert getattr(inner, "_ascend_producer_no_eagle_drop", False)
-        # functools.wraps keeps the wrapped signature transparent.
-        assert inspect.signature(inner) == inspect.signature(record)
-        # A producer call traverses consumer wrapper -> producer wrapper ->
-        # record with the drop bit cleared.
-        result = scheduler._mamba_block_aligned_split("req", 1600)
-        assert scheduler.observed_drop_bits == [False]
-        assert result == ("split", 1600)
-        assert scheduler.use_eagle is True
-        # Re-installing is idempotent at the nesting site.
-        mod._install_producer_mamba_block_aligned_split_patch(cls)
-        assert consumer_mod._original_mamba_block_aligned_split is inner
-    finally:
-        consumer_mod._original_mamba_block_aligned_split = saved_original
+    inner = cls._mamba_block_aligned_split
+
+    def _consumer_early_return(self, request, num_new_tokens, nlc=0, nec=0):
+        self.observed_drop_bits.append(self.use_eagle)
+        return ("consumer-early-return", num_new_tokens)
+
+    _consumer_early_return.__wrapped__ = inner
+    cls._mamba_block_aligned_split = _consumer_early_return
+    mod._install_producer_mamba_block_aligned_split_patch(cls)
+
+    registered = cls._mamba_block_aligned_split
+    assert registered is not _consumer_early_return
+    assert registered.__wrapped__ is _consumer_early_return
+    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
+    assert scheduler._mamba_block_aligned_split("req", 1600) == (
+        "consumer-early-return",
+        1600,
+    )
+    assert scheduler.observed_drop_bits == [False]
+    assert scheduler.use_eagle is True
+
+
+def test_scheduler_split_patch_clears_and_restores_both_drop_attributes():
+    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
+    scheduler.use_eagle_block_drop = "dedicated-original"
+
+    def _observe_both(self, request, num_new_tokens, nlc=0, nec=0):
+        self.calls.append((self.use_eagle, self.use_eagle_block_drop))
+        return num_new_tokens
+
+    cls._mamba_block_aligned_split = _observe_both
+    mod._install_producer_mamba_block_aligned_split_patch(cls)
+
+    assert scheduler._mamba_block_aligned_split("req", 3200) == 3200
+    assert scheduler.calls == [(False, False)]
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop == "dedicated-original"
 
 
 def test_scheduler_split_patch_noop_without_split_method():
