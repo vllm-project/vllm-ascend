@@ -139,3 +139,63 @@ child process creation, and imports of lifecycle wrappers. They cover complete
 configuration output, safe server arguments, unchanged input templates and
 dataset bytes, explicit result verification, optional thresholds, and optimized
 Python. These CPU tests do not claim a successful NPU performance run.
+
+## Explicit image runtime reuse
+
+`tools/nightly_environment.py` defaults to the existing `source-install` policy.
+Opt in to `--runtime-mode image-reuse` to use an image's installed runtime rather
+than installing the requested PR's vLLM/Ascend revisions:
+
+```bash
+python tools/nightly_environment.py --role server --runtime-mode image-reuse \
+  --vllm-sha "$(cat .github/vllm-main-verified.commit)" \
+  --dep-dir /tmp/nightly/environment-unique/server
+source /tmp/nightly/environment-unique/server/activate.sh
+```
+
+This performs no server dependency installation, source clone, or compilation.
+It loads installed CANN/ATB environment scripts, tests imports and the vLLM CLI,
+and captures `pip check`. The report explicitly separates the requested helper
+source and vLLM revision from actual imported versions, paths, Git revisions,
+dirty status, and tracked-diff hashes. An originally modified image may be used;
+its modifications are recorded. This is not proof that the PR runtime executed,
+nor a complete dependency solution. Unknown runtime source or an import from the
+requested PR checkout is rejected.
+
+Client reuse checks out the frozen AISBench revision from an existing local Git
+repository into a private directory. It ignores and never edits the source
+repository's working tree, recording its state. No dependencies are installed
+unless the separate client-only flag is supplied:
+
+```bash
+python tools/nightly_environment.py --role client --runtime-mode image-reuse \
+  --install-client-dependencies \
+  --vllm-sha "$(cat .github/vllm-main-verified.commit)" \
+  --benchmark-source /mnt/share/c00814587/benchmark \
+  --dep-dir /tmp/nightly/environment-unique/client
+source /tmp/nightly/environment-unique/client/activate.sh
+```
+
+The optional installation uses a private `venv --system-site-packages`, reuses
+the image's installed Torch/NumPy/NPU stack, and constrains existing protected
+packages and Transformers to their observed versions. Only the fixed AISBench
+API dependencies and PyYAML are installed as needed. The HTTP client explicitly
+uses private OpenCV 4.11.0.86 and Pillow 11.2.1 to satisfy the frozen AISBench
+requirements; the image's original packages must remain unchanged. Reports
+record the image baseline and effective private environment. Installation,
+dependency audit, or CLI failures prevent successful activation. Without this
+flag, missing client dependencies fail rather than trigger an installation.
+
+One client-only dependency exception is recorded explicitly: the observed image's
+`vllm 0.28.0+empty` metadata requires `opencv-python-headless>=4.13.0`, while this
+HTTP client uses private OpenCV 4.11.0.86 with NumPy 1.x. This exact conflict is
+permitted because the client does not run vLLM; all other new or worsened
+conflicts still fail setup. Original image conflicts and the exception remain
+visible in the report; successful setup does not claim a clean `pip check`.
+
+Activation selects private command wrappers and, when present, the private
+venv's Python. It removes PR paths from `PYTHONPATH` and enters a neutral working
+directory. Render YAML commands from the frozen helper checkout, then return to
+a neutral directory before executing the service or benchmark. The AISBench
+wrapper imports `ais_bench.benchmark.cli.main:main` from the private fixed
+checkout; it does not instantiate `AisbenchRunner`.

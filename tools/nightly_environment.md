@@ -1,5 +1,12 @@
 # Explicit nightly environment preparation
 
+The installation flows below describe the default `--runtime-mode source-install`.
+The optional [`--runtime-mode image-reuse`](nightly_cli.md#explicit-image-runtime-reuse)
+uses the existing image's server runtime without cloning, installing, or compiling
+vLLM/Ascend. It reports requested and actual revisions separately. Client reuse
+can explicitly add missing AISBench dependencies in a private environment with
+`--install-client-dependencies`, retaining the image's Torch/NPU stack.
+
 This helper prepares two separate disposable containers. It never starts a
 model server, runs pytest, submits requests, or uses an NPU for validation.
 Run it from a frozen vllm-ascend checkout; its `--vllm-sha` must exactly equal
