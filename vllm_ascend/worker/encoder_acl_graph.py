@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -271,14 +271,16 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         weak_ref_workspaces()
 
-    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
+    def _capture_budget_graph(self, token_budget: int, path: str = "default", axis_keys: tuple[Any, ...] = ()):
         logger.debug(
-            "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d",
+            "Capturing encoder aclgraph for budget=%d, max_batch_size=%d, max_frames_per_batch=%d, axis_keys=%s",
             token_budget,
             self.max_batch_size,
             self.max_frames_per_batch,
+            axis_keys,
         )
 
+        capture_kwargs = {} if vllm_version_is("0.28.0") else {"axis_keys": axis_keys}
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
             self.max_batch_size,
@@ -286,6 +288,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             self.device,
             self.dtype,
             path,
+            **capture_kwargs,
         )
 
         values = capture_inputs.values
@@ -302,6 +305,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer.copy_(output)
 
+        metadata_kwargs = {} if vllm_version_is("0.28.0") else {"axis_keys": axis_keys}
         graph_meta = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
@@ -309,22 +313,30 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             graph=graph,
             input_buffers=values,
             output_buffer=weak_ref_tensors(output_buffer),
+            **metadata_kwargs,
         )
         graph_set = self._get_graph_set(path)
-        graph_set[token_budget] = graph_meta
+        graph_set[self._graph_map_key(token_budget, axis_keys)] = graph_meta
+
+    @staticmethod
+    def _graph_map_key(token_budget: int, axis_keys: tuple[Any, ...]) -> Any:
+        """Mirror upstream's ``BudgetGraphMapKey`` keying (int or (int, keys))."""
+        return token_budget if not axis_keys else (token_budget, axis_keys)
 
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
         path: str = "default",
+        axis_keys: tuple[Any, ...] = (),
     ) -> torch.Tensor | None:
         num_items = len(self._get_item_specs(mm_kwargs))
         graph_set = self._get_graph_set(path)
-        if token_budget not in graph_set:
+        graph_map_key = self._graph_map_key(token_budget, axis_keys)
+        if graph_map_key not in graph_set:
             self.graph_misses += num_items
             return None
-        graph_meta = graph_set[token_budget]
+        graph_meta = graph_set[graph_map_key]
 
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs,

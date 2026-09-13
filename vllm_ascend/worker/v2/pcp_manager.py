@@ -168,6 +168,7 @@ class AscendPCPManager(PCPManager):
     def _partition_speculative_batch_compat(
         self,
         global_batch: AscendInputBatch,
+        padded_num_tokens: int | None = None,
     ) -> AscendInputBatch:
         """Adapt spec decode until upstream PCP supports it natively."""
         global_draft_counts = global_batch.num_draft_tokens_per_req
@@ -185,7 +186,16 @@ class AscendPCPManager(PCPManager):
             num_draft_tokens_per_req=None,
         )
         try:
-            local_batch = super().partition_batch(non_spec_batch)
+            if vllm_version_is("0.28.0"):
+                local_batch = super().partition_batch(non_spec_batch)
+            else:
+                # Forward the graph-padded token extent. Speculative batches
+                # otherwise fall back to the rank-local count, which desyncs the
+                # replicated draft (global hidden states) from its local batch.
+                local_batch = super().partition_batch(
+                    non_spec_batch,
+                    padded_num_tokens=padded_num_tokens,
+                )
         finally:
             self._global_batch = global_batch
         assert isinstance(local_batch, AscendInputBatch)
@@ -236,7 +246,7 @@ class AscendPCPManager(PCPManager):
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
-            local_batch = self._partition_speculative_batch_compat(global_batch)
+            local_batch = self._partition_speculative_batch_compat(global_batch, padded_num_tokens)
         elif vllm_version_is("0.28.0"):
             # vLLM #53515 added padded_num_tokens on main only.
             local_batch = super().partition_batch(global_batch)
