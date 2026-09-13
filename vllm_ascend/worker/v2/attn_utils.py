@@ -289,6 +289,7 @@ def build_attn_metadata(
             dcp_local_seq_lens=dcp_local_seq_lens,
             **common_attn_metadata_extra_kwargs,
         )
+
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)

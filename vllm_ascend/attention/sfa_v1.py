@@ -475,6 +475,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             assert state is not None
             state.update(metadata)
         else:
+            assert metadata.cos is not None and metadata.sin is not None
             cos, sin = get_cos_and_sin_mla(
                 metadata.positions[: metadata.num_input_tokens].long(),
                 use_cache=True,
