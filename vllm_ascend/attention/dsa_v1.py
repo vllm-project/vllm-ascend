@@ -733,11 +733,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if (
             speculative_config is not None
             and speculative_config.method == "dspark"
-            and getattr(
-                speculative_config,
-                "enable_adaptive_verification",
-                False,
-            )
+            and getattr(speculative_config, "enable_adaptive_verification", False)
         ):
             return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
@@ -1048,6 +1044,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            and self.num_prefills == 0
+        ):
+            # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
+            # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
+            # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+            max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
         max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
         has_prefill = self.num_prefills > 0
 
