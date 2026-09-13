@@ -29,6 +29,8 @@ import pandas as pd
 import regex as re
 from modelscope import snapshot_download  # type: ignore
 
+from tools.aisbench_config import render_dataset_config, render_request_config, verify_performance
+
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
@@ -139,7 +141,7 @@ class AisbenchRunner:
                 self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
             with open(conf_path, encoding="utf-8") as f:
                 content = f.read()
-            content = re.sub(r"path=.*", f'path="{self.dataset_path}",', content)
+            content = render_dataset_config(content, self.dataset_path)
             conf_path_new = os.path.join(DATASET_CONF_DIR, f"{self.dataset_conf}_custom.py")
             with open(conf_path_new, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -147,45 +149,7 @@ class AisbenchRunner:
     def _init_request_conf(self):
         conf_path = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}.py")
         with open(conf_path, encoding="utf-8") as f:
-            content = f.read()
-        content = re.sub(r"model=.*", f'model="{self.model}",', content)
-        content = re.sub(r"host_port.*", f"host_port={self.port},", content)
-        content = re.sub(r"host_ip.*", f'host_ip="{self.host_ip}",', content)
-        content = re.sub(r"max_out_len.*", f"max_out_len={self.max_out_len},", content)
-        content = re.sub(r"batch_size.*", f"batch_size={self.batch_size},", content)
-        content = re.sub(r"trust_remote_code=.*", f"trust_remote_code={self.trust_remote_code},", content)
-        if self.top_p:
-            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_p={self.top_p},", content)
-        if self.top_k:
-            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            top_k={self.top_k},", content)
-        if self.seed:
-            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            seed={self.seed},", content)
-        if self.min_p:
-            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            min_p={self.min_p},", content)
-        if self.presence_penalty:
-            content = re.sub(
-                r"ignore_eos.*", f"ignore_eos=False,\n            presence_penalty={self.presence_penalty},", content
-            )
-        if self.repetition_penalty:
-            content = re.sub(
-                r"ignore_eos.*",
-                f"ignore_eos=False,\n            repetition_penalty={self.repetition_penalty},",
-                content,
-            )
-        if self.thinking:
-            field_thinking = 'chat_template_kwargs={"thinking": True}'
-            content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            {field_thinking},", content)
-        if self.task_type == "performance":
-            content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
-            content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
-            content = re.sub(r"temperature.*", "temperature=0,", content)
-            content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
-        if self.task_type in ("accuracy", "spec_decode"):
-            content = re.sub(r"temperature.*", "temperature=0.6,", content)
-        if self.temperature is not None:
-            content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
-        if self.no_pred:
-            content = re.sub(r"pred_postprocessor.*", "#pred_postprocessor", content)
+            content = render_request_config(f.read(), vars(self))
         conf_path_new = os.path.join(REQUEST_CONF_DIR, f"{self.request_conf}_custom.py")
         with open(conf_path_new, "w", encoding="utf-8") as f:
             f.write(content)
@@ -257,24 +221,14 @@ class AisbenchRunner:
 
     def _performance_verify(self):
         self._get_result_performance()
-        output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
-        assert float(output_throughput) >= self.threshold * self.baseline, (
-            "Performance verification failed. "
-            f"The current Output Token Throughput is {output_throughput} token/s, "
-            f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
+        verify_performance(
+            self.result_json,
+            self.baseline,
+            self.threshold,
+            input_throughput_threshold=self.input_throughput_threshold,
+            tpot_threshold=self.tpot_threshold,
+            tpot=self.result_csv.loc["TPOT", "Average"] if self.tpot_threshold is not None else None,
         )
-        if self.input_throughput_threshold is not None:
-            input_throughput = str(self.result_json["Input Token Throughput"]["total"]).replace("token/s", "")
-            assert float(input_throughput) >= float(self.input_throughput_threshold), (
-                f"Input Token Throughput verification failed. The current value is {input_throughput} token/s, "
-                f"which is not greater than {self.input_throughput_threshold} token/s."
-            )
-        if self.tpot_threshold is not None:
-            tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
-            assert tpot <= float(self.tpot_threshold), (
-                f"TPOT verification failed. The current TPOT is {tpot} ms, "
-                f"which is greater than {self.tpot_threshold} ms."
-            )
 
     def _accuracy_verify(self):
         self._get_result_accuracy()
