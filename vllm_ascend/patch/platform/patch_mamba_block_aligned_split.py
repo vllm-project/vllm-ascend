@@ -62,17 +62,8 @@ def _mamba_block_aligned_split(
     # also handles cold prefills; bypassing alignment for those requests means
     # no reusable Mamba state is ever materialized, so neither HBM nor the KV
     # pool can cache the prefix.
-    has_computed_prefix = (
-        request.num_computed_tokens
-        + num_new_local_computed_tokens
-        + num_external_computed_tokens
-        > 0
-    )
-    if (
-        kv_transfer_config is not None
-        and kv_transfer_config.is_kv_consumer
-        and has_computed_prefix
-    ):
+    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
         return num_new_tokens
 
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
