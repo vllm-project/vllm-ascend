@@ -797,6 +797,10 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
         "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
         _make_vllm_config,
     )
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_config",
+        lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+    )
     impl = cast(AscendDSACPImpl, _make_impl(AscendDSACPImpl))
     impl.compress_ratio = compress_ratio
     impl.compressor_overlap = False
@@ -2119,3 +2123,98 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             output[:local_num_actual_tokens],
             attention_output.view(local_num_actual_tokens, 2),
         )
+
+
+def test_v4_backend_keeps_post_projection_q_norm_by_default():
+    assert _make_impl().apply_q_norm is True
+
+
+@pytest.mark.parametrize("apply_q_norm", [False, True])
+@pytest.mark.parametrize("multistream", [False, True])
+@pytest.mark.parametrize("w8a8", [False, True])
+@torch.inference_mode()
+def test_post_projection_q_norm_switch_preserves_lora_norm(monkeypatch, apply_q_norm, multistream, w8a8):
+    from contextlib import nullcontext
+
+    from vllm_ascend.attention import dsa_v1
+
+    impl = _make_impl()
+    impl.apply_q_norm = apply_q_norm
+    impl.n_local_heads = 2
+    impl.head_dim = 2
+    impl.nope_head_dim = 1
+    impl.rope_head_dim = 1
+    impl.eps = 1e-6
+
+    class Norm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([1.0, 2.0, 0.5, 1.5]))
+
+        def forward(self, x):
+            return x * torch.rsqrt(x.square().mean(-1, keepdim=True) + impl.eps) * self.weight
+
+    class Wrapper:
+        _quant_method = None
+        _has_communication = False
+
+        def __init__(self, linear):
+            self.linear = linear
+
+        def quantize(self, x):
+            return x, None
+
+        def matmul(self, x, scale):
+            return self.linear(x)
+
+    def linear(weight):
+        layer = torch.nn.Linear(4, 4, bias=False)
+        layer.weight.copy_(torch.diag(torch.tensor(weight)))
+        layer.weight_scale = torch.ones(4)
+        return layer
+
+    impl.wq_a = linear([1.0, 2.0, 3.0, 4.0])
+    impl.wq_b = linear([4.0, 0.5, 2.0, 3.0])
+    impl.wkv = torch.nn.Linear(4, 2, bias=False)
+    impl.wkv.weight_scale = torch.ones(2)
+    impl.q_norm = Norm()
+    impl.kv_norm = lambda x: x
+    impl.cv_wq_a, impl.cv_wq_b, impl.cv_wkv = map(Wrapper, (impl.wq_a, impl.wq_b, impl.wkv))
+    stream = MagicMock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+    monkeypatch.setattr(dsa_v1, "dsv4_dsa_overlap_stream", lambda: stream)
+    monkeypatch.setattr(dsa_v1, "npu_stream_switch", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(dsa_v1, "_is_w8a8_dynamic", lambda layer: w8a8)
+    monkeypatch.setattr(dsa_v1, "get_dsa_attn_kv_plan", lambda config: MagicMock())
+    monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(dsa_v1.torch_npu, "npu_dynamic_quant", lambda x: (x, torch.ones(x.shape[0])), raising=False)
+    monkeypatch.setattr(
+        torch.ops._C_ascend,
+        "npu_rms_norm_dynamic_quant",
+        lambda x, weight, epsilon: (impl.q_norm(x), torch.ones(x.shape[0])),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dsa_v1.torch_npu,
+        "npu_quant_matmul",
+        lambda x, weight, scale, **kwargs: torch.nn.functional.linear(x, weight, kwargs.get("bias")),
+        raising=False,
+    )
+    rms = MagicMock(side_effect=lambda q, eps, norm: q * torch.rsqrt(q.square().mean(-1, keepdim=True) + eps))
+    monkeypatch.setattr(dsa_v1.DeviceOperator, "apply_dsa_q_rms", rms)
+
+    hidden = torch.tensor([[1.0, 2.0, 3.0, 4.0], [-2.0, 1.0, 4.0, 0.5]])
+    expected_qr = impl.q_norm(impl.wq_a(hidden))
+    projected = impl.wq_b(expected_qr).unflatten(-1, (2, 2))
+    expected = (
+        projected * torch.rsqrt(projected.square().mean(-1, keepdim=True) + impl.eps) if apply_q_norm else projected
+    )
+    assert not torch.allclose(projected.square().mean(-1), torch.ones(2, 2))
+    args = (hidden, None, None, torch.empty(1), torch.arange(2))
+    if multistream:
+        q, qr, _, _ = impl._mla_prolog_multistream(*args)
+    else:
+        q, qr, _ = impl._mla_prolog_single_stream(*args, write_swa_cache=False)
+    torch.testing.assert_close(qr, expected_qr)
+    torch.testing.assert_close(q, expected)
+    assert rms.call_count == int(apply_q_norm)

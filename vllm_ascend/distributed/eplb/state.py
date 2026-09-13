@@ -12,9 +12,14 @@ from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
-from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
-
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
+
+
+def _build_expert_replica_routing_table(*args, **kwargs):
+    """Load Ascend EPLB ops only when a model refreshes its routing table."""
+    from vllm_ascend.ops.fused_moe.eplb import build_expert_replica_routing_table
+
+    return build_expert_replica_routing_table(*args, **kwargs)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -60,7 +65,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         if logical_to_physical_map is None or logical_replica_count is None:
             raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
-        new_routing_table = _eplb_ops.build_expert_replica_routing_table(
+        new_routing_table = _build_expert_replica_routing_table(
             logical_to_physical_map,
             logical_replica_count,
             get_ep_group().rank_in_group,

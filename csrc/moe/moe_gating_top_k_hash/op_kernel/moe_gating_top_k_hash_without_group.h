@@ -24,17 +24,18 @@ template <typename T, typename U1, typename U2>
 class MoeGatingTopKHashWithoutGroup {
 public:
     __aicore__ inline MoeGatingTopKHashWithoutGroup(){};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                 const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe);
     __aicore__ inline void Process();
 
 private:
     __aicore__ inline void CopyInBiasAndInitExpertId();
     __aicore__ inline void CopyInX(int64_t progress);
-    __aicore__ inline void ComputeX();
+    __aicore__ inline void ComputeX(bool useVisionBias);
     __aicore__ inline void CopuOutXNorm(int64_t row);
     __aicore__ inline void SelectTopKExpertIdx();
     __aicore__ inline void SelectExpertIdxByHash(int64_t row);
+    __aicore__ inline bool IsImageRow(int64_t row);
     __aicore__ inline void SelectTopKExpertScore();
     __aicore__ inline void CopyOut(int64_t row);
 
@@ -46,6 +47,7 @@ private:
     TQue<QuePosition::VECOUT, 1> outOutQueue_;
 
     TBuf<TPosition::VECCALC> biasBuf_;          // 存放输入bias
+    TBuf<TPosition::VECCALC> biasVlBuf_;        // vision-token correction bias
     TBuf<TPosition::VECCALC> expertIdBuf_;      // 专家编号
     TBuf<TPosition::VECCALC> xNormWithBiasBuf_; // 存放加了bias之后的值
     TBuf<TPosition::VECCALC> xNormBuf_;         // 存放计算sigmoid或softmax的值
@@ -54,6 +56,7 @@ private:
 
     GlobalTensor<T> xGm_;
     GlobalTensor<T> biasGm_;
+    GlobalTensor<T> biasVlGm_;
     GlobalTensor<U1> inputIdsGm_;
     GlobalTensor<U2> tid2eidGm_;
     GlobalTensor<T> yGm_;
@@ -65,6 +68,7 @@ private:
     int64_t curCoreRowCount_ = 0;
     int64_t expertCount_ = 0;
     bool addBias_ = false;
+    bool addBiasVl_ = false;
     bool outFlag_ = false;
     bool hashFlag_ = false;
     int64_t k_ = 0;
@@ -104,6 +108,20 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::CopyInBiasAndIn
             PipeBarrier<PIPE_V>();
         }
     }
+    if (addBiasVl_) {
+        LocalTensor<float> biasVlTensor = biasVlBuf_.Get<float>();
+        if constexpr (IsSameType<T, float>::value) {
+            DataCopyPad(biasVlTensor, biasVlGm_, dataCopyParams, dataCopyPadParams);
+            SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        } else {
+            DataCopyPad(biasVlTensor[expertCountAlign_].ReinterpretCast<T>(), biasVlGm_, dataCopyParams,
+                        dataCopyPadParams);
+            SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+            Cast(biasVlTensor, biasVlTensor[expertCountAlign_].ReinterpretCast<T>(), RoundMode::CAST_NONE,
+                 expertCountAlign_);
+            PipeBarrier<PIPE_V>();
+        }
+    }
     ArithProgression(expertIdTensor, static_cast<int32_t>(0), static_cast<int32_t>(1), expertCount_);
 }
 
@@ -123,12 +141,11 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::CopyInX(int64_t
 }
 
 template <typename T, typename U1, typename U2>
-__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX()
+__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX(bool useVisionBias)
 {
     LocalTensor<float> xNormTensor = xNormBuf_.Get<float>();
     LocalTensor<float> xInLocalTensor = xInQueue_.DeQue<float>();
     LocalTensor<float> xNormWithBiasTensor = xNormWithBiasBuf_.Get<float>();
-    LocalTensor<float> biasTensor = biasBuf_.Get<float>();
 
     if constexpr (!IsSameType<T, float>::value) {
         Cast(xInLocalTensor, xInLocalTensor[expertCountAlign_].ReinterpretCast<T>(), RoundMode::CAST_NONE,
@@ -176,8 +193,10 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX()
         Sqrt(xNormTensor, calcNormTmpTensor, expertCount_);
         PipeBarrier<PIPE_V>();
     }
-    if (addBias_) {
-        Add(xNormWithBiasTensor, xNormTensor, biasTensor, expertCount_);
+    if (useVisionBias && addBiasVl_) {
+        Add(xNormWithBiasTensor, xNormTensor, biasVlBuf_.Get<float>(), expertCount_);
+    } else if (addBias_) {
+        Add(xNormWithBiasTensor, xNormTensor, biasBuf_.Get<float>(), expertCount_);
     } else {
         DataCopy(xNormWithBiasTensor, xNormTensor, expertCountAlign_);
     }
@@ -193,6 +212,17 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::ComputeX()
         PipeBarrier<PIPE_V>();
     }
     xInQueue_.FreeTensor(xInLocalTensor);
+}
+
+template <typename T, typename U1, typename U2>
+__aicore__ inline bool MoeGatingTopKHashWithoutGroup<T, U1, U2>::IsImageRow(int64_t row)
+{
+    if (!addBiasVl_) {
+        return false;
+    }
+    U1 tokenId = inputIdsGm_.GetValue(row);
+    return tokenId >= static_cast<U1>(tilingData_->imageSentinelLo) &&
+           tokenId < static_cast<U1>(tilingData_->imageSentinelLo + tilingData_->imageSentinelCount);
 }
 
 template <typename T, typename U1, typename U2>
@@ -313,7 +343,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::SelectExpertIdx
 }
 
 template <typename T, typename U1, typename U2>
-__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid,
+__aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl,
                                                           GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                                           const MoeGatingTopKHashTilingData *tilingData, TPipe *tPipe)
 {
@@ -328,6 +358,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x,
     }
     expertCount_ = tilingData_->expertCount;
     addBias_ = tilingData_->addBias == 1;
+    addBiasVl_ = tilingData_->addBiasVl == 1;
     outFlag_ = tilingData_->outFlag == 1;
     hashFlag_ = tilingData_->hashFlag == 1;
     k_ = tilingData_->k;
@@ -337,6 +368,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x,
     // init input gm buf
     xGm_.SetGlobalBuffer((__gm__ T *)x + perCoreRowCount_ * expertCount_ * blockIdx_, expertCount_);
     biasGm_.SetGlobalBuffer((__gm__ T *)bias, expertCount_);
+    biasVlGm_.SetGlobalBuffer((__gm__ T *)biasVl, expertCount_);
     inputIdsGm_.SetGlobalBuffer((__gm__ U1 *)inputIds);
     tid2eidGm_.SetGlobalBuffer((__gm__ U2 *)tid2eid);
 
@@ -353,6 +385,7 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Init(GM_ADDR x,
 
     // init calc buf
     pipe_->InitBuffer(biasBuf_, expertCountAlign_ * sizeof(float) * (sizeof(float) / sizeof(T)));
+    pipe_->InitBuffer(biasVlBuf_, expertCountAlign_ * sizeof(float) * (sizeof(float) / sizeof(T)));
     pipe_->InitBuffer(expertIdBuf_, expertCountAlign_ * sizeof(int32_t));
     pipe_->InitBuffer(xNormBuf_, expertCountAlign_ * sizeof(float));
     pipe_->InitBuffer(xNormWithBiasBuf_, expertCountAlign_ * sizeof(float));
@@ -367,13 +400,15 @@ __aicore__ inline void MoeGatingTopKHashWithoutGroup<T, U1, U2>::Process()
 {
     CopyInBiasAndInitExpertId();
     for (int64_t row = 0; row < curCoreRowCount_; row++) {
+        int64_t globalRow = row + perCoreRowCount_ * blockIdx_;
+        bool useVisionBias = IsImageRow(globalRow);
         CopyInX(row);
-        ComputeX();
+        ComputeX(useVisionBias);
         if (outFlag_) {
             CopuOutXNorm(row);
         }
-        if (hashFlag_) {
-          SelectExpertIdxByHash(row + perCoreRowCount_ * blockIdx_);
+        if (hashFlag_ && !useVisionBias) {
+          SelectExpertIdxByHash(globalRow);
         } else {
           SelectTopKExpertIdx();
         }

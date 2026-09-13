@@ -95,7 +95,6 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3Indexer,
     AscendMiniMaxM3IndexerLinear,
@@ -571,6 +570,11 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
             up = torch.clamp(x[..., d:], min=-self.limit, max=self.limit)
             activated = gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
             if self.use_mx_quant:
+                # Importing DeviceOperator initializes the Ascend ops package.
+                # Defer it until execution so model inspection cannot enter the
+                # ops package through a partially initialized device_op module.
+                from vllm_ascend.device.device_op import DeviceOperator
+
                 quantized_x, scale = DeviceOperator.npu_dynamic_quant(
                     activated,
                     act_quant_type=torch.float8_e4m3fn,

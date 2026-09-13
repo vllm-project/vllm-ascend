@@ -36,7 +36,11 @@ struct TilingOptionalParaInfo {
     const gert::Tensor *tensor;
 };
 
-enum class DataLayout : uint32_t { BSND = 0, TND = 1, PA_BBND = 2 };
+enum class DataLayout : uint32_t {
+    BSND = 0,
+    TND = 1,
+    PA_BBND = 2
+};
 
 // ------------------算子原型索引常量定义----------------
 // Inputs Index
@@ -53,8 +57,10 @@ constexpr uint32_t CMP_RESIDUAL_K_INDEX = 9;
 constexpr uint32_t BLOCK_TABLE_INDEX = 10;
 constexpr uint32_t OUTPUT_IDX_OFFSET_INDEX = 11;
 constexpr uint32_t METADATA_INDEX = 12;
+constexpr uint32_t CANDIDATE_TOPK_INDEX_INPUT_INDEX = 13;
 constexpr uint32_t SPARSE_INDICES_INDEX = 0;
 constexpr uint32_t SPARSE_VALUES_INDEX = 1;
+constexpr uint32_t CANDIDATE_TOPK_INDEX_OUTPUT_INDEX = 2;
 // Attributes Index
 constexpr uint32_t ATTR_TOPK_INDEX = 0;
 constexpr uint32_t ATTR_QUANT_MODE_INDEX = 1;
@@ -64,6 +70,11 @@ constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 4;
 constexpr uint32_t ATTR_MASK_MODE_INDEX = 5;
 constexpr uint32_t ATTR_CMP_RATIO_INDEX = 6;
 constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 7;
+constexpr uint32_t ATTR_CANDIDATE_MODE_INDEX = 8;
+constexpr uint32_t ATTR_CANDIDATE_TOPK_BLOCKS_INDEX = 9;
+constexpr uint32_t ATTR_CANDIDATE_BLOCK_SIZE_INDEX = 10;
+constexpr uint32_t ATTR_KEY_STRIDE0_INDEX = 11;                 // A11: key 第0维 stride
+constexpr uint32_t ATTR_KEY_DEQUANT_SCALE_STRIDE0_INDEX = 12;   // A11: k_scale 第0维 stride
 
 // Dim Index
 constexpr uint32_t DIM_IDX_ZERO = 0;
@@ -94,6 +105,14 @@ constexpr uint32_t MX_E8M0_SCALE_PACK_NUM = 2; // MX的E8M0 scale形状最后一
 constexpr uint32_t MXFP4_PACK_NUM = 2;         // 每个uint8承载2个FP4 E2M1逻辑元素
 constexpr uint32_t MX_SCALE_GROUP_SIZE = 32;   // MX量化每32个D维元素对应1个E8M0 scale
 
+// ------------------candidate 两级TopK 常量------------------
+constexpr uint32_t CANDIDATE_MODE_SOURCE = 1;      // is_candidate_source: 输出候选块索引
+constexpr uint32_t CANDIDATE_MODE_CONSUMER = 2;    // use_candidate: 输入候选块索引, 候选内选topk
+constexpr uint32_t CANDIDATE_MODE_OFF = 3;         // 关闭candidate功能(默认)
+constexpr uint32_t CANDIDATE_TOPK_BLOCKS_FIX = 2048;      // O2决策: 当前仅支持2048
+constexpr uint32_t CANDIDATE_BLOCK_SIZE_DEFAULT = 8;
+constexpr uint32_t CANDIDATE_BLOCK_SIZE_MAX = 64;
+
 // -----------算子TilingData定义---------------
 BEGIN_TILING_DATA_DEF(QLIV2TilingData)
 TILING_DATA_FIELD_DEF(uint32_t, bSize)
@@ -112,6 +131,10 @@ TILING_DATA_FIELD_DEF(int32_t, maxSeqlenQ)
 TILING_DATA_FIELD_DEF(uint32_t, keyStride0)
 TILING_DATA_FIELD_DEF(uint32_t, keyDequantScaleStride0)
 TILING_DATA_FIELD_DEF(uint32_t, quantMode)
+// ---- candidate (two-level topk) ----
+TILING_DATA_FIELD_DEF(uint32_t, candidateMode)
+TILING_DATA_FIELD_DEF(uint32_t, candidateTopkBlocks)
+TILING_DATA_FIELD_DEF(uint32_t, candidateBlockSize)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(QuantLightningIndexerV2, QLIV2TilingData)
 
@@ -133,6 +156,7 @@ struct QLIV2ParaInfo {
     TilingOptionalParaInfo blockTable = {nullptr, nullptr};
     TilingOptionalParaInfo outputIdxOffset = {nullptr, nullptr};
     TilingOptionalParaInfo metadata = {nullptr, nullptr};
+    TilingOptionalParaInfo candidateTopkIndex = {nullptr, nullptr};
     TilingRequiredParaInfo attenOut = {nullptr, nullptr};
     TilingRequiredParaInfo sparseValues = {nullptr, nullptr};
 
@@ -145,6 +169,11 @@ struct QLIV2ParaInfo {
     const int32_t *sparseCount = nullptr;
     const int32_t *cmpRatio = nullptr;
     const int32_t *returnValue = nullptr;
+    const int32_t *candidateMode = nullptr;
+    const int32_t *candidateTopkBlocks = nullptr;
+    const int32_t *candidateBlockSize = nullptr;
+    const int32_t *keyStride0Attr = nullptr;               // A11: key 第0维 stride 显式属性
+    const int32_t *keyDequantScaleStride0Attr = nullptr;   // A11: k_scale 第0维 stride 显式属性
 };
 
 // -----------算子Tiling入参信息类---------------
@@ -178,6 +207,10 @@ public:
     std::vector<uint32_t> keyStridesVec;
     std::vector<uint32_t> keyDequantScaleStridesVec;
     int32_t maxSeqlenQ = -1;
+    // candidate (two-level topk)
+    uint32_t candidateMode = CANDIDATE_MODE_OFF;
+    uint32_t candidateTopkBlocks = CANDIDATE_TOPK_BLOCKS_FIX;
+    uint32_t candidateBlockSize = CANDIDATE_BLOCK_SIZE_DEFAULT;
     // DType
     ge::DataType inputQType = ge::DT_FLOAT16;
     ge::DataType inputKType = ge::DT_FLOAT16;
@@ -190,7 +223,9 @@ public:
 // -----------算子Tiling入参信息解析及Check类---------------
 class QLIV2InfoParser {
 public:
-    explicit QLIV2InfoParser(gert::TilingContext *context) : context_(context) {}
+    explicit QLIV2InfoParser(gert::TilingContext *context)
+        : context_(context)
+    {}
     ~QLIV2InfoParser() = default;
 
     ge::graphStatus CheckRequiredInOutExistence() const;
@@ -266,7 +301,8 @@ public:
 // ---------------算子Tiling类---------------
 class QuantLightningIndexerV2Tiling {
 public:
-    explicit QuantLightningIndexerV2Tiling(gert::TilingContext *context) : context_(context) {};
+    explicit QuantLightningIndexerV2Tiling(gert::TilingContext *context)
+        : context_(context) {};
     ge::graphStatus DoTiling(QLIV2TilingInfo *tilingInfo);
 
 private:

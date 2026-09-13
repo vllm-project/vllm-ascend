@@ -92,6 +92,14 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
 # in the vLLM upstream need to be added here.
 UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
+    "deepseek_v4.1": {
+        "gate_up_proj": ["w1", "w3"],
+        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+    },
+    "deepseek_v41": {
+        "gate_up_proj": ["w1", "w3"],
+        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+    },
     # GLM-5.3-Flash (glm5_next): KDA layers ship a fused q/k/v/b/f_a/g_a
     # projection; sparse-MLA layers keep the DeepSeek-style q_a/kv_a pair.
     # Native HF FP8 checkpoints leave the KDA projections in bf16 via
@@ -162,6 +170,21 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
         "embed.": "model.embed_tokens.",
         "head.": "lm_head.",
     },
+    "deepseek_v4.1": {
+        # V4.1 ModelSlim descriptions keep the original checkpoint names,
+        # while the runtime reuses the V4 module tree. Map runtime prefixes
+        # back to the checkpoint namespace for quant-scheme lookup.
+        "language_model.model.layers.": "layers.",
+        "language_model.model.embed_tokens.": "embed.",
+        "language_model.model.embed_tokens": "embed",
+        "language_model.lm_head.": "head.",
+        "language_model.lm_head": "head",
+        "model.layers.": "layers.",
+        "model.embed_tokens.": "embed.",
+        "model.embed_tokens": "embed",
+        "lm_head.": "head.",
+        "lm_head": "head",
+    },
 }
 
 
@@ -174,6 +197,20 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".ffn.": ".mlp.",
         ".ffn_norm.": ".post_attention_layernorm.",
         ".attn_norm.": ".input_layernorm.",
+    },
+    "deepseek_v4.1": {
+        ".self_attn.": ".attn.",
+        ".gate_proj.": ".w1.",
+        ".gate_proj": ".w1",
+        ".down_proj.": ".w2.",
+        ".down_proj": ".w2",
+        ".up_proj.": ".w3.",
+        ".up_proj": ".w3",
+        ".mlp.": ".ffn.",
+        ".post_attention_layernorm.": ".ffn_norm.",
+        ".post_attention_layernorm": ".ffn_norm",
+        ".input_layernorm.": ".attn_norm.",
+        ".input_layernorm": ".attn_norm",
     },
     # The step3.5 MTP draft nests its decoder block under ".mtp_block.", but the
     # checkpoint's quant_model_description.json keys it without that infix
@@ -198,6 +235,11 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".moe.experts": ".experts",
     },
 }
+
+# The released config renamed the V4.1 model type without changing its
+# ModelSlim module namespace. Keep pre-release checkpoints compatible.
+QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v41"] = QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v4.1"]
+QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v41"] = QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v4.1"]
 
 
 def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bool:
@@ -345,6 +387,15 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendModelSlimConfig":
+        # Some ModelSlim checkpoints keep only format metadata in config.json
+        # and store the per-parameter description in
+        # quant_model_description.json. Treat that metadata-only form as a
+        # deferred file load; otherwise maybe_update_config() sees a non-empty
+        # dict and never reads the actual layer descriptions.
+        if config.get("quant_method") == ASCEND_QUANTIZATION_METHOD and not any(
+            isinstance(name, str) and name.endswith(".weight") for name in config
+        ):
+            return cls()
         return cls(config)
 
     @classmethod

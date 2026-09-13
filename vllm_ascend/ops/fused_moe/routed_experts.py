@@ -37,7 +37,7 @@ from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
-from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
+from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, activate_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
@@ -622,6 +622,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
+        # Target and dSPark draft models may use different expert shapes in
+        # one process (Aurora uses 384/top-6 and 128/top-3 respectively).
+        # Select the dispatcher owned by this layer before prepare/apply use
+        # the forward-context communication method.
+        activate_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
         # When static kernels are enabled, the forward pass runs twice
         # (compilation + capture), causing moe_layer_index to overflow.
         if self.enable_npugraph_ex_static_kernel and forward_context.all_moe_layers:

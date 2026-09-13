@@ -145,6 +145,9 @@ class DeepseekV4DSparkModel(nn.Module):
             }
         )
 
+        self.needs_moe_input_ids = any(
+            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None for layer in self.layers.values()
+        )
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = first_layer.use_sequence_parallel_moe
 
@@ -275,13 +278,16 @@ class DeepseekV4DSparkModel(nn.Module):
             input_ids = sp_shard(input_ids)
 
         residual = None
+        moe_input_ids = input_ids
+        if self.needs_moe_input_ids:
+            moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in self.layers.values():
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
                 llama_4_scaling=None,
-                input_ids=input_ids,
+                input_ids=moe_input_ids,
             )
         if use_sp:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)

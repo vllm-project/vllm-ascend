@@ -59,6 +59,7 @@ class AscendDeepseekV4ForConditionalGeneration(
     """DeepSeek-V4 vision entry point using the Ascend text backbone."""
 
     requires_raw_input_tokens = True
+    language_model_cls = AscendDeepseekV4ForCausalLM
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -104,7 +105,7 @@ class AscendDeepseekV4ForConditionalGeneration(
                 self.aligner.to(dtype=model_config.dtype)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = AscendDeepseekV4ForCausalLM(
+            self.language_model = self.language_model_cls(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )

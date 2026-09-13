@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.core.circular_buffer import is_circular_spec
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
@@ -48,6 +49,7 @@ class BlockTable:
         self.device = device
         self.physical_block_size = block_size
         self.is_mamba_group = is_mamba_group
+        self.is_circular_group = kv_cache_group is not None and is_circular_spec(kv_cache_group.kv_cache_spec)
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -144,6 +146,9 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
         num_tokens = positions.shape[0]
         total_cp_world_size = self.dcp_world_size
         total_cp_rank = self.dcp_rank
@@ -191,6 +196,9 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
         if self.dcp_world_size > 1:
             if not isinstance(req_indices, torch.Tensor):
                 req_indices = torch.from_numpy(req_indices)
