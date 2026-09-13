@@ -22,7 +22,7 @@ import torch_npu  # noqa: F401
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm_ascend.ops.triton.kimi_k3.attention_residual import apply_attn_res
+    from vllm_ascend.ops.triton.kimi_k3.attention_residual import _apply_attn_res_kernel, apply_attn_res
 
 
 pytestmark = [
@@ -95,3 +95,23 @@ def test_kimi_k3_attention_residual_triton_matches_reference(
         rtol=1e-2,
         atol=1e-2,
     )
+
+
+def test_kimi_k3_attention_residual_reuses_kernel_across_token_counts(monkeypatch):
+    kernels = []
+    original_run = _apply_attn_res_kernel.run
+
+    def record_kernel(*args, **kwargs):
+        kernel = original_run(*args, **kwargs)
+        kernels.append(kernel)
+        return kernel
+
+    monkeypatch.setattr(_apply_attn_res_kernel, "run", record_kernel)
+    # Cover one token, alignment changes, partial cores, and multiple rows/core
+    # while keeping all model dimensions and launch options fixed.
+    for num_tokens in (1, 7, 16, 17, 512):
+        test_kimi_k3_attention_residual_triton_matches_reference(num_tokens, 4, 7)
+
+    assert len(kernels) == 5
+    assert kernels[0] is not None
+    assert all(kernel is kernels[0] for kernel in kernels)
