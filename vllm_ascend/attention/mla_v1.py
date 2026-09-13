@@ -468,13 +468,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                # Metadata building can run outside the current-config context.
-                # Use the builder's config for the PD last-token recompute step.
                 treat_short_extends_as_decodes=(
-                    is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
-                    or not (
+                    not (
                         parallel_config.prefill_context_parallel_size > 1
                         or parallel_config.decode_context_parallel_size > 1
+                    )
+                    # Only DCP needs the PD last-token recompute override.
+                    # Use the builder's config outside the current-config context.
+                    or (
+                        parallel_config.decode_context_parallel_size > 1
+                        and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
                     )
                 ),
             )

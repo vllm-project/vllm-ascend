@@ -941,6 +941,26 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertIsNone(metadata.prefill)
         self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
 
+        # Without DCP, preserve the original classification even on a PD consumer.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        for pcp_size in (1, 2):
+            with (
+                self.subTest(pcp_size=pcp_size),
+                patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+                patch(
+                    "vllm_ascend.attention.mla_v1.is_pd_decode_recompute_scheduler_enabled",
+                    side_effect=AssertionError("DCP-only override must not run without DCP"),
+                ),
+                patch.object(builder, "build_prefill_metadata", return_value=MagicMock()),
+            ):
+                self.mock_vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+                metadata = builder.build(0, common_attn_metadata)
+                expected_decodes = 3 if pcp_size == 1 else 0
+                self.assertEqual(metadata.num_decodes, expected_decodes)
+                self.assertEqual(metadata.num_prefills, 3 - expected_decodes)
+                self.assertEqual(metadata.num_decode_tokens, expected_decodes)
+                self.assertEqual(builder.num_prefill_tokens, 3 - expected_decodes)
+
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
         common_attn_metadata = MagicMock()
