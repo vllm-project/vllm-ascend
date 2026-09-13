@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
 
@@ -1137,18 +1138,23 @@ class NPUWorker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %s", max_model_len)
 
+    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        """Return the sleep-mode pool for ``tag``, or a no-op context."""
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            return allocator.use_memory_pool(tag=tag)
+        return nullcontext()
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-        if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CaMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
-        else:
-            from contextlib import nullcontext
-
-            context = nullcontext()  # type: ignore
-        with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        # Restrict the discardable kv_cache pool to backing cache allocations.
+        # Persistent metadata created during initialize_kv_cache must stay
+        # outside this pool so sleep/wake does not drop its contents.
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
+        )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the

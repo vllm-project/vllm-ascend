@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 import torch.nn as nn
 from vllm.config import CUDAGraphMode
@@ -60,8 +60,15 @@ class XliteModelRunner(NPUModelRunner):
         finally:
             self.model = self.runner_model  # type: ignore[assignment]
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        super().initialize_kv_cache(kv_cache_config)
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
+        super().initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
         self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
 
     def _should_build_dummy_attn_metadata(
