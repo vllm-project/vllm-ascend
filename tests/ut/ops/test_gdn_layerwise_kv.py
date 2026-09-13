@@ -80,6 +80,7 @@ class _GDNForwardWrapper(nn.Module):
         self.register_buffer("conv_state", torch.zeros(1, 1, 2))
         self.register_buffer("ssm_state", torch.zeros(1, 1, 2, 2))
         self.prefix = "layers.0.linear_attn"
+        self.cache_config = SimpleNamespace(enable_prefix_caching=False)
 
     @property
     def kv_cache(self):

@@ -30,7 +30,6 @@ with ``__new__`` and drive it through recording fake managers, and the
 scheduler wrapper is exercised against one-off scheduler double classes.
 """
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -506,13 +505,13 @@ def test_scheduler_split_patch_wraps_consumer_early_return_path():
         self.observed_drop_bits.append(self.use_eagle)
         return ("consumer-early-return", num_new_tokens)
 
-    _consumer_early_return.__wrapped__ = inner
+    _consumer_early_return.__wrapped__ = inner  # type: ignore[attr-defined]
     cls._mamba_block_aligned_split = _consumer_early_return
     mod._install_producer_mamba_block_aligned_split_patch(cls)
 
     registered = cls._mamba_block_aligned_split
     assert registered is not _consumer_early_return
-    assert registered.__wrapped__ is _consumer_early_return
+    assert registered.__wrapped__ is _consumer_early_return  # type: ignore[attr-defined]
     assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
     assert scheduler._mamba_block_aligned_split("req", 1600) == (
         "consumer-early-return",
