@@ -3,7 +3,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -16,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_common import restore_tp_heads
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -1974,16 +1974,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
-        num_tokens = local_attn_output.shape[0]
-        send = (
-            local_attn_output.view(num_tokens, self.tp_size, self.n_local_heads, self.head_dim)
-            .permute(1, 0, 2, 3)
-            .contiguous()
-            .view(-1, self.n_local_heads, self.head_dim)
-        )
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
-        return recv
+        return restore_tp_heads(local_attn_output, self.tp_group)
 
     def _update_indexer_cache(
         self,

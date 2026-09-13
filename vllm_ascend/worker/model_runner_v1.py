@@ -3779,8 +3779,14 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
-            # Padded requests have zero query length.
-            num_scheduled_tokens = np.pad(num_scheduled_tokens, (0, num_reqs_padded - num_reqs))
+            if _cudagraph_mode == CUDAGraphMode.NONE:
+                # Preserve the eager DP dummy-run contract used by legacy DSA
+                # CP. Graph-only padding below must not turn its replicated
+                # request metadata into an empty request on idle DP ranks.
+                num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+            else:
+                # Requests added by CudagraphDispatcher have zero query length.
+                num_scheduled_tokens = np.pad(num_scheduled_tokens, (0, num_reqs_padded - num_reqs))
 
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
