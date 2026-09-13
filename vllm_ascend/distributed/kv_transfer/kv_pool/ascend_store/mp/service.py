@@ -166,14 +166,14 @@ class TransferService:
 
     # Registration restores child-owned state before data-plane calls arrive.
     def register(self, payload: dict[str, Any]) -> None:
-        database, addresses = self._restore_registration(payload)
+        database = self._restore_registration(payload)
         layerwise = payload.get("layerwise")
         if layerwise is not None:
             self._create_layerwise_handlers(payload, database, layerwise)
         else:
-            self._create_block_handlers(payload, database, addresses)
+            self._create_block_handlers(payload, database)
 
-    def _restore_registration(self, payload: dict[str, Any]) -> tuple[ChunkedTokenDatabase, dict[int, list[int]]]:
+    def _restore_registration(self, payload: dict[str, Any]) -> ChunkedTokenDatabase:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ChunkedTokenDatabase, KeyMetadata
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.npu_ipc import (
             WorkerKVCacheSpec,
@@ -208,7 +208,7 @@ class TransferService:
         )
         ranges = payload["registered_ranges"]
         self.backend.register_buffer([cache.resolve_range(*item) for item in ranges], [item[2] for item in ranges])
-        return database, addresses
+        return database
 
     def _create_layerwise_handlers(
         self,
@@ -304,36 +304,34 @@ class TransferService:
         self,
         payload: dict[str, Any],
         database: ChunkedTokenDatabase,
-        addresses: dict[int, list[int]],
     ) -> None:
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
             KVCacheStoreRecvingThread,
             KVCacheStoreSendingThread,
         )
 
-        transfer_worker = None
+        sender_type: type[KVCacheStoreSendingThread] = KVCacheStoreSendingThread
+        receiver_type: type[KVCacheStoreRecvingThread] = KVCacheStoreRecvingThread
+        handler_options: dict[str, Any] = {}
         tp_mismatch = payload["tp_mismatch"]
         if tp_mismatch is not None:
-            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-
-            # The existing transfer handlers delegate this mode to KVPoolWorker.
-            # Rebuild only the state read by those methods instead of copying
-            # their key, address, and backend logic into the process layer.
-            transfer_worker = KVPoolWorker.__new__(KVPoolWorker)
-            transfer_worker.tp_mismatch = True
-            transfer_worker.m_store = self.backend
-            transfer_worker.token_database = database
-            transfer_worker.group_kv_caches_base_addr = addresses
-            transfer_worker.group_block_len = payload["block_lengths"]
-            transfer_worker.group_block_stride = payload["block_strides"]
-            transfer_worker.block_size = tp_mismatch["block_size"]
-            transfer_worker.num_sub_keys = tp_mismatch["num_sub_keys"]
-            transfer_worker.sub_size_bytes = tp_mismatch["sub_size_bytes"]
-            transfer_worker.tp_rank = self.config["tp_rank"]
-            transfer_worker.enable_kv_events = self.config["enable_kv_events"]
-            transfer_worker._record_kv_connector_operation = (  # type: ignore[method-assign]
-                self._record_kv_connector_operation
+            from .tp_mismatch import (
+                KVCacheStoreRecvingTPMismatchHandler,
+                KVCacheStoreSendingTPMismatchHandler,
+                TPMismatchTransfer,
             )
+
+            transfer = TPMismatchTransfer(
+                self.backend,
+                database,
+                self.config["tp_rank"],
+                tp_mismatch["num_sub_keys"],
+                enable_kv_events=self.config["enable_kv_events"],
+                record_operation=self._record_kv_connector_operation,
+            )
+            sender_type = KVCacheStoreSendingTPMismatchHandler
+            receiver_type = KVCacheStoreRecvingTPMismatchHandler
+            handler_options["transfer"] = transfer
         common = dict(
             m_store=self.backend,
             token_database=database,
@@ -342,23 +340,19 @@ class TransferService:
             tp_size=self.config["tp_size"],
             dcp_size=self.config["dcp_size"],
         )
-        self.sender = KVCacheStoreSendingThread(
+        self.sender = sender_type(
             **common,
             put_step=self.config["put_step"],
             kv_role=self.config["kv_role"],
             group_uses_align_state=payload["align_state"],
             enable_kv_event=self.config["enable_kv_events"],
-            worker=transfer_worker,
+            **handler_options,
         )
-        self.receiver = KVCacheStoreRecvingThread(
+        self.receiver = receiver_type(
             **common,
-            worker=transfer_worker,
             record_operation=self._record_kv_connector_operation,
+            **handler_options,
         )
-        if transfer_worker is not None:
-            transfer_worker.kv_send_thread = self.sender
-            transfer_worker._invalid_block_ids = self.receiver._invalid_block_ids
-            transfer_worker._invalid_block_ids_lock = self.receiver._invalid_block_ids_lock
 
     # Independent single-worker lanes preserve send and receive ordering.
     def submit(self, operation: str, payload: Any) -> Future:
