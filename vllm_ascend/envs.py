@@ -108,6 +108,18 @@ env_variables: dict[str, Callable[[], Any]] = {
     # net of the extra decode steps the lower acceptance costs.
     # See https://github.com/vllm-project/vllm-ascend/issues/16271
     "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV": lambda: _strict_binary_env("VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV"),
+    # Restore exactness on top of the approximate bound above by masking the
+    # rolled-back KV tail on the device: the draft build is handed the
+    # optimistic bound as before, and ``atten_mask`` -- an ordinary device
+    # tensor, not a ValueDepend operator input -- hides the [L, U) tail, which
+    # is the draft KV the previous step rolled back. That tail is the whole of
+    # the approximation's cost, so masking it restores the exact result while
+    # the host still never learns the true lengths.
+    # Requires VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1; default 0.
+    # See https://github.com/vllm-project/vllm-ascend/issues/16271
+    "VLLM_ASCEND_DSPARK_DRAFT_KV_DEVICE_MASK": lambda: _strict_binary_env(
+        "VLLM_ASCEND_DSPARK_DRAFT_KV_DEVICE_MASK"
+    ),
 }
 
 # end-env-vars-definition
