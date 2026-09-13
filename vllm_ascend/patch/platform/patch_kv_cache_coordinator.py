@@ -712,9 +712,7 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
         # transitional scheduler implementations expose both and different
         # wrapper layers consult different attributes, so clear every
         # attribute that exists and restore all of them after the call.
-        drop_attrs = tuple(
-            name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name)
-        )
+        drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
         original_drop_values = {name: getattr(self, name) for name in drop_attrs}
         for name in drop_attrs:
             setattr(self, name, False)
