@@ -187,8 +187,10 @@ class MooncakeBackend(Backend):
         lazy_init: bool = False,
         contribute_memory: bool = True,
         extra_config: dict[str, Any] | None = None,
+        process_global_rank: int | None = None,
     ):
         self.parallel_config = parallel_config
+        self._process_global_rank = process_global_rank
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
@@ -243,7 +245,8 @@ class MooncakeBackend(Backend):
         # rank so that DP/TP/PP/CP replicas never share a directory (dense and
         # MoE alike); only ranks that contribute memory need an offload dir.
         if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
-            global_rank = get_global_rank(self.parallel_config)
+            process_global_rank = getattr(self, "_process_global_rank", None)
+            global_rank = get_global_rank(self.parallel_config) if process_global_rank is None else process_global_rank
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
                 os.makedirs(rank_path, exist_ok=True)
