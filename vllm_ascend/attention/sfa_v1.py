@@ -450,6 +450,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -503,6 +510,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            num_input_tokens = common_attn_metadata.positions.shape[0]
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
@@ -551,7 +564,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         metadata = self.metadata_cls(  # type: ignore
-            num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
