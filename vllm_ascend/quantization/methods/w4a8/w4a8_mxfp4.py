@@ -265,7 +265,10 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             if reinterpret_as_uint8:
                 scale = scale.view(torch.uint8)
             if self.use_expert_weight_list:
-                expert_list = [expert.transpose(0, 1).contiguous() for expert in scale.unbind(dim=0)]
+                # GMM-SiTU consumes contiguous N-major scale bytes. Keep that
+                # layout canonical for EPLB transfer and create zero-copy
+                # transposed views only for the ordinary GMM call sites.
+                expert_list = [expert.clone() for expert in scale.unbind(dim=0)]
                 setattr(layer, f"{tensor_name}_list", expert_list)
                 delattr(layer, tensor_name)
             else:
@@ -281,9 +284,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         if self.use_expert_weight_list:
             return (
                 [weight.transpose(0, 1) for weight in layer.w13_weight_list],
-                layer.w13_weight_scale_list,
+                [scale.transpose(0, 1) for scale in layer.w13_weight_scale_list],
                 [weight.transpose(0, 1) for weight in layer.w2_weight_list],
-                layer.w2_weight_scale_list,
+                [scale.transpose(0, 1) for scale in layer.w2_weight_scale_list],
             )
         return (
             [layer.w13_weight],
@@ -292,16 +295,22 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             [layer.w2_weight_scale],
         )
 
+    def _get_gmm_situ_weights(self, layer):
+        if self.use_expert_weight_list:
+            return layer.w13_weight_list, layer.w13_weight_scale_list
+        return layer.w13_weight, layer.w13_weight_scale
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         assert layer is not None
         if mlp_compute_input.activation == MoEActivation.SITU and mlp_compute_input.group_list_type in (0, 1):
+            w1, w1_scale = self._get_gmm_situ_weights(layer)
             hidden_states, out_scale, _ = DeviceOperator.npu_grouped_matmul_situ_quant(
                 x=hidden_states,
-                weight=layer.w13_weight,
-                weight_scale=layer.w13_weight_scale,
+                weight=w1,
+                weight_scale=w1_scale,
                 x_scale=pertoken_scale,
                 group_list=mlp_compute_input.group_list,
                 group_list_type=mlp_compute_input.group_list_type,
