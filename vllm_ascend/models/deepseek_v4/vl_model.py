@@ -86,6 +86,10 @@ class AscendDeepseekV4ForConditionalGeneration(
             self.image_end: nn.Parameter | None = None
             self.image_newline: nn.Parameter | None = None
             self.image_pad: nn.Parameter | None = None
+            # Cache for the stacked sentinel table in the embedding dtype;
+            # rebuilt lazily on first use (the raw params are float32 while
+            # the embedding output is model dtype).
+            self._sentinel_table: torch.Tensor | None = None
             if image_enabled:
                 self.vision = DeepseekV4ViT(config)
                 self.aligner = DeepseekV4Aligner(config)
@@ -157,6 +161,26 @@ class AscendDeepseekV4ForConditionalGeneration(
             llm_offset += n_llm
         return tuple(embeds)
 
+    def _get_sentinel_table(self, dtype: torch.dtype) -> torch.Tensor:
+        """Stacked sentinel vectors in ``dtype``, cached across steps.
+
+        The raw ``image_*`` parameters are float32, so stacking + casting per
+        forward would repeat an avoidable copy in this hot path.
+        """
+        table = self._sentinel_table
+        if table is None or table.dtype != dtype:
+            table = torch.stack(
+                [
+                    self.image_start,
+                    self.image_pad,
+                    self.image_pad,
+                    self.image_newline,
+                    self.image_end,
+                ]
+            ).to(dtype)
+            self._sentinel_table = table
+        return table
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None or self.vision is None:
@@ -182,19 +206,12 @@ class AscendDeepseekV4ForConditionalGeneration(
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if self.image_start is not None:
             sentinel_mask = image_sentinel_mask(input_ids)
-            if is_multimodal is not None:
-                sentinel_mask = sentinel_mask & ~is_multimodal.to(input_ids.device)
-            table = torch.stack(
-                [
-                    self.image_start,
-                    self.image_pad,
-                    self.image_pad,
-                    self.image_newline,
-                    self.image_end,
-                ]
-            ).to(inputs_embeds.dtype)
+            table = self._get_sentinel_table(inputs_embeds.dtype)
             idx = (input_ids - IMAGE_SENTINEL_BASE_ID).clamp(0, 4)
-            inputs_embeds = torch.where(sentinel_mask.unsqueeze(-1), table[idx], inputs_embeds)
+            # In-place write avoids one full-size allocation per step. The
+            # `is_multimodal` exclusion is unnecessary here: those positions
+            # are overwritten by _merge_multimodal_embeddings below anyway.
+            torch.where(sentinel_mask.unsqueeze(-1), table[idx], inputs_embeds, out=inputs_embeds)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
