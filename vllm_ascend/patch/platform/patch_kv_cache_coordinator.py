@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.core.circular_buffer import prefix_cacheable
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -172,7 +173,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             assert all(
                 self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
                 for g in kv_cache_config.kv_cache_groups
-                if getattr(g.kv_cache_spec, "participates_in_prefix_caching", True)
+                if prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
         self.enable_partial_hash_hits = dcp_world_size == 1 and any(
             isinstance(g.kv_cache_spec, MambaSpec)
@@ -197,7 +198,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def _cache_hit_alignment_tokens(self) -> int:
         if self.enable_partial_hash_hits:
             return self.hash_block_size
-        return self.scheduler_block_size or self.lcm_block_size
+        alignment = self.scheduler_block_size or self.lcm_block_size
+        assert alignment is not None
+        return alignment
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
@@ -214,6 +217,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            if not prefix_cacheable(g.kv_cache_spec):
+                continue
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
             use_eagle = i in self.eagle_group_ids
@@ -229,7 +234,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             else:
                 self.attention_groups.append(SpecGroup(spec, [i], manager_cls, use_eagle))
 
-        assert len(self.attention_groups) > 1, "HybridKVCacheCoordinator requires at least two attention groups."
+        self.full_attention_group_id: int | None
+        if not self.attention_groups:
+            self.full_attention_group_id = None
+            self.lcm_block_size = self.scheduler_block_size
+            return
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
@@ -240,9 +249,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # so any group reporting a longer per-group hit implies the union of
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
-        self.full_attention_group_id: int | None = (
-            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
-        )
+        self.full_attention_group_id = first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
 
         # Propagate the eagle bit to every manager in an eagle-containing
         # attention group, mirroring upstream
@@ -303,6 +310,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return block_hashes
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
+        if not self.attention_groups:
+            return tuple([] for _ in range(num_groups)), 0
         hit_length = max_cache_hit_length
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups

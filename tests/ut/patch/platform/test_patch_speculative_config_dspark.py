@@ -174,3 +174,115 @@ def test_non_dcp_dspark_config_is_not_replaced_during_validation(
 
     patch_speculative_config._dspark_post_init(config)
     assert config.target_parallel_config is original_parallel_config
+
+
+def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape():
+    text_config = SimpleNamespace(
+        model_type="deepseek_v4.1_text",
+        dspark_target_layer_ids=[37, 38, 39],
+        dspark_n_routed_experts=128,
+        dspark_n_activated_experts=3,
+        num_nextn_predict_layers=3,
+    )
+    text_config.update = lambda values: text_config.__dict__.update(values)
+    # vLLM's generic DeepSeek-V4 dSPark normalization has already rewritten
+    # the composite root before the Ascend post-init hook runs.
+    hf_config = SimpleNamespace(
+        model_type="deepseek_v4",
+        architectures=["DSparkDraftModel"],
+        text_config=text_config,
+    )
+    hf_config.update = lambda values: hf_config.__dict__.update(values)
+    model_arch_config = ModelArchitectureConfig(
+        architectures=["DeepseekV41ForConditionalGeneration"],
+        model_type="deepseek_v4.1",
+        text_model_type="deepseek_v4.1_text",
+        hidden_size=5120,
+        total_num_hidden_layers=43,
+        total_num_attention_heads=64,
+        head_size=512,
+        vocab_size=129280,
+        total_num_kv_heads=1,
+        num_experts=384,
+        num_experts_per_token=6,
+        quantization_config=None,
+        is_deepseek_mla=True,
+        is_mm_prefix_lm=True,
+        rswa_window=128,
+        derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
+    )
+    registry = MagicMock()
+    registry.inspect_model_cls.return_value = (
+        "model-info",
+        "DeepseekV41DSparkDraftModel",
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        registry=registry,
+    )
+
+    _normalize_deepseek_v4_dspark_draft(draft_model_config)
+
+    assert hf_config.architectures == ["DeepseekV41DSparkDraftModel"]
+    assert hf_config.model_type == "deepseek_v4.1"
+    assert text_config.n_routed_experts == 128
+    assert text_config.num_experts_per_tok == 3
+    assert text_config.n_mtp_layers == 3
+    assert draft_model_config.model_arch_config.num_experts == 128
+    if "num_experts_per_token" in ModelArchitectureConfig.__dataclass_fields__:
+        assert draft_model_config.model_arch_config.num_experts_per_token == 3
+    registry.inspect_model_cls.assert_called_once_with(["DeepseekV41DSparkDraftModel"], draft_model_config)
+
+
+def test_released_deepseek_v41_dspark_names_select_v41_drafter():
+    text_config = SimpleNamespace(
+        model_type="deepseek_v41_text",
+        dspark_target_layer_ids=[37, 38, 39],
+        dspark_n_routed_experts=128,
+        dspark_num_experts_per_tok=3,
+        num_nextn_predict_layers=3,
+    )
+    text_config.update = lambda values: text_config.__dict__.update(values)
+    hf_config = SimpleNamespace(
+        model_type="deepseek_v41",
+        architectures=["DeepseekV41ForCausalLM"],
+        text_config=text_config,
+    )
+    hf_config.update = lambda values: hf_config.__dict__.update(values)
+    model_arch_config = ModelArchitectureConfig(
+        architectures=["DeepseekV41ForCausalLM"],
+        model_type="deepseek_v41",
+        text_model_type="deepseek_v41_text",
+        hidden_size=5120,
+        total_num_hidden_layers=43,
+        total_num_attention_heads=64,
+        head_size=512,
+        vocab_size=129280,
+        total_num_kv_heads=1,
+        num_experts=384,
+        num_experts_per_token=6,
+        quantization_config=None,
+        is_deepseek_mla=True,
+        is_mm_prefix_lm=False,
+        rswa_window=128,
+        derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
+    )
+    registry = MagicMock()
+    registry.inspect_model_cls.return_value = (
+        "model-info",
+        "DeepseekV41DSparkDraftModel",
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        registry=registry,
+    )
+
+    _normalize_deepseek_v4_dspark_draft(draft_model_config)
+
+    assert hf_config.architectures == ["DeepseekV41DSparkDraftModel"]
+    assert hf_config.model_type == "deepseek_v41"
+    assert text_config.n_routed_experts == 128
+    assert text_config.num_experts_per_tok == 3
+    assert draft_model_config.model_arch_config.num_experts_per_token == 3

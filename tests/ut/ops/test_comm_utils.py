@@ -59,6 +59,20 @@ class TestDistributedCommunication(PytestBase):
         assert handle is not None
         assert isinstance(handle, mocker.MagicMock)
 
+    def test_async_all_to_all_normalizes_numpy_splits(self, mocker: MockerFixture):
+        input_tensor = torch.randn(8, 16)
+        splits = torch.tensor([2, 2, 2, 2], dtype=torch.float32).numpy()
+        all_to_all = mocker.patch("torch.distributed.all_to_all_single", return_value=mocker.MagicMock())
+
+        async_all_to_all(input_tensor, splits, splits, mocker.MagicMock())
+
+        assert all_to_all.call_args.kwargs["input_split_sizes"] == [2, 2, 2, 2]
+        assert all_to_all.call_args.kwargs["output_split_sizes"] == [2, 2, 2, 2]
+
+    def test_async_all_to_all_rejects_mismatched_input_splits(self):
+        with pytest.raises(RuntimeError, match="MoE all-to-all input split mismatch"):
+            async_all_to_all(torch.randn(8, 16), [2, 2, 2, 2], [1, 1, 1, 1], object())
+
     @pytest.mark.parametrize(
         "world_size, test_tensor, expected", [(1, torch.randn(8, 16), (8, 16)), (4, torch.randn(8, 16), (32, 16))]
     )

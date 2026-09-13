@@ -1,0 +1,7 @@
+中国的首都是哪里？
+
+列出100以内的所有素数。
+
+DeepSeek是做什么的公司？
+
+请按“第一张、第二张”的顺序回答：第一张图<image>examples/images/carrots.jpeg</image>和第二张图<image>examples/images/corn.jpeg</image>中分别是什么食材？它们通常食用的部位分别是什么？

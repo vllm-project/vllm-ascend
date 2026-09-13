@@ -42,9 +42,16 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
-from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router
 
 _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
+
+
+def create_ascend_fused_moe_router(*args, **kwargs):
+    """Load Ascend router ops only when a model constructs its MoE."""
+    from vllm_ascend.ops.fused_moe.router.router_factory import create_ascend_fused_moe_router as factory
+
+    return factory(*args, **kwargs)
+
 
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoEFactory

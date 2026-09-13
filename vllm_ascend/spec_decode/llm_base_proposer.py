@@ -726,7 +726,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # This is used to hold a position.
                     slot_mapping=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.gpu,
                     positions=self.runner.positions,
-                    positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
+                    positions_cpu=None,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
                     is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),

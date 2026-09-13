@@ -3,7 +3,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -13,8 +12,10 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.dsa_common import restore_tp_heads
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -41,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
+from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
@@ -1403,6 +1405,14 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
 
+        # V4.1 CP preprocessing uses the same split projections as ordinary DSA.
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
+        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
+            self.multistream_dsv4_dsa_overlap = False
+
         # indexer param
         if self.indexer is not None:
             self.indexer_heads: int = self.indexer.n_heads
@@ -1656,8 +1666,18 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             common_attn_metadata,
             skip_all_to_all=full_gather_wo_a_enabled,
         )
-        num_tokens = o_proj_input.shape[0]
+        projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled)
+        if need_gather_q_kv and not full_gather_wo_a_enabled:
+            projected_output = sp_reduce_scatter(projected_output)
+        output[...] = projected_output
 
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+
+        return output
+
+    def _forward_o_proj(self, o_proj_input, full_gather_wo_a_enabled=False):
+        """Project CP attention output with TP or temporarily gathered weights."""
+        num_tokens = o_proj_input.shape[0]
         # o
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight()
@@ -1700,17 +1720,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                     batch_split_factor=1,
                 )
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
-            if need_gather_q_kv and not full_gather_wo_a_enabled:
-                projected_output = sp_reduce_scatter(projected_output)
-            output[...] = projected_output
+            return self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
         finally:
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_local_weight()
-
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
-
-        return output
 
     def _forward(
         self,
@@ -1949,7 +1962,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        num_tokens = local_attn_output.shape[0]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
@@ -1962,15 +1974,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
-        send = (
-            local_attn_output.view(num_tokens, self.tp_size, self.n_local_heads, self.head_dim)
-            .permute(1, 0, 2, 3)
-            .contiguous()
-            .view(-1, self.n_local_heads, self.head_dim)
-        )
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
-        return recv
+        return restore_tp_heads(local_attn_output, self.tp_group)
 
     def _update_indexer_cache(
         self,

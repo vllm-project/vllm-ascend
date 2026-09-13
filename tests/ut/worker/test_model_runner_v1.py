@@ -6,11 +6,12 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -25,6 +26,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from tests.deepseek_v41_cache_utils import make_cache_config
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
@@ -97,6 +99,107 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
+    def test_padded_speculative_dummy_preserves_logical_query_lengths(self):
+        # DSA CP rounds 186 tokens to 192 without adding a logical request.
+        # Also cover dispatchers that pad the request count itself.
+        for num_tokens, padded_tokens, padded_reqs in ((186, 192, 31), (12, 24, 4), (6, 24, 4), (12, 12, 2)):
+            with self.subTest(num_tokens=num_tokens):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.uniform_decode_query_len = 6
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                runner.speculative_config = None
+                runner._has_gdn = True
+                runner.vllm_config = MagicMock()
+                agreed_counts = torch.tensor([padded_tokens, 192], dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.FULL,
+                        SimpleNamespace(num_tokens=padded_tokens, num_reqs=padded_reqs),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+                runner.synchronize_input_prep = nullcontext
+                runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+                runner.optimistic_seq_lens_cpu = torch.zeros(32, dtype=torch.int32)
+                runner.seq_lens = MagicMock()
+                runner.arange_np = np.arange(4096, dtype=np.int32)
+                runner.query_pos = SimpleNamespace(np=np.zeros(4096, dtype=np.int32))
+                runner.query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+                runner.gdn_query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+
+                def check_offsets(
+                    *args,
+                    runner=runner,
+                    num_tokens=num_tokens,
+                    padded_tokens=padded_tokens,
+                    padded_reqs=padded_reqs,
+                    agreed_counts=agreed_counts,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate(
+                        (np.arange(num_reqs + 1) * 6, np.full(padded_reqs - num_reqs, num_tokens))
+                    )
+                    np.testing.assert_array_equal(runner.query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.gdn_query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.query_pos.np[:num_tokens], np.tile(np.arange(6), num_reqs))
+                    torch.testing.assert_close(agreed_counts, torch.tensor([padded_tokens, 192], dtype=torch.int32))
+                    raise RuntimeError("logical query lengths checked")
+
+                get_cumsum = runner._get_cumsum_and_arange
+
+                def check_padded_schedule(
+                    schedule,
+                    arange,
+                    num_tokens=num_tokens,
+                    padded_reqs=padded_reqs,
+                    get_cumsum=get_cumsum,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate((np.full(num_reqs, 6), np.zeros(padded_reqs - num_reqs)))
+                    np.testing.assert_array_equal(schedule, expected)
+                    self.assertEqual(schedule.dtype, np.int32)
+                    self.assertEqual(int(schedule.sum()), num_tokens)
+                    return get_cumsum(schedule, arange)
+
+                runner._get_cumsum_and_arange = check_padded_schedule
+                runner._pad_query_start_loc_for_fia = check_offsets
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+                    self.assertRaisesRegex(RuntimeError, "logical query lengths checked"),
+                ):
+                    runner._dummy_run(num_tokens, uniform_decode=True, cudagraph_runtime_mode=CUDAGraphMode.FULL)
+
+    def test_padded_dummy_preserves_other_dp_token_counts(self):
+        for token_counts in ([24, 8], [8, 24], [8, 8]):
+            with self.subTest(token_counts=token_counts):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                agreed_counts = torch.tensor(token_counts, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.NONE,
+                        SimpleNamespace(num_tokens=8, num_reqs=1),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+
+                def check_agreed_counts(agreed_counts=agreed_counts, token_counts=token_counts):
+                    torch.testing.assert_close(agreed_counts, torch.tensor(token_counts, dtype=torch.int32))
+                    raise RuntimeError("DP token counts checked")
+
+                runner.synchronize_input_prep = check_agreed_counts
+                with self.assertRaisesRegex(RuntimeError, "DP token counts checked"):
+                    runner._dummy_run(1, uniform_decode=True)
+
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kvpp = KVPPRuntime()
@@ -130,7 +233,12 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
             slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
         )
         runner.input_batch = SimpleNamespace(block_table=block_tables)
-        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=object()),
+                SimpleNamespace(kv_cache_spec=object()),
+            ]
+        )
 
         def check_slots_before_build(**_kwargs):
             for slot_mapping in slot_mappings:
@@ -141,6 +249,64 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
+
+    def test_graph_capture_invalidates_only_v41_active_slots(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner.use_compress = True
+        runner._has_gdn = False
+        runner.vllm_config = MagicMock()
+
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=2, num_reqs=2),
+                None,
+                None,
+                None,
+            )
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
+        runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1, 2], dtype=np.int32))
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=2)
+
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), copy_to_gpu=MagicMock())
+        runner.positions = MagicMock()
+        runner._dsa_positions_cpu_buf = MagicMock()
+
+        v41_group = make_cache_config(17).kv_cache_groups[0]
+        other_group = SimpleNamespace(kv_cache_spec=object())
+        slot_mappings = [torch.tensor([3, 4]), torch.tensor([7, 8])]
+        block_tables = MagicMock()
+        block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
+        )
+        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[v41_group, other_group],
+            num_blocks=17,
+        )
+
+        def check_slots_before_build(**_kwargs):
+            torch.testing.assert_close(slot_mappings[0], torch.full_like(slot_mappings[0], -1))
+            torch.testing.assert_close(slot_mappings[1], torch.tensor([7, 8]))
+            raise RuntimeError("metadata checked")
+
+        runner._build_attention_metadata = check_slots_before_build
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "metadata checked"),
+        ):
+            runner._dummy_run(2, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
 
 
 class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
@@ -513,6 +679,74 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
+    def test_v41_layer_outer_buffers_allocate_and_reshape(self):
+        runner = self._build_runner()
+        config = make_cache_config(4)
+        # vLLM shrinks each tensor proportionally when another rank has less
+        # capacity. Component offsets must not depend on the old block count.
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        prefix = "model.layers."
+        long_name = prefix + "2.self_attn.long_kv_cache"
+        index_name = prefix + "2.self_attn.indexer.k_cache"
+        assert raw[long_name] is raw[index_name]
+        assert raw[long_name] is raw[prefix + "0.self_attn.swa_cache"]
+        assert raw[long_name] is not raw[prefix + "8.self_attn.long_kv_cache"]
+        unique = {id(value): value for value in raw.values()}
+        assert len(unique) == 4
+        assert sum(buffer.numel() for buffer in unique.values()) == 3 * 540928
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        key, scale = caches[index_name]
+        assert key.shape == (3, 64, 1, 128)
+        assert scale.shape == (3, 64, 1, 1)
+        assert key.data_ptr() - caches[long_name].data_ptr() == 65536
+        assert scale.data_ptr() - key.data_ptr() == 8192
+        assert key.stride(0) == 131072
+        assert scale.stride(0) == 65536
+        assert not key.is_contiguous()
+        assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
+        assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
+
+    def test_v41_rejects_obsolete_allocation_descriptors(self):
+        runner = self._build_runner()
+        config = make_cache_config(3)
+        config.kv_cache_tensors[0].block_stride = 0
+        with self.assertRaisesRegex(ValueError, "allocation disagrees"):
+            runner._allocate_kv_cache_tensors(config)
+
+    def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
+        runner = self._build_runner()
+        config = make_cache_config(5, draft_layers=3)
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        assert len({id(value) for value in raw.values()}) == 4
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        for stage, source in enumerate((2, 8, 14)):
+            draft = f"mtp.{stage}.self_attn.swa_cache"
+            target = f"model.layers.{source}.self_attn.long_kv_cache"
+            assert raw[draft] is raw[target]
+            assert caches[draft].shape == (3, 128, 1, 512)
+            assert caches[draft].stride(0) * 2 == 131072
+            assert caches[draft].data_ptr() == caches[target].data_ptr()
+            caches[target][1].fill_(2)
+            caches[draft][2].fill_(3)
+            assert (caches[target][1] == 2).all()
+            assert (caches[draft][0] == 0).all()
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
@@ -726,34 +960,64 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
 
-    def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):
-        for capture_sizes, expected_tp_size in (([48, 96], 1), ([16, 32], 16)):
-            with self.subTest(capture_sizes=capture_sizes):
+    def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
+        cases = (
+            (True, 8, 6, False),
+            (True, 16, 6, False),
+            (True, 8, 6, True),
+            (True, 8, 1, False),
+            (False, 8, 6, True),
+            (False, 16, 6, True),
+            (False, 8, 1, True),
+        )
+        for cp_enabled, tp_size, query_len, enable_sp in cases:
+            with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):
                 runner = self._build_runner()
-                compilation_config = SimpleNamespace(
-                    pass_config=SimpleNamespace(enable_sp=True),
-                    cudagraph_capture_sizes=capture_sizes,
-                    resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
+                max_tokens = 32 * query_len
+                config = CompilationConfig(
+                    cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+                    cudagraph_capture_sizes=list(range(tp_size, max_tokens + 1, tp_size)),
+                    max_cudagraph_capture_size=max_tokens,
                 )
-                runner.compilation_config = compilation_config
-                runner.vllm_config.compilation_config = compilation_config
-                runner.parallel_config = SimpleNamespace(tensor_parallel_size=16)
-                runner.uniform_decode_query_len = 6
-                runner.kv_cache_config = SimpleNamespace()
-                runner.max_num_reqs = 16
-                runner.cudagraph_dispatcher = MagicMock()
-                runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+                config.pass_config.enable_sp = enable_sp
+                runner.compilation_config = config
+                runner.parallel_config = SimpleNamespace(tensor_parallel_size=tp_size)
+                runner.vllm_config = SimpleNamespace(
+                    compilation_config=config,
+                    parallel_config=runner.parallel_config,
+                    num_speculative_tokens=query_len - 1,
+                    lora_config=None,
+                    scheduler_config=SimpleNamespace(max_num_seqs=32),
+                )
+                runner.uniform_decode_query_len = query_len
+                runner.kv_cache_config = SimpleNamespace(has_mamba_layers=False)
+                runner.max_num_reqs = 32
+                runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
                 runner.speculative_config = None
                 runner.drafter = None
                 runner.use_aclgraph = False
-
-                runner._check_and_update_cudagraph_mode([], [])
-
-                call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
-                self.assertEqual(
-                    call_kwargs["tensor_parallel_size"],
-                    expected_tp_size,
-                )
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.enable_dsa_cp", return_value=cp_enabled),
+                    patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=enable_sp),
+                    patch("vllm_ascend.worker.model_runner_v1.update_pass_config", return_value=nullcontext()),
+                ):
+                    runner._check_and_update_cudagraph_mode([], [])
+                    dispatcher = runner.cudagraph_dispatcher
+                    captured = set()
+                    for mode, descriptors in dispatcher.get_capture_descs():
+                        for descriptor in descriptors:
+                            actual_mode, actual_key = dispatcher.dispatch(
+                                runner._pad_for_sequence_parallelism(descriptor.num_tokens), uniform_decode=True
+                            )
+                            self.assertEqual((actual_mode, actual_key), (mode, descriptor))
+                            captured.add(actual_key)
+                    # Includes the one-request dummy used by idle DP ranks.
+                    for num_reqs in range(1, 33):
+                        mode, key = dispatcher.dispatch(
+                            runner._pad_for_sequence_parallelism(num_reqs * query_len), uniform_decode=True
+                        )
+                        self.assertEqual(mode, CUDAGraphMode.FULL)
+                        self.assertIn(key, captured)
 
     def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
         runner = self._build_runner()
@@ -2178,7 +2442,11 @@ class TestKVPPExecute(unittest.TestCase):
                 runner.model = object()
                 runner.vllm_config = SimpleNamespace()
                 runner.parallel_config = SimpleNamespace(num_ubatches=1)
-                runner.model_config = SimpleNamespace(enforce_eager=True)
+                runner.model_config = SimpleNamespace(
+                    enforce_eager=True,
+                    hf_config=SimpleNamespace(model_type="test"),
+                    hf_text_config=SimpleNamespace(model_type="test"),
+                )
                 runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False, mamba_cache_mode=None)
                 runner.input_batch = SimpleNamespace(
                     num_reqs=2, req_ids=["a", "b"], num_computed_tokens_cpu=np.array(computed)

@@ -820,7 +820,37 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.device = torch.device("cpu")
         proposer.runner = SimpleNamespace(device_metadata_executor=None)
         proposer.dcp_size = 1
+        proposer._per_group_block_tables = {}
+        proposer._per_group_slot_mappings = {}
         return proposer
+
+    def test_aurora_draft_uses_only_group_twelve(self, monkeypatch):
+        from tests.deepseek_v41_cache_utils import make_cache_config
+
+        config = make_cache_config(17, draft_layers=3)
+        draft_names = config.kv_cache_groups[12].layer_names
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "AscendDSASWABackend"
+        modules = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in draft_names}
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config", lambda *args, **kw: modules
+        )
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: draft_names)
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(config, [128, 32] + [128] * 11)
+        assert proposer.kv_cache_gid == 12
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_names)
+        assert proposer._layer_group_idx == [12, 12, 12]
+        target_table = torch.tensor([[2]], dtype=torch.int32)
+        draft_table = torch.tensor([[7]], dtype=torch.int32)
+        proposer.set_per_group_attn_metadata(2, target_table, torch.tensor([256]))
+        proposer.set_per_group_attn_metadata(12, draft_table, torch.tensor([896]))
+        assert proposer._per_group_block_tables[12] is draft_table
+        assert proposer._per_group_block_tables[12] is not target_table
 
     @pytest.mark.parametrize(
         ("dcp_size", "pcp_enabled", "has_executor", "expected_tokens"),

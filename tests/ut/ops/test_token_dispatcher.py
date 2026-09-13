@@ -310,7 +310,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(kwargs["expert_token_nums_type"], EXPERT_TOKEN_NUMS_TYPE_CUMSUM)
 
     def test_get_combine_mc_kwargs_with_quant(self):
-        hidden_states = torch.randn(10, 128)
+        hidden_states = torch.randn(10, 128, dtype=torch.bfloat16)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
@@ -341,6 +341,8 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.moe_expert_num = len(expert_map)
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
+        self.assertIs(kwargs["expert_scales"], topk_weights)
+        self.assertEqual(kwargs["expert_scales"].dtype, torch.float32)
 
     def test_get_combine_mc_kwargs_combine_quant_mode_forces_quant_mode(self):
         # When additional_config.combine_quant_mode is non-zero (here 4), the

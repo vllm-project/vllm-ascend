@@ -2,9 +2,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
-from vllm_ascend.ops.rope_dsv4 import RopeDataProxy
+from vllm_ascend.ops import rope_dsv4
+from vllm_ascend.ops.rope_dsv4 import (
+    ComplexExpRotaryEmbedding,
+    RopeDataProxy,
+    get_full_cos_and_sin_dsa_for_layer,
+)
+
+
+def test_full_rope_lookup_resolves_exact_layer_config(monkeypatch):
+    first = (torch.randn(4, 1, 1, 8), torch.randn(4, 1, 1, 8))
+    second = (torch.randn(4, 1, 1, 8), torch.randn(4, 1, 1, 8))
+    monkeypatch.setattr(
+        rope_dsv4._ROPE_STATE,
+        "layer_info",
+        {
+            "model.layers.0.self_attn.attn": ("base", ["default"]),
+            "model.layers.2.self_attn.attn": ("compressed", ["default"]),
+        },
+    )
+    monkeypatch.setattr(
+        rope_dsv4._ROPE_STATE,
+        "full_rope_cache",
+        {"base": first, "compressed": second},
+    )
+
+    actual = get_full_cos_and_sin_dsa_for_layer("model.layers.2.self_attn.attn")
+
+    assert actual[0] is second[0]
+    assert actual[1] is second[1]
+    with pytest.raises(KeyError, match="not registered"):
+        get_full_cos_and_sin_dsa_for_layer("missing")
+
+
+def test_zero_original_length_disables_yarn():
+    dim = 8
+    base = 10000
+    actual = ComplexExpRotaryEmbedding.precompute_freqs_cis(
+        dim,
+        seqlen=65536,
+        original_seq_len=0,
+        base=base,
+        factor=16,
+        beta_fast=32,
+        beta_slow=1,
+    )
+    expected = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    torch.testing.assert_close(actual, expected)
+
 
 # ──────────────────────────────────────────────
 # Equivalence: pad_to + slice  vs  pad-positions + gather + slice

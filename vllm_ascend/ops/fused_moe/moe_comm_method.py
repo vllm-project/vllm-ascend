@@ -46,20 +46,75 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MoECommMethodsByConfig: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
 
-def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
+def _moe_config_key(moe_config: FusedMoEConfig) -> tuple[int, ...]:
+    """Return the execution shape that owns mutable MoE comm state.
+
+    Target and speculative draft models can have different expert counts and
+    top-k values.  A single process-global dispatcher is therefore unsafe: the
+    model constructed last would overwrite the dispatcher's shape for every
+    other MoE layer.  Configs with the same execution shape can still share the
+    existing stateful implementation because their forwards are sequential.
+    """
+    fields = (
+        "num_experts",
+        "num_local_experts",
+        "experts_per_token",
+        "hidden_dim",
+        "intermediate_size_per_partition",
+        "ep_size",
+        "tp_size",
+        "dp_size",
+        "pcp_size",
+    )
+    return tuple(int(getattr(moe_config, field, 0) or 0) for field in fields)
+
+
+def get_moe_comm_method(
+    moe_comm_type: MoECommType | None,
+    moe_config: FusedMoEConfig | None = None,
+) -> MoECommMethod | None:
+    if moe_config is not None:
+        return _MoECommMethodsByConfig.get((moe_comm_type, _moe_config_key(moe_config)))
     return _MoECommMethods.get(moe_comm_type)
 
 
 def setup_moe_comm_method(moe_config):
+    implementations: dict[MoECommType, type[MoECommMethod]]
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        implementations = {
+            MoECommType.ALLTOALL: AlltoAllCommImpl,
+            MoECommType.ALLGATHER: AllGatherCommImpl,
+            MoECommType.MC2: MC2CommImpl,
+            MoECommType.FUSED_MC2: FusedMC2CommImpl,
+        }
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        implementations = {MoECommType.ALLGATHER: AllGatherCommImpl}
+
+    config_key = _moe_config_key(moe_config)
+    for comm_type, implementation_cls in implementations.items():
+        cache_key = (comm_type, config_key)
+        comm_method = _MoECommMethodsByConfig.get(cache_key)
+        if comm_method is None:
+            comm_method = implementation_cls(moe_config)
+            _MoECommMethodsByConfig[cache_key] = comm_method
+        # Preserve the legacy lookup for callers that do not own a layer
+        # config. Layer forwards use the shape-qualified cache below.
+        _MoECommMethods[comm_type] = comm_method
+
+
+def activate_moe_comm_method(moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig) -> MoECommMethod:
+    """Bind the communication implementation matching the active MoE layer."""
+    comm_method = get_moe_comm_method(moe_comm_type, moe_config)
+    if comm_method is None:
+        setup_moe_comm_method(moe_config)
+        comm_method = get_moe_comm_method(moe_comm_type, moe_config)
+    if comm_method is None:
+        raise RuntimeError(f"No MoE communication method registered for {moe_comm_type}")
+    _EXTRA_CTX.moe_comm_method = comm_method
+    return comm_method
 
 
 @dataclass
