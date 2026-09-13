@@ -58,8 +58,14 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        parallel_group: GroupCoordinator | None = None,
     ):
         nn.Module.__init__(self)
+        # vLLM main added a `parallel_group` override to VocabParallelEmbedding
+        # (shard/reduce over it instead of the TP group); keep the base attribute
+        # in sync even though the Ascend forward uses self.comm_group.
+        self.parallel_group = parallel_group
         self.forward_type = None
         if lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()

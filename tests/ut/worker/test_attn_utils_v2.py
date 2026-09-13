@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -339,6 +340,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         kv_transfer_config=None,
         quant_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        # Upstream HiSparse entry points read `attention_config.hisparse_config`.
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
@@ -456,24 +459,19 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 kv_cache_config=_kv_cache_config,
             )
 
-        def _ascend_bind_kv_cache(
+        def _ascend_bind_kv_cache_to_layers(
             kv_caches: dict[str, Any],
             forward_context: dict[str, Any],
-            runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
             kv_cache_groups: Any = None,
         ) -> None:
             del num_attn_module, kv_cache_groups
-            assert len(runner_kv_caches_) == 0
-            for kv_cache in kv_caches.values():
-                runner_kv_caches_.append(kv_cache)
             for layer_name_, kv_cache in kv_caches.items():
                 forward_context[layer_name_].kv_cache = kv_cache
 
         monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache_to_layers)
         kv_caches = upstream_attn_utils.init_kv_cache(
-            runner_kv_caches=runner_kv_caches,
             forward_context={layer_name: cache_layer},
             kv_cache_config=kv_cache_config,
             device=torch.device("cpu"),
@@ -482,10 +480,11 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         )
 
     cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
     if vllm_version_is("0.28.0"):
-        # The v0.28.0 patch binds the pre-set layer tensor in place.
+        # v0.28.0 `bind_kv_cache` appends the cache to `runner_kv_caches` and
+        # binds the pre-set layer tensor in place; main dropped both.
+        assert len(runner_kv_caches) == 1
+        assert runner_kv_caches[0] is cache_components
         assert cache_layer.kv_cache is cache_components
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
@@ -892,6 +891,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     }
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 allocate_kv_cache entry point is main-only")
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
 def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner

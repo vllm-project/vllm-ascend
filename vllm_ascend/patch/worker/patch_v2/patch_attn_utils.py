@@ -16,11 +16,19 @@ def _get_ascend_sfa_indexer_backend(_self):
     return AscendSFAIndexerBackend
 
 
+def _bind_kv_cache_to_layers_ascend(kv_caches, forward_context, num_attn_module=1, kv_cache_groups=None):
+    # Upstream main binds layers from `init_kv_cache`; each layer's
+    # `bind_kv_cache` squeezes a single tensor, but Ascend keeps K/V (+scale)
+    # component tuples per layer, so route through the Ascend binder.
+    bind_kv_cache(kv_caches, forward_context, [], num_attn_module, kv_cache_groups=kv_cache_groups)
+
+
 DeepseekV32IndexerCache.get_attn_backend = _get_ascend_sfa_indexer_backend
 vllm.v1.worker.gpu.attn_utils._allocate_kv_cache = _allocate_kv_cache
 vllm.v1.worker.gpu.attn_utils._reshape_kv_cache = _reshape_kv_cache_v2
 if not vllm_version_is("0.28.0"):
     # vLLM #51718 made this the live allocation symbol used by init_kv_cache.
     vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
+    vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = _bind_kv_cache_to_layers_ascend
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

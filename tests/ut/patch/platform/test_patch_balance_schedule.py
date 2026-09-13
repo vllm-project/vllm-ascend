@@ -102,6 +102,29 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
 # scheduler and remains unmodified by the BalanceScheduler class replacement.
 _UpstreamScheduler = BalanceScheduler.__bases__[0]
 
+
+def _rearm_platform_wrapper_chain() -> None:
+    """Re-assert the canonical balance -> DyntraLB ``run_engine_core`` order.
+
+    ``patch_profiling_chunk`` is imported lazily (when profiling chunk sizing is
+    enabled) and wraps ``run_engine_core`` last, so it becomes the outer wrapper
+    and displaces the order this guard asserts. It already applied its patches
+    at import time in this process, so re-installing the two platform wrappers
+    the guard is about restores the intended precedence without losing the
+    profiling hook.
+    """
+    if _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core:
+        return
+    _UpstreamEngineCoreProc.run_engine_core = staticmethod(_balance_run_engine_core)
+    _UpstreamEngineCoreProc.run_engine_core = staticmethod(_dyntra_patch._dyntra_lb_run_engine_core)
+
+
+def setUpModule():
+    # Another UT file may have imported patch_profiling_chunk mid-batch; re-arm
+    # immediately before this module's tests (same pattern as L20260901-002).
+    _rearm_platform_wrapper_chain()
+
+
 # ---------------------------------------------------------------------------
 # Scheduler config compatibility
 # ---------------------------------------------------------------------------

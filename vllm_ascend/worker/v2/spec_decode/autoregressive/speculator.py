@@ -448,40 +448,83 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             mm_inputs,
         )
 
-    def _build_draft_attn_metadata(  # type: ignore[misc]
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
-        num_query_per_req: int = 1,
-        causal: bool = True,
-        query_start_loc_np: np.ndarray | None = None,
-    ) -> dict[str, Any] | None:
-        assert self.input_batch is not None
-        with build_draft_attn_metadata_factory(
-            self.input_buffers.positions,
-            num_tokens_padded,
-            torch.from_numpy(self.input_batch.is_prefilling_np),
-        ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
+    if vllm_version_is("0.28.0"):
+
+        def _build_draft_attn_metadata(  # type: ignore[misc]
+            self,
+            num_reqs: int,
+            num_reqs_padded: int,
+            num_tokens_padded: int,
+            seq_lens_cpu_upper_bound: torch.Tensor,
+            step: int,
+            num_query_per_req: int = 1,
+            causal: bool = True,
+            query_start_loc_np: np.ndarray | None = None,
+        ) -> dict[str, Any] | None:
+            assert self.input_batch is not None
+            with build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
                 num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-                query_start_loc_np=query_start_loc_np,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ):
+                attn_metadata = super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    num_query_per_req,
+                    causal,
+                    query_start_loc_np=query_start_loc_np,
+                )
+            if attn_metadata is not None:
+                # Ascend-specific: force DecodeOnly attention state for the draft model.
+                for metadata in attn_metadata.values():
+                    if metadata is None:
+                        continue
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
+            return attn_metadata
+
+    else:
+        # Upstream renamed `_build_draft_attn_metadata` to `_build_attn_metadata`
+        # and routes `_build_uniform_attn_metadata` through it, so the Ascend
+        # wrapper (factory context + forced DecodeOnly state) must live on the
+        # new method or those callers capture a non-TND draft layout.
+        def _build_attn_metadata(  # type: ignore[misc]
+            self,
+            num_reqs: int,
+            batch_desc: BatchExecutionDescriptor,
+            query_start_loc_np: np.ndarray,
+            seq_lens_cpu_upper_bound: torch.Tensor,
+            step: int,
+            causal: bool = True,
+            dcp_local_seq_lens: torch.Tensor | None = None,
+        ) -> dict[str, Any] | None:
+            assert self.input_batch is not None
+            num_tokens = (
+                batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
             )
-        if attn_metadata is not None:
-            # Ascend-specific: force DecodeOnly attention state for the draft model.
-            for metadata in attn_metadata.values():
-                if metadata is None:
-                    continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
-        return attn_metadata
+            with build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ):
+                attn_metadata = super()._build_attn_metadata(  # type: ignore[attr-defined]
+                    num_reqs,
+                    batch_desc,
+                    query_start_loc_np,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+            if attn_metadata is not None:
+                # Ascend-specific: force DecodeOnly attention state for the draft model.
+                for metadata in attn_metadata.values():
+                    if metadata is None:
+                        continue
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
+            return attn_metadata
 
     def build_draft_attn_metadatas(
         self,

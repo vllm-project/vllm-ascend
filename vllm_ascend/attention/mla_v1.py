@@ -73,7 +73,7 @@ BUILD_METADATA_STEP_DECODE = 1
 
 def _npu_mla_prolog_v3_no_rope(**kwargs):
     """Call the AscendC MLA prolog with optional RoPE inputs omitted."""
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped, import-not-found]  # noqa: F401, PLC0415
 
     return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
 

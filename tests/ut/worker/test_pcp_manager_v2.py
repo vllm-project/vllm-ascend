@@ -16,6 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# mypy: ignore-errors
+from contextlib import nullcontext
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
@@ -238,16 +240,23 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     local_attn_state = object()
 
     with (
-        # This Triton helper is unrelated to PCP partitioning and has no CPU
-        # implementation. Stub only it; AscendPCPManager.partition_batch and
-        # PCPManager.partition_batch both execute unmocked below.
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
+        # These two Triton helpers exist only on the v0.28.0 PCP partition
+        # path; vLLM main removed them from the module.
+        (
+            patch(
+                "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
+                return_value=None,
+            )
+            if vllm_version_is("0.28.0")
+            else nullcontext()
         ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(2, dtype=torch.int64),
+        (
+            patch(
+                "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+                return_value=torch.zeros(2, dtype=torch.int64),
+            )
+            if vllm_version_is("0.28.0")
+            else nullcontext()
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
@@ -554,13 +563,23 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     input_buffers.seq_lens[0] = 11
 
     with (
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
+        # These two Triton helpers exist only on the v0.28.0 PCP partition
+        # path; vLLM main removed them from the module.
+        (
+            patch(
+                "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
+                return_value=None,
+            )
+            if vllm_version_is("0.28.0")
+            else nullcontext()
         ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(1, dtype=torch.int64),
+        (
+            patch(
+                "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+                return_value=torch.zeros(1, dtype=torch.int64),
+            )
+            if vllm_version_is("0.28.0")
+            else nullcontext()
         ),
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",

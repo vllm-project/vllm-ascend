@@ -9,6 +9,7 @@ import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.utils import vllm_version_is
 
 
 def layer_name(index):
@@ -62,18 +63,22 @@ def make_kvpp_specs():
 
 
 def make_cache_config(specs, num_blocks=3):
+    kv_cache_tensors = []
+    for name, spec in specs.items():
+        tensor_kwargs: dict[str, Any] = {
+            "size": num_blocks * spec.page_size_bytes,
+            "offset": 0,
+            "block_stride": spec.page_size_bytes,
+        }
+        if vllm_version_is("0.28.0"):
+            tensor_kwargs["shared_by"] = [name]
+        else:
+            tensor_kwargs["layers"] = [name]
+            tensor_kwargs["layer_stride"] = spec.page_size_bytes
+        kv_cache_tensors.append(KVCacheTensor(**tensor_kwargs))
     return KVCacheConfig(
         num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                layers=[name],
-                offset=0,
-                layer_stride=spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
-            )
-            for name, spec in specs.items()
-        ],
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=list(specs),

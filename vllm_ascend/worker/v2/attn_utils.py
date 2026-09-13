@@ -925,6 +925,41 @@ def allocate_kv_cache_main(
     )
 
 
+class _AscendKVCacheTuple(tuple):
+    """Tuple of KV-cache component views exposing the first view's ``device``.
+
+    Upstream `GPUModelRunner.initialize_kv_cache` keeps only entries whose
+    ``.device`` matches the runner device. Ascend stores K/V (and optional
+    scale/state) components as a tuple per layer, so re-expose the device.
+    """
+
+    __slots__ = ()
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+class _AscendKVCacheList(list):
+    """List form of `_AscendKVCacheTuple` (Mamba/DSV4 split state views)."""
+
+    __slots__ = ()
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+def _ascend_kv_cache_value(cache: Any) -> Any:
+    if isinstance(cache, torch.Tensor):
+        return cache
+    if isinstance(cache, tuple):
+        return _AscendKVCacheTuple(cache)
+    if isinstance(cache, list):
+        return _AscendKVCacheList(cache)
+    return cache
+
+
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
@@ -1173,7 +1208,7 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
-    return kv_caches
+    return {name: _ascend_kv_cache_value(cache) for name, cache in kv_caches.items()}
 
 
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator

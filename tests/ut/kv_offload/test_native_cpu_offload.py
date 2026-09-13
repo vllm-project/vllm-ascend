@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -33,16 +34,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_co
     AscendOffloadingConnectorWorker,
     _canonicalize_split_cache,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
+    group_kwargs: dict[str, Any] = {
+        "tokens_per_block": 16,
+        "layer_names": ("model.layers.0.self_attn",),
+    }
+    if not vllm_version_is("0.28.0"):
+        group_kwargs["group_id"] = 0
     return OffloadingConfig(
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block=16,
-                layer_names=("model.layers.0.self_attn",),
-            ),
-        ),
+        groups=(OffloadingGroupConfig(**group_kwargs),),
         worker_kv_bytes_per_block=64,
         enable_kv_cache_events=False,
         extra_config=extra_config,
@@ -78,7 +81,10 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert spec.num_blocks == 10
+    if vllm_version_is("0.28.0"):
+        assert spec.num_blocks == 10  # type: ignore[attr-defined]
+    else:
+        assert spec.num_chunks == 10  # type: ignore[attr-defined]
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 

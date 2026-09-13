@@ -29,7 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -443,6 +442,16 @@ class NPUModelRunner(GPUModelRunner):
 
         dcp_local_seq_lens = None
         if self.use_dcp:
+            # vLLM main renamed this helper and made it return the padded view;
+            # it still fills `dcp_local_seq_lens` in place, so keep slicing.
+            if vllm_version_is("0.28.0"):
+                from vllm.v1.worker.gpu.cp_utils import (  # type: ignore[import-not-found]
+                    prepare_dcp_local_seq_lens,
+                )
+            else:
+                from vllm.v1.worker.gpu.cp_utils import (  # type: ignore[import-not-found]
+                    maybe_prepare_dcp_local_seq_lens as prepare_dcp_local_seq_lens,
+                )
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,

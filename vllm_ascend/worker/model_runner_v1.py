@@ -1381,7 +1381,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
+        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -1539,7 +1539,8 @@ class NPUModelRunner(GPUModelRunner):
             self.positions[:total_num_scheduled_tokens],
         )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        use_xdrope = vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0
+        if self.use_async_spec_decode and (self.uses_mrope or use_xdrope):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
@@ -1727,16 +1728,17 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
-            for value in (
-                cu_num_draft_tokens,
-                cu_num_sampled_tokens,
-                logits_indices,
-                target_logits_indices,
-                bonus_logits_indices,
-            )
+        cpu_values = (
+            cu_num_draft_tokens,
+            cu_num_sampled_tokens,
+            logits_indices,
+            target_logits_indices,
+            bonus_logits_indices,
         )
+        if getattr(self, "pin_memory", False):
+            cpu_metadata = tuple(torch.from_numpy(value).pin_memory() for value in cpu_values)
+        else:
+            cpu_metadata = tuple(torch.from_numpy(value) for value in cpu_values)
         (
             cu_num_draft_tokens,
             cu_num_sampled_tokens,
@@ -3896,7 +3898,7 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
+            elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]

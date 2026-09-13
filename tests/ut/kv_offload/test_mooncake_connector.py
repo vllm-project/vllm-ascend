@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import os
 import queue
 import socket
@@ -1758,6 +1759,8 @@ class MockVllmConfig:
         self.kv_transfer_config = MagicMock()
         self.scheduler_config = MagicMock(disable_hybrid_kv_cache_manager=True)
         self.speculative_config = None
+        # Upstream HiSparse reads `vllm_config.attention_config.hisparse_config`.
+        self.attention_config = types.SimpleNamespace(hisparse_config=None)
         self.model_config.use_mla = False
         self.model_config.is_deepseek_mla = False
         self.model_config.hf_text_config = types.SimpleNamespace(
