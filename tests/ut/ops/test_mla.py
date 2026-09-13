@@ -143,7 +143,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.write_cache = MagicMock(side_effect=lambda *args, **kwargs: calls.append("write_cache"))
         expected_topk = torch.zeros(2, 2048, dtype=torch.int32)
 
-        def _select(*args):
+        def _select(*args, **kwargs):
             calls.append("select")
             return expected_topk
 
@@ -159,11 +159,12 @@ class TestAscendSFAIndexerBackend(TestBase):
             patch(
                 "vllm_ascend.device.device_op.DeviceOperator.indexer_select_post_process",
                 side_effect=_select,
-            ),
+            ) as select,
         ):
             result = indexer.forward(hidden_states, q_c, k_hidden_states, indexer_metadata)
 
         self.assertIs(result, expected_topk)
+        self.assertIs(select.call_args.kwargs["return_selected_scores"], False)
         # The write completes before the selection kernel reads the cache.
         self.assertEqual(calls, ["forward_k", "write_cache", "select"])
         indexer.forward_k.assert_called_once_with(
@@ -200,8 +201,6 @@ class TestAscendSFAIndexerBackend(TestBase):
             result = indexer.forward(
                 torch.zeros(2, 32),
                 torch.zeros(2, 16),
-                MagicMock(name="cos"),
-                MagicMock(name="sin"),
                 torch.zeros(2, 32),
                 indexer_metadata,
                 return_selected_scores=True,
@@ -363,15 +362,20 @@ class TestIndexerWrapper(TestBase):
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
         wrapper("hidden", "q_c", "k_hidden", "meta", False)
-        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False)
-
-        wrapper.impl.reset_mock()
-        wrapper("hidden", "q_c", "cos", "sin", "k_hidden", "meta", return_selected_scores=True)
         wrapper.impl.assert_called_once_with(
             "hidden",
             "q_c",
-            "cos",
-            "sin",
+            "k_hidden",
+            "meta",
+            False,
+            return_selected_scores=False,
+        )
+
+        wrapper.impl.reset_mock()
+        wrapper("hidden", "q_c", "k_hidden", "meta", return_selected_scores=True)
+        wrapper.impl.assert_called_once_with(
+            "hidden",
+            "q_c",
             "k_hidden",
             "meta",
             True,
