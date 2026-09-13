@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -7,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.utils import vllm_version_is
@@ -20,12 +23,69 @@ def _make_runner(need_timing: bool = True):
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(additional_config={})
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
+
+
+@pytest.mark.parametrize("shared_storage", [False, True])
+@pytest.mark.parametrize("kernel_blocks_per_block", [1, 2])
+def test_initialized_kv_cache_copies_attention_and_mamba_views(shared_storage, kernel_blocks_per_block):
+    num_blocks = 4
+    # Include separate K/V, mixed-dtype Mamba states, and a tensor-only cache.
+    shapes = [(num_blocks * kernel_blocks_per_block, 2)] * 2 + [(num_blocks, 3)] * 3
+    dtypes = [torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.float32, torch.bfloat16]
+    sizes = [int(np.prod(shape)) * torch.empty((), dtype=dtype).element_size() for shape, dtype in zip(shapes, dtypes)]
+    raw = torch.zeros(sum(sizes), dtype=torch.uint8)
+    views = []
+    offset = 0
+    for shape, dtype, size in zip(shapes, dtypes, sizes):
+        backing = raw[offset : offset + size] if shared_storage else torch.zeros(size, dtype=torch.uint8)
+        cache = backing.view(dtype).view(shape)
+        cache.copy_(torch.arange(cache.numel()).view(shape))
+        views.append(cache)
+        offset += size
+    key, value, conv, ssm, hidden = views
+    layer_caches = [(key, value), [conv, ssm], hidden, (key, value)]
+    original = [cache.clone() for cache in views]
+    runner_caches = list(layer_caches)
+    runner = _make_runner()
+    runner.pcp_manager = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+
+    def initialize(_config):
+        runner.kv_caches = runner_caches
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", side_effect=initialize),
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+    ):
+        runner.initialize_kv_cache(runner.kv_cache_config)
+
+    assert runner.kv_caches is runner_caches
+    assert isinstance(layer_caches[0], tuple)
+    assert isinstance(layer_caches[1], list)
+    assert all(actual is expected for actual, expected in zip(runner.kv_caches, [*views, key, value], strict=True))
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens_np=np.array([8]),
+        prefill_len=SimpleNamespace(np=np.array([6])),
+        num_computed_prefill_tokens=np.zeros(1, dtype=np.int64),
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    # Chained copies also catch copying an aliased view more than once.
+    scheduler_output.kv_cache_block_copies = [KVCacheBlockCopy(0, 1), KVCacheBlockCopy(1, 2)]
+    runner.update_requests(scheduler_output)
+
+    np.testing.assert_array_equal(runner.req_states.num_computed_prefill_tokens, [6])
+    for cache, before in zip(views, original):
+        expected = before.reshape(num_blocks, -1).clone()
+        expected[[1, 2]] = before.reshape(num_blocks, -1)[[0, 1]]
+        torch.testing.assert_close(cache.reshape(num_blocks, -1), expected)
 
 
 def test_execute_model_records_profiling_time():
