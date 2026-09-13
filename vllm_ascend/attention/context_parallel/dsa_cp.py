@@ -42,7 +42,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import enable_dsa_cp_full_o_proj
+from vllm_ascend.utils import enable_dsa_cp_full_o_proj, is_950
 from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -1946,13 +1946,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         num_tokens = local_attn_output.shape[0]
+        # Ascend950 tiling rejects negate_sin=True (#16134); -sin is equivalent.
+        negate_sin = not is_950()
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
-            cp_metadata.local_sin[layer_name],
+            cp_metadata.local_sin[layer_name] if negate_sin else -cp_metadata.local_sin[layer_name],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         if self.tp_size == 1 or skip_all_to_all:
