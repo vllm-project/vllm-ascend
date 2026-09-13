@@ -303,12 +303,6 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
             torch.float16,
             (128, 1),
         ),
-        (
-            AscendDeviceType.A5,
-            torch.float8_e4m3fn,
-            torch.float32,
-            (128, 1, 132),
-        ),
     ],
 )
 def test_mrv2_initializes_dsv4_cache_only_layer(

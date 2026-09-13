@@ -87,11 +87,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         else 1
     )
 
-    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-        c8_k_cache_dtype = torch.float8_e4m3fn
+    c8_k_cache_dtype = get_kv_cache_torch_dtype(vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config)
+    if c8_k_cache_dtype == torch.float8_e4m3fn:
         c8_k_scale_cache_dtype = torch.float32
-    else:
-        c8_k_cache_dtype = torch.int8
+    elif c8_k_cache_dtype == torch.int8:
         c8_k_scale_cache_dtype = torch.float16
 
     for layer_name, attn_module in attn_layers.items():
@@ -1148,9 +1147,7 @@ def _reshape_kv_cache_v2(
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
                 k_dtype = (
-                    torch.float8_e4m3fn
-                    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-                    else torch.int8
+                    get_kv_cache_torch_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
                 )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)

@@ -107,8 +107,12 @@ templates:
       - --cp-kv-cache-interleave-size
       - "128"
       - --enforce-eager
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
@@ -163,8 +167,12 @@ templates:
       - --cp-kv-cache-interleave-size
       - "128"
       - --enforce-eager
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
@@ -220,8 +228,12 @@ templates:
       - "128"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
@@ -277,8 +289,12 @@ templates:
       - "128"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization

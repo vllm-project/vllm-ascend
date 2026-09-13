@@ -12,6 +12,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -720,11 +721,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
                 self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
+            elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:

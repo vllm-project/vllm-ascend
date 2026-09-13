@@ -116,6 +116,8 @@ templates:
       - "ascend"
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
@@ -168,6 +170,8 @@ templates:
       - "ascend"
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
@@ -206,6 +210,8 @@ templates:
       - --async-scheduling
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -261,6 +267,8 @@ templates:
       - --async-scheduling
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"

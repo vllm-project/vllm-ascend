@@ -88,6 +88,8 @@ templates:
       - --trust-remote-code
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --tokenizer-mode
       - "deepseek_v4"
       - --tool-call-parser
@@ -135,6 +137,8 @@ templates:
       - --async-scheduling
       - --block-size
       - "32"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --no-enable-prefix-caching
       - --no-disable-hybrid-kv-cache-manager
       - --model-loader-extra-config

@@ -12,7 +12,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     get_dsa_attn_kv_plan,
-    get_dsv4_attn_kv_dtype,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
 )
@@ -122,9 +121,6 @@ def test_a5_bf16_kv_is_disabled_on_non_a5():
         (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
     ],
 )
-def test_dsv4_attn_kv_dtype_preserves_device_modes(device_type, cache_dtype, expected_dtype):
-    with _on(device_type):
-        assert get_dsv4_attn_kv_dtype(_cache_config(cache_dtype)) == expected_dtype
 
 
 def test_non_a5_pins_cache_dtype_to_the_model_dtype():

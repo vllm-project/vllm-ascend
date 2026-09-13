@@ -187,6 +187,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -263,6 +264,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -333,6 +335,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -391,6 +394,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -457,6 +461,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -520,6 +525,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -760,6 +766,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -831,6 +838,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -929,6 +937,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -993,6 +1002,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -1200,6 +1210,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
@@ -1276,6 +1287,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
