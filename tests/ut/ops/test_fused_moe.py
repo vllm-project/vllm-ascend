@@ -348,18 +348,29 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
 
 
 @pytest.mark.parametrize(
-    "moe_comm_type, is_sequence_parallel, expected",
+    "moe_comm_type, is_sequence_parallel",
     [
-        (MoECommType.ALLTOALL, False, True),
-        (MoECommType.MC2, False, True),
-        (MoECommType.FUSED_MC2, False, True),
-        (MoECommType.ALLGATHER, False, False),
-        (MoECommType.ALLGATHER, True, True),
+        (MoECommType.ALLTOALL, False),
+        (MoECommType.MC2, False),
+        (MoECommType.FUSED_MC2, False),
+        (MoECommType.ALLGATHER, False),
+        (MoECommType.ALLGATHER, True),
     ],
 )
-def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_parallel, expected):
+def test_runner_reduction_contract_is_comm_method_independent(monkeypatch, moe_comm_type, is_sequence_parallel):
+    # The reduction contract must be identical for every MoE comm method:
+    # MoERunner.forward() evaluates this property OUTSIDE the MoE custom op,
+    # so torch.compile bakes its value during the profile run (compiled at
+    # max_num_batched_tokens) while the comm method inside the custom op
+    # follows the live per-batch context. A comm-method-dependent contract
+    # therefore disagreed with the method actually executed. The live
+    # moe_comm_type is still monkeypatched here to prove it is no longer
+    # consulted.
     runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
+    runner.moe_config = SimpleNamespace(
+        is_sequence_parallel=is_sequence_parallel,
+        skip_final_all_reduce=False,
+    )
     runner.ascend_shared_experts = SimpleNamespace(
         parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP)
     )
@@ -371,8 +382,24 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
     )
 
     assert runner.use_dp_chunking is False
-    assert runner._fused_output_is_reduced is expected
+    assert runner._fused_output_is_reduced is True
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
+
+
+@pytest.mark.parametrize(
+    ("skip_final_all_reduce", "expected"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_runner_reduction_contract_honors_skip_final_all_reduce(skip_final_all_reduce, expected):
+    # Layers that explicitly requested a downstream-fused all-reduce
+    # (FusedMoE(..., reduce_results=False)) keep the late-AR contract.
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.moe_config = SimpleNamespace(skip_final_all_reduce=skip_final_all_reduce)
+
+    assert runner._fused_output_is_reduced is expected
 
 
 @pytest.mark.parametrize(
