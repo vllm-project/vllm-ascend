@@ -819,7 +819,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     # vLLM #50514 validates and relays the model's existing PP aux payload.
     supports_aux_hidden_states_over_pp = True
     AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
-    decoder_layer_cls = DeepseekV2DecoderLayer
+    decoder_layer_cls: type[DeepseekV2DecoderLayer] = DeepseekV2DecoderLayer
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

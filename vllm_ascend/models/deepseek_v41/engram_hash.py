@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from sympy import isprime
+from sympy import isprime  # type: ignore[import-untyped]
 
 _HISTORY_SLAB_MIN_TOKENS = 16
 _PAGE_WRITE_NUMPY_MIN_TOKENS = 16
@@ -56,7 +56,7 @@ def build_compressed_token_map(tokenizer) -> tuple[list[int], int]:
     beyond bounds
     checking, because every hash multiplier is derived from it.
     """
-    from tokenizers import Regex, normalizers
+    from tokenizers import Regex, normalizers  # type: ignore[import-untyped]
 
     # a private-use char, so a token that is exactly one space survives Strip() instead
     # of
@@ -144,7 +144,8 @@ class EngramLayout:
         if not layer_ids:
             return None
         max_ngram_size, n_heads = args.engram_max_ngram_size, args.engram_n_heads
-        primes, seen = [], set()
+        primes = []
+        seen: set[int] = set()
         for _ in layer_ids:
             per_ngram = []
             for _ in range(max_ngram_size - 1):
@@ -175,6 +176,8 @@ class PagedNgramHistory:
 
     def __init__(self, config, tokenizer):
         layout = EngramLayout.from_args(config)
+        if layout is None:
+            raise ValueError("PagedNgramHistory requires at least one Engram layer")
         token_map, vocab_size = build_compressed_token_map(tokenizer)
         if vocab_size != config.engram_compressed_vocab_size:
             raise ValueError(f"Engram compressed vocabulary mismatch: {vocab_size}")
@@ -191,7 +194,7 @@ class PagedNgramHistory:
         self.offsets = sizes.cumsum(-1) - sizes
         self.multipliers = compute_hash_multipliers(layout.layer_ids, layout.max_ngram_size, vocab_size)
         self.lookback = layout.max_ngram_size
-        self.pages = {}
+        self.pages: dict[int, torch.Tensor] = {}
 
     def update(self, input_ids, positions, request_ids, block_table, block_size):
         """All arguments are CPU tensors; page numbers come from full SWA KV."""
@@ -221,7 +224,7 @@ class PagedNgramHistory:
                     self.pages[page] = torch.full((block_size,), -1, dtype=torch.int64, device="cpu")
                 self.pages[page][position % block_size] = token
         else:
-            page_views = {}
+            page_views: dict[int, np.ndarray] = {}
             for token, position, page in zip(compressed_list, position_list, page_indices):
                 view = page_views.get(page)
                 if view is None:

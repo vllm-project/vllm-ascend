@@ -198,7 +198,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def _cache_hit_alignment_tokens(self) -> int:
         if self.enable_partial_hash_hits:
             return self.hash_block_size
-        return self.scheduler_block_size or self.lcm_block_size
+        alignment = self.scheduler_block_size or self.lcm_block_size
+        assert alignment is not None
+        return alignment
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
@@ -232,6 +234,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             else:
                 self.attention_groups.append(SpecGroup(spec, [i], manager_cls, use_eagle))
 
+        self.full_attention_group_id: int | None
         if not self.attention_groups:
             self.full_attention_group_id = None
             self.lcm_block_size = self.scheduler_block_size
@@ -246,9 +249,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # so any group reporting a longer per-group hit implies the union of
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
-        self.full_attention_group_id: int | None = (
-            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
-        )
+        self.full_attention_group_id = first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
 
         # Propagate the eagle bit to every manager in an eagle-containing
         # attention group, mirroring upstream

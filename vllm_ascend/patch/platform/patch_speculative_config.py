@@ -95,7 +95,7 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
         uses_released_name = root_model_type == "deepseek_v41" or text_model_type == "deepseek_v41_text"
         normalized_model_type = "deepseek_v41" if uses_released_name else "deepseek_v4.1"
     else:
-        normalized_model_type = root_model_type
+        normalized_model_type = str(root_model_type)
     hf_config.update(
         {
             "architectures": [architecture],

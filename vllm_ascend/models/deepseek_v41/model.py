@@ -283,7 +283,7 @@ class DeepseekV41Attention(DeepseekV4Attention):
         block_size = vllm_config.cache_config.block_size
         if block_size <= 0 or block_size % 2:
             raise ValueError("V4.1 logical block_size must be a positive multiple of two")
-        owned = []
+        owned: list[str] = []
         if role.is_kv_source:
             owned.extend((f"{prefix}.long_kv_cache", f"{prefix}.indexer.k_cache"))
             if role.compress_ratio == 2:
@@ -660,7 +660,7 @@ class DeepseekV41Model(DeepseekV4Model):
 class AscendDeepseekV41ForCausalLM(AscendDeepseekV4ForCausalLM):
     model_cls = DeepseekV41Model
     requires_raw_input_tokens = True
-    _DEFERRED_WEIGHT_MARKERS = ()
+    _DEFERRED_WEIGHT_MARKERS: tuple[str, ...] = ()
     _DEFERRED_WEIGHT_PREFIXES = ("aligner.", "vision.", "image_", "mtp.")
 
     def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None):
@@ -693,7 +693,7 @@ class AscendDeepseekV41ForCausalLM(AscendDeepseekV4ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if not get_ascend_config().enable_engram:
             return super().load_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
-        engram_loaded = set()
+        engram_loaded: set[str] = set()
 
         def milestone_weights() -> Iterator[tuple[str, torch.Tensor]]:
             for name, tensor in weights:

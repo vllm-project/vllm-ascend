@@ -931,7 +931,8 @@ def parse_message_from_completion_text(text: str, thinking_mode: str) -> dict[st
         Dict with keys: "role", "content", "reasoning_content", "tool_calls".
         tool_calls are in OpenAI format.
     """
-    summary_content, reasoning_content, tool_calls = "", "", []
+    summary_content, reasoning_content = "", ""
+    tool_calls: list[dict[str, Any]] = []
     index, stop_token = 0, None
     tool_calls_start_token = f"\n\n<{dsml_token}{tool_calls_block_name}"
 

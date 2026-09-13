@@ -21,7 +21,7 @@ def thinking_enabled(kwargs):
 def get_deepseek_v41_tokenizer(tokenizer):
     wrapped = copy.copy(tokenizer)
 
-    class _DeepseekV41Tokenizer(tokenizer.__class__):
+    class _DeepseekV41Tokenizer(tokenizer.__class__):  # type: ignore[name-defined]
         def apply_chat_template(self, messages, tools=None, **kwargs):
             # Keep original content blocks: vLLM's flattened conversation loses
             # reference separators, image positions and reasoning_content.

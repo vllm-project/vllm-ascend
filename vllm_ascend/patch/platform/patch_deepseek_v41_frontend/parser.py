@@ -28,8 +28,8 @@ def convert_arguments(raw_args, partial):
             raise ValueError(f"Duplicate V4.1 tool parameter: {name}")
         params[name] = value if string == "true" else json.loads(value)
         end = match.end()
-    if partial and (match := PARTIAL_PARAMETER_PATTERN.search(raw_args, end)):
-        name, string, value = match.groups()
+    if partial and (partial_match := PARTIAL_PARAMETER_PATTERN.search(raw_args, end)):
+        name, string, value = partial_match.groups()
         if string == "true":
             params[name] = value
         else:
