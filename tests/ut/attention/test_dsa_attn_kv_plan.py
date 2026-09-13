@@ -113,14 +113,6 @@ def test_a5_bf16_kv_is_disabled_on_non_a5():
         assert not is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
 
 
-@pytest.mark.parametrize(
-    ("device_type", "cache_dtype", "expected_dtype"),
-    [
-        (AscendDeviceType.A3, "auto", torch.bfloat16),
-        (AscendDeviceType.A5, "bfloat16", torch.bfloat16),
-        (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
-    ],
-)
 def test_non_a5_pins_cache_dtype_to_the_model_dtype():
     with _on(AscendDeviceType.A3):
         for launch in ("auto", "bfloat16", "fp8"):
