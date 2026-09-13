@@ -75,7 +75,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         def should_share(eagle, flag, draft, target):
             # Non-owning PP ranks expose embed / lm_head as PPMissingLayer
             # (no ``weight``). Keep the draft's own copy instead of sharing.
-            if flag == "has_own_embed_tokens":
+            if flag == "has_own_embed_tokens" and draft is not None and hasattr(draft, "weight"):
                 return False
             if target is not None and not hasattr(target, "weight"):
                 return False

@@ -50,15 +50,15 @@ if not vllm_version_is("0.28.0"):
             num_query_per_req = getattr(self, "num_query_per_req", 1)
         if query_start_loc_np is None:
             query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
-        # The legacy `_build_draft_attn_metadata` always handed the caller's
-        # `num_tokens_padded` to `build_attn_metadata`. The new
-        # `_build_attn_metadata` only reads `batch_desc.num_tokens` when
-        # `cg_mode == FULL` (PIECEWISE derives it from `query_start_loc_np[-1]`,
-        # which shrinks the token count under request padding). Describe the
-        # descriptor as FULL so the padded layout captured by the draft graph is
-        # preserved for every legacy caller.
+            # Uniform layout is used by the FULL-graph decode path: keep the
+            # captured padded token count (`num_tokens_padded`).
+            cg_mode = CUDAGraphMode.FULL
+        else:
+            # Non-uniform layout (e.g. draft prefill under PCP) must derive the
+            # token count from the caller's query layout, not the padded count.
+            cg_mode = CUDAGraphMode.PIECEWISE
         batch_desc = BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.FULL,
+            cg_mode=cg_mode,
             num_tokens=num_tokens_padded,
             num_reqs=num_reqs_padded,
         )
