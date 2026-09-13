@@ -381,7 +381,12 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
+        adaptive_verification = self.adaptive_verification if num_draft_tokens_per_req is not None else None
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        if adaptive_verification is not None:
+            num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification.compact_batch(
+                num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
+            )
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -393,20 +398,14 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
-
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
+        if adaptive_verification is not None:
+            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification.reallocate_drafts(
+                req_ids, idx_mapping
+            )
+            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -721,59 +720,6 @@ class NPUModelRunner(GPUModelRunner):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
-
-    def _pad_query_start_loc_for_fia(
-        self,
-        num_tokens_padded: int,
-        num_reqs_padded: int,
-        num_reqs: int,
-        query_start_loc_np: np.ndarray,
-        cudagraph_runtime_mode: CUDAGraphMode | None = None,
-        batch_desc_num_reqs: int | None = None,
-    ) -> tuple[np.ndarray, int]:
-        """
-        This function is only designed to satisfied the constraint that when the layout is TND,
-        the first dimension of `hidden_states` must equal the last element of `actual_seq_lengths_q`.
-        """
-        # TODO: need refactor later, related to vllm PR #34043 this pr delete func
-        # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
-        # This checks query lengths, not request phase: short prefills can also
-        # match. Graph dispatch is responsible for excluding incompatible prefills.
-        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
-        matches_uniform_decode_graph_shape = (
-            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
-        )
-        if (
-            cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-            and not matches_uniform_decode_graph_shape
-        ):
-            num_reqs_padded = num_reqs
-        else:
-            # Preserve the captured request shape for uniform decode graphs.
-            # GDN full graphs capture metadata at request granularity, so
-            # collapsing all padded tokens into one request changes the graph
-            # topology between capture and replay.
-            num_reqs_padded = descriptor_num_reqs
-
-        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
-            # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
-            assert num_reqs <= num_reqs_padded
-
-            last_loc = query_start_loc_np[num_reqs]
-            query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
-            )
-        else:
-            # Mixed-batch case: num_reqs must equal num_reqs_padded
-            assert num_reqs == num_reqs_padded
-
-            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
-            query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
-            num_reqs_padded = num_reqs_padded + 1
-
-        return query_start_loc_np, num_reqs_padded
 
 
 @contextmanager
