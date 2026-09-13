@@ -107,6 +107,18 @@ def setup_moe_comm_method(moe_config):
 
 def activate_moe_comm_method(moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig) -> MoECommMethod:
     """Bind the communication implementation matching the active MoE layer."""
+    matching_methods = [
+        method for (comm_type, _), method in _MoECommMethodsByConfig.items() if comm_type == moe_comm_type
+    ]
+    if len(matching_methods) <= 1:
+        # Keep the upstream singleton path unchanged for ordinary models. In
+        # particular, mutating the forward context from inside a compiled MoE
+        # forward changes 310P ModelRunner V2 graph behavior. Per-layer
+        # rebinding is only needed when target and draft expert shapes coexist.
+        comm_method = get_moe_comm_method(moe_comm_type)
+        if comm_method is not None:
+            return comm_method
+
     comm_method = get_moe_comm_method(moe_comm_type, moe_config)
     if comm_method is None:
         setup_moe_comm_method(moe_config)

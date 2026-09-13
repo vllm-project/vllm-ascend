@@ -40,3 +40,31 @@ def test_expert_shapes_select_distinct_dispatchers(monkeypatch, ep_size):
             assert comm.activate_moe_comm_method(kind, config) is expected
             assert comm._EXTRA_CTX.moe_comm_method is expected
     assert sum(c.call_count for c in constructors) == 2 * len(kinds)
+
+
+def test_single_shape_keeps_forward_context_binding(monkeypatch):
+    original = SimpleNamespace(owner="forward-context")
+    cached = SimpleNamespace(owner="cached")
+    config = SimpleNamespace(
+        num_experts=128,
+        num_local_experts=128,
+        experts_per_token=8,
+        hidden_dim=4096,
+        intermediate_size_per_partition=1024,
+        ep_size=1,
+        tp_size=1,
+        dp_size=1,
+        pcp_size=1,
+    )
+    key = comm._moe_config_key(config)
+    monkeypatch.setattr(comm, "_MoECommMethods", {MoECommType.ALLGATHER: cached})
+    monkeypatch.setattr(
+        comm,
+        "_MoECommMethodsByConfig",
+        {(MoECommType.ALLGATHER, key): cached},
+    )
+    extra_ctx = SimpleNamespace(moe_comm_method=original)
+    monkeypatch.setattr(comm, "_EXTRA_CTX", extra_ctx)
+
+    assert comm.activate_moe_comm_method(MoECommType.ALLGATHER, config) is cached
+    assert extra_ctx.moe_comm_method is original
