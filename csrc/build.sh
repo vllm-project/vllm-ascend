@@ -74,6 +74,7 @@ else
     DEFAULT_INSTALL_DIR="/usr/local/Ascend/latest"
 fi
 CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
+BUILD_CACHE_DIR="${VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/../build_cache}"
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
@@ -99,6 +100,8 @@ function help_info() {
                 echo "    --experimental         Build experimental version"
                 echo "    --cann_3rd_lib_path=<PATH>"
                 echo "                           Set ascend third_party package install path, default ./third_party"
+                echo "    --build-cache-dir=<PATH>"
+                echo "                           Set local incremental build cache directory"
                 echo "    --oom                  Build with oom mode on the kernel side, with options: '-g --cce-enable-oom'"
                 echo $dotted_line
                 echo "Examples:"
@@ -298,6 +301,7 @@ function help_info() {
     echo "    --cov When building uTest locally, count the coverage."
     echo "    --noexec Only compile ut, do not execute the compiled executable file"
     echo "    --make_clean Clean build artifacts"
+    echo "    --build-cache-dir=<PATH> Set local incremental build cache directory"
     echo "    --disable_asan Disable ASAN (Address Sanitizer)"
     echo "    --valgrind run ut with valgrind. This option will disable asan, noexec and run utest by valgrind"
     echo "    --ops Compile specified operator, use snake name, like: --ops=add,add_lora, use ',' to separate different operator"
@@ -389,8 +393,8 @@ function clean_third_party()
 function cmake_config()
 {
     local extra_option="$1"
-    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} ."
-    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option}
+    log "Info: cmake config generator=${CMAKE_GENERATOR_ARGS[*]:-<default>} ${CUSTOM_OPTION} ${extra_option} build_cache=${BUILD_CACHE_DIR} ."
+    cmake "${CMAKE_GENERATOR_ARGS[@]}" .. ${CUSTOM_OPTION} ${extra_option} -DVLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
 }
 
 function build()
@@ -1162,6 +1166,11 @@ while [[ $# -gt 0 ]]; do
         CANN_3RD_LIB_PATH="$(realpath ${OPTARG#*=})"
         shift
         ;;
+    --build-cache-dir=*)
+        OPTARG=$1
+        BUILD_CACHE_DIR="${OPTARG#*=}"
+        shift
+        ;;
     --oom)
         OOM="true"
         shift
@@ -1172,6 +1181,8 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+BUILD_CACHE_DIR=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "${BUILD_CACHE_DIR}")
+export VLLM_ASCEND_BUILD_CACHE_DIR="${BUILD_CACHE_DIR}"
 set_ut_mode
 
 if [ -n "${vendor_name}" ];then

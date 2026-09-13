@@ -5,7 +5,8 @@
     "runner": "linux-arm64-cpu-16",
     "os": "ubuntu",
     "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12",
-    "soc_version": "ascend910b1"
+    "soc_version": "ascend910b1",
+    "incremental_cache": true
   },
   "a3-arm64-ubuntu": {
     "device": "a3",

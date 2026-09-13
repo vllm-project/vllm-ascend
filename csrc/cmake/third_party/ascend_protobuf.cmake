@@ -8,6 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ----------------------------------------------------------------------------------------------------------
 include(ExternalProject)
+include(${CMAKE_CURRENT_LIST_DIR}/../build_cache.cmake)
 set(PROTOBUF_VERSION_PKG protobuf-25.1.tar.gz)
 set(ASCEND_PROTOBUF_DIR ${CANN_3RD_LIB_PATH}/ascend_protobuf)
 
@@ -44,6 +45,41 @@ else()
     set(protobuf_CXXFLAGS "-Wno-maybe-uninitialized -Wno-unused-parameter -fPIC -fstack-protector-all -D_FORTIFY_SOURCE=2 -D_GLIBCXX_USE_CXX11_ABI=0 -O2 -Dgoogle=ascend_private")
     set(protobuf_LDFLAGS "-Wl,-z,relro,-z,now,-z,noexecstack")
 
+    # Hash the effective build recipe rather than the CMake file text,
+    # so comments and workspace paths do not create false misses.
+    set(
+        _protobuf_build_recipe
+        "CMAKE_INSTALL_LIBDIR=lib"
+        "protobuf_WITH_ZLIB=OFF"
+        "LIB_PREFIX=ascend_"
+        "CMAKE_SKIP_RPATH=TRUE"
+        "protobuf_BUILD_TESTS=OFF"
+        "BUILD_SHARED_LIBS=OFF"
+        "CMAKE_CXX_STANDARD=14"
+        "CMAKE_CXX_FLAGS=${protobuf_CXXFLAGS}"
+        "CMAKE_CXX_LDFLAGS=${protobuf_LDFLAGS}"
+        "protobuf_BUILD_PROTOC_BINARIES=ON"
+        "protobuf_ABSL_PROVIDER=module"
+    )
+
+    vllm_ascend_build_cache_command(
+        _protobuf_build_command
+        DOMAIN third_party
+        UNIT ascend_protobuf_build_transformer
+        OUTPUT_DIR <BINARY_DIR>
+        PREPARED_INPUT <SOURCE_DIR> ${ABSL_SOURCE_DIR}
+        RECIPE_VALUE ${_protobuf_build_recipe}
+        ENVIRONMENT_PROFILE host-cxx
+        ENVIRONMENT_TOOL ${CMAKE_C_COMPILER} ${CMAKE_CXX_COMPILER} ${CMAKE_COMMAND}
+        # CMAKE_COMMAND is a full executable path. PEP 517/uv may recreate the
+        # same CMake version under a different temporary build-environment path
+        # for each editable build. Its semantic identity is already captured by
+        # compiler_environment_hash, so keep the physical path out of recipe_hash.
+        NORMALIZE_PATH ${CMAKE_COMMAND}
+        ARTIFACT_INCLUDE "protoc" "*.a"
+        COMMAND ${CMAKE_COMMAND} --build .
+    )
+
     ExternalProject_Add(ascend_protobuf_build_transformer
                         URL ${REQ_URL}
                         DOWNLOAD_DIR ${CANN_3RD_LIB_PATH}/pkg
@@ -67,7 +103,7 @@ else()
                             -DABSL_ROOT_DIR=${ABSL_SOURCE_DIR}
                             <SOURCE_DIR>
                         SOURCE_DIR ${ASCEND_PROTOBUF_SOURCE_DIR}
-                        BUILD_COMMAND ${CMAKE_COMMAND} --build .
+                        BUILD_COMMAND ${_protobuf_build_command}
                         INSTALL_COMMAND ""
                         EXCLUDE_FROM_ALL TRUE
     )
