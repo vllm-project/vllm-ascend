@@ -48,15 +48,6 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     return str(cache_config.cache_dtype).lower() in _BF16_KV_CACHE_DTYPES
 
 
-def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
-    """Return the attention KV dtype while preserving non-A5 behavior."""
-    return (
-        torch.bfloat16
-        if not _supports_dsv4_compressed_cache() or is_a5_bf16_kv_enabled(vllm_config)
-        else torch.float8_e4m3fn
-    )
-
-
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 

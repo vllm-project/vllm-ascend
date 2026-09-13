@@ -755,8 +755,9 @@ class AscendConfig:
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
-        self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
-        self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
+
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
             getattr(kv_transfer_config, "kv_role", None) == "kv_producer"

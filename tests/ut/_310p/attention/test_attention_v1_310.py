@@ -55,6 +55,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
         self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.cache_config.cache_dtype = "float16"
         self.utils_patcher = patch(
             "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
         )
