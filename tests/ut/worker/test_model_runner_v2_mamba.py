@@ -29,6 +29,13 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
 )
 
 
+def _mock_vllm_config():
+    # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
+    config = MagicMock()
+    config.attention_config.indexer_kv_dtype = "int8"
+    return config
+
+
 def _make_kv_cache_tensor(
     size: int,
     layer_names: list[str],
@@ -422,7 +429,7 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     mamba_layer.get_kv_cache_spec.return_value = spec
     mock_get_layers.return_value = {"linear_attn": mamba_layer}
 
-    assert get_kv_cache_spec(MagicMock()) == {"linear_attn": spec}
+    assert get_kv_cache_spec(_mock_vllm_config()) == {"linear_attn": spec}
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
@@ -456,7 +463,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
         "full_attn": FakeAttention(),
     }
 
-    specs = get_kv_cache_spec(MagicMock())
+    specs = get_kv_cache_spec(_mock_vllm_config())
 
     assert list(specs) == ["full_attn", "linear_attn"]
     assert specs["full_attn"].page_size_bytes == 20
@@ -512,7 +519,7 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
         "large_attn": FakeAttention(large_attention_spec),
     }
 
-    specs = get_kv_cache_spec(MagicMock())
+    specs = get_kv_cache_spec(_mock_vllm_config())
 
     assert {spec.page_size_bytes for spec in specs.values()} == {80}
     # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main.

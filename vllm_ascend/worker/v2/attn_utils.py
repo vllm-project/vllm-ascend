@@ -1146,9 +1146,7 @@ def _reshape_kv_cache_v2(
 
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    get_kv_cache_torch_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
+                k_dtype = get_kv_cache_torch_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

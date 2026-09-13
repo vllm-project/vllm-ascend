@@ -329,6 +329,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_vllm_config.cache_config.cache_dtype = "float16"
+        
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )

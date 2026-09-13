@@ -79,12 +79,21 @@ class TestAscendSFAIndexerBackend(TestBase):
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
-        mock_get_hw_profile.return_value.supports.return_value = True
-        indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
-        self.assertTrue(indexer.enable_sparse_li_c8)
-        self.assertEqual(indexer.c8_k_cache_dtype, torch.float8_e4m3fn)
-        self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float32)
+        # The dtype pair is derived from attention_config.indexer_kv_dtype. In UT
+        # processes the worker patch (patch_kv_cache_dtype) is not applied, so fp8
+        # still maps to torch.uint8 here; emulate the worker-side flip to cover the
+        # float8/float32 pair, then exercise the int8/float16 pair via "int8".
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
+        mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "fp8"
+        with patch.dict(STR_DTYPE_TO_TORCH_DTYPE, {"fp8": torch.float8_e4m3fn}):
+            mock_get_hw_profile.return_value.supports.return_value = True
+            indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
+            self.assertTrue(indexer.enable_sparse_li_c8)
+            self.assertEqual(indexer.c8_k_cache_dtype, torch.float8_e4m3fn)
+            self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float32)
+
+        mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
         mock_get_hw_profile.return_value.supports.return_value = False
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
         self.assertEqual(indexer.c8_k_cache_dtype, torch.int8)

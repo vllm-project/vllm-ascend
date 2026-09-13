@@ -262,6 +262,7 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(index_head_dim=128),
@@ -323,6 +324,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -913,8 +915,17 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", allocate)
     assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
-    assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
-    caches = upstream_attn_utils.allocate_kv_cache(
-        make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
-    )
+    if vllm_version_is("0.28.0"):
+        # vLLM #51718 kept the private split entry points on the 0.28.0 lane;
+        # Ascend replaces those instead of installing a public allocate_kv_cache.
+        assert upstream_attn_utils._allocate_kv_cache is patch_attn_utils._allocate_kv_cache
+        assert upstream_attn_utils._reshape_kv_cache is patch_attn_utils._reshape_kv_cache_v2
+        caches = patch_attn_utils.allocate_kv_cache_main(
+            make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+        )
+    else:
+        assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
+        caches = upstream_attn_utils.allocate_kv_cache(
+            make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+        )
     assert_attention_cache_views(caches, raw, packed)
