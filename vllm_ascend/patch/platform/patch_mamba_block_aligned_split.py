@@ -57,7 +57,22 @@ def _mamba_block_aligned_split(
 ) -> int:
     """Preserve PD windows and align sparse index-kpool cache groups."""
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+    # A consumer only needs the unsplit verifier window after some prefix has
+    # already been computed locally or loaded from the connector.  ``kv_both``
+    # also handles cold prefills; bypassing alignment for those requests means
+    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
+    # pool can cache the prefix.
+    has_computed_prefix = (
+        request.num_computed_tokens
+        + num_new_local_computed_tokens
+        + num_external_computed_tokens
+        > 0
+    )
+    if (
+        kv_transfer_config is not None
+        and kv_transfer_config.is_kv_consumer
+        and has_computed_prefix
+    ):
         return num_new_tokens
 
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:

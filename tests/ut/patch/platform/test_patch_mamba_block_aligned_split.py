@@ -113,6 +113,21 @@ def test_pd_consumer_preserves_window_after_external_cache_hit():
     assert result == 8
 
 
+def test_kv_both_cold_prefill_retains_mamba_boundary_split():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True),
+        _request(
+            num_computed_tokens=0,
+            num_prompt_tokens=4800,
+            num_tokens=4800,
+        ),
+        num_new_tokens=4800,
+    )
+
+    # 4800 rounds down to 4608; EAGLE keeps one 384-token verifier block.
+    assert result == 4224
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
