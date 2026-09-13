@@ -47,6 +47,7 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     get_potential_max_tokens,
+    is_950,
     npu_stream_switch,
     oproj_tp_enable,
 )
@@ -201,9 +202,13 @@ def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
 
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
-    """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
+    """Return SparseFlashMLA cmp_ratio.
+
+    ops-transformer SparseFlashMLA only accepts 1/4/128 (default 1 when only
+    ori_kv is used). 0 is not a legal compression ratio.
+    """
     if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
-        return 0
+        return 1
     return max(compress_ratio, 1)
 
 
@@ -606,12 +611,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        kv_plan = get_dsa_attn_kv_plan(vllm_config)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.slot_mapping_shape = (
+            (max_num_batched_tokens, 2) if kv_plan.requires_block_offset_slots else (max_num_batched_tokens,)
+        )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -695,8 +699,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
         self._zero_i32 = torch.tensor([0], device=self.device, dtype=torch.int32)
-        # Note(qcs): we use two dimension slot_mapping for kvcache with shape
-        # [block_nums, block_size, head_num, head_dim]
+        # A5 uses flat physical slots for both FP8 and BF16 KV. Other devices
+        # retain [block_idx, block_offset] mappings for paged cache writes.
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
         self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
 
@@ -1526,8 +1530,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
-            self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
         self,
@@ -1764,14 +1766,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
-
+        # Ascend950 tiling rejects negate_sin=True (#16134); -sin is equivalent.
+        negate_sin = not is_950()
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            sin[:actual_tokens],
+            sin[:actual_tokens] if negate_sin else -sin[:actual_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         # o
