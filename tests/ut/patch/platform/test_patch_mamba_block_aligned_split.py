@@ -187,5 +187,10 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
 
 
 def test_patch_is_registered_with_upstream_signature():
-    assert scheduler_module.Scheduler._mamba_block_aligned_split is _mamba_block_aligned_split
+    registered = scheduler_module.Scheduler._mamba_block_aligned_split
+    # The producer-role companion patch is loaded later and must stay
+    # outermost so this wrapper's sparse-index early-return path observes its
+    # temporary EAGLE-drop override.
+    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
+    assert registered.__wrapped__ is _mamba_block_aligned_split
     assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)
