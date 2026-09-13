@@ -4824,6 +4824,7 @@ class NPUModelRunner(GPUModelRunner):
                                 kv_cache_raw_tensors[layer_name_inner] = (
                                     self._allocate_int8_cache_tensor(k_tensor_size, alignment),
                                 )
+                # 普通Attention kv cache分配分支
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
@@ -4835,6 +4836,37 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
+                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
+                    is_fused_mla = (
+                        isinstance(attn_module, MLAAttention)
+                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
+                        and not use_legacy_shared_by_layout
+                        and self.vllm_config.kv_transfer_config is None
+                        and not self.use_sparse
+                        and not self.sparse_kv_offload_enabled
+                        and not self.use_compress
+                        and not current_sparse_sfa_c8
+                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                        and getattr(current_kv_cache_spec, "model_version", None) is None
+                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
+                        and getattr(attn_module, "indexer", None) is None
+                        and not getattr(attn_module.impl, "fa_quant_layer", False)
+                    )
+                    # 纯MLA在这里分配single raw backing；hybrid MLA使用上方
+                    # standardized shared backing 生成的bare raw tensor。
+                    if is_fused_mla:
+                        for layer_name_inner in shared_layers:
+                            if "attn" not in layer_name_inner or "linear_attn" in layer_name_inner:
+                                continue
+                            # 独立计算raw size，避免复用k_tensor_size和v_tensor_size导致padding部分被越界
+                            fused_raw_size = (
+                                kv_cache_config.num_blocks
+                                * layer_kv_cache_spec[layer_name_inner].page_size_bytes
+                            )
+                            kv_cache_raw_tensors[layer_name_inner] = (
+                                self._allocate_int8_cache_tensor(fused_raw_size, alignment),
+                            )
+                        continue
 
                     # vLLM #51718 packs every layer of a group into a single
                     # KVCacheTensor on main; the per-layer size is the block
@@ -5140,6 +5172,73 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
+                        continue
+
+                    # Fused MLA使用allocate/hybrid阶段的一整块raw backing。
+                    # 这里构造token交错的fused view，再切片出nope/rope；
+                    # MHA/GQA继续走下面的raw K/V协议。当前mla_v1仍按tuple
+                    # 索引访问两个component，因此保留协议兼容的零拷贝切片。
+                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
+                    raw_cache = kv_cache_raw_tensors[layer_name]
+                    fused_raw_tensor = None
+                    if isinstance(raw_cache, tuple) and len(raw_cache) == 1:
+                        maybe_raw_tensor = raw_cache[0]
+                        if isinstance(maybe_raw_tensor, torch.Tensor):
+                            fused_raw_tensor = maybe_raw_tensor
+                    elif isinstance(raw_cache, torch.Tensor):
+                        fused_raw_tensor = raw_cache
+
+                    if (
+                        fused_raw_tensor is not None
+                        and isinstance(attn_module, MLAAttention)
+                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
+                        and self.vllm_config.kv_transfer_config is None
+                        and not self.use_sparse
+                        and not self.sparse_kv_offload_enabled
+                        and not self.use_compress
+                        and not current_sparse_sfa_c8
+                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                        and getattr(current_kv_cache_spec, "model_version", None) is None
+                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
+                        and getattr(attn_module, "indexer", None) is None
+                        and not getattr(attn_module.impl, "fa_quant_layer", False)
+                    ):
+                        dtype = current_kv_cache_spec.dtype
+                        element_size = torch.empty((), dtype=dtype).element_size()
+                        manager_block_size = current_kv_cache_spec.block_size
+                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
+                        kernel_blocks_per_manager = manager_block_size // kernel_block_size
+                        physical_page_bytes = current_kv_cache_spec.page_size_bytes
+                        slot_bytes = physical_page_bytes // kernel_blocks_per_manager
+                        nope_dim, rope_dim = self._get_attention_kv_cache_dims(
+                            layer_name, current_kv_cache_spec
+                        )
+                        fused_dim = nope_dim + rope_dim
+                        typed_raw = fused_raw_tensor.view(dtype)
+                        slot_elements = slot_bytes // element_size
+                        fused_shape = (
+                            kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                            kernel_block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            fused_dim,
+                        )
+                        # 每个kernel slot内按token交错存储[nope|rope]：
+                        # token0[nope|rope], token1[nope|rope], ...。
+                        # 只需要一个fused stride；nope/rope是该view的最后维切片。
+                        fused_cache = torch.as_strided(
+                            typed_raw,
+                            size=fused_shape,
+                            stride=(
+                                slot_elements,
+                                current_kv_cache_spec.num_kv_heads * fused_dim,
+                                fused_dim,
+                                1,
+                            ),
+                            storage_offset=typed_raw.storage_offset(),
+                        )
+                        nope = fused_cache[..., :nope_dim]
+                        rope = fused_cache[..., nope_dim:]
+                        kv_caches[layer_name] = (nope, rope)
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:

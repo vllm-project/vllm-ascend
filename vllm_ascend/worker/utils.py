@@ -122,7 +122,24 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                     continue
                 kv_tuple = static_forward_context[layer_name].kv_cache
                 assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+                kv_tensors = kv_tuple
+                # 过渡兼容协议：mla_v1仍通过kv_cache[0]/[1]访问nope/rope，
+                # reshape只返回普通tuple，fused cache的类型信息在这里已经丢失。
+                # 因此用三个不变量识别token-fused视图：二者slot stride相同、
+                # 共享同一storage、rope正好紧跟每个token的nope之后。component-major
+                # 布局不满足第三个条件，因为其rope位于整个nope区域之后。
+                if (
+                    isinstance(kv_tuple[0], torch.Tensor)
+                    and isinstance(kv_tuple[1], torch.Tensor)
+                    and kv_tuple[0].stride(0) == kv_tuple[1].stride(0)
+                    and kv_tuple[0].untyped_storage().data_ptr() == kv_tuple[1].untyped_storage().data_ptr()
+                    and kv_tuple[1].data_ptr()
+                    == kv_tuple[0].data_ptr() + kv_tuple[0].shape[-1] * kv_tuple[0].element_size()
+                ):
+                    # token-fused MLA只有一个物理slot起点。若从rope再清零一次，
+                    # 起点会向右偏移nope_dim个element，并越过当前manager page。
+                    kv_tensors = (kv_tuple[0],)
+                for kv in kv_tensors:
                     block_dim = 0
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:
