@@ -60,7 +60,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.startup_plan import (
+from vllm_ascend.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
