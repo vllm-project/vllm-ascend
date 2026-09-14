@@ -484,6 +484,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         assert len(runner_kv_caches) == 1
         assert runner_kv_caches[0] is cache_components
     else:
+        assert isinstance(cache_components, attn_utils._DeviceAwareKVCacheList)
         assert cache_components.device == torch.device("cpu")
     assert cache_layer.kv_cache is cache_components
     assert [component.shape for component in cache_components] == [
