@@ -22,6 +22,16 @@ def _make_model_config(vocab_size: int) -> MagicMock:
     return model_config
 
 
+class _PlainTokenizer:
+    """Minimal TokenizerLike: vocab_size/__len__ but no get_vocab_size."""
+
+    def __init__(self, vocab_size: int) -> None:
+        self.vocab_size = vocab_size
+
+    def __len__(self) -> int:
+        return self.vocab_size
+
+
 @pytest.mark.parametrize(
     ("stop_token_ids", "vocab_size", "should_raise"),
     [
@@ -98,10 +108,10 @@ def test_verify_calls_validation(stop_token_ids, allowed_token_ids, match):
 def test_verify_accepts_in_vocab_ids():
     model_config = _make_model_config(129280)
     params = SamplingParams(stop_token_ids=[0, 129279], allowed_token_ids=[1, 2])
-    tokenizer = MagicMock()
-    tokenizer.__len__.return_value = 129280
-    tokenizer.get_vocab_size.return_value = 129280
-    params.verify(model_config, None, None, tokenizer)
+    # The unpatched upstream verify() we delegate to calls
+    # _validate_allowed_token_ids(tokenizer); real tokenizers expose
+    # vocab_size/__len__ but no get_vocab_size().
+    params.verify(model_config, None, None, _PlainTokenizer(129280))
 
 
 def test_patch_is_idempotent_when_upstream_has_fix():
