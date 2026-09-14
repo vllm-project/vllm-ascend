@@ -9,30 +9,25 @@ import vllm.v1.worker.utils as upstream_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.patch.worker.patch_copy_kv_cache import (
-    _fused_page_view,
-    _is_fused_mla_pair,
-    copy_kv_cache_blocks_inplace,
-)
+from vllm_ascend.patch.worker.patch_copy_kv_cache import copy_kv_cache_blocks_inplace
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 MANAGER_BLOCK_SIZE = 384
 KERNEL_BLOCK_SIZE = 128
 RATIO = MANAGER_BLOCK_SIZE // KERNEL_BLOCK_SIZE
 NUM_KV_HEADS = 1
-NOPE_DIM = 512
-ROPE_DIM = 64
-FUSED_DIM = NOPE_DIM + ROPE_DIM
+FUSED_DIM = 576
 DTYPE_SIZE = 2
 PAGE_BYTES = 488448
 SLOT_BYTES = PAGE_BYTES // RATIO
 SLOT_ELEMENTS = SLOT_BYTES // DTYPE_SIZE
+SLOT_LOGICAL_BYTES = KERNEL_BLOCK_SIZE * FUSED_DIM * DTYPE_SIZE
 
 
-def _make_k3_fused_pair(*, num_blocks: int = 2):
+def _make_k3_fused_cache(*, num_blocks: int = 2):
     logical_spec = MLAAttentionSpec(
         block_size=MANAGER_BLOCK_SIZE,
-        num_kv_heads=1,
+        num_kv_heads=NUM_KV_HEADS,
         head_size=FUSED_DIM,
         dtype=torch.bfloat16,
     )
@@ -45,7 +40,7 @@ def _make_k3_fused_pair(*, num_blocks: int = 2):
         stride=(SLOT_ELEMENTS, FUSED_DIM, FUSED_DIM, 1),
         storage_offset=0,
     )
-    return spec, fused[..., :NOPE_DIM], fused[..., NOPE_DIM:]
+    return spec, fused
 
 
 def _install_cpu_h2d(monkeypatch):
@@ -56,15 +51,15 @@ def _install_cpu_h2d(monkeypatch):
     )
 
 
-def test_zeroer_recognizes_one_fused_mla_physical_page():
-    spec, nope, rope = _make_k3_fused_pair()
+def test_zeroer_uses_single_fused_mla_physical_page():
+    spec, fused = _make_k3_fused_cache()
     zeroer = AscendKVBlockZeroer(torch.device("cpu"), pin_memory=False)
     zeroer.init_meta(
         [SimpleNamespace(kv_cache_spec=spec, kv_cache_group_id=0, layer_names=["layer"])],
         [[KERNEL_BLOCK_SIZE]],
         "auto",
         set(),
-        {"layer": SimpleNamespace(kv_cache=(nope, rope))},
+        {"layer": SimpleNamespace(kv_cache=fused)},
     )
 
     assert zeroer._meta is not None
@@ -74,24 +69,21 @@ def test_zeroer_recognizes_one_fused_mla_physical_page():
     assert n_segs == 1
 
 
-def test_fused_mla_cow_copies_complete_manager_page(monkeypatch):
+def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
     num_blocks = 2
-    _, nope, rope = _make_k3_fused_pair(num_blocks=num_blocks)
-    assert _is_fused_mla_pair((nope, rope))
-
-    page_view = _fused_page_view(nope, rope)
-    assert page_view.shape == (num_blocks * RATIO, SLOT_BYTES)
-    payload = ((torch.arange(SLOT_BYTES, dtype=torch.int64) * 31 + 17) % 251).to(torch.uint8)
-    page_view[3].copy_(payload)
+    _, fused = _make_k3_fused_cache(num_blocks=num_blocks)
+    payload = ((torch.arange(SLOT_LOGICAL_BYTES, dtype=torch.int64) * 31 + 17) % 251).to(torch.uint8)
+    fused[3].copy_(payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM))
 
     _install_cpu_h2d(monkeypatch)
     copy_kv_cache_blocks_inplace(
-        [(nope, rope)],
-        2,
+        [fused],
+        num_blocks,
         [KVCacheBlockCopy(src_block_id=1, dst_block_id=0)],
     )
 
-    torch.testing.assert_close(page_view[0], payload)
-    torch.testing.assert_close(page_view[1], payload)
-    torch.testing.assert_close(page_view[2], payload)
-    assert not torch.equal(page_view[4], payload)
+    expected = payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM)
+    torch.testing.assert_close(fused[0], expected)
+    torch.testing.assert_close(fused[1], expected)
+    torch.testing.assert_close(fused[2], expected)
+    assert not torch.equal(fused[4], expected)

@@ -5172,9 +5172,8 @@ class NPUModelRunner(GPUModelRunner):
                         continue
 
                     # Fused MLA使用allocate/hybrid阶段的一整块raw backing。
-                    # 这里构造token交错的fused view，再切片出nope/rope；
-                    # MHA/GQA继续走下面的raw K/V协议。当前mla_v1仍按tuple
-                    # 索引访问两个component，因此保留协议兼容的零拷贝切片。
+                    # 这里构造token交错的单一fused view；mla_v1在forward入口
+                    # 派生nope/rope逻辑视图。MHA/GQA继续走raw K/V协议。
                     attn_module = self.compilation_config.static_forward_context.get(layer_name)
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = None
@@ -5221,7 +5220,8 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         # 每个kernel slot内按token交错存储[nope|rope]：
                         # token0[nope|rope], token1[nope|rope], ...。
-                        # 只需要一个fused stride；nope/rope是该view的最后维切片。
+                        # cache协议只保留这个单一fused tensor，首轴stride
+                        # 携带hybrid page padding信息。
                         fused_cache = torch.as_strided(
                             typed_raw,
                             size=fused_shape,
@@ -5233,9 +5233,7 @@ class NPUModelRunner(GPUModelRunner):
                             ),
                             storage_offset=typed_raw.storage_offset(),
                         )
-                        nope = fused_cache[..., :nope_dim]
-                        rope = fused_cache[..., nope_dim:]
-                        kv_caches[layer_name] = (nope, rope)
+                        kv_caches[layer_name] = fused_cache
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:
