@@ -18,4 +18,13 @@ no separate operator package or runtime source patching is required.
 
 `VLLM_ASCEND_ENABLE_FLASH_MLA=1` enables the opt-in route in the existing
 attention backends. Initial support is BF16 dense MLA, unquantized KV,
-SD convolution states, and PCP/DCP=1. Service validation follows the build.
+SD convolution states, and PCP=1. DCP uses local paged history plus replicated
+current-token pages for causal attention, and local full-cache attention for
+non-causal DSpark drafting. Service validation follows the build.
+
+P/D disaggregation is supported with `MooncakeConnectorV1`. Producer and
+consumer must use the same Flash-MLA flag, TP/DCP sizes, interleave size, cache
+dtype, and kernel block size. Only the persistent paged cache is transferred;
+the replicated current-token cache is per-step scratch space. The combined
+DSpark path currently covers MLA draft backends (including causal block
+drafting); GQA draft backends are outside this Flash MLA DCP path.

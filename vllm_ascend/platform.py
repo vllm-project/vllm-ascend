@@ -490,8 +490,8 @@ class NPUPlatform(Platform):
             parallel = vllm_config.parallel_config
             if not is_950() or not vllm_config.model_config.use_mla:
                 raise ValueError("Flash MLA requires an A5 dense MLA target")
-            if parallel.decode_context_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
-                raise ValueError("Flash MLA requires PCP=DCP=1")
+            if parallel.prefill_context_parallel_size != 1:
+                raise ValueError("Flash MLA requires PCP=1")
             if cache.cache_dtype not in ("auto", "bfloat16", "float16"):
                 raise ValueError("Flash MLA requires unquantized KV cache")
             kv_transfer = vllm_config.kv_transfer_config

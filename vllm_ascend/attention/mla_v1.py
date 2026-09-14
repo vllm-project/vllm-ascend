@@ -2143,17 +2143,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
 
-    def _forward_flash(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
-        if output is None:
-            raise ValueError("A5 Flash MLA requires an explicit output buffer.")
-        if attn_metadata is None:
-            return output.zero_()
-        meta = attn_metadata
-        b = meta.flash
-        t = b.query.shape[0]
-        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(b.schedule))
-        if t == 0:
-            return output.zero_()
+    def _flash_mla_preprocess(self, hidden_states, flash):
+        """Build the local Flash MLA query and latent current-token KV."""
+        t = flash.query.shape[0]
         x = hidden_states[:t]
         if self.fused_qkv_a_proj is not None:
             qkv_lora = self.fused_qkv_a_proj(x)[0]
@@ -2166,25 +2158,52 @@ class AscendMLAImpl(MLAAttentionImpl):
         c_kv, k_pe = kv.view(t, 1, 576).split([512, 64], dim=-1)
         c_kv = self.kv_a_layernorm(c_kv.contiguous()).view(t, 1, 512)  # type: ignore[misc]
         if self.use_mla_rope:
-            cos, sin = get_cos_and_sin_mla(b.positions, use_cache=False)
+            cos, sin = get_cos_and_sin_mla(flash.positions, use_cache=False)
             q_pe = self.rope_single(q_pe, cos, sin)
             k_pe = self.rope_single(k_pe, cos, sin)
-        b.query[..., :512].copy_(q_abs)
-        b.query[..., 512:].copy_(q_pe)
+        flash.query[..., :512].copy_(q_abs)
+        flash.query[..., 512:].copy_(q_pe)
+        return x, c_kv, k_pe
 
-        if meta.num_prefills > 0:
-            # Keep the Flash MLA path on the common KV connector lifecycle.
-            # Mooncake completes a full-cache load before forward today; this
-            # also preserves the synchronization point for layerwise peers.
-            wait_for_kv_layer_from_connector(layer_name)
+    @staticmethod
+    def _flash_mla_scatter_kv(c_kv, k_pe, kv_cache, slots) -> None:
         torch_npu.npu_scatter_pa_kv_cache(
             key=c_kv.contiguous(),
             value=k_pe.contiguous(),
             key_cache=kv_cache[..., :512].unsqueeze(2),
             value_cache=kv_cache[..., 512:].unsqueeze(2),
-            slot_mapping=b.slots,
+            slot_mapping=slots,
             cache_mode="Norm",
         )
+
+    def _flash_mla_postprocess(self, x, latent, flash, output, *, batch_major: bool = False):
+        projected = self._v_up_proj_batch_major(latent) if batch_major else self._v_up_proj(latent)
+        if self.use_output_gate:
+            projected.mul_(torch.sigmoid(self.g_proj(x.contiguous())[0]))  # type: ignore[misc]
+        result = self.o_proj(projected, is_prefill=flash.is_prefill)[0]
+        output.zero_()
+        output[: flash.query.shape[0]].copy_(result)
+        output[: flash.query.shape[0]].masked_fill_(~flash.token_live.unsqueeze(1), 0)
+        return output
+
+    def _forward_flash(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
+        if output is None:
+            raise ValueError("A5 Flash MLA requires an explicit output buffer.")
+        if attn_metadata is None:
+            return output.zero_()
+        meta = attn_metadata
+        b = meta.flash
+        t = b.query.shape[0]
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(b.schedule))
+        if t == 0:
+            return output.zero_()
+        x, c_kv, k_pe = self._flash_mla_preprocess(hidden_states, b)
+        if meta.num_prefills > 0:
+            # Keep the Flash MLA path on the common KV connector lifecycle.
+            # Mooncake completes a full-cache load before forward today; this
+            # also preserves the synchronization point for layerwise peers.
+            wait_for_kv_layer_from_connector(layer_name)
+        self._flash_mla_scatter_kv(c_kv, k_pe, kv_cache, b.slots)
         notify_kv_cache_written(layer_name)
         mask_mode = 3 if meta.causal else 0
         latent, _ = torch.ops._C_ascend.flash_mla_with_kvcache(
@@ -2206,15 +2225,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             layout_out="NTD",
             return_softmax_lse=False,
         )
-        projected = self._v_up_proj(latent)
-        if self.use_output_gate:
-            projected.mul_(torch.sigmoid(self.g_proj(x.contiguous())[0]))  # type: ignore[misc]
-        result = self.o_proj(projected, is_prefill=b.is_prefill)[0]
-        output.zero_()
-        output[:t].copy_(result)
-        output[:t].masked_fill_(~b.token_live.unsqueeze(1), 0)
+        result = self._flash_mla_postprocess(x, latent, b, output)
         maybe_save_kv_layer_to_connector(layer_name, [kv_cache])
-        return output
+        return result
 
     def forward(
         self,
