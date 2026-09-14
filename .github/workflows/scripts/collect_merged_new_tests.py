@@ -16,6 +16,9 @@
 #
 """Collect new or moved tests from a merged PR and write them as extra-yaml paths.
 
+Only ``tests/e2e/pull_request/`` is collected. New or changed unit tests under
+``tests/ut/`` are ignored.
+
 Use GitHub's three-dot PR diff (``pr-base...pr-head``), the same range as the
 Files changed tab: ``git diff $(git merge-base BASE HEAD) HEAD``.
 
@@ -34,7 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 _DEFAULT_OUTPUT = Path("merged_new_tests.yaml")
-_WATCHED_TEST_DIRS = ("tests/e2e/pull_request/", "tests/ut/")
+_WATCHED_TEST_DIRS = ("tests/e2e/pull_request/",)
 
 NameStatus = list[tuple[str, str, str]]
 
@@ -190,7 +193,6 @@ def _git_name_status(old: str, new: str) -> NameStatus:
             f"{old}...{new}",
             "--",
             "tests/e2e/pull_request",
-            "tests/ut",
         ],
         check=True,
     )
