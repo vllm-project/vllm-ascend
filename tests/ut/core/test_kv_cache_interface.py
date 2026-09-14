@@ -9,6 +9,7 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
 
@@ -24,10 +25,13 @@ def _mla_spec():
 
 def test_get_storage_block_size_and_dcp_memory():
     spec = _mla_spec()
-    assert get_storage_block_size(spec) == spec.storage_block_size
+    # On main, storage_block_size is an optional dataclass field and may be
+    # None. Ascend derives physical rows from block_size / compression ratio.
+    expected = spec.block_size // get_kv_cache_compression_ratio(spec)
+    assert get_storage_block_size(spec) == expected
 
     uniform = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": spec})
-    assert get_storage_block_size(uniform) == spec.storage_block_size
+    assert get_storage_block_size(uniform) == expected
 
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=128),

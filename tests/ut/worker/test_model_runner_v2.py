@@ -435,9 +435,12 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_spec_pp is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
-    assert speculator.update_stream == "stream"
-    install_pp.assert_called_once()
-    assert runner.update_stream == "stream"
+    assert speculator.update_stream is runner.update_stream
+    if vllm_version_is("0.28.0"):
+        install_pp.assert_called_once()
+    else:
+        install_pp.assert_not_called()
+    assert runner.update_stream is not None
     assert runner.decode_query_len == 2
 
 
@@ -469,14 +472,18 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
+    if vllm_version_is("0.28.0"):
+        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
+    else:
+        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner = _make_runner()
     runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
-    runner.model_state = SimpleNamespace(pcp_manager=None)
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
     runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
     runner.init_routed_experts_capturer = MagicMock()
@@ -484,12 +491,17 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     seen = {}
 
     def _super(self, kv_cache_config):
+        self.kv_cache_config = kv_cache_config
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
     with (
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ) as create_kvpp,
     ):
         runner.initialize_kv_cache("kv")
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
@@ -497,6 +509,9 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert seen["cfg"] == "kv"
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
+    create_kvpp.assert_called_once()
+    assert runner.kvpp == "kvpp"
+    assert runner.model_state.kvpp_runtime == "kvpp"
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
@@ -669,6 +684,8 @@ def test_postprocess_sampled_copies_only_with_speculator():
 
 
 def test_copy_num_computed_tokens_to_cpu_records_event():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
     runner = _make_runner()
     stream = MagicMock()
     runner.num_computed_tokens_stream = stream
@@ -680,8 +697,8 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     npu_cm.__exit__.return_value = False
     default_stream = MagicMock()
     with (
-        patch("torch.cuda.current_stream", return_value=default_stream),
-        patch("torch.npu.stream", return_value=npu_cm) as npu_stream,
+        patch.object(model_runner_mod.torch.cuda, "current_stream", return_value=default_stream),
+        patch.object(model_runner_mod.torch.npu, "stream", return_value=npu_cm) as npu_stream,
     ):
         runner._copy_num_computed_tokens_to_cpu()
     npu_stream.assert_called_once_with(stream)

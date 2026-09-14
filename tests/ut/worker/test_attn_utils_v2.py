@@ -971,9 +971,11 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):
         kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
     )
     vllm_config = SimpleNamespace(
+        additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
         cache_config=SimpleNamespace(cache_dtype="auto"),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
