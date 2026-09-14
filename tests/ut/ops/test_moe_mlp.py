@@ -521,11 +521,14 @@ class TestUnifiedApplyActivation(unittest.TestCase):
 
     def test_gelu_tanh_matches_torch_reference(self):
         hidden_states = torch.randn(4, 8)
-        out = _unified_apply_activation(
-            _mlp_compute_input(activation=MoEActivation.GELU_TANH), hidden_states.clone(), self._quant_method()
-        )
         gate, up = hidden_states.chunk(2, dim=-1)
-        self.assertTrue(torch.allclose(out, torch.nn.functional.gelu(gate, approximate="tanh") * up))
+        expected = torch.nn.functional.gelu(gate, approximate="tanh") * up
+        with patch(f"{MOE_MLP}.DeviceOperator.gelu_tanh_and_mul", return_value=expected) as activation:
+            out = _unified_apply_activation(
+                _mlp_compute_input(activation=MoEActivation.GELU_TANH), hidden_states, self._quant_method()
+            )
+        activation.assert_called_once_with(hidden_states)
+        self.assertIs(out, expected)
 
     def test_situ_matches_reference(self):
         hidden_states = torch.randn(4, 8)
