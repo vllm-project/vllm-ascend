@@ -132,7 +132,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
+        self.dynamic_eplb = ascend_config.eplb_config.convert_weight_to_list
 
     @staticmethod
     def get_weight(
