@@ -489,7 +489,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.multi_stage = False
         self.load_counter = None
         self.num_iter = None
-        self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
+        self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64, device="npu")
         # Only FlashLB consumes a time series of expert loads. Other EPLB
         # policies (including the default SwiftBalance policy) expect one load
         # vector per layer and rank. Using the collection interval alone here
