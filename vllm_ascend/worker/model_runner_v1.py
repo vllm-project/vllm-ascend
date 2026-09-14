@@ -4390,10 +4390,13 @@ class NPUModelRunner(GPUModelRunner):
 
     def _uses_sfa_kv_parent(self, layer_name: str, spec: AttentionSpec) -> bool:
         # Model-level use_sparse also covers heterogeneous GQA draft layers.
+        # KVPP (ascend_config.kvpp_config.size > 1) short-circuits allocation
+        # above and is mutually exclusive with this layout.
         if (
             not self.use_sparse
             or not should_use_sfa_kv_parent_layout(self.vllm_config.kv_transfer_config)
             or self.use_compress
+            or self._uses_page_strided_kv_layout(spec)
             or self.hybrid_with_attn_and_mamba
             or self.sparse_kv_offload_enabled
             or not isinstance(spec, AscendMLAAttentionSpec)
@@ -5192,7 +5195,7 @@ class NPUModelRunner(GPUModelRunner):
                         raw = kv_cache_raw_tensors[layer_name]
                         if not isinstance(raw, torch.Tensor):
                             raise ValueError(f"SFA main cache for {layer_name} requires one parent raw tensor")
-                        storage_block_size = current_kv_cache_spec.storage_block_size
+                        storage_block_size = get_storage_block_size(current_kv_cache_spec)
                         kernel_block_size = storage_block_size
                         if self.use_hybrid_blocks and hasattr(attn_backend, "get_supported_kernel_block_sizes"):
                             kernel_block_size = attn_backend.get_supported_kernel_block_sizes()[0]

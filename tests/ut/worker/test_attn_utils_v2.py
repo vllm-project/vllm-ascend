@@ -943,7 +943,10 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     ]
     transfer = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=None)
     vc = SimpleNamespace(
-        kv_transfer_config=transfer, quant_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+        kv_transfer_config=transfer,
+        quant_config=None,
+        additional_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
     )
     layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for name in names}
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vc)

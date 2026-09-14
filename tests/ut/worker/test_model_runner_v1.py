@@ -512,6 +512,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     raw = runner._allocate_kv_cache_tensors(cache_config)
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
+
     def test_sfa_parent_allocation_main_and_legacy(self):
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
         from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent
