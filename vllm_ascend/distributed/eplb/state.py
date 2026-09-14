@@ -109,6 +109,8 @@ class AscendEplbState(_eplb_state.EplbState):
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
         self._stair_config = stair_config
+        self._stair_record_current_step = False
+        self._stair_load_window_step = 0
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
@@ -154,10 +156,10 @@ class AscendEplbState(_eplb_state.EplbState):
             getattr(self, "_stair_config", None) is not None
             and not is_dummy
             and not is_profile
-            and self._should_record_current_step(log_stats=log_stats)
+            and self._stair_record_current_step
         ):
             for model_state in self.model_states.values():
-                target = model_state._stair_load_window[self.expert_load_window_step]
+                target = model_state._stair_load_window[self._stair_load_window_step]
                 target.zero_()
                 target.scatter_add_(
                     1,
@@ -168,6 +170,8 @@ class AscendEplbState(_eplb_state.EplbState):
                     model_state._stair_valid_size + 1,
                     self.expert_load_window_size,
                 )
+            self._stair_load_window_step = (self._stair_load_window_step + 1) % self.expert_load_window_size
+        self._stair_record_current_step = False
         super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
 
     def _compress_stair_window(self, model_state: Any) -> tuple[torch.Tensor, np.ndarray]:
@@ -180,7 +184,7 @@ class AscendEplbState(_eplb_state.EplbState):
         else:
             ordered = torch.roll(
                 model_state._stair_load_window,
-                shifts=-self.expert_load_window_step,
+                shifts=-self._stair_load_window_step,
                 dims=0,
             )
         bins = min(valid_size, self._stair_config.sample_size)

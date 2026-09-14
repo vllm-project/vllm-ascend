@@ -25,9 +25,9 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
     state = AscendEplbState.__new__(AscendEplbState)
     state._stair_config = object()
+    state._stair_record_current_step = True
+    state._stair_load_window_step = 0
     state.expert_load_window_size = 1
-    state.expert_load_window_step = 0
-    state._should_record_current_step = lambda log_stats=False: True
     model_state = SimpleNamespace(
         _stair_load_window=torch.zeros((1, 1, 3), dtype=torch.int64),
         _stair_valid_size=0,
@@ -40,7 +40,29 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
 
     torch.testing.assert_close(model_state._stair_load_window[0], torch.tensor([[7, 3, 7]]))
     assert model_state._stair_valid_size == 1
+    assert not state._stair_record_current_step
     upstream_step.assert_called_once_with(is_dummy=False, is_profile=False, log_stats=False)
+
+
+def test_stair_step_skips_a_phase_filtered_batch(monkeypatch):
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._stair_config = object()
+    state._stair_record_current_step = False
+    state._stair_load_window_step = 0
+    state.expert_load_window_size = 2
+    model_state = SimpleNamespace(
+        _stair_load_window=torch.zeros((2, 1, 2), dtype=torch.int64),
+        _stair_valid_size=0,
+        physical_to_logical_map=torch.tensor([[0, 1]]),
+        expert_load_pass=torch.tensor([[3, 7]]),
+    )
+    state.model_states = {"model": model_state}
+
+    state.step()
+
+    assert model_state._stair_valid_size == 0
+    assert state._stair_load_window_step == 0
 
 
 def test_stair_initialization_rejects_rank_local_duplicates(monkeypatch):
@@ -88,7 +110,7 @@ def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     state._stair_node_by_rank = (0, 0)
     state._stair_config = SimpleNamespace(sample_size=64)
     state.expert_load_window_size = 2
-    state.expert_load_window_step = 1
+    state._stair_load_window_step = 1
     state.rearrange_event = MagicMock()
 
     state._rearrange_stair()
@@ -102,7 +124,7 @@ def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
 def test_stair_compression_ignores_unwritten_window_slots():
     state = AscendEplbState.__new__(AscendEplbState)
     state.expert_load_window_size = 4
-    state.expert_load_window_step = 2
+    state._stair_load_window_step = 2
     state._stair_config = SimpleNamespace(sample_size=1)
     model_state = SimpleNamespace(
         _stair_valid_size=2,

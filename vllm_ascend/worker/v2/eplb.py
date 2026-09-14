@@ -75,6 +75,7 @@ class AscendEPLBController(EPLBController):
                 and self._load_collection_phase_matched
             )
             state.should_record_tensor.fill_(should_record)
+            state._stair_record_current_step = should_record
             if should_record:
                 state._has_fresh_recorded_load = True
 

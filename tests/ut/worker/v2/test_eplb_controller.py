@@ -146,6 +146,7 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._stair_record_current_step)
         self.assertTrue(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_nonmatching_phase(self):
@@ -164,6 +165,7 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._stair_record_current_step)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_closed_window(self):
@@ -180,6 +182,7 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=False,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._stair_record_current_step)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
