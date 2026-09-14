@@ -1,15 +1,18 @@
 # FlashMLA BBND Draft：移植范围与调用逻辑
 
 本 Draft 在 #16456 的 token-fused cache 上接入外部 FlashMLA 两个算子。
-首次功能提交为 `7fef0589`；后续标注提交只增加代码注释与本说明，不改变执行逻辑。
+当前分支为 `draft/flash-mla-bbnd-main-b8db6e985`，由原 Draft 的六个提交整体 rebase 得到。
+原分支 `draft/flash-mla-external-on-16456` 保留在 `7658d022`，用于回溯与比较。
 
 ## 固定对照版本
 
-- 缓存基线：[ #16456 的 fe01d1df](https://github.com/HackClawMxw/vllm-ascend-fork/commit/fe01d1dfcc2c0ce4a27971b9c62904b26ebcfa86)。
+- Ascend 主线基线：`b8db6e9853094eb4ec0bfa3d6d7beab7474d4f4e`，固定该提交而非浮动 main。
+- 缓存改动来源：[ #16456 的 fe01d1df](https://github.com/HackClawMxw/vllm-ascend-fork/commit/fe01d1dfcc2c0ce4a27971b9c62904b26ebcfa86)，包括其前置两个提交，全部重放到新基线。
 - Python 接入参考：[ #16468 的 e36a3d05](https://github.com/maoxx241/vllm-ascend/tree/e36a3d05e9c869007439f36a5111992008a990c4)。
 - 本地参考提交 `9204b0ba3770d7959c6f897c8908b6b51e53a8b2` 的 `mla_v1.py`、
   `attention_v1.py`、`model_runner_v1.py`、`platform.py` 与上述 `e36a3d05` 内容相同。
-- 配套 vLLM：`a97dacb7106ee49f39f3d1fc6ae1800ff724e01d`。
+- 新基线 `.github/vllm-main-verified.commit` 记录的配套 vLLM：`84030bbe3d74d99bad477a3d2e37a973ccd8865c`。
+- 本任务按用户要求继续使用 `a97dacb7106ee49f39f3d1fc6ae1800ff724e01d`（本地 `../vllm-a97dac`），本次只 rebase Ascend；与新 Ascend 基线的组合兼容性留待容器验证，以上官方配套版本仅作参考。
 
 代码内可以搜索 `FLASHMLA[` 定位标记：
 
@@ -18,6 +21,8 @@
 | `FLASHMLA[REF-16468]` | 从 #16468 移植的逻辑，或接入其同样使用的既有框架机制 |
 | `FLASHMLA[ADAPT-16456]` | 配合 #16456 的 fused BBND cache 保留或适配的位置 |
 | `FLASHMLA[EXTERNAL]` | 使用外部包替代仓内 FlashMLA dispatcher 的位置 |
+| `FLASHMLA[ABI]` | 两段调用共用的参数合同及只读缓存布局校验 |
+| `FLASHMLA[OUT-OF-SCOPE]` | 当前接入未覆盖的其他执行入口 |
 | `FLASHMLA[TODO]` | 对照发现的尚未移植或需要补齐的相关边界 |
 
 ## 已实现的修改
@@ -29,7 +34,7 @@
 | `AscendMLAMetadataBuilder` | 构造一个 `flash` 描述整个 batch，接入 task-provider 协议；提前返回以跳过旧的 prefill/decode metadata 拆分。 |
 | `attention_v1.py` 中的 FlashMLA helpers | 为 Q、schedule、长度、block table、slots 和 positions 分配并复用设备 buffer。普通 GQA backend 没有因此切换到 Flash GQA。 |
 | `_build_flash_attention_metadata` | 每步按设备侧 query offsets 和 KV 长度更新 buffer，调用真实 metadata 算子，把其结果复制到稳定 schedule 地址。 |
-| `NPUModelRunner` | FlashMLA 开关下跳过旧的 optimistic CPU seq-len correction；向 builder 传递实际选择的 kernel block size。 |
+| `NPUModelRunner` | 按 runner 选择的 MLA backend 和 FlashMLA 开关决定是否跳过 optimistic CPU seq-len correction；向 builder 传递实际选择的 kernel block size。 |
 | `AscendMLAImpl.__init__` | 限定 latent 512、PE 64、一个 KV head、BF16 attention，关闭这一路的 MLAPO、NZ 和 head padding。 |
 | `AscendMLAImpl.update_graph_params` | FlashMLA 路径提前返回；每步动态数据通过稳定设备 buffer 更新，不再更新 FIA task handle。 |
 | `AscendMLAImpl.forward / _forward_flash` | 执行 Q/KV 投影、归一化、按层 RoPE、paged scatter、主算子、V-up、gate 和输出投影。 |
@@ -94,7 +99,7 @@ schedule buffer 仍沿用参考代码的 A5 `36+72` 核数容量公式。当前�
 | 范围 | 当前状态和影响 |
 | --- | --- |
 | 按 `num_heads_q` 分组 builder | #16468 有，当前 Draft 未移植。相同 cache spec、不同 Q head 数的 MLA 层可能错误共用 query/schedule buffer，需要补齐。 |
-| 混合 MLA 与普通 attention 的 CPU seq-len correction | 当前按全局 FlashMLA 开关跳过；普通 attention 路径仍可能依赖 CPU mirror，混合 runner 需要按消费者收紧条件。 |
+| 混合 MLA 与普通 attention 的 CPU seq-len correction | 已收紧为 runner 的 backend 是 MLA 且启用 FlashMLA；尚未逐一检查混合 runner 的所有 layer backend，不能据此宣称混合场景完整支持。 |
 | MLA DSpark 的 context KV writer | #16468 在 `exec_kv_prefill` 另加 fused 写入分支；当前只在 `_forward_flash` 中实现写入，context-only 调用入口尚未适配 BBND。 |
 | DSpark 的 query 重建、draft graph padding/等待 | proposer 改动未移植，不能宣称完整 DSpark/投机解码接入。设备侧长度更新只是其中一环。 |
 | GQA Flash 算子与 GQA cache split | 未移植；不属于这两个 MLA 算子的调用。 |
@@ -106,6 +111,16 @@ schedule buffer 仍沿用参考代码的 A5 `36+72` 核数容量公式。当前�
 上表中的 head 分组、DSpark 上下文和混合 backend 条件涉及正确性，不能笼统归为“无关改动”。
 
 ## 当前验证记录
+
+本次 rebase 只做 Git 差异、调用点和 Python 语法的静态检查，按要求不运行测试、不连接或同步容器。
+
+- 唯一文本冲突为 `attention_v1.py` 的 import，合并保留主线 `weak_ref_tensors` 与 FlashMLA task 引用。
+- 主线 `_forward_decode` 已改为接收 `DecodeMLAPreprocessResult`；保留新签名及调用，FlashMLA 仍从 `_forward_flash` 分支执行。
+- 保留主线 DCP current-KV 与 graph 更新逻辑；#16456 的 `not fused_mla_cache` 条件与主线条件同时保留。
+- #16456 的三份缓存提交已重放；本次没有另行修改 allocator、COW 或清零。
+- 静态审阅发现旧单测 fixture 从错误文件抽取 `FlashMLAContract`，已修正为从 `flash_mla.py` 加载；单测未运行。
+
+历史记录：
 
 - 首次功能提交：Python 语法和 `git diff --check` 通过。
 - 本地没有 torch/pytest，新 CPU mock 单测尚未执行。

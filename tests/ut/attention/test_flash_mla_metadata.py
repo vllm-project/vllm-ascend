@@ -2,9 +2,10 @@
 """CPU-only checks for external FlashMLA metadata buffer management."""
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -17,7 +18,6 @@ def helpers():
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/attention_v1.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     selected = {
-        "FlashMLAContract",
         "AscendFlashAttentionMetadata",
         "_build_flash_attention_metadata",
     }
@@ -35,14 +35,22 @@ def helpers():
     scope = {
         "torch": torch,
         "dataclass": dataclass,
-        "replace": __import__("dataclasses").replace,
-        "Any": object,
+        "replace": replace,
+        "Any": Any,
         "DeviceMetadataStage": SimpleNamespace(ATTENTION=2),
         "DeviceMetadataTask": lambda stage, run, group_id: SimpleNamespace(
             stage=stage, run=run, group_id=group_id
         ),
         "flash_mla_with_kvcache_metadata": metadata,
     }
+    # The contract lives in flash_mla.py, not attention_v1.py. Load its real
+    # definition before compiling the metadata helpers, without NPU imports.
+    contract_path = path.with_name("flash_mla.py")
+    contract_tree = ast.parse(contract_path.read_text(encoding="utf-8"))
+    contract_tree.body = [
+        node for node in contract_tree.body if getattr(node, "name", None) == "FlashMLAContract"
+    ]
+    exec(compile(contract_tree, str(contract_path), "exec"), scope)
     exec(compile(tree, str(path), "exec"), scope)
     return SimpleNamespace(**scope), calls
 
@@ -134,7 +142,7 @@ def test_metadata_falls_back_to_eager_without_executor(helpers):
     assert builder._device_metadata_tasks == ()
 
 
-def test_contract_and_cache_validation_preserve_strided_pa_bbnd(helpers):
+def test_contract_uses_pa_bbnd_layout(helpers):
     module, _ = helpers
     contract = module.FlashMLAContract(num_heads_q=8, max_seqlen_q=16, max_seqlen_kv=128)
     metadata_kwargs = contract.metadata_kwargs(
