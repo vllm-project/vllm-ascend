@@ -9,7 +9,6 @@ import torch
 
 ASCEND_V2_POLICY_TYPES = {
     "policy_swift_balancer": 2,
-    "policy_flashlb": 3,
 }
 
 
