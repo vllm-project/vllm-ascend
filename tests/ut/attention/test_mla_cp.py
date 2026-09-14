@@ -216,7 +216,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     SimpleNamespace(is_draft_model=False, capturing=False),
 )
 @patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
-def test_mla_dcp_pads_fia_heads_and_preserves_collective_heads(mock_fia) -> None:
+def test_mla_dcp_preserves_native_fia_and_collective_heads(mock_fia) -> None:
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.dcp_size = 8
     impl.num_heads = 12
@@ -265,8 +265,8 @@ def test_mla_dcp_pads_fia_heads_and_preserves_collective_heads(mock_fia) -> None
     k_nope = torch.randn(2, 1, 2, 3)
     k_pe = torch.randn(2, 1, 2, 2)
     mock_fia.return_value = (
-        torch.randn(1, 4, 128, 3),
-        torch.randn(1, 128, 4, 1),
+        torch.randn(1, 4, 96, 3),
+        torch.randn(1, 96, 4, 1),
     )
 
     metadata.causal = False
@@ -283,11 +283,10 @@ def test_mla_dcp_pads_fia_heads_and_preserves_collective_heads(mock_fia) -> None
 
     call_args = mock_fia.call_args.args
     call_kwargs = mock_fia.call_args.kwargs
-    assert call_args[0].shape == (1, 4, 128, 3)
-    assert call_kwargs["query_rope"].shape == (1, 4, 128, 2)
-    assert call_kwargs["num_heads"] == 128
-    torch.testing.assert_close(call_args[0][0, :, :96], q_nope)
-    assert torch.count_nonzero(call_args[0][0, :, 96:]) == 0
+    assert call_args[0].shape == (1, 4, 96, 3)
+    assert call_kwargs["query_rope"].shape == (1, 4, 96, 2)
+    assert call_kwargs["num_heads"] == 96
+    torch.testing.assert_close(call_args[0][0], q_nope)
     assert merged["output_shape"] == (4, 96, 3)
     assert merged["softmax_lse_shape"] == (4, 96, 1)
 
