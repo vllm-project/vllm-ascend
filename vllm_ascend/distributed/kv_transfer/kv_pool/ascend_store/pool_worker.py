@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
-    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -122,7 +121,6 @@ class KVPoolWorker:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
-        self.kvpp_shard_ranks: dict[tuple[int, int], tuple[int, ...]] = {}
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -792,29 +790,6 @@ class KVPoolWorker:
             assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
             registered_regions[storage_key] = (new_start, end)
 
-    def _init_kvpp_shard_ranks(self, cache_names: list[str], owners: dict[str, int]) -> None:
-        """Record the owner ranks required for complete pool hits across PP stages."""
-        layer_groups = (
-            [[name for name in group.layer_names if name in cache_names] for group in self.kv_cache_config.kv_cache_groups]
-            if self.kv_cache_config is not None and self.use_hybrid
-            else [cache_names]
-        )
-        shard_ranks = {}
-        for group_id, layer_names in enumerate(layer_groups):
-            ranks = {owners[name] for name in layer_names if name in owners}
-            if any(name not in owners for name in layer_names):
-                # MTP caches are persistent on every TP rank.
-                ranks.update(range(self.tp_size))
-            shard_ranks[(self.pp_rank, group_id)] = tuple(sorted(ranks))
-
-        if self.pp_size > 1:
-            stage_shards: list[Any] = [None] * self.pp_size
-            torch.distributed.all_gather_object(stage_shards, shard_ranks, group=get_pp_group().cpu_group)
-            for stage in stage_shards:
-                self.kvpp_shard_ranks.update(stage)
-        else:
-            self.kvpp_shard_ranks = shard_ranks
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
@@ -839,7 +814,6 @@ class KVPoolWorker:
         self.kv_caches = kv_caches
         if self.use_kvpp:
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            self._init_kvpp_shard_ranks(list(kv_caches), owners)
             kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
             self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
@@ -2751,6 +2725,8 @@ class KVPoolWorker:
         return self.num_kv_head
 
     def get_group_tp_size(self, kv_cache_group_id: int):
+        if self.use_kvpp:
+            return self.tp_size
         if self.tp_mismatch:
             return self.effective_tp_size
         if self.group_uses_align_state[kv_cache_group_id]:
@@ -2772,16 +2748,12 @@ class KVPoolWorker:
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
         # All-rank KV pool lookup currently assumes PCP=1.
         expanded: list[str] = []
+        num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
         for pp_rank in range(self.pp_size):
-            head_or_tp_ranks = (
-                self.kvpp_shard_ranks[(pp_rank, group_id)]
-                if self.use_kvpp
-                else range(self.get_group_tp_size(group_id))
-            )
             for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in head_or_tp_ranks:
+                for head_or_tp_rank in range(num_head_or_tp_ranks):
                     for key in keys:
                         rank_key = self._replace_key_field(key, "dcp", dcp_rank)
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
