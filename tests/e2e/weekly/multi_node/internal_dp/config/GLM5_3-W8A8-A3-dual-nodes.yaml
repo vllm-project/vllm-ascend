@@ -27,7 +27,6 @@ deployment:
       --safetensors-load-strategy prefetch
       --api-server-count 1
       --data-parallel-size 8
-      --data-parallel-start-rank 0
       --data-parallel-size-local 4
       --data-parallel-address $LOCAL_IP
       --data-parallel-rpc-port 12980
