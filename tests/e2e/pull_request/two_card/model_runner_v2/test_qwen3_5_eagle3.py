@@ -28,9 +28,9 @@ from vllm.config import CompilationConfig
 
 from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
-QWEN36_DENSE_MODEL = "Qwen/Qwen3.6-27B"
-QWEN36_EAGLE3_DRAFT_MODEL = "Ex0bit/Qwen3.6-27B-PRISM-EAGLE3"
-MODELS = [QWEN36_DENSE_MODEL]
+QWEN35_DENSE_MODEL = "Qwen/Qwen3.5-9B"
+QWEN35_EAGLE3_DRAFT_MODEL = "BLR2/Qwen3.5-9B-Eagle3-ShareGPT"
+MODELS = [QWEN35_DENSE_MODEL]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MAX_MODEL_LEN = 72320
@@ -48,7 +48,7 @@ _EAGER = os.environ.get("QWEN36_EAGLE3_EAGER") == "1"
             2.43,
             3,
             {"ascend_compilation_config": {"enable_npugraph_ex": False}},
-            id="eagle3-qwen36-27b",
+            id="eagle3-qwen35-9b",
         ),
     ],
 )
@@ -68,7 +68,7 @@ _EAGER = os.environ.get("QWEN36_EAGLE3_EAGER") == "1"
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
     },
 )
-def test_qwen36_27b_eagle3_acceptance_tp2(
+def test_qwen35_9b_eagle3_acceptance_tp2(
     model_name,
     expected_acceptance_length,
     num_speculative_tokens,
@@ -78,7 +78,7 @@ def test_qwen36_27b_eagle3_acceptance_tp2(
         model_name=model_name,
         speculative_config={
             "method": "eagle3",
-            "model": QWEN36_EAGLE3_DRAFT_MODEL,
+            "model": QWEN35_EAGLE3_DRAFT_MODEL,
             "num_speculative_tokens": num_speculative_tokens,
         },
         example_prompts=SPEC_DECODE_PROMPTS,
