@@ -836,16 +836,17 @@ class KVPoolWorker:
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
+        self.kv_caches = kv_caches
+        if self.use_kvpp:
+            owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            self._init_kvpp_shard_ranks(list(kv_caches), owners)
+            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
             for group_id in range(self.num_kv_cache_groups)
         }
         self.group_num_layers: dict[int, int] = {}
-        if self.use_kvpp:
-            owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            self._init_kvpp_shard_ranks(list(kv_caches), owners)
-            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
-        self.kv_caches = kv_caches
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
@@ -2903,8 +2904,6 @@ class KVPoolWorker:
                     return 0
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
-                if self.use_kvpp and not multi_tp_keys:
-                    return 0
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
