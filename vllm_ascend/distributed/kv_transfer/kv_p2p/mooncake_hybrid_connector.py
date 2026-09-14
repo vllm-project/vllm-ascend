@@ -1619,10 +1619,10 @@ class MooncakeConnectorWorker:
         ptrs = []
         lengths = []
         if not self.use_hybrid:
-            for layer_name, kv_cache_tuple in kv_caches.items():
-                if isinstance(kv_cache_tuple, (list, tuple)) is False:
-                    kv_cache_tuple = [kv_cache_tuple]
-                for single_kv_cache in kv_cache_tuple:
+            for layer_name, kv_cache_list in kv_caches.items():
+                if isinstance(kv_cache_list, (list, tuple)) is False:
+                    kv_cache_list = [kv_cache_list]
+                for single_kv_cache in kv_cache_list:
                     tensor_num_blocks = single_kv_cache.shape[0]
                     block_size_scale = tensor_num_blocks // self.num_blocks
                     block_shape = single_kv_cache.shape[1:]
@@ -1636,10 +1636,10 @@ class MooncakeConnectorWorker:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 share_tensor_addr = []
                 for layer_name in kv_cache_tensor.shared_by:
-                    kv_cache_tuple = kv_caches[layer_name]
-                    if isinstance(kv_cache_tuple, (list, tuple)) is False:
-                        kv_cache_tuple = [kv_cache_tuple]
-                    for single_kv_cache in kv_cache_tuple:
+                    kv_cache_list = kv_caches[layer_name]
+                    if isinstance(kv_cache_list, (list, tuple)) is False:
+                        kv_cache_list = [kv_cache_list]
+                    for single_kv_cache in kv_cache_list:
                         if single_kv_cache.data_ptr() in self.kv_caches_base_addr:
                             continue
                         tensor_num_blocks = single_kv_cache.shape[0]
@@ -1667,10 +1667,10 @@ class MooncakeConnectorWorker:
                 cur_tensor_group_idx = []
                 for layer_name in kv_cache_tensor.shared_by:
                     cur_tensor_group_idx.append(layer_group_idx[layer_name])
-                    kv_cache_tuple = kv_caches[layer_name]
-                    if not isinstance(kv_cache_tuple, (tuple, list)):
-                        kv_cache_tuple = [kv_cache_tuple]
-                    for single_tensor in kv_cache_tuple:
+                    kv_cache_list = kv_caches[layer_name]
+                    if not isinstance(kv_cache_list, (tuple, list)):
+                        kv_cache_list = [kv_cache_list]
+                    for single_tensor in kv_cache_list:
                         tensor_addr = single_tensor.data_ptr()
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
                             continue
