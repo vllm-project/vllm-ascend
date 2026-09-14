@@ -1890,7 +1890,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         if self.compress_ratio <= 1:
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(swa_metadata.req_metadata.sas_metadata))
-            record_attention_compute_start()
+            record_attention_compute_start(layer_name)
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1906,7 +1906,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(req_metadata.sas_metadata))
-            record_attention_compute_start()
+            record_attention_compute_start(layer_name)
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1926,7 +1926,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(compressor_req_metadata.sas_metadata))
-            record_attention_compute_start()
+            record_attention_compute_start(layer_name)
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,

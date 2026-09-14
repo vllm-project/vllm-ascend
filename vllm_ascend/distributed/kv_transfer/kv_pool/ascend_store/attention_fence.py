@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import threading
 
+import regex as re
 import torch
 
 _lock = threading.RLock()
 _attention_compute_start_gate: AttentionComputeStartGate | None = None
+_gates: list[AttentionComputeStartGate] = []
+_layer_indices: dict[str, int] = {}
+_record_cursor = 0
 
 
 class AttentionComputeStartGate:
@@ -68,24 +72,49 @@ def reset_attention_compute_start_gate() -> AttentionComputeStartGate:
     they were submitted. The attention path opens that same gate when attention
     compute is about to be launched.
     """
-    global _attention_compute_start_gate
+    global _attention_compute_start_gate, _gates
     gate = AttentionComputeStartGate()
     with _lock:
         _attention_compute_start_gate = gate
+        _gates = []
     return gate
 
 
-def get_attention_compute_start_gate() -> AttentionComputeStartGate:
+def get_attention_compute_start_gate(layer_idx: int | None = None) -> AttentionComputeStartGate | None:
     with _lock:
+        if layer_idx is not None:
+            return _gates[layer_idx] if 0 <= layer_idx < len(_gates) else None
         gate = _attention_compute_start_gate
     if gate is None:
         gate = reset_attention_compute_start_gate()
     return gate
 
 
-def record_attention_compute_start() -> None:
-    """Record the compute-stream boundary immediately before attention."""
+def record_attention_compute_start(layer_name: str = "") -> None:
+    """Open the gate bound to this physical layer's attention boundary."""
+    global _record_cursor
     with _lock:
-        gate = _attention_compute_start_gate
+        if not _gates:
+            gate = _attention_compute_start_gate
+        else:
+            if layer_name:
+                idx = _layer_indices.get(layer_name)
+                if idx is None:
+                    match = re.search(r"layers\.(\d+)", layer_name)
+                    idx = int(match.group(1)) if match is not None else -1
+            else:
+                idx = _record_cursor
+                _record_cursor += 1
+            gate = _gates[idx] if 0 <= idx < len(_gates) else None
     if gate is not None:
         gate.record()
+
+
+def reset_attention_compute_start_gates(num_layers: int, layer_indices: dict[str, int] | None = None) -> None:
+    """Bind one gate per physical layer for an entire forward step."""
+    global _gates, _layer_indices, _record_cursor, _attention_compute_start_gate
+    with _lock:
+        _gates = [AttentionComputeStartGate() for _ in range(num_layers)]
+        _layer_indices = dict(layer_indices or {})
+        _record_cursor = 0
+        _attention_compute_start_gate = None
