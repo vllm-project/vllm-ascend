@@ -1393,7 +1393,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def indexer_select_pre_process(
         self,
-        x: torch.Tensor,
+        kw: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ):
@@ -1402,10 +1402,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
             )
 
-        assert self.wk_weights_proj is not None
         assert self.k_norm is not None
 
-        kw, _ = self.wk_weights_proj(x)
         k_li = kw[:, : self.head_dim]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
@@ -1442,7 +1440,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def indexer_select_post_process(
         self,
-        x: torch.Tensor,
+        kw: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
@@ -1456,17 +1454,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
             )
 
-        assert self.wk_weights_proj is not None
         assert self.wq_b is not None
 
-        kw, _ = self.wk_weights_proj(x)
         weights = kw[:, self.head_dim :]
         if isinstance(q_c, tuple):
             q_c_tensor, q_c_scale = q_c
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
             quant_matmul_kwargs = dict(
                 bias=None,
-                output_dtype=x.dtype,
+                output_dtype=kw.dtype,
             )
             if q_c_tensor.dtype == torch.float8_e4m3fn:
                 if q_c_scale.dim() == 2:
@@ -1882,7 +1878,11 @@ class AscendSFAImpl(MLAAttentionImpl):
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
             if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+                # Project once and reuse kw in indexer_select_post_process to
+                # avoid a redundant GEMM per layer.
+                assert self.wk_weights_proj is not None
+                kw, _ = self.wk_weights_proj(hidden_states)
+                k_li, k_li_scale = self.indexer_select_pre_process(kw=kw, cos=cos, sin=sin)
             else:
                 k_li, k_li_scale = None, None
             wait_for_kv_layer_from_connector(layer_name)
@@ -1920,11 +1920,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_c = self.q_a_layernorm(q_c)
 
             if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(
-                    x=hidden_states,
-                    cos=cos,
-                    sin=sin,
-                )
+                # Project once and reuse kw in indexer_select_post_process to
+                # avoid a redundant GEMM per layer.
+                assert self.wk_weights_proj is not None
+                kw, _ = self.wk_weights_proj(hidden_states)
+                k_li, k_li_scale = self.indexer_select_pre_process(kw=kw, cos=cos, sin=sin)
             else:
                 k_li, k_li_scale = None, None
 
@@ -2040,7 +2040,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
             assert q_c is not None
             topk_indices = self.indexer_select_post_process(
-                x=hidden_states,
+                kw=kw,
                 q_c=q_c,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
