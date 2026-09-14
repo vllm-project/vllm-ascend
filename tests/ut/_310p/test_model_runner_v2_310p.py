@@ -92,7 +92,7 @@ def test_config_accepts_tensor_parallelism() -> None:
         (True, True, 0, False),
     ],
 )
-def test_kv_zeroing_matches_mrv1_gate(
+def test_kv_zeroing_uses_narrow_310p_gate(
     has_mamba: bool,
     uses_eagle_block_drop: bool,
     num_spec_tokens: int,

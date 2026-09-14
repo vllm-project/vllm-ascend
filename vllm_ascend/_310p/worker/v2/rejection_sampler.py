@@ -10,11 +10,11 @@ import torch
 from vllm.config import SpeculativeConfig
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
+from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.spec_utils import (
     get_num_sampled_and_rejected_cpu,
     greedy_rejection_sample_cpu,
 )
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
 class RejectionSampler310V2:
@@ -33,7 +33,7 @@ class RejectionSampler310V2:
     def __call__(
         self,
         logits: torch.Tensor,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
         draft_logits: torch.Tensor | None,
     ) -> SamplerOutput:
         del draft_logits
@@ -54,7 +54,7 @@ class RejectionSampler310V2:
             input_batch.prefill_len_np,
             logits.device,
         )
-        # MRV1 pattern: publish host bookkeeping produced by rejection sampling.
+        # Publish host bookkeeping produced by rejection sampling.
         # postprocess_sampled must not copy these tensors back from NPU again.
         self.sampled_tokens_cpu = sampled_cpu
         self.num_sampled_cpu = num_sampled_cpu

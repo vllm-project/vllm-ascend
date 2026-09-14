@@ -13,7 +13,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 class Ascend310PBlockTables(BlockTables):
-    """CPU-owned MRV2 block tables matching the 310P MRV1 data path."""
+    """CPU-owned MRV2 block tables for Ascend 310P."""
 
     # TODO: Refactor block-table operations to register 310P implementations
     # through Triton Dispatcher after vLLM RFC #45133 lands.
@@ -167,7 +167,7 @@ class Ascend310PBlockTables(BlockTables):
                 f"num_tokens_padded ({num_tokens_padded}) exceeds slot-mapping capacity "
                 f"({self.max_num_batched_tokens})."
             )
-        # Match MRV1 CpuGpuBuffer.copy_to_gpu(num_tokens): initialize and
+        # Initialize and
         # transfer only active columns.
         self.slot_mappings_cpu[:, :num_tokens_padded].fill(PAD_SLOT_ID)
         for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.kernel_block_sizes)):
