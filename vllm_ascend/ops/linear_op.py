@@ -42,9 +42,9 @@ from types import SimpleNamespace
 
 import regex as re
 import torch
-import torch_npu
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
@@ -504,9 +504,7 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
                 # Allocate the receive buffer with the size of the full padded output
                 out_features = rs_output.shape[1]
                 full_output_2d = torch.empty(
-                    input_2d.shape[0], out_features,
-                    device=rs_output.device,
-                    dtype=rs_output.dtype
+                    input_2d.shape[0], out_features, device=rs_output.device, dtype=rs_output.dtype
                 )
                 # Use all_gather_into_tensor for efficient collection across ranks
                 dist.all_gather_into_tensor(full_output_2d, rs_output, group=self.comm_group.device_group)
@@ -624,7 +622,14 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | MatmulCommRowParallelOp | None:
+) -> (
+    MLPRowParallelOp
+    | OProjRowParallelOp
+    | DSV4OProjRowParallelOp
+    | SequenceRowParallelOp
+    | MatmulCommRowParallelOp
+    | None
+):
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
