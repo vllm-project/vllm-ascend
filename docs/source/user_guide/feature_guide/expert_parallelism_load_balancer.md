@@ -82,9 +82,9 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous EPLB
 
 Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and upstream EPLB. Ascend uses the upstream
-default policy, selects the Gloo communicator automatically, and supports
-asynchronous movement only.
+default. Enable expert parallelism and upstream EPLB. Ascend uses STAIR,
+selects the Gloo communicator automatically, and supports asynchronous movement
+only.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -112,7 +112,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `default` | Upstream EPLB placement policy. |
+| `policy` | `default` | Upstream compatibility field; Ascend MRv2 always plans with STAIR. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
 | `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
@@ -130,7 +130,7 @@ must not worsen mean imbalance (equal scores are allowed), and must satisfy
 the p95 regression guard before admission.
 
 MRv2 always uses STAIR when `--enable-eplb` is set; no algorithm selector is
-needed. Leave the upstream `--eplb-config.policy` at `default`:
+needed, and STAIR does not inspect the upstream `policy` field:
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
@@ -140,10 +140,11 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --eplb-config.num_redundant_experts 16
 ```
 
-STAIR currently requires MRv2, asynchronous EPLB, `load_collection_phase=all`,
-the Gloo communicator, non-elastic EP, and at least one redundant expert. The
-total physical expert count must divide evenly across EP ranks, and no rank may
-hold two copies of one logical expert. Unsupported combinations fail at startup.
+STAIR currently requires MRv2, asynchronous EPLB, the Gloo communicator, and
+non-elastic EP. The total physical expert count must divide evenly across EP
+ranks, and no rank may hold two copies of one logical expert. With zero
+redundant experts, STAIR can still balance load by exchanging physical expert
+positions between ranks. Unsupported combinations fail at startup.
 
 The defaults below are intended to be usable without tuning. `stair_config` is
 an advanced interface for workload-specific experiments:
@@ -184,9 +185,9 @@ such as CVaR better predicts serving latency remains an evaluation question.
 
 #### MRv2 Load Collection Phase
 
-MRv2 STAIR requires `load_collection_phase=all` (the default), collecting
-load from both prefill and decode batches. Phase-only collection with
-`prefill` or `decode` is not supported and is rejected at startup.
+MRv2 STAIR supports `all` (the default), `prefill`, and `decode`. `all`
+collects both phases; the other values keep only matching batches in STAIR's
+temporal load window.
 
 !!! IMPORTANT
 

@@ -878,13 +878,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
-            if load_collection_phase != "all":
-                raise ValueError("STAIR currently requires load_collection_phase='all'.")
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.policy != "default":
-                raise ValueError("STAIR requires the upstream EPLB policy to remain 'default'.")
-            if upstream_eplb_config.num_redundant_experts < 1:
-                raise ValueError("STAIR requires at least one redundant expert.")
             if upstream_eplb_config.communicator not in (None, "torch_gloo"):
                 raise ValueError(
                     "Async EPLB on Ascend requires the torch_gloo communicator "

@@ -112,9 +112,9 @@ The details of each configuration option are as follows:
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts `load_collection_phase`, `algorithm`, and
-  `stair_config` here. Configure upstream EPLB through `--enable-eplb` and
-  `--eplb-config`. Ascend uses asynchronous Gloo movement.
+- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
+  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
+  always uses STAIR with asynchronous Gloo movement.
 - **Model Runner V1** accepts the legacy fields below except
   `load_collection_phase`.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
@@ -132,7 +132,7 @@ configuration.
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. STAIR requires `"all"`; phase-only load collection is not supported. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. |
 | `stair_config`                   | dict | `None` | MRv2 only. Advanced tuning for STAIR, which is always used when EPLB is enabled; defaults are intended for normal use. |
 
 **scheduler_config**

@@ -156,8 +156,6 @@ class TestNPUPlatform(TestBase):
         cases = (
             ({"algorithm": "default"}, "algorithm"),
             ({"algorithm": "stair"}, "algorithm"),
-            ({"load_collection_phase": "decode"}, "requires load_collection_phase"),
-            ({"load_collection_phase": "prefill"}, "requires load_collection_phase"),
         )
         for eplb_config, message in cases:
             with self.subTest(eplb_config=eplb_config):
@@ -186,28 +184,25 @@ class TestNPUPlatform(TestBase):
         with self.assertRaisesRegex(ValueError, "requires --enable-eplb"):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_rejects_non_default_upstream_policy(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
-        vllm_config.parallel_config.enable_eplb = True
-        vllm_config.parallel_config.eplb_config.policy = "other"
+    def test_validate_eplb_config_allows_every_stair_mode(self):
+        for phase, policy, redundancy in (
+            ("all", "default", 1),
+            ("prefill", "other", 0),
+            ("decode", "other", 0),
+        ):
+            with self.subTest(phase=phase, policy=policy, redundancy=redundancy):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.use_v2_model_runner = True
+                vllm_config.parallel_config.enable_eplb = True
+                vllm_config.parallel_config.eplb_config = MagicMock(
+                    use_async=True,
+                    communicator=None,
+                    policy=policy,
+                    num_redundant_experts=redundancy,
+                )
+                vllm_config.additional_config = {"eplb_config": {"load_collection_phase": phase}}
 
-        with self.assertRaisesRegex(ValueError, "upstream EPLB policy"):
-            _validate_eplb_config(vllm_config)
-
-    def test_validate_eplb_config_requires_stair_redundancy(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
-        vllm_config.parallel_config.enable_eplb = True
-        vllm_config.parallel_config.eplb_config = MagicMock(
-            use_async=True,
-            communicator=None,
-            policy="default",
-            num_redundant_experts=0,
-        )
-
-        with self.assertRaisesRegex(ValueError, "redundant expert"):
-            _validate_eplb_config(vllm_config)
+                _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
