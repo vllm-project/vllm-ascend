@@ -9,7 +9,9 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
-from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonMetadataBuilder,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backend import (
@@ -490,9 +492,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens = query_seq_lens_cpu[:num_reqs]
         # Prefer _seq_lens_cpu, which remains populated in async speculative
         # decode, over seq_lens_cpu, which is intentionally None in that mode.
-        seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
-        if seq_lens_cpu is not None:
-            self.seq_lens = seq_lens_cpu[:num_reqs]
+        if common_attn_metadata._seq_lens_cpu is not None:
+            self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
@@ -855,6 +856,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             or self.q_lora_scale != 1.0
             or self.kv_lora_scale != 1.0
         )
+        # Dots3 Note uses different RoPE configs for global and sliding-window
+        # layers, so every MLA-extras layer must read its own embedding.
         self.use_layer_rotary_emb = self.has_mla_extras
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -1225,8 +1228,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         if self._needs_sliding_window_decode():
+            # Sliding-window decode uses this signed-off reduction path, which
+            # returns (B, N, L) directly.
             ql_nope = torch_npu.npu_transpose_batchmatmul(q_nope, self.W_UK_T, perm_y=(1, 0, 2))
         else:
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L), then to (B, N, L).
             ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
         return ql_nope, q_pe
 
