@@ -610,7 +610,7 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
 
     // MIX 1AIC:2AIV：CalcTschBlockDim 的 sliceNum 按 AIV 计数，内部再 / (aiv/aic)。
     // 传入 aicNum 会再除一次得到 blockDim=aic/2，只能打一半 Cube。
-    // 整 batch q_len=0：queryS==0 → BlockDim=1，避免 totalTaskNum=0。
+    // 整 batch q_len=0：totalQ==0 → BlockDim=1，避免 totalTaskNum=0。
     // sliceNum = launchAic * 2：短 decode 只起实际 M-task（及 950 的 S-chunk）对应的 MIX；
     // 多 M-tile / 大 batch 仍打满 AIC。
     if (info.totalQ == 0U) {

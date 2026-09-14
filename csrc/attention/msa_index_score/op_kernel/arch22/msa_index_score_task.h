@@ -189,8 +189,8 @@ private:
         if (mActual == 0U) {
             return 0U;
         }
-        const uint32_t tHi = (mStart + mActual - 1U) / numQHeads_;
-        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tHi));
+        const uint32_t tokenHigh = (mStart + mActual - 1U) / numQHeads_;
+        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tokenHigh));
         uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
         return MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);
     }

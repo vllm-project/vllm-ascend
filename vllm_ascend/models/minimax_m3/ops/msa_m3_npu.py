@@ -22,6 +22,9 @@ _FP8_E4M3_MAX = 448.0
 
 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        _index_topk_postprocess_kernel,
+    )
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
 else:
@@ -166,6 +169,7 @@ def _minimax_m3_index_score(
     *,
     init_blocks: int = 0,
     local_blocks: int = 0,
+    force_blocks_in_kernel: bool = False,
 ) -> torch.Tensor:
     """Compute MSA index scores with the bundled AscendC operator.
 
@@ -175,12 +179,15 @@ def _minimax_m3_index_score(
 
     A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
     for a TP chunk that is entirely before the current query positions.
-    ``init_blocks`` and ``local_blocks`` are kept for parity with the index
-    scoring interface; candidate forcing is applied by the TopK stage.
+    ``init_blocks`` and ``local_blocks`` can be applied in the AscendC
+    epilogue for a complete block table.  TP-sharded scoring keeps them at
+    zero because the operator attributes do not carry a global block offset;
+    that path applies global forcing in its candidate TopK stage instead.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
     if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
         idx_q = _to_fp8_e4m3(idx_q)
+    block_force_kwargs = {"init_blocks": init_blocks, "local_blocks": local_blocks} if force_blocks_in_kernel else {}
     return torch.ops._C_ascend.npu_msa_index_score(
         idx_q,
         index_kv_cache,
@@ -191,7 +198,72 @@ def _minimax_m3_index_score(
         actual_seq_klen=seq_lens,
         layout_key="BBND",
         sparse_mode=3 if causal_mask is not None else 0,
+        **block_force_kwargs,
     )
+
+
+@torch.no_grad()
+def minimax_m3_index_decode_a5(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor,
+    *,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    decode_query_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run A5 AscendC scoring with fused block forcing and TopK cleanup."""
+    assert _ASCEND_DEVICE_TYPE == AscendDeviceType.A5
+    score = _minimax_m3_index_score(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        force_blocks_in_kernel=True,
+    )
+    if score.shape[-1] < topk:
+        raise ValueError(f"MsaIndexScore width {score.shape[-1]} is smaller than topk {topk}")
+
+    _, raw_topk = torch.topk(score, k=topk, dim=-1)
+    num_index_heads, total_q, _ = raw_topk.shape
+    topk_indices = torch.empty(
+        raw_topk.shape,
+        dtype=torch.int32,
+        device=raw_topk.device,
+    )
+    select_num_idx = torch.empty(
+        (num_index_heads, total_q),
+        dtype=torch.int32,
+        device=raw_topk.device,
+    )
+    _index_topk_postprocess_kernel[(total_q, num_index_heads)](
+        raw_topk,
+        topk_indices,
+        select_num_idx,
+        seq_lens,
+        _MSA_INDEX_BLOCK_SIZE,
+        topk,
+        decode_query_len,
+        raw_topk.stride(0),
+        raw_topk.stride(1),
+        raw_topk.stride(2),
+        topk_indices.stride(0),
+        topk_indices.stride(1),
+        topk_indices.stride(2),
+        select_num_idx.stride(0),
+        select_num_idx.stride(1),
+    )
+    return topk_indices, select_num_idx
 
 
 @torch.no_grad()
