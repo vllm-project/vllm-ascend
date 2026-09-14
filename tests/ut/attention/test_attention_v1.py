@@ -473,35 +473,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(impl.kv_cache_layout, "HND")
         self.assertTrue(impl.use_bnsd_kv_cache)
 
-    def test_hnd_reshape_and_cache_uses_custom_scatter(self):
-        self.impl.use_bnsd_kv_cache = True
-        query = torch.empty(2, 8, 64)
-        key = torch.randn(2, 8, 64)
-        value = torch.randn(2, 8, 64)
-        kv_cache = (torch.empty(4, 8, 128, 64), torch.empty(4, 8, 128, 64))
-        output = torch.empty_like(query)
-        metadata = MagicMock()
-        metadata.slot_mapping = torch.arange(2)
-        metadata.num_actual_tokens = 2
-
-        with (
-            patch.object(
-                torch.ops._C_ascend,
-                "npu_scatter_pa_kv_cache",
-                create=True,
-            ) as scatter,
-            patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
-            patch("vllm_ascend.attention.attention_v1.is_950", return_value=False),
-            patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
-        ):
-            self.impl.reshape_and_cache(query, key, value, kv_cache, metadata, output)
-
-        scatter.assert_called_once()
-        reshape_and_cache.assert_not_called()
-        self.assertEqual(scatter.call_args.kwargs["cache_mode"], "Norm")
-        self.assertEqual(scatter.call_args.kwargs["scatter_mode"], "NHSD")
-
-    def test_hnd_reshape_and_cache_uses_bsnd_view_on_a5(self):
+    def test_hnd_reshape_and_cache_passes_bnsd_to_device_operator(self):
         self.impl.use_bnsd_kv_cache = True
         query = torch.empty(2, 8, 64)
         key = torch.randn(2, 8, 64)
@@ -514,13 +486,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_actual_tokens = 2
 
         with (
-            patch.object(
-                torch.ops._C_ascend,
-                "npu_scatter_pa_kv_cache",
-                create=True,
-            ) as scatter,
             patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
-            patch("vllm_ascend.attention.attention_v1.is_950", return_value=True),
             patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
         ):
             self.impl.reshape_and_cache(
@@ -532,15 +498,36 @@ class TestAscendAttentionBackendImpl(TestBase):
                 output,
             )
 
-        scatter.assert_not_called()
         reshape_and_cache.assert_called_once()
         call_kwargs = reshape_and_cache.call_args.kwargs
-        self.assertEqual(call_kwargs["key_cache"].shape, (4, 128, 8, 64))
-        self.assertEqual(call_kwargs["value_cache"].shape, (4, 128, 8, 64))
-        self.assertFalse(call_kwargs["key_cache"].is_contiguous())
-        self.assertFalse(call_kwargs["value_cache"].is_contiguous())
-        self.assertEqual(call_kwargs["key_cache"].data_ptr(), key_cache.data_ptr())
-        self.assertEqual(call_kwargs["value_cache"].data_ptr(), value_cache.data_ptr())
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
+
+    def test_hnd_do_kv_cache_update_passes_bnsd_to_device_operator(self):
+        self.impl.use_bnsd_kv_cache = True
+        self.impl.key_cache = None
+        self.impl.value_cache = None
+        key = torch.randn(2, 8, 64)
+        value = torch.randn_like(key)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        slot_mapping = torch.arange(2)
+
+        with patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache:
+            self.impl.do_kv_cache_update(
+                MagicMock(),
+                key,
+                value,
+                [key_cache, value_cache],
+                slot_mapping,
+            )
+
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
 
     def test_get_fia_params_uses_layout_specific_cache_view(self):
         metadata = MagicMock()

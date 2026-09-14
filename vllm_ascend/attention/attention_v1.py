@@ -60,7 +60,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
-from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -1631,33 +1630,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-        if self.use_bnsd_kv_cache:
-            if is_950():
-                DeviceOperator.reshape_and_cache(
-                    key=key,
-                    value=value,
-                    key_cache=self.key_cache.permute(0, 2, 1, 3),
-                    value_cache=self.value_cache.permute(0, 2, 1, 3),
-                    slot_mapping=slot_mapping,
-                )
-            else:
-                torch.ops._C_ascend.npu_scatter_pa_kv_cache(
-                    key.contiguous(),
-                    value.contiguous(),
-                    self.key_cache,
-                    self.value_cache,
-                    slot_mapping.contiguous(),
-                    cache_mode="Norm",
-                    scatter_mode="NHSD",
-                )
-        else:
-            DeviceOperator.reshape_and_cache(
-                key=key,
-                value=value,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                slot_mapping=slot_mapping,
-            )
+        DeviceOperator.reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            slot_mapping=slot_mapping,
+            use_bnsd=self.use_bnsd_kv_cache,
+        )
 
     def reshape_and_cache(
         self,
@@ -1684,33 +1664,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # quick fix to make sure slots is int32 for cross attention case.
             # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
             slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
-            if self.use_bnsd_kv_cache:
-                if is_950():
-                    DeviceOperator.reshape_and_cache(
-                        key=key_to_cache,
-                        value=value_to_cache,
-                        key_cache=self.key_cache.permute(0, 2, 1, 3),
-                        value_cache=self.value_cache.permute(0, 2, 1, 3),
-                        slot_mapping=slots_to_cache,
-                    )
-                else:
-                    torch.ops._C_ascend.npu_scatter_pa_kv_cache(
-                        key_to_cache.contiguous(),
-                        value_to_cache.contiguous(),
-                        self.key_cache,
-                        self.value_cache,
-                        slots_to_cache.contiguous(),
-                        cache_mode="Norm",
-                        scatter_mode="NHSD",
-                    )
-            else:
-                DeviceOperator.reshape_and_cache(
-                    key=key_to_cache,
-                    value=value_to_cache,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_mapping=slots_to_cache,
-                )
+            DeviceOperator.reshape_and_cache(
+                key=key_to_cache,
+                value=value_to_cache,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=slots_to_cache,
+                use_bnsd=self.use_bnsd_kv_cache,
+            )
             notify_kv_cache_written()
         return query, key, value, output
 
