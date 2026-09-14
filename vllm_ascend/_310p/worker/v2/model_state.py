@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 """MRV2 model state for Ascend 310P (dense/VL + hybrid/GDN)."""
 
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
+from .rejection_sampler import RejectionSampler310V2
 from .sampler import Ascend310PSampler
 
 
@@ -121,7 +126,19 @@ class _Ascend310PModelStateMixin:
 
     def custom_sampler(self, sampler):
         del sampler
-        return Ascend310PSampler(), None
+        # MTP propose/_dummy_run reads sampler.sampling_states.temperature/seeds.
+        # ``object.__new__`` UT fixtures may omit attrs set in real ``__init__``.
+        max_num_reqs = int(getattr(self, "max_num_reqs", 1) or 1)
+        device = getattr(self, "device", torch.device("cpu"))
+        base_sampler = Ascend310PSampler(max_num_reqs, device)
+        vllm_config = getattr(self, "vllm_config", None)
+        spec_config = None if vllm_config is None else vllm_config.speculative_config
+        if spec_config is None:
+            return base_sampler, None
+        method = getattr(spec_config, "method", None)
+        if method != "mtp":
+            raise NotImplementedError(f"310P MRv2 only supports MTP speculative decoding, got {method!r}.")
+        return base_sampler, RejectionSampler310V2(base_sampler, spec_config, device)
 
 
 class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
@@ -174,6 +191,109 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         )
         self._capture_seq_lens_by_ptr = {}
         self._replace_310p_rope_state(encoder_cache)
+
+    def prepare_attn(
+        self,
+        input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+    ) -> dict[str, Any]:
+        """310P hybrid FULL: correct actual/padded token counts + uniform SpecDecoding pads.
+
+        Upstream ``AscendMambaHybridModelState.prepare_attn`` passes only
+        ``num_tokens`` (padded under FULL), so GDN treats pad tokens as actual.
+        Pad rows also get ``draft_tokens=-1``, which turns a uniform SpecDecoding
+        FULL batch into mixed Spec+Prefill — diverging from the captured uniform
+        graph. Mirror AscendModelState's actual/padded split and keep pad rows on
+        the SpecDecoding path (draft=K, accepted=1), matching MRv1 pad accepted=1.
+        """
+        assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        if for_capture:
+            self._record_capture_seq_lens(input_batch.seq_lens)
+        elif cudagraph_mode == CUDAGraphMode.FULL:
+            self._refresh_capture_seq_lens(input_batch.seq_lens)
+
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            num_reqs = input_batch.num_reqs_after_padding
+            num_input_tokens = input_batch.num_tokens_after_padding
+        else:
+            num_reqs = input_batch.num_reqs
+            num_input_tokens = input_batch.num_tokens
+        num_actual_reqs = input_batch.num_reqs
+        num_actual_tokens = input_batch.num_tokens
+
+        is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
+        is_prefilling[:num_actual_reqs] = torch.from_numpy(input_batch.is_prefilling_np)
+
+        num_accepted_tokens = None
+        num_decode_draft_tokens_cpu = None
+        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
+            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+            num_accepted_tokens[:num_actual_reqs] = self.num_accepted_tokens_gpu[input_batch.idx_mapping]
+
+            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            if num_draft_tokens_per_req is not None:
+                is_decode = input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
+                num_decode_draft_tokens_np[:num_actual_reqs] = np.where(
+                    spec_decode_mask,
+                    num_draft_tokens_per_req,
+                    -1,
+                )
+                # Align with upstream #15707: only promote pad rows to Spec when
+                # every real request is SpecDecoding and pad query lens == 1+K.
+                # Also keep pad rows Spec when attn_state is already SpecDecoding
+                # (310P target FULL capture / concurrent pad), matching MRv1.
+                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > num_actual_reqs:
+                    expected_query_len = int(self.vllm_config.num_speculative_tokens) + 1
+                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[num_actual_reqs:]
+                    attn_state = input_batch.attn_state
+                    is_spec = attn_state is not None and getattr(attn_state, "name", "") == "SpecDecoding"
+                    if (spec_decode_mask.all() or is_spec) and np.all(padded_query_lens == expected_query_len):
+                        num_decode_draft_tokens_np[num_actual_reqs:] = padded_query_lens - 1
+            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+
+        # Host seq_lens for pad rows must be 0 (GPU already zeroed in prepare_inputs).
+        seq_lens_np = input_batch.seq_lens_np
+        if seq_lens_np is not None and num_reqs > num_actual_reqs:
+            seq_lens_np = seq_lens_np.copy()
+            seq_lens_np[num_actual_reqs:num_reqs] = 0
+
+        model_specific_metadata = MambaHybridAttnMetadata(
+            is_prefilling=is_prefilling,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+        )
+        self.attn_metadata = build_attn_metadata(
+            attn_groups=attn_groups,
+            num_reqs=num_reqs,
+            num_actual_reqs=num_actual_reqs,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+            max_query_len=input_batch.num_scheduled_tokens.max().item(),
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=self.max_model_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=kv_cache_config,
+            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            seq_lens_np=seq_lens_np,
+            positions=input_batch.positions,
+            attn_state=input_batch.attn_state,
+            model_specific_attn_metadata=model_specific_metadata,
+            for_cudagraph_capture=for_capture,
+        )
+        return self.attn_metadata
 
     def preprocess_state(
         self,

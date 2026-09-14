@@ -24,7 +24,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
@@ -33,6 +33,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
+    is_pd_decode_recompute_scheduler_enabled,
     vllm_version_is,
 )
 from vllm_ascend.weight_switch import (
@@ -630,6 +631,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
+        self.dcp_enabled = enable_dcp()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -873,7 +875,9 @@ class AscendSFADCPMetadataBuilder(
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
+            treat_short_extends_as_decodes=(
+                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+            ),
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None

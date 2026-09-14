@@ -464,6 +464,7 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),

@@ -8,14 +8,12 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
     AscendIndexerKPoolStateBackend,
-    select_indexer_block_size,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -90,18 +88,55 @@ def test_invalid_pool_geometry_is_rejected(ratio):
         format_indexer_kpool_slot_mapping(torch.tensor([0]), torch.tensor([0]), 128, ratio)
 
 
-@pytest.mark.parametrize(
-    ("storage_block_size", "expected"),
-    [(16, (16, 1)), (1024, (1024, 1)), (2048, (1024, 2)), (1536, (768, 2))],
-)
-def test_indexer_block_size_selection(storage_block_size, expected):
-    assert select_indexer_block_size(storage_block_size) == expected
-
-
-@pytest.mark.parametrize("storage_block_size", [0, 7, 17])
-def test_invalid_indexer_block_size_is_rejected(storage_block_size):
-    with pytest.raises(ValueError):
-        select_indexer_block_size(storage_block_size)
+@pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
+    pool_size = 16
+    logical_size = storage_block_size * pool_size
+    split = logical_size // 128
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
+        model_config=SimpleNamespace(max_model_len=logical_size * 3),
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=logical_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        **({"compress_ratio": pool_size} if vllm_version_is("0.28.0") else {"tokens_per_state": pool_size}),
+        model_version="glm5_next",
+    )
+    builders = [
+        AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
+        for _ in range(2)
+    ]
+    pages = torch.tensor([[7, 2, -1]], dtype=torch.int32)
+    expanded = (pages.unsqueeze(-1) * split + torch.arange(split)).reshape(1, -1).int()
+    expanded[:, -split:] = -1
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_input_tokens=4,
+        num_actual_tokens=3,
+        max_query_len=3,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([logical_size + pool_size], dtype=torch.int32),
+        _seq_lens_cpu=None,
+        seq_lens_cpu=None,
+        positions=torch.tensor([logical_size - 1, logical_size, logical_size + pool_size - 1, 0]),
+        slot_mapping=torch.tensor([8 * logical_size - 1, 2 * logical_size, 2 * logical_size + pool_size - 1, -1]),
+        block_table_tensor=expanded,
+    )
+    first, draft = [builder.build(0, common) for builder in builders]
+    assert first.block_size == storage_block_size
+    torch.testing.assert_close(first.block_table, pages)
+    assert first.slot_mapping.tolist() == [8 * storage_block_size - 1, -1, 2 * storage_block_size, -1]
+    assert first.seq_lens.tolist() == [storage_block_size + 1]
+    address = first.block_table.data_ptr()
+    assert draft.block_table.data_ptr() != address
+    common.block_table_tensor[:, :split] = 3 * split + torch.arange(split)
+    refreshed = builders[0].build(0, common)
+    assert refreshed.block_table.data_ptr() == address
+    assert first.block_table.tolist() == [[3, 2, -1]]
+    assert draft.block_table.tolist() == [[7, 2, -1]]
 
 
 def test_model_cache_layers_publish_source_compatible_specs():
@@ -161,7 +196,7 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
         model_config=SimpleNamespace(max_model_len=512),
     )
     builder = AscendIndexerKPoolMetadataBuilder(
-        MLAAttentionSpec(
+        AscendMLAAttentionSpec(
             block_size=256,
             num_kv_heads=1,
             head_size=128,

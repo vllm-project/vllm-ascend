@@ -1200,6 +1200,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
+            # Hash-router layers route text tokens through ``tid2eid`` and keep
+            # ``e_score_correction_bias`` unset, but the checkpoint still ships
+            # a router bias for them. Skip it instead of raising a KeyError.
+            if name.endswith(".gate.e_score_correction_bias") and name not in params_dict:
+                continue
+
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
                     continue

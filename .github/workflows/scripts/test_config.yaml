@@ -45,6 +45,7 @@ curated_tests:
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/one_card/test_msa_index_score.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -66,8 +67,6 @@ skip_tests:
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   # Temporarily skipped: capture/replay metrics unstable
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
-  # Temporarily skip this DeepSeek V4 test
-  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   # Temporarily skip the Qwen3.6 MTP e2e test
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   # Temporarily skipped: this test is currently broken
