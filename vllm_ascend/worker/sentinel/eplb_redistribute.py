@@ -15,7 +15,7 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader import get_model_loader
 
 # Re-exported upstream helpers, kept in one place so the sentinel has a
 # single import site for the redistribution building blocks.
@@ -52,6 +52,19 @@ _W13_WEIGHT_SUFFIXES = ("gate_up_proj.weight", "gate_proj.weight", "up_proj.weig
 _W2_WEIGHT_SUFFIX = "down_proj.weight"
 _W13_SCALE_SUFFIXES = ("gate_up_proj.weight_scale", "gate_proj.weight_scale", "up_proj.weight_scale")
 _W2_SCALE_SUFFIX = "down_proj.weight_scale"
+
+
+def _get_ckpt_name_normalizer(model: torch.nn.Module) -> Callable[[str], str]:
+    """Return the model's checkpoint -> runtime name normalizer, if any.
+
+    Models whose raw checkpoint naming differs from the runtime module
+    namespace (e.g. DeepSeek-V4's ``.ffn.``/``.w1./.w2./.w3.``/``.scale``)
+    declare it as a ``ckpt_weight_name_normalizer`` attribute so the reload
+    below can match raw checkpoint names against runtime-name prefixes. The
+    identity mapping is used for models that load under the same names.
+    """
+    normalizer = getattr(model, "ckpt_weight_name_normalizer", None)
+    return normalizer if normalizer is not None else (lambda name: name)
 
 
 def build_orig_to_dense_rank_table(ep_world_size: int, dead_ranks: set[int]) -> torch.Tensor:
@@ -240,8 +253,8 @@ def reload_experts_from_disk(
     it unchanged. Ascend keeps expert weights in runtime layout (transposed,
     NZ-cast, split into per-slot lists, with derived quant scales), so the
     standard ``model.load_weights`` path cannot write them back; checkpoint
-    tensors are read via DefaultModelLoader and converted per quant method,
-    then copied into the existing slot storage in place.
+    tensors are read via the configured model loader and converted per quant
+    method, then copied into the existing slot storage in place.
 
     The destination local slot of each reassigned logical expert is recovered
     from the freshly rebuilt per-layer ``logical_to_physical_map`` (rebuilt by
@@ -278,10 +291,13 @@ def reload_experts_from_disk(
         f"{routed_layers[layer_idx].layer_name}.{logical_id}.": (layer_idx, logical_id)
         for layer_idx, logical_id in local_slots
     }
+    normalize = _get_ckpt_name_normalizer(model)
 
-    loader = DefaultModelLoader(vllm_config.load_config)
-    # Produce every expert, not just the ones local at startup.
-    loader.local_expert_ids = None
+    loader = get_model_loader(vllm_config.load_config)
+    # Produce every expert, not just the ones local at startup. Only the
+    # default loader carries this EPLB filter attribute.
+    if hasattr(loader, "local_expert_ids"):
+        loader.local_expert_ids = {logical_id for _, logical_id in local_slots}
     all_weights = loader.get_all_weights(vllm_config.model_config, model)
 
     wanted_suffixes = set(_W13_WEIGHT_SUFFIXES + _W13_SCALE_SUFFIXES)
@@ -292,7 +308,8 @@ def reload_experts_from_disk(
     matched: set[str] = set()
 
     def filtered_iter() -> Generator[tuple[tuple[int, int], str, torch.Tensor], None, None]:
-        for name, tensor in all_weights:
+        for raw_name, tensor in all_weights:
+            name = normalize(raw_name)
             for prefix, key in prefixes.items():
                 if name.startswith(prefix):
                     matched.add(prefix)
