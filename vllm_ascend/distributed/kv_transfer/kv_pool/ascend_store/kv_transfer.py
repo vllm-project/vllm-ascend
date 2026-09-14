@@ -19,7 +19,6 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
-    BatchResultShapeError,
     require_aligned_batch_results,
 )
 
@@ -1247,12 +1246,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if self.worker is not None and self.worker.use_kvpp:
-                try:
-                    ret = require_aligned_batch_results("KVPP pool get", key_list_c, ret)
-                except BatchResultShapeError as exc:
-                    logger.error("%s", exc)
-                    ret = None
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,

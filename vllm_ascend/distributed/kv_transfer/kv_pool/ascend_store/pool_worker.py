@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
-import json
 import math
 import threading
 import time
@@ -93,6 +91,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
     MooncakeSessionTracker,
 )
+from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -125,8 +124,6 @@ class KVPoolWorker:
         self.vllm_config = vllm_config
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kvpp_shard_ranks: dict[tuple[int, int], tuple[int, ...]] = {}
-        if self.use_kvpp and (kv_cache_config is None or len(kv_cache_config.kv_cache_groups) != 1):
-            raise ValueError("KVPP pooling requires one logical full-attention cache group.")
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -163,6 +160,8 @@ class KVPoolWorker:
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
         self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
+        if self.use_kvpp:
+            self.pp_rank = get_pp_group().rank_in_group
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
@@ -796,84 +795,30 @@ class KVPoolWorker:
             assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
             registered_regions[storage_key] = (new_start, end)
 
-    def _build_kvpp_stage_manifest(self, kv_caches, owner_ranks: dict[str, int]) -> dict[str, Any]:
-        components = []
-        for name in sorted(kv_caches, key=lambda name: (self._extract_physical_layer_index(name), name)):
-            for index, cache in enumerate(self._as_cache_tuple(kv_caches[name])):
-                block_len, _, _, _ = self._get_cache_block_metadata(cache)
-                components.append(
-                    {
-                        "physical_layer_id": self._extract_physical_layer_index(name),
-                        "cache_name": name,
-                        "tuple_index": index,
-                        "owner_rank": owner_ranks.get(name),
-                        "dtype": str(cache.dtype),
-                        "logical_bytes_per_block": block_len,
-                        "shape_after_block_axis": list(cache.shape[1:]),
-                        "strides_after_block_axis": list(cache.stride()[1:]),
-                    }
-                )
-        return {
-            "pp_rank": self.pp_rank,
-            "groups": [
-                {
-                    "group_id": 0,
-                    "block_size": self.grouped_block_size[0],
-                    "cache_family": self.group_kv_cache_families[0],
-                    "components": components,
-                }
-            ],
-        }
-
-    def _initialize_kvpp_pool_layout(self, kv_caches):
+    def _filter_kvpp_caches(self, kv_caches):
         owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-        manifest = self._build_kvpp_stage_manifest(kv_caches, owners)
+        kvpp_group = get_kvpp_group()
+        layer_groups = (
+            [[name for name in group.layer_names if name in kv_caches] for group in self.kv_cache_config.kv_cache_groups]
+            if self.kv_cache_config is not None and self.use_hybrid
+            else [list(kv_caches)]
+        )
+        shard_ranks = {}
+        for group_id, layer_names in enumerate(layer_groups):
+            ranks = {owners[name] for name in layer_names if name in owners}
+            if any(name not in owners for name in layer_names):
+                # MTP caches are persistent on every rank in the replica group.
+                ranks.update(range(kvpp_group.world_size))
+            shard_ranks[(self.pp_rank, group_id)] = tuple(sorted(ranks))
+
         if self.pp_size > 1:
-            manifests: list[Any] = [None] * self.pp_size
-            torch.distributed.all_gather_object(manifests, manifest, group=get_pp_group().cpu_group)
+            stage_shards: list[Any] = [None] * self.pp_size
+            torch.distributed.all_gather_object(stage_shards, shard_ranks, group=get_pp_group().cpu_group)
+            for stage in stage_shards:
+                self.kvpp_shard_ranks.update(stage)
         else:
-            manifests = [manifest]
-        manifests.sort(key=lambda stage: stage["pp_rank"])
-
-        for stage in manifests:
-            for group in stage["groups"]:
-                if (
-                    group["group_id"] != 0
-                    or group["block_size"] != self.grouped_block_size[0]
-                    or group["cache_family"] != self.group_kv_cache_families[0]
-                ):
-                    raise ValueError("KVPP pooling requires matching cache groups across PP stages.")
-                components = group["components"]
-                ranks = {part["owner_rank"] for part in components if part["owner_rank"] is not None}
-                if any(part["owner_rank"] is None for part in components):
-                    ranks.update(range(self.tp_size))
-                self.kvpp_shard_ranks[(stage["pp_rank"], group["group_id"])] = tuple(sorted(ranks))
-
-        model_config = self.vllm_config.model_config
-        speculative_config = self.vllm_config.speculative_config
-        payload = {
-            "schema": "kvpp-owner-v1",
-            "tp_size": self.tp_size,
-            "pp_size": self.pp_size,
-            "model_dtype": str(model_config.dtype),
-            "quantization": model_config.quantization,
-            "cache_dtype": str(self.vllm_config.cache_config.cache_dtype),
-            "speculation": (
-                {
-                    "method": speculative_config.method,
-                    "num_speculative_tokens": speculative_config.num_speculative_tokens,
-                }
-                if speculative_config is not None
-                else None
-            ),
-            "stages": manifests,
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        ).hexdigest()
-        for metadata in self.metadata:
-            metadata.kvpp_layout = digest
-        return {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            self.kvpp_shard_ranks = shard_ranks
+        return {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, kvpp_group.rank_in_group)}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
@@ -902,7 +847,7 @@ class KVPoolWorker:
         }
         self.group_num_layers: dict[int, int] = {}
         if self.use_kvpp:
-            kv_caches = self._initialize_kvpp_pool_layout(kv_caches)
+            kv_caches = self._filter_kvpp_caches(kv_caches)
         self.kv_caches = kv_caches
 
         logger.info(
@@ -925,10 +870,6 @@ class KVPoolWorker:
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
                 end = base_addr + region_len
-                if self.use_kvpp:
-                    storage = cache.untyped_storage()
-                    if base_addr == 0 or not storage_key <= start <= end <= storage_key + storage.nbytes():
-                        raise ValueError("KVPP pool registration exceeds the persistent cache storage.")
                 if storage_key in registered_regions:
                     old_start, old_end = registered_regions[storage_key]
                     registered_regions[storage_key] = (min(old_start, start), max(old_end, end))
@@ -941,7 +882,10 @@ class KVPoolWorker:
 
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                self._infer_cache_group_metadata(group_id, group_spec.layer_names)
+                layer_names = group_spec.layer_names
+                if self.use_kvpp:
+                    layer_names = [name for name in layer_names if name in kv_caches]
+                self._infer_cache_group_metadata(group_id, layer_names)
         else:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 
@@ -973,16 +917,6 @@ class KVPoolWorker:
             group_num_layers=self.group_num_layers,
             group_layer_cache_entry_offsets=self.group_layer_cache_entry_offsets,
         )
-        if self.use_kvpp:
-            logger.info(
-                "KVPP pool shard pp_rank=%d tp_rank=%d layers=%d components=%d bytes_per_block=%d layout=%s",
-                self.pp_rank,
-                self.tp_rank,
-                self.group_num_layers[0],
-                len(self.group_block_len[0]),
-                sum(self.group_block_len[0]),
-                self.metadata[0].kvpp_layout,
-            )
 
         if self.tp_mismatch:
             first_cache = self._as_cache_tuple(next(iter(kv_caches.values())))[0]
@@ -2703,8 +2637,6 @@ class KVPoolWorker:
 
         done_recving = set()
         if self.kv_recv_thread is not None:
-            if self.use_kvpp:
-                self.kv_recv_thread.raise_if_failed()
             self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
@@ -2840,20 +2772,20 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # All-rank KV pool lookup currently assumes PCP=1.
         expanded: list[str] = []
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
         for pp_rank in range(self.pp_size):
-            head_or_tp_ranks = (
-                self.kvpp_shard_ranks[(pp_rank, group_id)]
+            rank_shards = (
+                [divmod(rank, self.tp_size) for rank in self.kvpp_shard_ranks[(pp_rank, group_id)]]
                 if self.use_kvpp
-                else range(self.get_group_tp_size(group_id))
+                else [(self.pcp_rank, rank) for rank in range(self.get_group_tp_size(group_id))]
             )
             for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in head_or_tp_ranks:
+                for pcp_rank, head_or_tp_rank in rank_shards:
                     for key in keys:
-                        rank_key = self._replace_key_field(key, "dcp", dcp_rank)
+                        rank_key = self._replace_key_field(key, "pcp", pcp_rank) if self.use_kvpp else key
+                        rank_key = self._replace_key_field(rank_key, "dcp", dcp_rank)
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
                         expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
@@ -2978,8 +2910,6 @@ class KVPoolWorker:
                     return 0
                 num_ranks = len(multi_tp_keys) // len(keys)
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
-                if self.use_kvpp:
-                    res = require_aligned_batch_results("KVPP pool exists", multi_tp_keys, res)
                 num_block = len(keys)
                 if use_layerwise:
                     res = self.check_all_layers_exists(res, self.num_layers)

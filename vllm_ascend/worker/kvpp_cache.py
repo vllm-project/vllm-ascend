@@ -4,13 +4,18 @@ from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_placement import (
+    KVPP_BUFFER_ALIGNMENT,
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
     create_kvpp_cache_allocation_plan,
+    get_kvpp_buffer_size,
 )
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
-KVPP_PD_ALIGNMENT = 2 * 1024 * 1024
+
+def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
+    raw = torch.zeros(get_kvpp_buffer_size(size), dtype=torch.int8, device=device)
+    return raw.narrow(0, (-raw.data_ptr()) % KVPP_BUFFER_ALIGNMENT, size)
 
 
 def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
@@ -34,10 +39,8 @@ def allocate_kvpp_cache(
         for name, bundle in plan.layer_bundles.items()
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
-    transfer_config = vllm_config.kv_transfer_config
-    align_for_transfer = transfer_config is not None and transfer_config.kv_connector == "MooncakeConnectorV2"
     scratch = (
-        [torch.zeros(scratch_size, dtype=torch.int8, device=device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
+        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
         if scratch_size
         else []
     )
@@ -46,13 +49,7 @@ def allocate_kvpp_cache(
     for name, (layout, size) in layouts.items():
         owner = plan.layer_owner_ranks.get(name)
         if owner is None or owner == plan.kvpp_rank:
-            if align_for_transfer:
-                # Register whole pages without including neighboring allocations.
-                aligned_size = (size + KVPP_PD_ALIGNMENT - 1) // KVPP_PD_ALIGNMENT * KVPP_PD_ALIGNMENT
-                raw = torch.zeros(aligned_size + KVPP_PD_ALIGNMENT, dtype=torch.int8, device=device)
-                buffer = raw.narrow(0, (-raw.data_ptr()) % KVPP_PD_ALIGNMENT, size)
-            else:
-                buffer = torch.zeros(size, dtype=torch.int8, device=device)
+            buffer = _allocate_kvpp_buffer(size, device)
         else:
             buffer = scratch[target_index % KVPP_SCRATCH_BUFFER_COUNT]
         for cache_name, parts in layout.items():

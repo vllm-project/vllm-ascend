@@ -1012,7 +1012,7 @@ class KVPoolScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
-            # A cancelled load still holds its blocks until all workers finish receiving.
+            self._loading_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -1110,7 +1110,6 @@ class KVPoolScheduler:
         hand the connector_output, free non-null mamba blocks and so on.
         """
         self.update_finished_sending(connector_output.finished_sending)
-        self.update_finished_recving(connector_output.finished_recving)
 
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
