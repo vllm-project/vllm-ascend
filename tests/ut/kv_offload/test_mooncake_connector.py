@@ -4043,6 +4043,59 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     self.assertEqual(local_ids, (list(range(20 * local_cp, 20 * local_cp + 8)),))
                     self.assertEqual(remote_ids, (list(range(10 * remote_cp, 10 * remote_cp + 8)),))
 
+    def test_single_side_dcp_block_mapping_both_directions(self):
+        for local_cp, remote_cp in ((1, 2), (1, 4), (2, 1), (4, 1)):
+            for local_rank in range(local_cp):
+                for prefix in (0, 4):
+                    for is_full_block_table in (False, True):
+                        with self.subTest(
+                            local_cp=local_cp, remote_cp=remote_cp, rank=local_rank,
+                            prefix=prefix, full=is_full_block_table,
+                        ):
+                            worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+                            worker.block_size = 16
+                            worker.dcp_size, worker.dcp_rank = local_cp, local_rank
+                            worker.block_size_scale = [[2], [1]]
+                            worker.kv_group2layeridx = {
+                                0: ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+                                1: ({"kv_cache_spec_type": "MambaSpec", "kv_cache_group_id": 1}, [1]),
+                            }
+                            local_blocks = [20, 9, 30, 12, 40, 15, 50, 18, 60]
+                            remote_blocks = [100, 70, 90, 60, 80, 50, 110, 40, 120]
+                            meta = types.SimpleNamespace(
+                                remote_dcp_size=remote_cp,
+                                remote_block_size=16,
+                                num_computed_tokens=prefix * 16,
+                                num_prompt_blocks=9,
+                                local_block_ids=(local_blocks[prefix // local_cp:], [31]),
+                                local_full_block_ids=(local_blocks, [99]) if is_full_block_table else (),
+                                remote_block_ids=(remote_blocks, [201]),
+                            )
+                            ranks = list(reversed(range(remote_cp)))
+                            local_ids, remote_ids = worker._get_single_side_dcp_block_ids(meta, ranks)
+                            for idx, source_rank in enumerate(ranks):
+                                blocks = [
+                                    b for b in range(prefix, 9)
+                                    if b % local_cp == local_rank and b % remote_cp == source_rank
+                                ]
+                                self.assertEqual(
+                                    local_ids[idx][0],
+                                    [local_blocks[b // local_cp] * 2 + k for b in blocks for k in range(2)],
+                                )
+                                self.assertEqual(
+                                    remote_ids[idx][0],
+                                    [remote_blocks[b // remote_cp] * 2 + k for b in blocks for k in range(2)],
+                                )
+                                self.assertEqual(local_ids[idx][1], [31] if idx == len(ranks) - 1 else [])
+                                self.assertEqual(remote_ids[idx][1], [201] if idx == len(ranks) - 1 else [])
+
+    def test_single_side_dcp_rejects_unequal_block_sizes(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.block_size, worker.dcp_size = 16, 2
+        meta = types.SimpleNamespace(remote_dcp_size=1, remote_block_size=8)
+        with self.assertRaisesRegex(AssertionError, "equal P/D block sizes"):
+            worker._get_single_side_dcp_block_ids(meta, [0])
+
     def test_decode_only_dcp_checks_each_cache_group_type(self):
         for spec_type in ("MLAAttentionSpec", "AscendMLAAttentionSpec", "FullAttentionSpec"):
             with self.subTest(spec_type=spec_type):
