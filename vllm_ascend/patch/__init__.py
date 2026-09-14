@@ -1279,3 +1279,8 @@
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
 #
+# ** 34a. File: platform/patch_stop_token_ids_validation.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   Validate client-supplied stop_token_ids and allowed_token_ids against the
+#   model vocabulary until vLLM#54196 is included in the pinned vLLM commit.
+#
