@@ -312,6 +312,12 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
       - name: Kimi-K2.6-w4a8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
