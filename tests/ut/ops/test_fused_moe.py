@@ -1781,9 +1781,7 @@ def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm)
         "get_forward_context",
         lambda: SimpleNamespace(no_compile_layers={runner.layer_name: runner}),
     )
-    monkeypatch.setattr(
-        fused_moe_module, "tensor_model_parallel_all_reduce", lambda states: states * 4
-    )
+    monkeypatch.setattr(fused_moe_module, "tensor_model_parallel_all_reduce", lambda states: states * 4)
 
     def upstream_forward(self, hidden_states, router_logits, **kwargs):
         return self._maybe_reduce_final_output(hidden_states.clone(), None)
@@ -1799,10 +1797,7 @@ def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm)
             context.moe_comm_type = comm
             expected = states * (4 if comm == MoECommType.ALLGATHER else 1)
             torch.testing.assert_close(graph(states), expected)
-        assert any(
-            node.target == torch.ops.vllm.ascend_moe_forward_complete.default
-            for node in graph.graph.nodes
-        )
+        assert any(node.target == torch.ops.vllm.ascend_moe_forward_complete.default for node in graph.graph.nodes)
     finally:
         library._destroy()
 
@@ -1811,8 +1806,6 @@ def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm)
 def test_complete_moe_fake_preserves_local_token_count(shared_width):
     hidden = torch.empty(3, 4)
     shared = torch.empty(12, shared_width) if shared_width is not None else None
-    result = fused_moe_module._ascend_moe_forward_complete_fake(
-        hidden, hidden, shared, None, "test"
-    )
+    result = fused_moe_module._ascend_moe_forward_complete_fake(hidden, hidden, shared, None, "test")
     assert result.shape == (3, shared_width or 4)
     assert result.dtype == hidden.dtype

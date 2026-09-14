@@ -105,9 +105,7 @@ def _ascend_moe_forward_complete_fake(
     input_ids: torch.Tensor | None,
     layer_name: str,
 ) -> torch.Tensor:
-    output_width = (
-        shared_experts_input.shape[-1] if shared_experts_input is not None else hidden_states.shape[-1]
-    )
+    output_width = shared_experts_input.shape[-1] if shared_experts_input is not None else hidden_states.shape[-1]
     return hidden_states.new_empty((*hidden_states.shape[:-1], output_width))
 
 
