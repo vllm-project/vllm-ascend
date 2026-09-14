@@ -16,14 +16,13 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.dspark import mla
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
-from vllm_ascend.worker.v2.spec_decode.dspark.mla import AscendMLADSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
 def make_speculator():
-    spec = AscendMLADSparkSpeculator.__new__(AscendMLADSparkSpeculator)
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.attn_architecture = "MLA"
     spec.vllm_config = SimpleNamespace()
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
@@ -66,13 +65,10 @@ def make_draft(config):
         ("KpoolMLADraftModel", True, {"index_topk": 2048, "index_kpool": 4}, {}, True),
     ],
 )
-def test_routes_by_draft_mla_capability(
+def test_shared_speculator_selects_draft_mla_metadata(
     monkeypatch, architecture, draft_use_mla, target_use_mla, text_fields, outer_fields, expect_dense_mla
 ):
-    mla_constructor = MagicMock()
-    shared_constructor = MagicMock()
-    monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
-    monkeypatch.setattr(shared, "AscendDSparkSpeculator", shared_constructor)
+    patch_upstream_init(monkeypatch)
     text_config = SimpleNamespace(**text_fields)
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=target_use_mla),
@@ -88,12 +84,16 @@ def test_routes_by_draft_mla_capability(
     )
     device = torch.device("cpu")
     result = init_speculator(config, device)
-    selected, unused = (
-        (mla_constructor, shared_constructor) if expect_dense_mla else (shared_constructor, mla_constructor)
-    )
-    selected.assert_called_once_with(config, device)
-    unused.assert_not_called()
-    assert result is selected.return_value
+    assert type(result) is AscendDSparkSpeculator
+    assert result.attn_architecture == ("MLA" if expect_dense_mla else None)
+
+
+def patch_upstream_init(monkeypatch):
+    def init(self, config, device):
+        self.draft_model_config = config.speculative_config.draft_model_config
+
+    monkeypatch.setattr(DSparkSpeculator, "__init__", init)
+    monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
 
 
 @pytest.mark.parametrize(
@@ -104,11 +104,7 @@ def test_routes_by_draft_mla_capability(
     ],
 )
 def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, metadata_cls, config_fields):
-    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
-    spec.num_query_per_req = 5
-    mla_constructor = MagicMock()
-    monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
-    monkeypatch.setattr(shared, "AscendDSparkSpeculator", MagicMock(return_value=spec))
+    patch_upstream_init(monkeypatch)
     hf_config = SimpleNamespace(architectures=["DSparkDraftModel"], **config_fields)
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -118,8 +114,9 @@ def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, metadata_cls, conf
         )
     )
     selected = init_speculator(config, torch.device("cpu"))
-    assert selected is spec
-    mla_constructor.assert_not_called()
+    assert type(selected) is AscendDSparkSpeculator
+    assert selected.attn_architecture is None
+    selected.num_query_per_req = 5
     # Use the backend's actual type: neither DSA nor SFA has a dense decode
     # object. Only the fields touched by the shared update are needed here.
     metadata = metadata_cls.__new__(metadata_cls)
@@ -199,42 +196,47 @@ def test_padded_mla_query_lengths_are_nested():
     assert not hasattr(metadata["draft.0"], "actual_seq_lengths_q")
 
 
-@pytest.mark.parametrize("metadata", [{}, {"draft": SimpleNamespace(decode=None)}])
-def test_rejects_missing_mla_decode_metadata(metadata):
-    with pytest.raises((RuntimeError, TypeError)):
-        make_speculator()._update_draft_attn_metadata(metadata, 1)
+@pytest.mark.parametrize("architecture", [None, "MLA"])
+def test_empty_metadata_is_a_noop(architecture):
+    spec = make_speculator()
+    spec.attn_architecture = architecture
+    metadata = {}
+    assert spec._update_draft_attn_metadata(metadata, 1) is metadata
 
 
 def test_capture_uses_descriptor_positions_and_restores_on_error(monkeypatch):
     spec = make_speculator()
-    original = mla.dflash_cudagraph.build_attn_metadata
+    original = shared.dflash_cudagraph.build_attn_metadata
     builder = MagicMock()
-    monkeypatch.setattr(mla, "build_attn_metadata", builder)
+    monkeypatch.setattr(shared, "build_attn_metadata", builder)
     with pytest.raises(RuntimeError, match="capture failed"), spec.draft_capture_context():
-        mla.dflash_cudagraph.build_attn_metadata(num_tokens=10, num_reqs=2, causal=False)
+        shared.dflash_cudagraph.build_attn_metadata(num_tokens=10, num_reqs=2, causal=False)
         kwargs = builder.call_args.kwargs
         torch.testing.assert_close(kwargs["positions"], torch.arange(10))
         assert kwargs["is_prefilling"].tolist() == [False, False]
         assert kwargs["attn_state"] == AscendAttentionState.SpecDecoding
         assert kwargs["causal"] is False
         raise RuntimeError("capture failed")
-    assert mla.dflash_cudagraph.build_attn_metadata is original
+    assert shared.dflash_cudagraph.build_attn_metadata is original
 
 
-def test_shared_prefill_flags_keep_existing_behavior():
-    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
-    flags = np.array([True, False, True])
-    spec.input_batch = SimpleNamespace(is_prefilling_np=flags)
-    actual = spec._get_draft_is_prefilling(4)
-    assert actual.tolist() == flags.tolist()
-    assert np.shares_memory(actual.numpy(), flags)
-
-
-def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatch):
+def test_non_mla_capture_keeps_shared_builder():
     spec = make_speculator()
+    spec.attn_architecture = None
+    original = shared.dflash_cudagraph.build_attn_metadata
+    with spec.draft_capture_context():
+        assert shared.dflash_cudagraph.build_attn_metadata is original
+    assert shared.dflash_cudagraph.build_attn_metadata is original
+
+
+@pytest.mark.parametrize("architecture", [None, "MLA"])
+def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architecture):
+    spec = make_speculator()
+    spec.attn_architecture = architecture
     spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
     spec._group_causal = {0: False}
-    metadata = {"draft": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[5, 5]))}
+    query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
+    metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     spec._build_draft_attn_metadata = MagicMock(return_value=metadata)
     captured = {}
 
@@ -246,9 +248,15 @@ def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatc
     monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
     result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
     assert captured["pad"] == 10
-    assert captured["is_prefilling"].tolist() == [False, False]
-    assert result[0]["draft"].decode.actual_seq_lengths_q == [5, 10]
-    assert result[0]["draft"].attn_state == AscendAttentionState.SpecDecoding
+    assert result == [metadata]
+    assert query_metadata.actual_seq_lengths_q == [5, 10]
+    if architecture == "MLA":
+        assert captured["is_prefilling"].tolist() == [False, False]
+        assert result[0]["draft"].attn_state == AscendAttentionState.SpecDecoding
+    else:
+        assert captured["is_prefilling"].tolist() == [True, True]
+        assert np.shares_memory(captured["is_prefilling"].numpy(), spec.input_batch.is_prefilling_np)
+        assert not hasattr(result[0]["draft"], "attn_state")
     kwargs = spec._build_draft_attn_metadata.call_args.kwargs
     assert kwargs["num_reqs"] == 1
     assert kwargs["num_reqs_padded"] == 2

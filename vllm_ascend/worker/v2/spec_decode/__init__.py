@@ -19,8 +19,6 @@
 import torch
 from vllm.config import VllmConfig
 
-from vllm_ascend.utils import model_uses_sfa_sparse
-
 
 def init_speculator(
     vllm_config: VllmConfig,
@@ -40,17 +38,6 @@ def init_speculator(
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
-        draft_config = speculative_config.draft_model_config
-        assert draft_config is not None
-        # Sparse/compressed MLA uses DSA/SFA metadata rather than the dense
-        # MLA decode object consumed by AscendMLADSparkSpeculator.
-        uses_compressed_mla = any(
-            hasattr(config, "compress_ratios") for config in (draft_config.hf_config, draft_config.hf_text_config)
-        )
-        if draft_config.use_mla and not uses_compressed_mla and not model_uses_sfa_sparse(draft_config):
-            from vllm_ascend.worker.v2.spec_decode.dspark.mla import AscendMLADSparkSpeculator
-
-            return AscendMLADSparkSpeculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )
