@@ -422,7 +422,8 @@ def test_dummy_run_flushes_dump_window_without_writing():
     ):
         result = runner._dummy_run(8, is_profile=True)
 
-    assert result is outputs
+    assert result[0] is outputs[0]
+    assert result[1] is outputs[1]
     parent_dummy_run.assert_called_once_with(
         8,
         skip_attn=False,
@@ -532,6 +533,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         return metadata
 
     monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
-    assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=0, num_scheduled_tokens={})
+    assert runner.execute_model(scheduler_output, dummy_run=dummy_run, is_profile=is_profile) is metadata
     assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
     assert state.kvpp_is_dummy_run is False
