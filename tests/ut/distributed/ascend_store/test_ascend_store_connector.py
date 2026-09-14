@@ -303,8 +303,15 @@ class TestAscendStoreConnector(unittest.TestCase):
 
         # start_load_kv
         connector._get_connector_metadata = MagicMock(return_value=MagicMock())
-        connector.start_load_kv(MagicMock())
+        connector.start_load_kv(MagicMock(attn_metadata=MagicMock()))
+        mock_worker.prepare_save.assert_called_once()
         mock_worker.start_load_kv.assert_called_once()
+
+        # A zero-token scheduler step still loads metadata but has no save to
+        # commit, so it must not prepare one.
+        connector.start_load_kv(MagicMock(attn_metadata=None))
+        mock_worker.prepare_save.assert_called_once()
+        self.assertEqual(mock_worker.start_load_kv.call_count, 2)
 
         # wait_for_save (non-consumer)
         connector.kv_role = "kv_producer"
