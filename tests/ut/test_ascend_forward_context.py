@@ -197,6 +197,25 @@ def test_is_decode_only_node_false_without_kv_transfer():
     assert afc._is_decode_only_node(_make_vllm_config()) is False
 
 
+def test_a5_mega_moe_uses_prefill_capacity_without_kv_transfer(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=65536),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=8,
+        max_num_batched_tokens=4096,
+    )
+
+    capacity = afc.get_a5_mega_moe_buffer_tokens_per_rank(
+        vllm_config,
+        mc2_tokens_capacity=32,
+    )
+
+    assert capacity == 4096
+
+
 def test_is_decode_only_node_true_for_decode_bench_connector(monkeypatch):
     monkeypatch.setattr(
         afc,
