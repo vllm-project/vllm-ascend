@@ -16,6 +16,7 @@
 
 
 import torch
+import vllm.envs as envs
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
@@ -24,7 +25,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_a5_add_rms_norm_bias, enable_custom_op, is_950
+from vllm_ascend.utils import enable_custom_op, is_950
 
 
 class AscendRMSNorm(RMSNorm):
@@ -69,12 +70,9 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if is_950():
-                use_custom = enable_a5_add_rms_norm_bias()
-            else:
-                use_custom = enable_custom_op()
+            if enable_custom_op() or (is_950() and not envs.VLLM_BATCH_INVARIANT):
+                import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-            if use_custom:
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -100,12 +98,9 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if is_950():
-                use_custom = enable_a5_add_rms_norm_bias()
-            else:
-                use_custom = enable_custom_op()
+            if enable_custom_op() or (is_950() and not envs.VLLM_BATCH_INVARIANT):
+                import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-            if use_custom:
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
