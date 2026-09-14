@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch_npu
@@ -867,7 +867,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                actual_seq_qlen = self._decode_sink_actual_seq_qlen[: len(attn_metadata.seq_lens_list)]
+                actual_seq_qlen = cast(torch.Tensor, self._decode_sink_actual_seq_qlen)[
+                    : len(attn_metadata.seq_lens_list)
+                ]
             if self.sliding_window is not None:
                 sparse_mode = 4
             else:
