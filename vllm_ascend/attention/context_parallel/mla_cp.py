@@ -4,6 +4,7 @@ from typing import NamedTuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
@@ -213,6 +214,22 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # Decode kernels produce LSE for the backend's own DCP merge. Advertise
+    # this to the upstream runner's CP compatibility check, including the
+    # history/current split used by MTP with block-interleaved KV.
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    @staticmethod
+    def _pad_dcp_query_heads(q_nope: torch.Tensor, q_pe: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad TND queries for FIA without changing DCP head ownership."""
+        num_heads = q_nope.shape[1]
+        padding = (1 << (num_heads - 1).bit_length()) - num_heads
+        if padding:
+            q_nope = F.pad(q_nope, (0, 0, 0, padding))
+            q_pe = F.pad(q_pe, (0, 0, 0, padding))
+        return q_nope, q_pe
 
     @staticmethod
     def update_graph_params(
@@ -495,6 +512,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         head_end = head_start + self.num_heads
         current_q_nope = q_nope[:, head_start:head_end].contiguous()
         current_q_pe = q_pe[:, head_start:head_end].contiguous()
+        # Pad after selecting this rank's real heads. Remove padding before
+        # the history collective so head shards retain their original order.
+        q_nope, q_pe = self._pad_dcp_query_heads(q_nope, q_pe)
+        current_q_nope, current_q_pe = self._pad_dcp_query_heads(current_q_nope, current_q_pe)
         current_k_nope = current_k_nope.view(num_tokens, self.num_kv_heads, self.kv_lora_rank).contiguous()
         current_k_pe = current_k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim).contiguous()
 
@@ -526,7 +547,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                         history_k_nope,
                         query_rope=q_pe,
                         key_rope=history_k_pe,
-                        num_heads=num_heads,
+                        num_heads=q_nope.shape[1],
                         atten_mask=None,
                         sparse_mode=0,
                         block_table=decode_meta.block_table,
@@ -540,7 +561,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                         current_k_nope,
                         query_rope=current_q_pe,
                         key_rope=current_k_pe,
-                        num_heads=self.num_heads,
+                        num_heads=current_q_nope.shape[1],
                         atten_mask=decode_meta.attn_mask,
                         sparse_mode=3,
                         actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
@@ -565,6 +586,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             actual_seq_lengths_kv=decode_meta.cp_history_seq_len,
             attention_kind=MLASplitAttentionKind.HISTORY,
         )
+        if q_nope.shape[1] != num_heads:
+            history_output = history_output[:, :num_heads].contiguous()
+            history_lse = history_lse[:, :num_heads].contiguous()
 
         # Overlap history all-to-all with current-token attention.
         main_stream = torch.npu.current_stream()
@@ -603,6 +627,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
             attention_kind=MLASplitAttentionKind.CURRENT,
         )
+        if current_q_nope.shape[1] != self.num_heads:
+            current_output = current_output[:, : self.num_heads]
+            current_lse = current_lse[:, : self.num_heads]
 
         # Join the history communication only when both branches are ready.
         main_stream.wait_event(history_comm_done)
@@ -649,6 +676,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
+        real_num_heads = num_heads
+        q_nope = q_nope.view(num_tokens, num_heads, -1)
+        q_pe = q_pe.view(num_tokens, num_heads, -1)
+        q_nope, q_pe = self._pad_dcp_query_heads(q_nope, q_pe)
+        num_heads = q_nope.shape[1]
         # Use DCP-local computed token counts to build sequence lengths and masks.
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -783,6 +815,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
 
+        # Padding belongs only to FIA. DCP must scatter the original heads.
+        if num_heads != real_num_heads:
+            attn_output = attn_output[:, :real_num_heads].contiguous()
+            softmax_lse = softmax_lse[:, :real_num_heads].contiguous()
         # Update out&lse
         attn_output = self._merge_dcp_attention_output(
             attn_output,

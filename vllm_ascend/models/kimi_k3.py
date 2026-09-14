@@ -333,6 +333,12 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     def kv_cache(self):
         return self._attention_layer.kv_cache
 
+    @kv_cache.setter
+    def kv_cache(self, value):
+        # ModelRunner V2 detaches cache storage through every model module
+        # during shutdown. Forward that assignment to the owning MLA layer.
+        self._attention_layer.kv_cache = value
+
     @property
     def kv_cache_dtype(self):
         return self._attention_layer.kv_cache_dtype
