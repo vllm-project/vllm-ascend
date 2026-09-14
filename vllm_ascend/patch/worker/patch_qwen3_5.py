@@ -40,6 +40,25 @@ _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
 
 
+def _gdn_init_with_lora_config(
+    self,
+    config,
+    vllm_config,
+    prefix="",
+    gqa_interleaved_layout=False,
+    reduce_results=True,
+):
+    _GDN_ORIGINAL_INIT(
+        self,
+        config=config,
+        vllm_config=vllm_config,
+        prefix=prefix,
+        gqa_interleaved_layout=gqa_interleaved_layout,
+        reduce_results=reduce_results,
+    )
+    self.enable_lora = vllm_config.lora_config is not None
+
+
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
     """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
     return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
@@ -203,9 +222,11 @@ if Qwen3_5MultiTokenPredictor is not None:
 
 
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+_GDN_PATCH_TARGET.__init__ = _gdn_init_with_lora_config
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+_GDN_PATCH_TARGET.process_weights_after_loading = AscendGatedDeltaNetAttention.process_weights_after_loading
 
 if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -217,7 +238,7 @@ else:
 
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
-        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        _gdn_init_with_lora_config(self, *args, **kwargs)
         initialize_packed_conv_weight(self)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
