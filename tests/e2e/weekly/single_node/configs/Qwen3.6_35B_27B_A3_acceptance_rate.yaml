@@ -60,7 +60,7 @@ test_cases:
       - "--quantization"
       - "ascend"
       - "--speculative-config"
-      - '{"method": "dflash", "num_speculative_tokens": 3, "model":"z-lab/Qwen3.6-35B-A3B-DFlash"}'
+      - '{"method": "dflash", "num_speculative_tokens": 3, "model":"rainney/AEON-DFlash-Qwen3.6-35B-A3B"}'
     benchmarks:
       <<: *benchmarks_perf
     test_content:
