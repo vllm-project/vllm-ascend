@@ -263,6 +263,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        self.dcp_enabled = enable_dcp()
         self.pcp_rank = 0
         if self.pcp_enabled:
             self.pcp_rank = get_pcp_group().rank_in_group
@@ -459,20 +460,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        parallel_config = self.vllm_config.parallel_config
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.pcp_enabled or parallel_config.decode_context_parallel_size > 1)
+                    not (self.pcp_enabled or self.dcp_enabled)
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
-                    or (
-                        parallel_config.decode_context_parallel_size > 1
-                        and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
-                    )
+                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 ),
             )
         )
