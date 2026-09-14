@@ -437,23 +437,37 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
     clears the mode elsewhere so this class is never selected there.
     """
 
-    _HCOMM_INFO = None
+    _HCOMM_INFO_MAP = {}
 
     def __init__(self, layer):
         super().__init__(layer)
         self.mm_comm_fuse_mode = enable_mm_comm_fuse()
-        self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
+        # The fused ops take a string HCCL comm handle (not a ProcessGroup),
+        # resolved per group. tp=1 never reaches the fused path, so skip the
+        # backend query instead of eagerly initializing a communicator.
+        self.hcomm_info = None
+        if self.tp_size > 1 and self.comm_group.device_group is not None:
+            self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
+
+    def update_attrs(self):
+        super().update_attrs()
+        # Flagged here rather than in __init__ because reduce_results is only
+        # synced from the layer at this point. Still runs before
+        # process_weights_after_loading, which stashes weight_t when set.
+        if self.reduce_results and self.tp_size > 1:
+            self.layer.apply_weight_t = True
 
     def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         input_parallel = self.get_input_parallel(input_)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         if self.reduce_results and self.tp_size > 1:
-            # Both fused ops expect a contiguous [K, O] weight; prefer the
-            # pre-transposed (NZ-converted) copy stashed at load time and fall
-            # back to a zero-copy .t() view when it is absent.
+            # Both fused ops expect a contiguous [K, O] weight in ND format
+            # (npu_mm_all_reduce_base rejects FRACTAL_NZ); prefer the ND
+            # transposed copy stashed at load time and transpose on the fly
+            # when it is absent.
             weight = getattr(self.layer, "weight_t", None)
             if weight is None:
-                weight = self.layer.weight.t()
+                weight = self.layer.weight.t().contiguous()
             if self.mm_comm_fuse_mode == 1:
                 output = torch_npu.npu_mm_all_reduce_base(input_parallel, weight, self.hcomm_info, bias=bias_)
             else:
@@ -470,10 +484,7 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
                 pad_size = (world_size - (num_tokens % world_size)) % world_size
                 if pad_size > 0:
                     # Pad 'pad_size' rows at the end of the num_tokens dimension (dim=0)
-                    input_2d = torch.cat(
-                        [input_2d, torch.zeros(pad_size, hidden_dim, device=input_2d.device, dtype=input_2d.dtype)],
-                        dim=0
-                    )
+                    input_2d = F.pad(input_2d, (0, 0, 0, pad_size))
 
                 # --------------- 3. Call npu_mm_reduce_scatter_base ---------------
                 # Internally performs: matmul(input_2d, weight) -> reduce_scatter.
@@ -521,17 +532,22 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
 
     @classmethod
     def get_hcomm_info(cls, group: dist.ProcessGroup) -> str:
-        """Get the HCCL communication information for the given group."""
-        if cls._HCOMM_INFO is not None:
-            return cls._HCOMM_INFO
+        """Get the HCCL communication information for the given group.
 
+        Cached per group: layers on different comm groups (e.g. the MLP TP
+        group vs. the plain TP group) yield different handles, so a single
+        class-level value would be wrong.
+        """
+        if group in cls._HCOMM_INFO_MAP:
+            return cls._HCOMM_INFO_MAP[group]
         rank = torch.distributed.get_rank(group)
         if torch.__version__ > "2.0":
             global_rank = torch.distributed.get_global_rank(group, rank)
-            cls._HCOMM_INFO = group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+            hcomm_info = group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
         else:
-            cls._HCOMM_INFO = group.get_hccl_comm_name(rank)
-        return cls._HCOMM_INFO
+            hcomm_info = group.get_hccl_comm_name(rank)
+        cls._HCOMM_INFO_MAP[group] = hcomm_info
+        return hcomm_info
 
 
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):

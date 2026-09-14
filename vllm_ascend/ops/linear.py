@@ -43,7 +43,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import (
     AscendDeviceType,
-    enable_mm_comm_fuse,
     enable_sp,
     get_ascend_device_type,
     is_310p,
@@ -88,6 +87,14 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_310p_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
+        # Fused matmul+comm path (MatmulCommRowParallelOp) consumes a
+        # contiguous [K, O] weight, so stash a transposed copy up front to
+        # avoid an on-the-fly transpose every forward. Only layers flagged by
+        # the op selection stash. Must run before the fp32 cast and NZ
+        # conversion below: the stash stays in the original dtype and ND
+        # format because npu_mm_all_reduce_base rejects FRACTAL_NZ.
+        if getattr(layer, "apply_weight_t", False):
+            layer.weight_t = layer.weight.data.t().contiguous()
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
@@ -99,11 +106,6 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
-                if enable_mm_comm_fuse():
-                    # Fused matmul+comm ops consume a contiguous [K, O] weight;
-                    # stash a transposed (and NZ-converted) copy, keeping
-                    # layer.weight untouched for the fallback path.
-                    layer.weight_t = maybe_trans_nz(layer.weight.t().contiguous())
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
 
     def apply(
