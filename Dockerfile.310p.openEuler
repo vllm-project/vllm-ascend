@@ -86,15 +86,18 @@ ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
 # When an internal RUSTUP_DIST_SERVER mirror is provided (CI builds), pre-install
 # rustup-init from the mirror so build_rust.sh doesn't reach the public
 # https://sh.rustup.rs (unreachable from build containers). External builds
-# without the mirror keep the original public install path.
+# without the mirror keep the original public install path. The default
+# toolchain is read from vllm's rust-toolchain.toml (falling back to stable),
+# so it always matches the version vllm pins.
 RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
       case $(uname -m) in \
         x86_64) ARCH=x86_64-unknown-linux-gnu ;; \
         aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
       esac && \
+      TOOLCHAIN=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' /vllm-workspace/vllm/rust-toolchain.toml) && \
       python3 -c "import urllib.request; urllib.request.urlretrieve('${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init', '/tmp/rustup-init')" && \
       chmod +x /tmp/rustup-init && \
-      /tmp/rustup-init -y --default-toolchain "${RUSTUP_TOOLCHAIN:-1.95}" && \
+      /tmp/rustup-init -y --default-toolchain "${TOOLCHAIN:-stable}" && \
       rm /tmp/rustup-init && \
       . "$HOME/.cargo/env"; \
     fi
