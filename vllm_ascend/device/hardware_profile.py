@@ -26,7 +26,6 @@ class HardwareCapability(Enum):
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
     DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
-    DSA_O_PROJ_TP = auto()
     DSV4_COMPRESSED_CACHE = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
@@ -41,6 +40,7 @@ class HardwareCapability(Enum):
     LORA_CUSTOM_OPS = auto()
     MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     MLAPO_NATIVE_WEIGHTS = auto()
+    MINIMAX_M3_PREFILL_KV_GATHER_Q = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
     MOE_DISPATCH_EXTRA_ARGS = auto()
@@ -153,7 +153,10 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
-_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+}
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
@@ -226,7 +229,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
-                    HardwareCapability.DSA_O_PROJ_TP,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
@@ -237,6 +239,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+                    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,

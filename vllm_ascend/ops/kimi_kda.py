@@ -10,6 +10,7 @@ replaced here with the Ascend metadata builder and AscendC operators.
 from functools import wraps
 
 import torch
+import torch_npu
 from einops import rearrange
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -20,48 +21,143 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
-    _KimiGDNMergedColumnParallelLinear,
 )
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
+from vllm_ascend.utils import npu_stream_switch
 
-_KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+_F_PROJ_SHARD_ID = 1
+_KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
-def _zero_padded_output(
-    output: torch.Tensor,
-    num_live_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows using a device-side live-token count."""
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=num_live_tokens.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < num_live_tokens
-    return torch.where(valid_tokens.view(1, -1, 1, 1), output, 0.0)
+def _kda_bfg_stream() -> torch.npu.Stream:
+    global _KDA_BFG_STREAM
+    if _KDA_BFG_STREAM is None:
+        _KDA_BFG_STREAM = torch_npu.npu.Stream()
+    return _KDA_BFG_STREAM
 
 
-def _zero_padded_recurrent_output(
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows skipped by recurrent KDA."""
-    return _zero_padded_output(output, query_start_loc[-1])
+class _KDAFusedBFGLinear(MergedColumnParallelLinear):
+    """Pack beta, an offline-composed F projection, and the output gate."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        tp_size: int,
+        quant_config,
+        prefix: str,
+    ) -> None:
+        projection_size = num_heads * head_dim
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=[num_heads, projection_size, projection_size],
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        if self.tp_size != tp_size:
+            raise ValueError(f"KDA fused BFG TP mismatch: layer={self.tp_size}, attention={tp_size}")
+        local_projection_size = projection_size // tp_size
+        self.f_a_weight = nn.Parameter(
+            self.weight.new_empty((head_dim, hidden_size)),
+            requires_grad=False,
+        )
+        self.f_b_weight = nn.Parameter(
+            self.weight.new_empty((local_projection_size, head_dim)),
+            requires_grad=False,
+        )
+        self.f_a_weight.weight_loader = self._load_f_a_weight
+        self.f_b_weight.weight_loader = self._load_f_b_weight
+        self._f_a_loaded = False
+        self._f_b_loaded = False
+
+    def _load_f_a_weight(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        del loaded_shard_id
+        if param.shape != loaded_weight.shape:
+            raise ValueError(
+                "KDA f_a_proj checkpoint shape mismatch: "
+                f"expected {tuple(param.shape)}, got {tuple(loaded_weight.shape)}"
+            )
+        param.data.copy_(loaded_weight)
+        self._f_a_loaded = True
+        self._maybe_fuse_f_proj()
+
+    def _load_f_b_weight(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, ...] | int | None = None,
+    ) -> None:
+        del loaded_shard_id
+        if loaded_weight.shape == param.shape:
+            local_weight = loaded_weight
+        else:
+            expected_shape = (param.shape[0] * self.tp_size, param.shape[1])
+            if loaded_weight.shape != expected_shape:
+                raise ValueError(
+                    "KDA f_b_proj checkpoint shape mismatch: "
+                    f"expected {expected_shape} or {tuple(param.shape)}, "
+                    f"got {tuple(loaded_weight.shape)}"
+                )
+            local_weight = loaded_weight.narrow(
+                0,
+                self.tp_rank * param.shape[0],
+                param.shape[0],
+            )
+        param.data.copy_(local_weight)
+        self._f_b_loaded = True
+        self._maybe_fuse_f_proj()
+
+    @torch.no_grad()
+    def _maybe_fuse_f_proj(self) -> None:
+        if not self._f_a_loaded or not self._f_b_loaded:
+            return
+        output_dim = getattr(self.weight, "output_dim", None)
+        if output_dim is None:
+            raise ValueError("KDA fused f_proj requires an output-sharded parameter")
+        shard_offset = sum(self.output_sizes[:_F_PROJ_SHARD_ID]) // self.tp_size
+        shard_size = self.output_sizes[_F_PROJ_SHARD_ID] // self.tp_size
+        param_shard = self.weight.narrow(output_dim, shard_offset, shard_size)
+        fused_weight = torch.matmul(
+            self.f_b_weight.float(),
+            self.f_a_weight.float(),
+        ).to(dtype=param_shard.dtype)
+        if fused_weight.shape != param_shard.shape:
+            raise ValueError(
+                "KDA composed f_proj shape mismatch: "
+                f"expected {tuple(param_shard.shape)}, got {tuple(fused_weight.shape)}"
+            )
+        param_shard.copy_(fused_weight)
 
 
 def _prepare_beta(
-    raw_beta: torch.Tensor,
+    beta: torch.Tensor,
     num_actual_tokens: int,
+    *,
+    is_preprocessed: bool = False,
 ) -> torch.Tensor:
-    """Convert vLLM 0.27's packed raw beta to the AscendC contract."""
-    return raw_beta[:, :num_actual_tokens].float().sigmoid()
+    """Slice beta and apply sigmoid unless the auxiliary stream already did."""
+    beta = beta[:, :num_actual_tokens]
+    return beta if is_preprocessed else beta.float().sigmoid()
 
 
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
@@ -81,9 +177,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.uses_mixed_projection = uses_mixed_projection
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
-            # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps the
-            # three gates in floating point, so form one fused GEMM per
-            # precision group instead of falling back to four projections.
+            # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
+            # in floating point. Split those precision groups so DynamicQuant
+            # can overlap the composed BFG projection.
             self.in_proj_qkvgfab = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.projection_size] * 3,
@@ -91,24 +187,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_qkv",
             )
-            gate_output_sizes = [
-                self.projection_size,
-                self.head_dim,
-                self.num_heads,
-            ]
-            if self.in_proj_padding:
-                gate_output_sizes.append(self.in_proj_padding * self.tp_size)
-            self.in_proj_gfab = _KimiGDNMergedColumnParallelLinear(
-                self.hidden_size,
-                gate_output_sizes,
-                replicated_shard_id=1,
+            del self.f_b_proj
+            self.fused_bfg_proj = _KDAFusedBFGLinear(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
                 tp_size=self.tp_size,
-                bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj_gfab",
             )
-            if self.in_proj_padding:
-                self.in_proj_gfab.weight.data[-self.in_proj_padding :].zero_()
+            self._fused_bfg_output_sizes = (
+                self.local_num_heads,
+                self.local_projection_size,
+                self.local_projection_size,
+            )
         # Upstream's FusedRMSNormGated constructor defaults to 1e-5, while
         # Kimi K3 checkpoints use the model-configured RMS epsilon (1e-6 for
         # the production checkpoint). Preserve the checkpoint contract used
@@ -149,21 +241,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     ) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
-            mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
-            projected_gfab = self.in_proj_gfab(hidden_states)[0]
-            split_sizes = [
-                self.local_projection_size,
-                self.head_dim,
-                self.local_num_heads,
-            ]
-            if self.in_proj_padding:
-                split_sizes.append(self.in_proj_padding)
-            g_proj_states, f_a, beta = projected_gfab.split(split_sizes, dim=-1)[:3]
-            beta = beta.unsqueeze(0)
-
-            g1 = self.f_b_proj(f_a)[0]
-            g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
-            g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
+            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
             core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
@@ -175,10 +253,111 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
+                beta_is_preprocessed=True,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
         return super().forward(hidden_states, positions)
+
+    def _run_overlapped_qkv_bfg(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fork BFG work to an auxiliary stream and join it back to main."""
+        main_stream = torch.npu.current_stream()
+        bfg_stream = _kda_bfg_stream()
+
+        hidden_states_ready = main_stream.record_event()
+        hidden_states.record_stream(bfg_stream)
+        with npu_stream_switch(bfg_stream):
+            bfg_stream.wait_event(hidden_states_ready)
+            fused_bfg = self._project_bfg(hidden_states)
+            bfg_projection_ready = bfg_stream.record_event()
+
+        quantized_qkv = self._quantize_fused_qkv(hidden_states)
+        quant_ready = main_stream.record_event()
+
+        # Stage 1 join: DynamicQuant on main overlaps the BFG GEMM on the
+        # auxiliary stream, but the two Cube matmuls remain serialized.
+        main_stream.wait_event(bfg_projection_ready)
+        mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
+
+        with npu_stream_switch(bfg_stream):
+            # Stage 2: after both first-stage branches complete, overlap the
+            # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
+            # work. Split and reshape the F/output gates here as well so all
+            # BFG output handling occurs after the QKV matmul is enqueued.
+            bfg_stream.wait_event(quant_ready)
+            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
+            bfg_ready = bfg_stream.record_event()
+
+        for tensor in (beta, g1, g2):
+            tensor.record_stream(main_stream)
+        # bfg_ready is the auxiliary stream tail. Joining that exact event is
+        # required for multi-stream ACL graph capture as well as eager reuse.
+        main_stream.wait_event(bfg_ready)
+        return mixed_qkv, beta, g1, g2
+
+    def _project_bfg(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.fused_bfg_proj(hidden_states)[0]
+
+    def _postprocess_bfg(
+        self,
+        fused_bfg: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        beta, raw_gate, output_gate = fused_bfg.split(
+            self._fused_bfg_output_sizes,
+            dim=-1,
+        )
+        beta = beta.float().sigmoid().unsqueeze(0)
+        raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
+        return beta, raw_gate, output_gate
+
+    def _quantize_fused_qkv(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        quant_method = self.in_proj_qkvgfab.quant_method
+        inner_quant_method = getattr(quant_method, "quant_method", quant_method)
+        if (
+            isinstance(
+                inner_quant_method,
+                (
+                    AscendW4A8MXFPDynamicLinearMethod,
+                    AscendW8A8MXFP8DynamicLinearMethod,
+                ),
+            )
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+        ):
+            if isinstance(inner_quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+                return torch_npu.npu_dynamic_mx_quant(
+                    hidden_states,
+                    dst_type=torch.float8_e4m3fn,
+                    scale_alg=inner_quant_method.dynamic_mx_quant_scale_alg,
+                )
+            return torch_npu.npu_dynamic_mx_quant(
+                hidden_states,
+                dst_type=torch.float8_e4m3fn,
+            )
+        return hidden_states
+
+    def _matmul_fused_qkv(
+        self,
+        qkv_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        quant_method = self.in_proj_qkvgfab.quant_method
+        if quant_method is None:
+            raise RuntimeError("KDA fused QKV quantization method is not initialized")
+        return quant_method.apply(
+            self.in_proj_qkvgfab,
+            qkv_input,
+            bias=None,
+        )
 
     @staticmethod
     def _run_causal_conv1d(
@@ -242,25 +421,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops._C_ascend.recurrent_kda(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            raw_gate.contiguous(),
-            beta.contiguous(),
+        return run_recurrent_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
             recurrent_state,
             cu_seqlens,
             state_indices,
-            self.A_log.reshape(-1).contiguous(),
-            self.dt_bias.contiguous(),
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
             num_accepted_tokens=num_accepted_tokens,
-            scale=self.head_dim**-0.5,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=False,
-            allow_neg_eigval=False,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=(self.gate_lower_bound if self.gate_lower_bound is not None else -5.0),
         )
 
     def _run_prefill(
@@ -290,32 +463,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         initial_state_vk = recurrent_state[state_indices].contiguous()
         clear_ssm_states(initial_state_vk, has_initial_state)
 
-        q = l2norm_fwd(q.contiguous())
-        k = l2norm_fwd(k.contiguous())
-        result = torch.ops._C_ascend.chunk_kda_fwd(
+        output, final_state = run_chunk_kda(
             q,
             k,
-            v.contiguous(),
-            raw_gate.contiguous(),
-            beta.contiguous(),
-            self.head_dim**-0.5,
-            _KDA_CHUNK_SIZE,
-            layout="BSND",
-            initial_state=initial_state_vk,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=prebuilt_metadata.chunk_indices_chunk64_host,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
-            use_gate_in_kernel=True,
-            A_log=self.A_log.reshape(-1).contiguous(),
-            dt_bias=self.dt_bias.contiguous(),
-            disable_recompute=False,
-            return_intermediate_states=False,
-            state_v_first=True,
+            v,
+            raw_gate,
+            beta,
+            initial_state_vk,
+            cu_seqlens,
+            prebuilt_metadata.chunk_indices_chunk64_host,
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
         )
-        recurrent_state[state_indices] = result[1].to(recurrent_state.dtype)
-        return result[0]
+        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        return output
 
     @eager_break_during_capture
     def _forward(
@@ -325,6 +487,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        *,
+        beta_is_preprocessed: bool = False,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
         forward_context = get_forward_context()
@@ -341,7 +505,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
-        beta = _prepare_beta(beta, num_actual_tokens)
+        beta = _prepare_beta(
+            beta,
+            num_actual_tokens,
+            is_preprocessed=beta_is_preprocessed,
+        )
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
@@ -401,10 +569,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 attn_metadata.spec_query_start_loc,
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
-            )
-            core_spec = _zero_padded_recurrent_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
             )
 
         core_non_spec = None
@@ -497,28 +661,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.non_spec_state_indices_tensor,
                 )
 
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            core_non_spec = _zero_padded_recurrent_output(
-                core_non_spec,
-                attn_metadata.non_spec_query_start_loc,
-            )
-
         if core_spec is None and core_non_spec is None:
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
             # Do not feed a previous replay's output through the norm gate.
             core_attn_out.zero_()
             return
-
-        num_live_tokens = None
-        if core_spec is not None:
-            assert attn_metadata.spec_query_start_loc is not None
-            num_live_tokens = attn_metadata.spec_query_start_loc[-1]
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            num_non_spec_tokens = attn_metadata.non_spec_query_start_loc[-1]
-            num_live_tokens = num_non_spec_tokens if num_live_tokens is None else num_live_tokens + num_non_spec_tokens
-        assert num_live_tokens is not None
 
         # Reuse the caller-owned result buffer. FULL graphs can leave rows
         # outside the live spec/non-spec index sets, so define them before the
@@ -538,7 +685,5 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # The registered Ascend FusedRMSNormGated uses the fused norm-gate
         # kernel while preserving the upstream parameter/loading contract.
         normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        # Mask again after the norm gate: zero * sigmoid(NaN) is still NaN in
-        # static padding rows whose captured gate values are not live.
-        core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
+        core_attn_out[:, :num_actual_tokens].copy_(normalized)
         core_attn_out[:, num_actual_tokens:].zero_()

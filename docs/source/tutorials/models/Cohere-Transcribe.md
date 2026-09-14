@@ -31,7 +31,7 @@ Download the model weights from any of the following sources:
 
 |  Weight Version | Hardware Requirements  | Download Links |
 |-----------------|------------------------|----------------|
-| BF16            | one Atlas A2 64 GB NPU | [ModelScope](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026) \| [HuggingFace9(03-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) \| [HuggingFace(07-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) \| [GitCode mirror (03-2026)](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)|
+| BF16            | one Atlas A2 64 GB NPU | [ModelScope](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face9(03-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) \| [Hugging Face(07-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) \| [GitCode mirror (03-2026)](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)|
 
 Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 

@@ -26,7 +26,7 @@ _DSA_C_ASCEND_OPS = (
     "npu_kv_quant_sparse_attn_sharedkv",
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
     "kv_compress_epilog",
-    "npu_scatter_nd_update_v2",
+    "npu_scatter_nd_update_sk",
 )
 
 

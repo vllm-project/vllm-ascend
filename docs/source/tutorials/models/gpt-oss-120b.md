@@ -16,7 +16,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version              | Hardware Requirements                                               | Download Links |
 |------------------------------|---------------------------------------------------------------------|----------------|
-| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes | [ModelScope]() \| [Hugging Face](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |
+| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes | [Hugging Face](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 

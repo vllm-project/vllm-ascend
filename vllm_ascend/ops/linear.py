@@ -42,10 +42,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     maybe_trans_nz,
 )
+from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
 def unquantized_gemm(
@@ -81,21 +81,24 @@ def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
     )
 
 
-class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
+class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
-    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_tp_weight_switch = True
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+    supports_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
+        skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
-        if "conv1d" not in layer.prefix:
+            layer.weight_fp32 = (
+                weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
+            )
+        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.

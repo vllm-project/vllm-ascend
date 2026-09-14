@@ -50,6 +50,8 @@ def create_ascend_fused_moe_router(
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
     tid2eid: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 129257,
 ) -> FusedMoERouter:
     if custom_routing_function is not None:
         return CustomRoutingRouter(
@@ -98,6 +100,8 @@ def create_ascend_fused_moe_router(
             e_score_correction_bias=e_score_correction_bias,
             num_logical_experts=num_logical_experts,
             tid2eid=tid2eid,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
     return AscendGroupedTopKRouter(
         top_k=top_k,

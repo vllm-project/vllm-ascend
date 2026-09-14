@@ -21,6 +21,8 @@ from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedM
 def _build_runner() -> AscendMoERunner310:
     runner = AscendMoERunner310.__new__(AscendMoERunner310)
     nn.Module.__init__(runner)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
     return runner
 
 
@@ -101,6 +103,8 @@ def test_runner_310_installs_specialized_comm():
     runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
     runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
+    upstream_forward_entry = object()
+    runner._select_forward = MagicMock(return_value=upstream_forward_entry)
     comm_method = object()
 
     with (
@@ -118,6 +122,8 @@ def test_runner_310_installs_specialized_comm():
 
         assert routed_experts.quant_method is None
         assert runner.ascend_shared_experts.multistream_overlap is False
+        assert runner._forward_entry is upstream_forward_entry
+        runner._select_forward.assert_called_once_with()
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
 
@@ -190,6 +196,11 @@ def test_unquantized_apply_310_uses_preselected_experts():
     assert fused_experts_input.topk_ids is topk_ids
     assert fused_experts_input.routing.expert_map is expert_map
     assert fused_experts_input.routing.apply_router_weight_on_input is True
+    # Post-refactor contract: the layer is carried on the input so the MLP
+    # gmm hooks can read the weights, and the method passes itself as the
+    # quant_method dispatcher.
+    assert fused_experts_input.layer is layer
+    assert comm_method.fused_experts.call_args.kwargs["quant_method"] is method
 
 
 class _Projection(nn.Module):
@@ -205,18 +216,17 @@ class _Gate(nn.Module):
 @pytest.mark.parametrize("with_gate", [False, True])
 def test_shared_experts_part2_310_applies_optional_gate(with_gate):
     shared_experts_layer = SimpleNamespace(
-        act_fn=nn.Identity(),
         down_proj=_Projection(),
         expert_gate=_Gate() if with_gate else None,
     )
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
-    shared_gate_up = torch.randn(3, 4)
+    shared_act = torch.randn(3, 4)
 
-    output = shared_experts.part2(hidden_states, shared_gate_up)
+    output = shared_experts.part2(hidden_states, shared_act)
 
-    expected = shared_gate_up * 2.0 + 1.0
+    expected = shared_act * 2.0 + 1.0
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
@@ -230,7 +240,8 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(
-        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        multistream_overlap=False,
+        local_input_from_gathered=MagicMock(return_value=hidden_states),
         forward=MagicMock(return_value=shared_out),
     )
     routed_events = FusedMoEEvents(

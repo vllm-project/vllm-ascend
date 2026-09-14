@@ -109,6 +109,15 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 456
 
+    def test_model_with_multiple_image_sentinels_needs_no_single_index(self):
+        config = SimpleNamespace()
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "AscendDeepseekV4ForConditionalGeneration", config
+        )
+
+        assert image_token_index is None
+
 
 class TestMtpSharesTheTargetLmHead:
     """``_maybe_share_lm_head`` for the MTP branch.
@@ -197,6 +206,40 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
+
+
+def test_draft_vllm_config_only_propagates_draft_runner_type():
+    draft_model_config = SimpleNamespace(
+        runner_type="draft",
+        architecture="draft-architecture",
+        num_experts=0,
+    )
+    base_model_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="target-architecture",
+        num_experts=256,
+    )
+    base_vllm_config = SimpleNamespace(model_config=base_model_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+    )
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is not base_vllm_config
+    assert draft_vllm_config.model_config is not base_model_config
+    assert draft_vllm_config.model_config is not draft_model_config
+    assert draft_vllm_config.model_config.runner_type == "draft"
+    assert draft_vllm_config.model_config.architecture == "target-architecture"
+    assert draft_vllm_config.model_config.num_experts == 256
+    assert base_model_config.runner_type == "generate"
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

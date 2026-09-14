@@ -30,34 +30,6 @@ namespace Compressor {
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
 
-struct LoopInfo {
-    uint32_t groupSize = 0U;
-    uint32_t groupNum = 0U;
-    uint32_t coreRowIdx = 0U;
-    uint32_t coreColIdx = 0U;
-    bool isCoreRowFirst = false;
-    bool isCoreRowLast = false;
-    bool isCoreLoopFirst = false;
-    bool isCoreLoopLast = false;
-};
-
-struct Vec1SplitInfo {
-    uint32_t dealSeqStartIdx = 0;
-    uint32_t dBaseSize = 0;
-    uint32_t vec1GroupSize = 0;
-    uint32_t vec1GroupNum = 0;
-    uint32_t dealTcSize = 0;
-    uint32_t preDealTcSize = 0;
-    uint32_t curBStart = 0;
-    uint32_t curSStart = 0;
-    uint32_t curCompressedCnt = 0;
-    uint32_t totalCompressedCnt = 0;
-    uint32_t tcSplitSize = 0;
-    uint32_t dSplitSize = 0;
-    uint32_t dLoopCount = 0;
-};
-
-
 template <typename COMP>
 class CompressorBlockVectorPerf {
 public:
@@ -70,7 +42,6 @@ public:
     // 中间计算数据类型为float，高精度模式
     using T = float;
     using X_T = typename AscendC::Conditional<X_DTYPE, bfloat16_t, half>::type;
-    using ROPE_T = typename AscendC::Conditional<COMP::ropeDtype == ROPE_DTYPE::FP32, float, X_T>::type;
 
     __aicore__ inline CompressorBlockVectorPerf(){};
     // =================================设置参数=================================
@@ -241,9 +212,9 @@ private:
     GlobalTensor<int32_t> stateBlockTableGm_;
     GlobalTensor<T> stateCacheGm_;
     GlobalTensor<T> apeGm_;
-    GlobalTensor<X_T> normWeightGm_;
-    GlobalTensor<ROPE_T> ropeSinGm_;
-    GlobalTensor<ROPE_T> ropeCosGm_;
+    GlobalTensor<T> normWeightGm_;
+    GlobalTensor<T> ropeSinGm_;
+    GlobalTensor<T> ropeCosGm_;
     GlobalTensor<X_T> cmpKvOutGm_;
 
     // ================================Local Buffer区====================================
@@ -295,9 +266,9 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     stateBlockTableGm_.SetGlobalBuffer((__gm__ int32_t *)stateBlockTable);
     stateCacheGm_.SetGlobalBuffer((__gm__ T *)stateCache);
     apeGm_.SetGlobalBuffer((__gm__ T *)ape);
-    normWeightGm_.SetGlobalBuffer((__gm__ X_T *)normWeight);
-    ropeSinGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeSin);
-    ropeCosGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeCos);
+    normWeightGm_.SetGlobalBuffer((__gm__ T *)normWeight);
+    ropeSinGm_.SetGlobalBuffer((__gm__ T *)ropeSin);
+    ropeCosGm_.SetGlobalBuffer((__gm__ T *)ropeCos);
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
     isExistSeqUsed = (seqUsed != nullptr);
     isExistStartPos = (startPos != nullptr);
@@ -325,12 +296,12 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::InitBuffers(TPipe *pipe)
     pipe->InitBuffer(apeBuf, BUFFER_SIZE_BYTE_32K);
     normWeightUb = normWeightBuf.Get<T>();
     apeUb = apeBuf.Get<T>();
-    LocalTensor<X_T> normweightInUb = inputQue1.AllocTensor<X_T>();
+    LocalTensor<T> normweightInUb = inputQue1.AllocTensor<T>();
     LocalTensor<int32_t> gatherOffsetUb = gatherOffsetBuf.Get<int32_t>();
     DataCopy(normweightInUb, normWeightGm_, constInfo_.headDim); // 获取normWeight，常驻
     inputQue1.EnQue(normweightInUb);
-    inputQue1.DeQue<X_T>();
-    Cast(normWeightUb, normweightInUb, RoundMode::CAST_NONE, constInfo_.headDim);
+    inputQue1.DeQue<T>();
+    DataCopy(normWeightUb, normweightInUb, constInfo_.headDim);
     inputQue1.FreeTensor(normweightInUb);
     if constexpr (COMP::rotaryMode == Compressor::ROTARY_MODE::INTERLEAVE) {
         SetGatherSrcOffset<float>(gatherOffsetUb, constInfo_.ropeHeadDim);
@@ -1297,31 +1268,20 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::SingleCalRope(const Loca
 {
     uint32_t computeSize = curDealScSize * constInfo_.ropeHeadDim;
     uint64_t SinCosOffset = globalScStart * constInfo_.ropeHeadDim;
-    // sin/cos each reserves 16KB so fp32 rope can use the same compute tile.
-    LocalTensor<ROPE_T> cosUb = inputQue1.AllocTensor<ROPE_T>();
-    LocalTensor<ROPE_T> sinUb = cosUb[BUFFER_SIZE_BYTE_16K / sizeof(ROPE_T)];
+    // sin与cos各占一半, 实际分别最多只会用16K,总占用32K
+    LocalTensor<T> cosUb = inputQue1.AllocTensor<T>();
+    LocalTensor<T> sinUb = cosUb[BUFFER_SIZE_BYTE_16K / sizeof(T)];
     DataCopy(cosUb, ropeCosGm_[SinCosOffset], computeSize);
     DataCopy(sinUb, ropeSinGm_[SinCosOffset], computeSize);
     inputQue1.EnQue(sinUb);
-    inputQue1.DeQue<ROPE_T>();
-
-    LocalTensor<T> ropeCosFp32Local = tmpBuff2.Get<T>();
-    LocalTensor<T> ropeSinFp32Local = ropeCosFp32Local[BUFFER_SIZE_BYTE_16K / sizeof(T)].template ReinterpretCast<T>();
-    LocalTensor<T> tempLocal = ropeSinFp32Local[BUFFER_SIZE_BYTE_16K / sizeof(T)].template ReinterpretCast<T>();
+    inputQue1.DeQue<T>();
+    LocalTensor<T> tempLocal = tmpBuff2.Get<T>();
     PipeBarrier<PIPE_V>();
-    if constexpr (IsSameType<ROPE_T, T>::value) {
-        DataCopy(ropeCosFp32Local, cosUb, computeSize);
-        DataCopy(ropeSinFp32Local, sinUb, computeSize);
-    } else {
-        Cast(ropeCosFp32Local, cosUb, RoundMode::CAST_NONE, computeSize);
-        Cast(ropeSinFp32Local, sinUb, RoundMode::CAST_NONE, computeSize);
-    }
-    PipeBarrier<PIPE_V>();
-    inputQue1.FreeTensor(sinUb);
     RotaryPosEmb<COMP::rotaryMode>(normResUb[rowCnt * constInfo_.headDim], normResUb[rowCnt * constInfo_.headDim],
-                                   ropeCosFp32Local, ropeSinFp32Local, tempLocal, gatherOffsetCastUb, curDealScSize,
+                                   cosUb, sinUb, tempLocal, gatherOffsetCastUb, curDealScSize,
                                    constInfo_.ropeHeadDim, constInfo_.headDim,
                                    constInfo_.headDim - constInfo_.ropeHeadDim);
+    inputQue1.FreeTensor(sinUb);
     PipeBarrier<PIPE_V>();
 }
 

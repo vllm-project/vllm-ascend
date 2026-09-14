@@ -22,20 +22,23 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
-    TPWeightGatherSpec,
+    WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
 
@@ -50,15 +53,16 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
+    supports_unaligned_tp_groups = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -93,6 +97,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
+            prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+            if prefix_padding or suffix_padding:
+                x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 x,
                 dst_type=torch.float8_e4m3fn,
@@ -143,13 +150,28 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if getattr(layer, "_mxfp8_transformed", False):
             return
 
-        # Store original shapes for RL weight reloading
-        # Only store on first call (when shapes are in original format)
+        # Store the unpadded shapes expected by the checkpoint loader.
         if not hasattr(layer, "_mxfp8_original_shapes"):
             layer._mxfp8_original_shapes = {
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
+
+        prefix_padding = suffix_padding = 0
+        if isinstance(layer, RowParallelLinear):
+            global_start = layer.tp_rank * layer.input_size_per_partition
+            prefix_padding = global_start % self.group_size
+            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+        layer.mxfp8_tp_padding = (prefix_padding, suffix_padding)
+
+        padded_weight = layer.weight.data
+        if prefix_padding or suffix_padding:
+            padded_weight = F.pad(
+                padded_weight,
+                (prefix_padding, suffix_padding),
+                mode="constant",
+                value=0,
+            )
 
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
@@ -162,11 +184,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(layer.weight.data.transpose(0, 1).contiguous())
+            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf
@@ -228,6 +250,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     model_dtype = None
     quant_type: QuantType = QuantType.W8A8MXFP
+    act_quant_type: torch.dtype = torch.float8_e4m3fn
+    fused_activations = frozenset({"silu"})
     supports_eplb = True
 
     def __init__(self):
@@ -275,17 +299,13 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
 
-        if x.dtype not in [torch.float8_e4m3fn]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                layer=layer,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -299,9 +319,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
+            ),
+            quant_method=self,
         )
 
     @staticmethod
@@ -408,6 +427,85 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
 
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+
+        hidden_states, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=hidden_states,
+            weight=[layer.w13_weight],
+            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
+            weight_scale=[layer.w13_weight_scale],
+            x_scale=pertoken_scale,
+            dequant_mode=2,
+            quant_mode=2,
+            dequant_dtype=torch.float32,
+            quant_dtype=torch.float8_e4m3fn,
+            x_dtype=None,
+            weight_dtype=None,
+            weight_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_scale_dtype=torch_npu.float8_e8m0fnu,
+        )
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w13_weight],
+            scale=[layer.w13_weight_scale],
+            per_token_scale=[pertoken_scale],
+            bias=None,
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=torch.bfloat16,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states
+
+    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states, dst_type=self.act_quant_type, scale_alg=get_dynamic_mx_quant_scale_alg()
+        )
+        return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        input_dtype = mlp_compute_input.hidden_states.dtype
+        use_bf16 = input_dtype in [torch.bfloat16, torch.float8_e4m3fn]
+        output_dtype = (
+            input_dtype
+            if input_dtype in [torch.bfloat16, torch.float16]
+            else (torch.bfloat16 if use_bf16 else torch.float16)
+        )
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w2_weight],
+            scale=[layer.w2_weight_scale],
+            bias=None,
+            per_token_scale=[act_out_scale],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_dtype=None,
+            weight_dtype=None,
+        )[0]
+
 
 @register_scheme(FP8_METHOD, "ds_linear")
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
@@ -417,15 +515,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """
 
     model_dtype = None
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
 
     def __init__(self, weight_block_size):
         super().__init__()

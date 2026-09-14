@@ -64,7 +64,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 ### 3.1 模型权重
 
-**资料写作要求：**  
+**资料写作要求：**
 
 - 说明部署所需的硬件资源、软件环境和模型文件。
 - 需同时提供 `HuggingFace` 和 `ModelScope` 两个来源的权重下载链接。
@@ -74,8 +74,8 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 | 权重版本 | 硬件要求 |       权重链接      |
 |---------|---------|---------------------|
-| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
-| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
 > **路径说明：** 请将模型权重下载至您指定的目录，并记录该路径。例如：`/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`，后续部署命令中将使用 `<YOUR_MODEL_PATH>` 占位符，请替换为此处记录的路径。
 
@@ -239,8 +239,8 @@ lm_eval \
 
 | 场景            | 配置             | 卡数 |   权重版本    | TP | DP | 最大序列数 | 最大批量Token数 | 最大上下文 | MTP投机数 | FUSED_MC2 | EP开关 | FC+CP开关 | 异步调度 |
 |----------------|------------------|------|--------------|----|----|-----------|----------------|-----------|-----------|-----------|-------|-----------|---------|
-| 高吞吐(32K推1K) | 服务端-P节点/单机 |   8  | GLM5.1 W4A8  | 8  | 2  |     32    |      4096      |    30k    |     3     |     关    |   开   |     开    |    开   |
-| 高吞吐(32K推1K) | 服务端-D节点      |   8  | GLM5.1 W4A8  | 2  | 8  |     8     |      4096      |    30k    |    12     |     关    |   开  |    关      |    开   |
+| 高吞吐(32k推1k) | 服务端-P节点/单机 |   8  | GLM5.1 W4A8  | 8  | 2  |     32    |      4096      |    30k    |     3     |     关    |   开   |     开    |    开   |
+| 高吞吐(32k推1k) | 服务端-D节点      |   8  | GLM5.1 W4A8  | 2  | 8  |     8     |      4096      |    30k    |    12     |     关    |   开  |    关      |    开   |
 | 长序列          | 服务端-P节点/单机 |      |              |    |    |           |                |           |           |           |       |           |         |
 | 长序列          | 服务端-D节点      |      |              |    |    |           |                |           |           |           |       |           |         |
 | 低时延          | 服务端-P节点/单机 |      |              |    |    |           |                |           |           |           |       |           |         |

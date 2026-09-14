@@ -20,18 +20,7 @@ from vllm_ascend.utils import (
 )
 
 SFA_QSFA_TILE_SIZE = 128
-
-_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
-
-
-def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
-    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
-
-    Those classes subclass DeepseekV32IndexerCache but keep their own
-    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
-    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
-    """
-    return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 def get_or_register_attention_buffer(
@@ -89,6 +78,37 @@ def get_sfa_qsfa_packed_head_dim(
         )
     scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
+
+
+def scatter_paged_cache(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    values: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Write unique valid slots, preserving padded rows during graph replay."""
+    if cache.shape[1] != block_size:
+        raise ValueError(f"Cache block size mismatch: metadata={block_size}, tensor={cache.shape[1]}.")
+    values = values.reshape(values.shape[0], *cache.shape[2:])
+    valid = (slots >= 0) & (slots < cache.shape[0] * block_size)
+    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
+    block_ids = torch.div(safe_slots, block_size, rounding_mode="floor")
+    block_offsets = torch.remainder(safe_slots, block_size)
+    row_mask = valid.view(-1, *([1] * (values.ndim - 1)))
+
+    # Invalid rows use a fixed sentinel; restore its original value unless
+    # slot zero is itself a valid write. All operations retain static shapes.
+    old_zero = cache[0, 0].clone()
+    safe_values = torch.where(row_mask, values, old_zero.unsqueeze(0))
+    writes_zero = valid & (slots == 0)
+    zero_value = torch.where(
+        writes_zero.view(-1, *([1] * (values.ndim - 1))),
+        values,
+        torch.zeros_like(values),
+    ).sum(dim=0)
+    expected_zero = torch.where(writes_zero.any(), zero_value, old_zero)
+    cache[block_ids, block_offsets] = safe_values
+    cache[0, 0].copy_(expected_zero)
 
 
 @dataclass
@@ -239,7 +259,6 @@ def enable_dcp():
     return parallel_config.decode_context_parallel_size > 1
 
 
-@lru_cache(maxsize=1)
 def enable_pcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1

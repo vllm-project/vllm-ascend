@@ -316,6 +316,17 @@ class RForkModelLoader(BaseModelLoader):
             )
         return rfork_worker
 
+    def _get_target_registered_blocks(
+        self,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+    ) -> list[tuple[int, int]]:
+        if not _is_draft_model(vllm_config, model_config):
+            return []
+        target_worker = getattr(self.load_config, "rfork_worker", None)
+        target_transfer_backend = getattr(target_worker, "transfer_backend", None)
+        return list(getattr(target_transfer_backend, "registered_weight_blocks", None) or [])
+
     def _requires_processed_layout_transfer(self, model_config: ModelConfig) -> bool:
         return getattr(model_config, "quantization", None) is not None
 
@@ -357,6 +368,7 @@ class RForkModelLoader(BaseModelLoader):
                     raise
 
             rfork_worker = self._ensure_rfork_worker(vllm_config, model_config)
+            rfork_worker.set_excluded_weight_blocks(self._get_target_registered_blocks(vllm_config, model_config))
             processed_layout_transfer = self._requires_processed_layout_transfer(model_config)
             try:
                 if not rfork_worker.is_seed_available():
@@ -398,7 +410,11 @@ class RForkModelLoader(BaseModelLoader):
                 logger.warning("RFork transfer failed: %s, clean up and fall back to default loader", e)
 
                 rfork_worker.post_transfer()
-                rfork_worker.reset_transfer_state()
+                if not rfork_worker.reset_transfer_state():
+                    logger.warning(
+                        "RFork memory regions are still registered in the engine after "
+                        "cleanup; they will be retried before the fallback re-registers."
+                    )
 
                 if need_del:
                     _reset_process_global_model_state(vllm_config, model)
@@ -426,7 +442,11 @@ class RForkModelLoader(BaseModelLoader):
                     raise
 
                 try:
-                    rfork_worker.reset_transfer_state()
+                    if not rfork_worker.reset_transfer_state():
+                        logger.warning(
+                            "Unregister failed after fallback load; start_seed_service "
+                            "retries it before re-registering memory."
+                        )
                     rfork_worker.start_seed_service(model, processed_layout_transfer)
                 except Exception as e:
                     logger.warning(

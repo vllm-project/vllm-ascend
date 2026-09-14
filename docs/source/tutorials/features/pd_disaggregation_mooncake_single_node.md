@@ -6,6 +6,8 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation. This guide provides
 
 Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_ascend_version}} (with vLLM {{vllm_version}}) on 1 Atlas 800T A2 server to deploy the "1P1D" architecture (one Prefiller and one Decoder on the same node). Assume the IP address is 192.0.0.1.
 
+For P/D transfer priority settings, see [QoS Configuration](pd_disaggregation_mooncake_multi_node.md#qos-configuration).
+
 ## Verify Communication Environment
 
 ### Verification Process

@@ -333,6 +333,25 @@ def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     assert non_spec_indices.numel() == 0
 
 
+@pytest.mark.parametrize("sample_from_anchor", [False, True])
+def test_dspark_target_reorder_threshold_includes_base_token_regardless_of_anchor(
+    sample_from_anchor: bool,
+):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+    )
+    builder.vllm_config.speculative_config.method = "dspark"
+    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
+    )
+
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+    assert builder.reorder_batch_threshold == 8
+
+
 def _cache_index_first_column(cache_indices: torch.Tensor) -> torch.Tensor:
     if cache_indices.dim() == 1:
         return cache_indices
@@ -814,45 +833,77 @@ def test_one_token_prefill_selection_respects_recurrent_state(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "expected_spec_decodes", "expected_prefills"),
+    "dcp_size,num_spec,context_len,mixed_spec,graph_mode",
     [
-        pytest.param(4, 0, 1, id="first_chunk_stays_prefill"),
-        pytest.param(8, 1, 0, id="stateful_chunk_folds_into_spec"),
+        (1, 3, 0, False, CUDAGraphMode.NONE),
+        (1, 3, 384, False, CUDAGraphMode.NONE),
+        (1, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
+        (16, 5, 0, False, CUDAGraphMode.NONE),
+        (16, 5, 384, False, CUDAGraphMode.NONE),
+        (16, 5, 384, False, CUDAGraphMode.FULL_DECODE_ONLY),
+        (16, 5, 384, True, CUDAGraphMode.NONE),
+        (16, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
     ],
 )
-def test_spec_sized_prefill_fold_requires_recurrent_state(
+def test_spec_width_prompt_chunk_folds_only_without_dcp(
     monkeypatch: pytest.MonkeyPatch,
-    seq_len: int,
-    expected_spec_decodes: int,
-    expected_prefills: int,
+    dcp_size: int,
+    num_spec: int,
+    context_len: int,
+    mixed_spec: bool,
+    graph_mode: CUDAGraphMode,
 ):
     _patch_missing_runtime_cdiv(monkeypatch)
-    common_attn_metadata = create_common_attn_metadata(
-        BatchSpec(seq_lens=[seq_len], query_lens=[4]),
-        block_size=16,
+    width = num_spec + 1
+    query_lens = [width, width] if mixed_spec else [width]
+    seq_lens = [768 + width, context_len + width] if mixed_spec else [context_len + width]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=384,
         device=torch.device("cpu"),
     )
+    common.is_prefilling = torch.tensor([False, True] if mixed_spec else [True])
+    common.block_table_tensor = torch.arange(len(query_lens) * 10, dtype=torch.int32).view(-1, 10)
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
-        num_speculative_tokens=3,
+        num_speculative_tokens=num_spec,
+        mamba_cache_mode="align",
+        block_size=384,
+        num_speculative_blocks=num_spec,
+        cudagraph_mode=graph_mode,
     )
-
-    attn_metadata = builder.build(
+    builder.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    accepted = torch.tensor([2, 1] if mixed_spec else [1], dtype=torch.int32)
+    metadata = builder.build(
         0,
-        common_attn_metadata,
-        num_accepted_tokens=torch.ones(1, dtype=torch.int32),
-        num_decode_draft_tokens_cpu=torch.full((1,), -1, dtype=torch.int32),
+        common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=torch.tensor([num_spec, -1] if mixed_spec else [-1], dtype=torch.int32),
     )
 
-    assert attn_metadata.num_spec_decodes == expected_spec_decodes
-    assert attn_metadata.num_prefills == expected_prefills
-    if expected_spec_decodes:
-        assert attn_metadata.spec_sequence_masks.tolist() == [True]
-        assert attn_metadata.num_accepted_tokens.tolist() == [4]
+    assert accepted.tolist() == ([2, 1] if mixed_spec else [1])
+    if dcp_size == 1 and context_len > 0:
+        assert metadata.num_prefills == 0
+        assert metadata.num_prefill_tokens == 0
+        assert metadata.num_spec_decodes == 1 + int(mixed_spec)
+        assert metadata.spec_sequence_masks.tolist() == ([True, True] if mixed_spec else [True])
+        assert metadata.num_accepted_tokens.tolist() == ([2, width] if mixed_spec else [width])
+        return
+
+    # DCP retains prefill state semantics regardless of the prompt chunk width.
+    assert metadata.num_prefills == 1
+    assert metadata.num_prefill_tokens == width
+    assert metadata.num_spec_decodes == int(mixed_spec)
+    assert metadata.prefill_has_initial_state.tolist() == [context_len > 0]
+    expected_slot = (10 if mixed_spec else 0) + (seq_lens[-1] - 1) // 384
+    assert metadata.prefill_state_indices.tolist() == [expected_slot]
+    if mixed_spec:
+        assert metadata.spec_sequence_masks.tolist() == [True, False]
+        assert metadata.num_accepted_tokens.tolist() == [2]
     else:
-        assert attn_metadata.spec_sequence_masks is None
-        assert attn_metadata.num_accepted_tokens is None
+        assert metadata.spec_sequence_masks is None
+        assert metadata.num_accepted_tokens is None
 
 
 def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():

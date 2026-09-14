@@ -13,9 +13,24 @@ from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorStateCache,
     Compressor,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
 class TestCompressorMetadata:
+    def test_compute_metadata_waits_for_precomputed_output(self):
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        outputs = (torch.ones(1), torch.zeros(1), torch.zeros(1, dtype=torch.int32))
+        metadata = SimpleNamespace(
+            compressor_metadata=outputs,
+            compressor_metadata_group_id=11,
+        )
+
+        with patch("vllm_ascend.models.deepseek_v4.compressor.wait_for_device_metadata") as wait:
+            assert compressor._compute_metadata(metadata) is outputs
+
+        wait.assert_called_once_with(DeviceMetadataStage.COMPRESSOR, 11)
+
     def test_compute_metadata_flattens_rotary_inputs(self):
         compressor = Compressor.__new__(Compressor)
         torch.nn.Module.__init__(compressor)
@@ -27,6 +42,7 @@ class TestCompressorMetadata:
         start_pos = torch.tensor([1, 3], dtype=torch.int32)
         block_table = torch.tensor([[0], [1]], dtype=torch.int32)
         metadata = SimpleNamespace(
+            cache_group_key="model.layers.0.self_attn.attn",
             full_compress_cos=full_cos,
             full_compress_sin=full_sin,
             query_start_loc=query_start_loc,
@@ -46,6 +62,14 @@ class TestCompressorMetadata:
                 dsa_attn_kv_plan,
                 "get_dsa_attn_kv_plan",
                 return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_forward_context",
+                return_value=SimpleNamespace(additional_kwargs={}),
             ),
             patch.object(
                 torch.ops._C_ascend,
