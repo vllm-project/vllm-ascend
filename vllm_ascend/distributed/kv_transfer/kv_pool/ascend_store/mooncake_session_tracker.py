@@ -20,24 +20,29 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterable, Mapping
 
+# Block coordinate inside a request. Single-group models use a plain block
+# index; hybrid (multi-group) models use (group_id, block_index) so blocks of
+# different groups never replace each other in the per-request entry map.
+BlockCoord = int | tuple[int, int]
+
 
 class MooncakeSessionTracker:
     """Track Mooncake sessions that may span multiple chunked-prefill steps."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._request_load_entries: dict[str, dict[str, int]] = {}
-        self._pending_put_owners: dict[str, dict[str, int]] = {}
+        self._request_load_entries: dict[str, dict[str, BlockCoord]] = {}
+        self._pending_put_owners: dict[str, dict[str, BlockCoord]] = {}
         self._load_key_owners: dict[str, set[str]] = {}
 
     @staticmethod
-    def _replace_block_entry(entries: dict[str, int], key: str, block_index: int) -> None:
+    def _replace_block_entry(entries: dict[str, BlockCoord], key: str, block_index: BlockCoord) -> None:
         for previous_key, previous_index in list(entries.items()):
             if previous_index == block_index and previous_key != key:
                 del entries[previous_key]
         entries[key] = block_index
 
-    def register_put_keys(self, req_id: str, entries: Iterable[tuple[str, int]]) -> None:
+    def register_put_keys(self, req_id: str, entries: Iterable[tuple[str, BlockCoord]]) -> None:
         """Remember which requests should consume a key after commit succeeds."""
         with self._lock:
             for key, block_index in entries:
@@ -60,8 +65,8 @@ class MooncakeSessionTracker:
     def prepare_load_entries(
         self,
         req_id: str,
-        current_entries: Iterable[tuple[str, int]],
-    ) -> list[tuple[str, int]]:
+        current_entries: Iterable[tuple[str, BlockCoord]],
+    ) -> list[tuple[str, BlockCoord]]:
         """Merge current remote hits with keys committed by earlier chunks."""
         with self._lock:
             entries = self._request_load_entries.setdefault(req_id, {})
