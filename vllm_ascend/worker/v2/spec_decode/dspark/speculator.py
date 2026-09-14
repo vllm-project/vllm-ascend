@@ -180,6 +180,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             )
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
+    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
+        # Upstream propose builds metadata before selecting eager or graph replay.
+        metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+        if self.attn_architecture == "MLA":
+            return self._update_draft_attn_metadata(metadata, num_reqs_padded)
+        return metadata
+
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
         mirroring Eagle's ``_update_decode_attn_metadata``.
