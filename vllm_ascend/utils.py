@@ -854,6 +854,22 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+def enable_mm_comm_fuse() -> int:
+    """Fused matmul+comm mode: 1=all-reduce, 2=reduce-scatter, 0=disabled.
+
+    The fused ops are only supported on A2; other devices fall back to 0.
+    """
+    mm_comm_fuse = int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE", "0"))
+    if mm_comm_fuse and get_ascend_device_type() != AscendDeviceType.A2:
+        logger.warning_once(
+            "torch_npu.npu_mm_all_reduce_base / npu_mm_reduce_scatter_base are only supported "
+            "on A2 devices; falling back to the default matmul + all-reduce path on %s.",
+            get_ascend_device_type().name,
+        )
+        mm_comm_fuse = 0
+    return mm_comm_fuse
+
+
 def enable_sp_by_pass():
     return get_ascend_config().enable_sp_by_pass
 

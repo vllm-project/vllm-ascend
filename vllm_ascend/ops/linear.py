@@ -87,6 +87,14 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_310p_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
+        # Fused matmul+comm path (MatmulCommRowParallelOp) consumes a
+        # contiguous [K, O] weight, so stash a transposed copy up front to
+        # avoid an on-the-fly transpose every forward. Only layers flagged by
+        # the op selection stash. Must run before the fp32 cast and NZ
+        # conversion below: the stash stays in the original dtype and ND
+        # format because npu_mm_all_reduce_base rejects FRACTAL_NZ.
+        if getattr(layer, "apply_weight_t", False):
+            layer.weight_t = layer.weight.data.t().contiguous()
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
