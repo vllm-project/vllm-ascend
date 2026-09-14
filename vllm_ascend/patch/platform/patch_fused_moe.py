@@ -29,6 +29,7 @@
 
 import sys
 
+import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
 
@@ -43,6 +44,20 @@ if is_310p():
     from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
 else:
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
+
+    _original_maybe_apply_routed_scale_to_output = _DefaultAscendMoERunner._maybe_apply_routed_scale_to_output
+
+    def _ascend_maybe_apply_routed_scale_to_output(self, shared_output, fused_output):
+        shared_output, fused_output = _original_maybe_apply_routed_scale_to_output(
+            self, shared_output, fused_output
+        )
+        if shared_output is not None and self.routed_output_transform is None:
+            fused_output = torch._foreach_add([shared_output], [fused_output])[0]
+            # Tell MoERunner.forward that the shared output is already consumed.
+            shared_output = None
+        return shared_output, fused_output
+
+    _DefaultAscendMoERunner._maybe_apply_routed_scale_to_output = _ascend_maybe_apply_routed_scale_to_output
 
 
 def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
