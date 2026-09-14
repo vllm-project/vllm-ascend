@@ -110,6 +110,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
             self.attn_backends = attn_backends
 
+    def _get_draft_is_prefilling(self, num_reqs_padded: int) -> torch.Tensor:
+        assert self.input_batch is not None
+        return torch.from_numpy(self.input_batch.is_prefilling_np)
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
@@ -121,7 +125,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                self._get_draft_is_prefilling(num_reqs_padded),
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
