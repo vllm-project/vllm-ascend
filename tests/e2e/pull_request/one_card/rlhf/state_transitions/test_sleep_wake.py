@@ -29,11 +29,30 @@ All tests require:
                         flag sleep/wake are no-ops and the bug cannot trigger.
   VLLM_SERVER_DEV_MODE=1
   --additional-config '{"weight_nz_mode": 0}'
+
+Model coverage
+--------------
+TestPhysicalMemory / TestMemoryLeakCycle stay on the tiny Qwen3-0.6B default.
+TestOutputCorrectness and TestLogprobsPrecision additionally run against every
+single-card, layer-reduced profile declared in ``SLEEP_WAKE_PRECISION_PROFILES``
+(DeepSeek-V4-Flash, Qwen3.5-35B-A3B, GLM-5.2) so that "sleep then wake keeps the
+output reproducible" is guarded for real production architectures and not only
+for a 0.6B dense model.
+
+A profile whose checkpoint is not staged on the machine is skipped, therefore
+upstream CI (which only ships Qwen3-0.6B) is unaffected.  To enable a profile,
+point its environment variable at the model directory, e.g.::
+
+    export VLLM_TEST_SLEEP_DSV4_FLASH_MODEL=/weights/DeepSeek-V4-Flash-BF16-layer4
+    export VLLM_TEST_SLEEP_QWEN35_35B_MODEL=/weights/Qwen3.5-35B-A3B
+    export VLLM_TEST_SLEEP_GLM52_MODEL=/weights/GLM-5.2-config
 """
 
+import pytest
 import requests
 
 from tests.e2e.pull_request.one_card.rlhf.conftest import (
+    SLEEP_WAKE_PRECISION_PROFILES,
     gen,
     health,
     npu_free_bytes,
@@ -42,6 +61,23 @@ from tests.e2e.pull_request.one_card.rlhf.conftest import (
     sleep_metrics,
     wake,
 )
+
+
+@pytest.fixture(params=SLEEP_WAKE_PRECISION_PROFILES, ids=lambda profile: profile.name)
+def precision_server(request):
+    """Serve one sleep-enabled model profile and yield its base URL.
+
+    Profiles whose checkpoint is not staged locally are skipped with the reason
+    reported by the profile, so adding a model here never breaks a machine that
+    cannot host it.
+    """
+    profile = request.param
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(f"{profile.name}: {reason}")
+    with server(profile=profile) as url:
+        yield url
+
 
 # ---------------------------------------------------------------------------
 # TestPhysicalMemory
@@ -118,38 +154,43 @@ class TestPhysicalMemory:
 
 
 class TestOutputCorrectness:
-    """Output must be deterministic and self-consistent across the lifecycle."""
+    """Output must be deterministic and self-consistent across the lifecycle.
 
-    def test_staged_wake_restores_output(self):
+    Runs against every staged single-card profile: a real model that silently
+    loses precision on wake (wrong remap, stale quant scales, dropped sparse
+    attention state) fails here even though the protocol-level tests pass.
+    """
+
+    def test_staged_wake_restores_output(self, precision_server):
         """sleep → wake(weights) → wake(kv_cache) — output matches golden."""
-        with server() as url:
-            golden_text = gen(url)["choices"][0]["text"]
+        url = precision_server
+        golden_text = gen(url)["choices"][0]["text"]
 
-            assert sleep(url, level=1) == 200
-            assert wake(url, tags=["weights"]) == 200
-            assert wake(url, tags=["kv_cache"]) == 200
+        assert sleep(url, level=1) == 200
+        assert wake(url, tags=["weights"]) == 200
+        assert wake(url, tags=["kv_cache"]) == 200
 
-            resp = gen(url)
-            assert resp and resp["choices"][0]["text"] == golden_text
+        resp = gen(url)
+        assert resp and resp["choices"][0]["text"] == golden_text
 
-    def test_multiple_cycles_stable(self):
+    def test_multiple_cycles_stable(self, precision_server):
         """3× sleep/wake cycles — output and engine stay stable.
 
         Guards against cumem bookkeeping corruption across repeated
         release+remap of the same physical pages.
         """
-        with server() as url:
-            golden_text = gen(url)["choices"][0]["text"]
+        url = precision_server
+        golden_text = gen(url)["choices"][0]["text"]
 
-            for i in range(3):
-                assert sleep(url, level=1) == 200
-                assert wake(url) == 200
-                assert health(url) == 200
+        for i in range(3):
+            assert sleep(url, level=1) == 200
+            assert wake(url) == 200
+            assert health(url) == 200
 
-                resp = gen(url)
-                assert resp and resp["choices"][0]["text"] == golden_text, (
-                    f"output drifted on cycle {i} — cumem bookkeeping corrupted"
-                )
+            resp = gen(url)
+            assert resp and resp["choices"][0]["text"] == golden_text, (
+                f"output drifted on cycle {i} — cumem bookkeeping corrupted"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -214,61 +255,63 @@ class TestLogprobsPrecision:
                test_fsdp_log_probs_full, test_fsdp_log_probs_cp_rmpad, etc.
 
     After sleep(level=1)/wake, weights are remapped from CPU backup.
-    Calibrated scales (FP8-KV, etc.) must be restored; logprobs must match
-    the pre-sleep values within a tight tolerance.
+    Calibrated scales (FP8-KV, quantization scales, sparse-attention state)
+    must be restored; logprobs must match the pre-sleep values within a tight
+    tolerance.  Running this for every staged single-card profile turns a
+    silent precision drift on a real checkpoint into a test failure.
     """
 
-    def test_logprobs_stable_after_sleepwake(self):
+    def test_logprobs_stable_after_sleepwake(self, precision_server):
         """logprobs before and after sleep/wake must match within 1e-2.
 
         Reference: ROLL test_fsdp_log_probs_full — compares log_probs values
         across different parallelism configurations to within tight tolerance.
         """
-        with server() as url:
-            prompt = "The capital of France is Paris and the capital of Germany is"
+        url = precision_server
+        prompt = "The capital of France is Paris and the capital of Germany is"
 
-            def _get_logprobs():
-                r = requests.post(
-                    f"{url}/v1/completions",
-                    json={
-                        "model": "m",
-                        "prompt": prompt,
-                        "max_tokens": 4,
-                        "temperature": 0,
-                        "logprobs": 5,
-                    },
-                    timeout=30,
-                )
-                resp = r.json()
-                if "choices" not in resp or not resp["choices"]:
-                    return None
-                choice = resp["choices"][0]
-                lp = choice.get("logprobs", {})
-                return lp.get("token_logprobs", [])
+        def _get_logprobs():
+            r = requests.post(
+                f"{url}/v1/completions",
+                json={
+                    "model": "m",
+                    "prompt": prompt,
+                    "max_tokens": 4,
+                    "temperature": 0,
+                    "logprobs": 5,
+                },
+                timeout=30,
+            )
+            resp = r.json()
+            if "choices" not in resp or not resp["choices"]:
+                return None
+            choice = resp["choices"][0]
+            lp = choice.get("logprobs", {})
+            return lp.get("token_logprobs", [])
 
-            before = _get_logprobs()
-            assert before is not None, "failed to get logprobs before sleep"
-            assert len(before) > 0
+        before = _get_logprobs()
+        assert before is not None, "failed to get logprobs before sleep"
+        assert len(before) > 0
 
-            assert sleep(url, level=1) == 200
-            assert wake(url) == 200
-            assert health(url) == 200
+        assert sleep(url, level=1) == 200
+        assert wake(url) == 200
+        assert health(url) == 200
 
-            after = _get_logprobs()
-            assert after is not None, "failed to get logprobs after sleep/wake"
-            assert len(after) == len(before), "logprobs length changed after sleep/wake"
+        after = _get_logprobs()
+        assert after is not None, "failed to get logprobs after sleep/wake"
+        assert len(after) == len(before), "logprobs length changed after sleep/wake"
 
-            compared = 0
-            for i, (b, a) in enumerate(zip(before, after)):
-                if b is None or a is None:
-                    continue
-                compared += 1
-                diff = abs(b - a)
-                # BF16 has ~3 significant decimal digits; 1e-2 is achievable
-                # for identical greedy decodes across a sleep/wake cycle.
-                assert diff < 1e-2, (
-                    f"logprob[{i}] drifted after sleep/wake: "
-                    f"before={b:.6f} after={a:.6f} diff={diff:.2e} — "
-                    "weight restore or KV-scale recalibration may be incorrect"
-                )
-            assert compared > 0, "no non-None logprob pairs were compared — logprobs response may be empty or malformed"
+        compared = 0
+        for i, (b, a) in enumerate(zip(before, after)):
+            if b is None or a is None:
+                continue
+            compared += 1
+            diff = abs(b - a)
+            # BF16 has ~3 significant decimal digits; 1e-2 is achievable
+            # for identical greedy decodes across a sleep/wake cycle.
+            assert diff < 1e-2, (
+                f"logprob[{i}] drifted after sleep/wake: "
+                f"before={b:.6f} after={a:.6f} diff={diff:.2e} — "
+                "weight restore or KV-scale recalibration may be incorrect"
+            )
+        assert compared > 0, "no non-None logprob pairs were compared — logprobs response may be empty or malformed"
