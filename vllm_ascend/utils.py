@@ -259,6 +259,12 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1):
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
@@ -284,6 +290,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
 # - meta tensor: never convert
+# - weights with a 1 in either of the lowest two dimensions: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
