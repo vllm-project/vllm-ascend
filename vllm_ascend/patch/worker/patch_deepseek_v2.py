@@ -1,4 +1,5 @@
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -31,6 +32,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def _should_skip_indexer_init(
@@ -72,6 +75,7 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder: Any = None,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
@@ -276,6 +280,7 @@ def _deepseek_v2_mla_attention_init(
         indexer_rotary_emb=self.indexer_rope_emb,
         is_sparse=self.is_v32,
         topk_indices_buffer=topk_indices_buffer,
+        **({} if vllm_version_is("0.28.0") else {"index_group_builder": index_group_builder}),
     )
 
     self.mla_attn = MultiHeadLatentAttentionWrapper(

@@ -27,7 +27,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import A5DeviceAdaptor
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
@@ -153,11 +153,20 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        dcp_lengths = torch.tensor([2, 3, 3], dtype=torch.int32)
+        if vllm_version_is("0.28.0"):
+            dcp_metadata = {"dcp_local_seq_lens_cpu": dcp_lengths}
+        else:
+            dcp_metadata = {
+                "dcp_local_seq_lens_cpu_upper_bound": dcp_lengths,
+                "req_idx": torch.tensor([7, 7, 9]).numpy(),
+            }
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
             seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
             _seq_lens_cpu=internal_seq_lens_cpu,
+            **dcp_metadata,
             seq_lens_cpu=None,
             num_computed_tokens_cpu=None,
             num_reqs=3,
@@ -176,6 +185,11 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+        if vllm_version_is("0.28.0"):
+            self.assertTrue(torch.equal(unpadded_metadata.dcp_local_seq_lens_cpu, dcp_lengths[:2]))
+        else:
+            self.assertTrue(torch.equal(unpadded_metadata.dcp_local_seq_lens_cpu_upper_bound, dcp_lengths[:2]))
+            self.assertEqual(unpadded_metadata.req_idx.tolist(), [7, 7])
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):

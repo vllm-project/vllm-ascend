@@ -175,14 +175,22 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
 
     assert actual is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
-    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
-    restored_input = runner.pcp_manager.restore_hidden_states.call_args.args[0]
-    torch.testing.assert_close(
-        restored_input,
-        torch.cat(aux_hidden_states, dim=-1),
-    )
-    state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
-    assert runner.execute_model_state is restored_state
+    if vllm_version_is("0.28.0"):
+        runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
+        restored_input = runner.pcp_manager.restore_hidden_states.call_args.args[0]
+        torch.testing.assert_close(
+            restored_input,
+            torch.cat(aux_hidden_states, dim=-1),
+        )
+        state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
+        assert runner.execute_model_state is restored_state
+    else:
+        # Main restores aux states in the parent runner and local target states
+        # in the replicated drafter; the Ascend wrapper must not restore twice.
+        runner.pcp_manager.restore_hidden_state_buffer.assert_not_called()
+        runner.pcp_manager.restore_hidden_states.assert_not_called()
+        state._replace.assert_not_called()
+        assert runner.execute_model_state is state
 
 
 def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():

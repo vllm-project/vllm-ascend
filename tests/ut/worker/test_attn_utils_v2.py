@@ -340,6 +340,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         quant_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
+    if not vllm_version_is("0.28.0"):
+        vllm_config.attention_config = SimpleNamespace(hisparse_config=None)
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
         deepseek_v4_indexer.AscendDeepseekV4IndexerCache
@@ -456,24 +458,19 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 kv_cache_config=_kv_cache_config,
             )
 
-        def _ascend_bind_kv_cache(
+        def _ascend_bind_kv_cache_to_layers(
             kv_caches: dict[str, Any],
             forward_context: dict[str, Any],
-            runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
             kv_cache_groups: Any = None,
         ) -> None:
             del num_attn_module, kv_cache_groups
-            assert len(runner_kv_caches_) == 0
-            for kv_cache in kv_caches.values():
-                runner_kv_caches_.append(kv_cache)
             for layer_name_, kv_cache in kv_caches.items():
                 forward_context[layer_name_].kv_cache = kv_cache
 
         monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache_to_layers)
         kv_caches = upstream_attn_utils.init_kv_cache(
-            runner_kv_caches=runner_kv_caches,
             forward_context={layer_name: cache_layer},
             kv_cache_config=kv_cache_config,
             device=torch.device("cpu"),
@@ -482,13 +479,14 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         )
 
     cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
+    assert isinstance(cache_components, list)
     if vllm_version_is("0.28.0"):
-        # The v0.28.0 patch binds the pre-set layer tensor in place.
-        assert cache_layer.kv_cache is cache_components
-    # On main the layer cache is replaced by the freshly allocated views, so
-    # the returned structure is validated by the checks below instead.
+        assert len(runner_kv_caches) == 1
+        assert runner_kv_caches[0] is cache_components
+    else:
+        assert isinstance(cache_components, attn_utils._DeviceAwareKVCacheList)
+        assert cache_components.device == torch.device("cpu")
+    assert cache_layer.kv_cache is cache_components
     assert [component.shape for component in cache_components] == [
         (num_blocks, get_storage_block_size(spec), 1, dim) for dim in component_dims
     ]

@@ -29,7 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -74,6 +73,9 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+if vllm_version_is("0.28.0"):
+    from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -232,7 +234,10 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=pcp_manager.global_batch,
             )
 
-        self._restore_replicated_draft_target_states()
+        # vLLM #56107 restores aux states in sample_tokens and passes local
+        # target states to propose; replicated drafters restore those there.
+        if vllm_version_is("0.28.0"):
+            self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
@@ -442,7 +447,9 @@ class NPUModelRunner(GPUModelRunner):
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
         dcp_local_seq_lens = None
-        if self.use_dcp:
+        # Main computes DCP lengths in the inherited execute_model after PCP
+        # partitioning (vLLM #55212). Release still prepares them here.
+        if vllm_version_is("0.28.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,

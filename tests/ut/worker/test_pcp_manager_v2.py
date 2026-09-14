@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import ExitStack
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
@@ -241,14 +242,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         # This Triton helper is unrelated to PCP partitioning and has no CPU
         # implementation. Stub only it; AscendPCPManager.partition_batch and
         # PCPManager.partition_batch both execute unmocked below.
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(2, dtype=torch.int64),
-        ),
+        ExitStack() as release_patches,
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
@@ -259,6 +253,15 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         ) as build_attn_state,
     ):
         if vllm_version_is("0.28.0"):
+            release_patches.enter_context(
+                patch("vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens", return_value=None)
+            )
+            release_patches.enter_context(
+                patch(
+                    "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+                    return_value=torch.zeros(2, dtype=torch.int64),
+                )
+            )
             result = manager.partition_batch(global_batch)
         else:
             result = manager.partition_batch(global_batch, padded_num_tokens=12)
@@ -269,20 +272,28 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
-    # PCP=2 rank 0 owns the tail chunk then the head chunk; the real base
-    # implementation produces this local row order and pads to rank 1's size.
+    # vLLM #56157 orders a request's chunks by their global start position.
+    if vllm_version_is("0.28.0"):
+        expected_scheduled = [3, 5]
+        expected_query_start = [0, 3, 8]
+        expected_input_ids = [15, 16, 17, 0, 1, 2, 3, 4]
+        expected_seq_lens = np.array([18, 5], dtype=np.int32)
+    else:
+        expected_scheduled = [5, 3]
+        expected_query_start = [0, 5, 8]
+        expected_input_ids = [0, 1, 2, 3, 4, 15, 16, 17]
+        expected_seq_lens = np.array([5, 18], dtype=np.int32)
     assert result.req_ids == ["global-req", "global-req"]
     np.testing.assert_array_equal(result.idx_mapping_np, np.array([3, 3], dtype=np.int32))
-    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
+    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array(expected_scheduled, dtype=np.int32))
+    np.testing.assert_array_equal(result.query_start_loc_np, np.array(expected_query_start, dtype=np.int32))
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 10 if vllm_version_is("0.28.0") else 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
-    assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
+    assert torch.equal(result.input_ids[:8], torch.tensor(expected_input_ids, dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
     # the override must refresh them from real PCP-local CPU rows.
-    expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
     assert result.attn_state is local_attn_state
     build_attn_state.assert_called_once()
@@ -554,14 +565,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
     input_buffers.seq_lens[0] = 11
 
     with (
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(1, dtype=torch.int64),
-        ),
+        ExitStack() as release_patches,
         patch(
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
@@ -575,6 +579,16 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
             return_value=object(),
         ),
     ):
+        if vllm_version_is("0.28.0"):
+            release_patches.enter_context(
+                patch("vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens", return_value=None)
+            )
+            release_patches.enter_context(
+                patch(
+                    "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+                    return_value=torch.zeros(1, dtype=torch.int64),
+                )
+            )
         local_batch = manager.partition_batch(global_batch)
 
     assert local_batch.num_reqs == 1

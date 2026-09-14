@@ -68,13 +68,13 @@ class AscendPCPManager(PCPManager):
             pcp_world_size=pcp_world_size,
             pcp_rank=pcp_rank,
             device=device,
-            req_states=req_states,
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             block_tables=block_tables,
             dcp_world_size=dcp_world_size,
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
+            **({"req_states": req_states} if vllm_version_is("0.28.0") else {}),
         )
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
