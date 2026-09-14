@@ -44,12 +44,6 @@ def init_speculator(
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
-        draft_config = speculative_config.draft_model_config
-        assert draft_config is not None
-        if draft_config.use_mla:
-            from vllm_ascend.worker.v2.spec_decode.dspark.mla import AscendMLADSparkSpeculator
-
-            return AscendMLADSparkSpeculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
         )
