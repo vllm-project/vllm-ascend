@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import A5DeviceAdaptor, DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
@@ -454,3 +454,31 @@ class TestIndexerOps:
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3
         assert qli_kwargs["cmp_ratio"] == 4
+
+    def test_select_topk_takes_the_quant_mode_from_the_device_adaptor(self):
+        # The op validates the query/key dtypes against quant_mode, so the mode
+        # has to come from the adaptor that quantized them.
+        indexer_ops = AscendIndexerOps(index_topk=3)
+        indexer_ops.device_operator = A5DeviceAdaptor
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.float8_e4m3fn)
+        scale_cache = torch.empty((1, 1, 1, 1), dtype=torch.float32)
+        query = torch.ones((2, 2, 4), dtype=torch.float8_e4m3fn)
+        query_scale = torch.ones((2, 2), dtype=torch.float32)
+        weights = torch.ones((2, 2))
+        metadata = SimpleNamespace(
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([0], dtype=torch.int32),
+        )
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "npu_quant_lightning_indexer_v2",
+            create=True,
+            return_value=(torch.tensor([[[1, 2, 3]]], dtype=torch.int32), None),
+        ) as qli:
+            indexer_ops.select_topk(query, weights, query_scale, key_cache, scale_cache, metadata)
+
+        assert qli.call_args.kwargs["quant_mode"] == A5DeviceAdaptor.get_dsa_indexer_quant_mode()

@@ -1,8 +1,13 @@
 from unittest import mock
 
+import pytest
 import torch
 
-from vllm_ascend.device.device_op import BaseDeviceAdaptor
+from vllm_ascend.device.device_op import (
+    A5DeviceAdaptor,
+    Ascend310PDeviceAdaptor,
+    BaseDeviceAdaptor,
+)
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
@@ -68,3 +73,20 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
+
+
+@pytest.mark.parametrize(
+    ("adaptor", "expected_quant_mode", "expected_scale_dtype"),
+    [
+        (BaseDeviceAdaptor, 2, torch.float16),
+        (Ascend310PDeviceAdaptor, 2, torch.float16),
+        (A5DeviceAdaptor, 1, torch.float32),
+    ],
+)
+def test_dsa_indexer_quant_mode_matches_the_prepared_dtypes(adaptor, expected_quant_mode, expected_scale_dtype):
+    # The indexer op rejects weights and dequant scales whose dtypes disagree
+    # with the quant_mode it is called with. The modes come from
+    # csrc/attention/quant_lightning_indexer_v2: 1 is fp8, 2 is int8.
+    assert adaptor.get_dsa_indexer_quant_mode() == expected_quant_mode
+    assert adaptor.prepare_dsa_indexer_weights(torch.ones(2, 2)).dtype is expected_scale_dtype
+    assert adaptor.prepare_dsa_indexer_key_scale(torch.ones(1, 1, 1, 1)).dtype is expected_scale_dtype
