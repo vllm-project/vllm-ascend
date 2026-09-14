@@ -8,13 +8,40 @@ import pytest
 import vllm.envs as vllm_envs
 from vllm.distributed.utils import get_pp_indices
 
+from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import SpecPPSupport, bypass_upstream_spec_pp_guard
+
+
+@pytest.mark.parametrize(
+    "version, legacy",
+    [
+        ("0.28.0", True),
+        ("0.28.1+empty", True),
+        ("0.29.0", True),
+        ("0.29.1rc1", True),
+        ("0.30.0", False),
+        ("0.31.0.dev12", False),
+    ],
+)
+@pytest.mark.parametrize("override", [False, True])
+def test_spec_pp_version_routing(monkeypatch, version, legacy, override):
+    monkeypatch.setattr(pp_utils.vllm, "__version__", "0.30.0" if override else version)
+    monkeypatch.setattr(pp_utils.envs, "VLLM_VERSION", version if override else None)
+    monkeypatch.setattr(pp_utils, "vllm_version_is", lambda version: False)
+    assert pp_utils.use_legacy_spec_pp() is legacy
+
+
+def test_untagged_release_uses_existing_version_detection(monkeypatch):
+    monkeypatch.setattr(pp_utils.envs, "VLLM_VERSION", "0.1.dev1+g123.empty")
+    monkeypatch.setattr(pp_utils, "vllm_version_is", lambda version: version == "0.28.0")
+    assert pp_utils.use_legacy_spec_pp()
 
 
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("partition", [None, "42,36"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_unsharded_draft_preserves_target_partition(monkeypatch, cached, partition, fail):
+    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: True)
     was_cached = vllm_envs._is_envs_cache_enabled()
     vllm_envs.disable_envs_cache()
     if partition is None:
@@ -57,8 +84,12 @@ def test_unsharded_draft_preserves_target_partition(monkeypatch, cached, partiti
             vllm_envs.enable_envs_cache()
 
 
-@pytest.mark.parametrize("support", [None, SpecPPSupport()])
-def test_pp_guard_noop_preserves_partition(monkeypatch, support):
+@pytest.mark.parametrize(
+    "legacy,support",
+    [(True, None), (True, SpecPPSupport()), (False, SpecPPSupport(bypass_upstream_pp_guard=True))],
+)
+def test_pp_guard_noop_preserves_partition(monkeypatch, legacy, support):
+    monkeypatch.setattr(pp_utils, "use_legacy_spec_pp", lambda: legacy)
     monkeypatch.setattr(vllm_envs, "VLLM_PP_LAYER_PARTITION", "42,36")
     config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2))
     with bypass_upstream_spec_pp_guard(config, support) as bypassed:

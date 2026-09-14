@@ -11,15 +11,27 @@ from typing import TYPE_CHECKING, Protocol
 from unittest.mock import patch
 
 import torch
+import vllm
 import vllm.envs as vllm_envs
+from packaging.version import Version
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend import envs
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 _PP_TRANSPORT_PREFIX = "pp_transport"
+
+
+def use_legacy_spec_pp() -> bool:
+    """vLLM 0.28/0.29 need Ascend's Spec+PP protocol; other versions use upstream."""
+    version = Version(envs.VLLM_VERSION or vllm.__version__)
+    # Also recognize untagged 0.28 CPU builds via the existing version helper.
+    return version.release[:2] in ((0, 28), (0, 29)) or vllm_version_is("0.28.0")
 
 
 class _PPAuxHiddenStateModel(Protocol):
@@ -84,9 +96,9 @@ def bypass_upstream_spec_pp_guard(
     vllm_config: VllmConfig,
     support: SpecPPSupport | None,
 ) -> Iterator[bool]:
-    """Initialize the upstream runner as PP=1 to bypass its Spec+PP guard."""
+    """Bypass the legacy Spec+PP guard, leaving native PP initialization intact."""
     bypass_guard = support.bypass_upstream_pp_guard if support is not None else False
-    if not bypass_guard:
+    if not bypass_guard or not use_legacy_spec_pp():
         yield False
         return
 

@@ -26,8 +26,6 @@ def test_spec_pp_comm_does_not_skip_rank_local_finishing_request():
         max_seq_len_np=np.array([57, 100], dtype=np.int32),
     )
 
-    assert compute_need_sampled_mask(input_batch) is None
-
     comm_batch = _make_spec_pp_comm_batch(input_batch)
 
     np.testing.assert_array_equal(
@@ -35,3 +33,8 @@ def test_spec_pp_comm_does_not_skip_rank_local_finishing_request():
         np.array([True, False]),
     )
     np.testing.assert_array_equal(input_batch.max_seq_len_np, [57, 100])
+
+
+def test_spec_pp_comm_without_legacy_completion_bound():
+    input_batch = object()
+    assert _make_spec_pp_comm_batch(input_batch) is input_batch

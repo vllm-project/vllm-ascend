@@ -13,12 +13,13 @@ _BROADCAST_PATCHED = "_vllm_ascend_spec_pp_broadcast_patched"
 def _make_spec_pp_comm_batch(input_batch):
     """Ignore rank-local completion state when matching PP collectives.
 
-    Temporary workaround for vLLM builds without vllm-project/vllm#54436,
-    which can drop a decoding request from the PP sampled-token broadcast;
-    delete together with its callers once the paired vLLM carries that fix.
+    Release versions without vllm-project/vllm#54436 can drop a decoding
+    request from the PP sampled-token broadcast. Newer InputBatch versions
+    have no rank-local completion bound and need no adjustment.
     """
-    max_seq_len = input_batch.max_seq_len_np
-    assert max_seq_len is not None
+    max_seq_len = getattr(input_batch, "max_seq_len_np", None)
+    if max_seq_len is None:
+        return input_batch
     return replace(
         input_batch,
         max_seq_len_np=np.full_like(max_seq_len, np.iinfo(max_seq_len.dtype).max),
