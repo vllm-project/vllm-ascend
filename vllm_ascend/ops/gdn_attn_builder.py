@@ -388,38 +388,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         return spec_indices, non_spec_indices
 
-    def _pad_non_spec_decode_graph_inputs(
-        self,
-        state_indices: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        *,
-        num_decode_tokens: int,
-        graph_batch_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Refresh fixed buffers consumed by a non-spec decode graph."""
-        assert num_decode_tokens <= graph_batch_size
-
-        padded_state_indices = self.non_spec_state_indices_tensor[:graph_batch_size]
-        padded_state_indices[num_decode_tokens:].fill_(NULL_BLOCK_ID)
-        padded_state_indices[:num_decode_tokens].copy_(
-            state_indices[:num_decode_tokens],
-            non_blocking=True,
-        )
-
-        padded_query_start_loc = self.non_spec_query_start_loc[: graph_batch_size + 1]
-        padded_query_start_loc[: num_decode_tokens + 1].copy_(
-            query_start_loc[: num_decode_tokens + 1],
-            non_blocking=True,
-        )
-        query_padding = padded_query_start_loc[num_decode_tokens + 1 :]
-        if query_padding.numel() > 0:
-            query_padding.copy_(
-                padded_query_start_loc[num_decode_tokens].expand_as(query_padding),
-                non_blocking=True,
-            )
-
-        return padded_state_indices, padded_query_start_loc
-
     def _reset_spec_decode_graph_inputs(self, graph_batch_size: int) -> None:
         """Make a captured speculative branch a no-op for this replay."""
         self.spec_state_indices_tensor[:graph_batch_size].fill_(PAD_SLOT_ID)
@@ -1038,7 +1006,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_sequence_indices,
             )
             assert non_spec_query_start_loc_cpu is not None
-        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+        nums_dict, batch_ptr, token_chunk_offset_ptr = self._compute_causal_conv1d_metadata(
             non_spec_query_start_loc_cpu,
             device=query_start_loc.device,
         )
@@ -1048,6 +1016,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             batch_ptr,
             token_chunk_offset_ptr,
         )
+
+    def _compute_causal_conv1d_metadata(
+        self, query_start_loc_cpu: torch.Tensor | None, *, device: torch.device
+    ) -> tuple[dict[int, dict[str, object]] | None, torch.Tensor | None, torch.Tensor | None]:
+        """Encode convolution metadata for the device-specific kernel."""
+        return compute_causal_conv1d_metadata(query_start_loc_cpu, device=device)
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):

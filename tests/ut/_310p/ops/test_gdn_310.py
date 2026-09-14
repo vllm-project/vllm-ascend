@@ -59,6 +59,46 @@ def test_zero_padded_tokens_masks_only_padded_token_positions():
     assert torch.count_nonzero(masked[:, 2:]) == 0
 
 
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, AscendGDNAttentionMetadataBuilder310])
+@pytest.mark.parametrize("with_spec", [False, True])
+def test_builder_prefill_shares_state_filtering_and_selects_device_encoder(monkeypatch, builder_cls, with_spec):
+    assert (
+        builder_cls._build_prefill_has_initial_state_and_causal_conv1d_meta
+        is AscendGDNAttentionMetadataBuilder._build_prefill_has_initial_state_and_causal_conv1d_meta
+    )
+    builder = object.__new__(builder_cls)
+    query_start_loc = torch.tensor([0, 2, 5] if with_spec else [0, 2, 4, 7], dtype=torch.int32)
+    device = torch.device("cpu")
+    encoded = ({}, torch.tensor([7]), torch.tensor([11]))
+    calls = []
+
+    def encode(query_start_loc_cpu, *, device):
+        calls.append((query_start_loc_cpu, device))
+        return encoded
+
+    monkeypatch.setattr(f"{builder_cls.__module__}.compute_causal_conv1d_metadata", encode)
+    result = builder._build_prefill_has_initial_state_and_causal_conv1d_meta(
+        common_attn_metadata=None,
+        context_lens_tensor=torch.tensor([0, 4, 9]),
+        num_prefills=2 if with_spec else 3,
+        spec_sequence_masks_cpu=torch.tensor([False, True, False]) if with_spec else None,
+        non_spec_sequence_indices=torch.tensor([0, 2]) if with_spec else None,
+        non_spec_query_start_loc_cpu=query_start_loc,
+        query_start_loc=query_start_loc,
+    )
+    assert result[0].tolist() == ([False, True] if with_spec else [False, True, True])
+    assert len(calls) == 1
+    assert calls[0][0] is query_start_loc
+    assert calls[0][1] == device
+    assert all(actual is expected for actual, expected in zip(result[1:], encoded))
+
+
+def test_builder310_conv_metadata_requires_query_boundaries():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    with pytest.raises(AssertionError):
+        builder._compute_causal_conv1d_metadata(None, device=torch.device("cpu"))
+
+
 @pytest.mark.parametrize(
     "requests,tokens,expected",
     [(4, 4, True), (4, 16, True), (5, 16, False), (4, 17, False)],

@@ -21,7 +21,6 @@ reusing the common request-granular ACL graph materialization.
 from __future__ import annotations
 
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.cumpute_causal_conv1d_metadata_310 import (
@@ -51,43 +50,11 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             and num_spec_decode_tokens <= self.spec_token_indx.numel()
         )
 
-    def _build_prefill_has_initial_state_and_causal_conv1d_meta(
-        self,
-        *,
-        common_attn_metadata: CommonAttentionMetadata,
-        context_lens_tensor: torch.Tensor,
-        num_prefills: int,
-        spec_sequence_masks_cpu: torch.Tensor | None,
-        non_spec_sequence_indices: torch.Tensor | None,
-        non_spec_query_start_loc_cpu: torch.Tensor | None,
-        query_start_loc: torch.Tensor,
-    ) -> tuple[
-        torch.Tensor | None,
-        dict[int, dict[str, object]] | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
-        del common_attn_metadata, num_prefills
-        assert non_spec_query_start_loc_cpu is not None
-
-        has_initial_state = context_lens_tensor > 0
-        if spec_sequence_masks_cpu is not None:
-            assert non_spec_sequence_indices is not None
-            has_initial_state = torch.index_select(
-                has_initial_state,
-                0,
-                non_spec_sequence_indices,
-            )
-        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
-            non_spec_query_start_loc_cpu,
-            device=query_start_loc.device,
-        )
-        return (
-            has_initial_state,
-            nums_dict,
-            batch_ptr,
-            token_chunk_offset_ptr,
-        )
+    def _compute_causal_conv1d_metadata(
+        self, query_start_loc_cpu: torch.Tensor | None, *, device: torch.device
+    ) -> tuple[dict[int, dict[str, object]] | None, torch.Tensor | None, torch.Tensor | None]:
+        assert query_start_loc_cpu is not None
+        return compute_causal_conv1d_metadata(query_start_loc_cpu, device=device)
 
 
 # Keep the name introduced by the 310P ACL graph padding patch so existing
