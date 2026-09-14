@@ -309,6 +309,32 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # ``get_kv_cache_config_from_groups`` wrapper above; configs built
         # without the tag (e.g. unit tests) default to non-producer.
         self.is_kv_producer = getattr(kv_cache_config, "is_kv_producer", False)
+        self.has_state_groups = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.is_kv_producer = self.is_kv_producer
+
+    def _producer_hit_cap(self, max_cache_hit_length: int) -> int:
+        """Leave a pure prefill producer at least one token to recompute.
+
+        Mooncake truncates the last prompt token before producer scheduling.
+        A local hit covering that whole truncated prompt would consequently
+        schedule zero new tokens.  On an exact fine-grained hash boundary the
+        tail checkpoint also becomes unreachable after a one-token cap, so
+        pull back one complete match unit in that case.
+        """
+        if not (self.is_kv_producer and self.has_state_groups):
+            return max_cache_hit_length
+        if (
+            self.enable_partial_hash_hits
+            and self.hash_block_size > 0
+            and max_cache_hit_length % self.hash_block_size == 0
+        ):
+            return max(max_cache_hit_length - self.hash_block_size, 0)
+        return max(max_cache_hit_length - 1, 0)
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -432,6 +458,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             return block_hashes
 
+        max_cache_hit_length = self._producer_hit_cap(max_cache_hit_length)
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
         longest_hit_length = 0
@@ -537,6 +564,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
         # producer (see ``self.is_kv_producer``): matched content blocks
         # are always verified prompt blocks there.
+        max_cache_hit_length = self._producer_hit_cap(max_cache_hit_length)
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
