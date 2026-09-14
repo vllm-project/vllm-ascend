@@ -95,7 +95,7 @@ templates:
       - --max-model-len
       - "65536"
       - --additional-config
-      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert": true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -156,7 +156,7 @@ templates:
       - --max-model-len
       - "65536"
       - --additional-config
-      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert": true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -222,7 +222,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -285,7 +285,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable": true,"multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

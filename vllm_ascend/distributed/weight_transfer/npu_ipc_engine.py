@@ -15,7 +15,6 @@ import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 from vllm import envs
-from vllm.config import VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -31,7 +30,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -118,26 +116,13 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    if vllm_version_is("0.23.0"):
-
-        def __init__(
-            self,
-            config: WeightTransferConfig,
-            parallel_config: ParallelConfig,
-            model: torch.nn.Module | None = None,
-        ) -> None:
-            super().__init__(config, parallel_config, model)
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            config: WeightTransferConfig,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            model: torch.nn.Module,
-        ) -> None:
-            super().__init__(config, vllm_config, device, model)
+    def __init__(
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module | None = None,
+    ) -> None:
+        super().__init__(config, parallel_config, model)
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> NPUIPCWeightTransferUpdateInfo:
         """Parse update dict, deserializing pickled IPC handles if present.
@@ -167,16 +152,6 @@ class NPUIPCWeightTransferEngine(WeightTransferEngine[NPUIPCWeightTransferInitIn
     def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
         """No initialization needed for NPU IPC backend."""
         pass
-
-    if not vllm_version_is("0.23.0"):
-
-        def start_weight_update(self) -> None:
-            """No-op for NPU IPC engine (no layerwise reloading)."""
-            pass
-
-        def finish_weight_update(self) -> None:
-            """No-op for NPU IPC engine (no layerwise reloading)."""
-            pass
 
     def receive_weights(
         self,

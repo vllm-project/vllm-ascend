@@ -107,7 +107,8 @@ class NPUWorker310(NPUWorker):
         # based on the already occupied space of the system memory.
 
         if is_rc_device():
-            self.available_kv_cache_memory_bytes = (self.requested_memory - psutil.virtual_memory().used) // 2
+            vm = psutil.virtual_memory()
+            self.available_kv_cache_memory_bytes = (self.requested_memory - (vm.total - vm.available)) // 2
         else:
             self.available_kv_cache_memory_bytes = (
                 self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache

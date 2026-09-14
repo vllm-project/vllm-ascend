@@ -49,7 +49,11 @@ def _fill_cpu_exponential_310p(
     has_draft_mask: torch.Tensor | None = None,
 ) -> None:
     """Fill a CPU tensor with exponential values for 310P stability."""
-    if len(generators) != q_cpu.shape[0]:
+    if has_draft_mask is not None:
+        has_draft_mask = has_draft_mask.cpu()
+        # Prefill all rows so unmasked requests do not keep uninitialized values.
+        q_cpu.exponential_()
+    elif len(generators) != q_cpu.shape[0]:
         q_cpu.exponential_()
     if not generators:
         return
@@ -69,11 +73,11 @@ def fill_exponential_310p(
     has_draft_mask: torch.Tensor | None = None,
 ) -> None:
     """Fill ``q`` with exponential values using CPU RNG for 310P stability."""
-    with npu_stream_switch(global_stream()):
-        q_cpu = q.cpu()
-        _fill_cpu_exponential_310p(q_cpu, generators, has_draft_mask)
-        q.copy_(q_cpu.to(q.device))
-    torch.npu.current_stream().wait_stream(global_stream())
+    q_cpu = q.cpu()
+    _fill_cpu_exponential_310p(q_cpu, generators, has_draft_mask)
+    q.copy_(q_cpu.to(q.device))
+    # Ensure H2D of q is visible before rejection/recover consumes it.
+    torch.npu.current_stream().synchronize()
 
 
 def _random_sample_310p(

@@ -87,10 +87,7 @@ class EncoderForwardContext:
 
     token_budget: int | None = None
     capturing: bool = False
-    capture_layer_cursor: int = 0
     cu_seqlens_cpu: torch.Tensor | None = None
-    cu_window_seqlens_cpu: torch.Tensor | None = None
-    sequence_lengths_cpu: torch.Tensor | None = None
 
 
 _context = EncoderForwardContext()
@@ -106,8 +103,6 @@ def _reset_encoder_forward_context() -> None:
     _context.token_budget = None
     _context.capturing = False
     _context.cu_seqlens_cpu = None
-    _context.cu_window_seqlens_cpu = None
-    _context.sequence_lengths_cpu = None
 
 
 @contextmanager
@@ -116,8 +111,6 @@ def set_encoder_forward_context(
     capturing: bool,
     *,
     cu_seqlens_cpu: torch.Tensor | None = None,
-    cu_window_seqlens_cpu: torch.Tensor | None = None,
-    sequence_lengths_cpu: torch.Tensor | None = None,
 ):
     """Enter encoder graph replay (FIA host args): callers must pass lengths each time.
 
@@ -128,9 +121,6 @@ def set_encoder_forward_context(
     _context.token_budget = token_budget
     _context.capturing = capturing
     _context.cu_seqlens_cpu = cu_seqlens_cpu
-    _context.cu_window_seqlens_cpu = cu_window_seqlens_cpu
-    _context.sequence_lengths_cpu = sequence_lengths_cpu
-    _context.capture_layer_cursor = 0
     try:
         yield _context
     finally:
@@ -138,57 +128,57 @@ def set_encoder_forward_context(
 
 
 # ---------------------------------------------------------------------------
-# Replay-time FIA task updates
+# FIA actual_seq_lengths (cu_seqlens -> list[int])
 # ---------------------------------------------------------------------------
 
 
-def _pad_actual_seq_lengths_for_fia(actual_seq_lengths: list[int], num_tokens: int) -> list[int]:
-    """TND FIA requires ``query.shape[0] == actual_seq_lengths[-1]``."""
-    if not actual_seq_lengths or actual_seq_lengths[-1] != num_tokens:
-        actual_seq_lengths.append(num_tokens)
-    return actual_seq_lengths
-
-
-def _maybe_compute_actual_seq_lengths(
-    *,
+def maybe_compute_actual_seq_lengths(
+    cu_seqlens: torch.Tensor,
     num_query_tokens: int,
-    uses_seq_len_host: bool,
-    vit_layer_idx: int,
-    fullatt_block_indexes: set[int] | frozenset[int] | None,
+    num_kv_tokens: int,
+    *,
+    cudagraph_mm_encoder: bool = False,
 ) -> tuple[list[int], list[int]]:
-    context = get_encoder_forward_context()
-    if uses_seq_len_host:
-        if context.sequence_lengths_cpu is None:
-            raise RuntimeError("context.sequence_lengths_cpu is None during encoder replay.")
-        actual = context.sequence_lengths_cpu.cumsum(0).to(torch.int64).tolist()
-    elif fullatt_block_indexes is not None:
-        if vit_layer_idx in fullatt_block_indexes:
-            if context.cu_seqlens_cpu is None:
-                raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-            actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
-        else:
-            if context.cu_window_seqlens_cpu is None:
-                raise RuntimeError("context.cu_window_seqlens_cpu is None during encoder replay.")
-            actual = context.cu_window_seqlens_cpu[1:].to(torch.int64).tolist()
-    else:
-        if context.cu_seqlens_cpu is None:
-            raise RuntimeError("context.cu_seqlens_cpu is None during encoder replay.")
-        actual = context.cu_seqlens_cpu[1:].to(torch.int64).tolist()
+    """Convert ``cu_seqlens`` to FIA host ``actual_seq_lengths``.
 
-    aligned = _pad_actual_seq_lengths_for_fia(actual, num_query_tokens)
-    return aligned, aligned
+    Drops the leading-zero marker; with ``cudagraph_mm_encoder`` filters endpoints and
+    aligns the terminal to ``num_query_tokens``; when Q≠KV, scales Q endpoints by
+    ``num_kv_tokens // num_query_tokens`` for the KV list.
+    """
+    flat = cu_seqlens.detach().cpu().view(-1).tolist()
+    actual = flat[1:] if flat else flat
+
+    if not cudagraph_mm_encoder:
+        pass
+    elif num_query_tokens <= 0:
+        actual = [0]
+    else:
+        filtered: list[int] = []
+        for end in actual:
+            if end <= 0:
+                continue
+            if end > num_query_tokens:
+                break
+            if not filtered or end > filtered[-1]:
+                filtered.append(end)
+
+        if not filtered or filtered[-1] != num_query_tokens:
+            filtered.append(num_query_tokens)
+        actual = filtered
+
+    if num_kv_tokens == num_query_tokens:
+        return actual, actual
+
+    assert num_kv_tokens % num_query_tokens == 0
+    ratio = num_kv_tokens // num_query_tokens
+    return actual, [end * ratio for end in actual]
 
 
 def update_encoder_graph_params(
     update_stream: torch.npu.Stream,
     token_budget: int,
-    *,
-    fullatt_block_indexes: set[int] | frozenset[int] | None = None,
 ) -> None:
     """Re-bind fused infer attention host tensors inside the encoder NPUGraph (parallel to LLM path).
-
-    Qwen2.5-VL: layers listed in ``fullatt_block_indexes`` use ``cu_seqlens`` host endpoints;
-    others use ``cu_window_seqlens``. Those layouts are **not** baked at capture — only here.
 
     This deliberately bypasses :class:`AttentionBackend` — ViT attention is not registered there — but reuses
     the same ``graph_task_update_{begin,end}`` + ``ExternalEvent`` ordering pattern as
@@ -220,8 +210,6 @@ def update_encoder_graph_params(
                 block_table,
                 attn_mask,
                 block_size,
-                uses_sequence_lengths_host,
-                vit_layer_idx,
                 num_kv_heads,
                 num_heads,
                 scale,
@@ -230,11 +218,14 @@ def update_encoder_graph_params(
             ) = packed
 
             num_query_tokens = query.shape[0]
-            actual_seq_lengths_q, actual_seq_lengths_kv = _maybe_compute_actual_seq_lengths(
-                num_query_tokens=num_query_tokens,
-                uses_seq_len_host=uses_sequence_lengths_host,
-                vit_layer_idx=vit_layer_idx,
-                fullatt_block_indexes=fullatt_block_indexes,
+            num_kv_tokens = key.shape[0]
+            cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
+
+            actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
+                cu_seqlens_cpu,
+                num_query_tokens,
+                num_kv_tokens,
+                cudagraph_mm_encoder=True,
             )
 
             torch.npu.graph_task_update_begin(update_stream, handle)
@@ -269,9 +260,6 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         super().__init__(*args, **kwargs)
         self.graph_pool = current_platform.get_global_graph_pool()
         self.update_stream: torch.npu.Stream | None = None
-        visual = getattr(self.model, "visual", None)
-        fa_raw = getattr(visual, "fullatt_block_indexes", None) if visual is not None else None
-        self.fullatt = frozenset(fa_raw) if fa_raw is not None else None
 
     def capture(self, graph_pool: Any | None = None):
         encoder_graph_pool = graph_pool if graph_pool is not None else self.graph_pool
@@ -388,13 +376,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
                 padding_logic = self.config.padding_logics.get(key, self._copy_padded_buffer)
                 padding_logic(buf, src)
 
-        meta = graph_meta.input_buffers
-        cu_seqlens = meta.get("cu_seqlens")
+        cu_seqlens = graph_meta.input_buffers.get("cu_seqlens")
         cu_seqlens_cpu = None if cu_seqlens is None else cu_seqlens.cpu()
-        cu_window_seqlens = meta.get("cu_window_seqlens")
-        cu_window_seqlens_cpu = None if cu_window_seqlens is None else cu_window_seqlens.cpu()
-        seq_lens = meta.get("sequence_lengths")
-        seq_lens_cpu = None if seq_lens is None else seq_lens.cpu()
 
         update_stream = self.update_stream
         if update_stream is None:
@@ -406,10 +389,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             token_budget,
             False,
             cu_seqlens_cpu=cu_seqlens_cpu,
-            cu_window_seqlens_cpu=cu_window_seqlens_cpu,
-            sequence_lengths_cpu=seq_lens_cpu,
         ):
-            update_encoder_graph_params(update_stream, token_budget, fullatt_block_indexes=self.fullatt)
+            update_encoder_graph_params(update_stream, token_budget)
 
         self.graph_hits += num_items
         return graph_meta.output_buffer

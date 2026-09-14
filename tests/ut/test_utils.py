@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -22,6 +23,7 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -485,3 +487,38 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    ("separate_cudagraph_routines", "recompute_scheduler_enable", "expected"),
+    [
+        (False, False, True),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_should_skip_allreduce_across_dp_group(
+    separate_cudagraph_routines,
+    recompute_scheduler_enable,
+    expected,
+):
+    cudagraph_mode = mock.Mock()
+    cudagraph_mode.separate_routine.return_value = separate_cudagraph_routines
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=128),
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+    ascend_config = SimpleNamespace(recompute_scheduler_enable=recompute_scheduler_enable)
+
+    with (
+        mock.patch("vllm_ascend.utils.is_hierarchical_communication_enabled", return_value=False),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.utils.get_potential_max_tokens", return_value=64),
+        mock.patch(
+            "vllm_ascend.ascend_forward_context.select_moe_comm_method",
+            return_value=MoECommType.MC2,
+        ),
+        mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+    ):
+        assert utils.should_skip_allreduce_across_dp_group(vllm_config) is expected

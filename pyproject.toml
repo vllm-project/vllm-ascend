@@ -18,7 +18,7 @@ requires = [
     "setuptools>=64",
     "setuptools-scm>=8",
     "transformers==5.5.4",
-    "torch-npu==2.10.0",
+    "torch-npu==2.10.0.post2",
     "torch==2.10.0",
     "torchvision",
     "wheel",

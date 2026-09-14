@@ -62,7 +62,7 @@ env_common: &env_common
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
@@ -100,7 +100,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -161,7 +161,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -225,7 +225,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -289,7 +289,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code

@@ -11,7 +11,7 @@
 
  #ifndef CAUSAL_CONV1D_TILING_VALIDATION_H
  #define CAUSAL_CONV1D_TILING_VALIDATION_H
- 
+
  #include "tiling_base/tiling_util.h"
  #include "causal_conv1d_tiling_utils.h"
  #include "../op_kernel/causal_conv1d_tiling_data.h"
@@ -164,50 +164,22 @@
              qslSize = qslShape.GetDim(0);
              OP_CHECK_IF(qslSize < 1, OP_LOGE(context, "queryStartLoc.size must be >= 1"), return ge::GRAPH_FAILED);
              OP_CHECK_NULL_WITH_CONTEXT(context, qslDesc);
-             OP_CHECK_IF(qslDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "queryStartLoc dtype must be int64"),
-                         return ge::GRAPH_FAILED);
+             const ge::DataType qslDtype = qslDesc->GetDataType();
+             OP_CHECK_IF(qslDtype != ge::DT_INT32 && qslDtype != ge::DT_INT64,
+                         OP_LOGE(context, "queryStartLoc dtype must be int32 or int64"), return ge::GRAPH_FAILED);
          }
      }
- 
+
      if (qslAbsent) {
          OP_CHECK_IF(inputMode == 0, OP_LOGE(context, "queryStartLoc is required in 2D varlen mode (inputMode=0)"),
                      return ge::GRAPH_FAILED);
          qslSize = batch + 1;
      }
+     tiling.hasQueryStartLoc = qslAbsent ? 0 : 1;
  
      OP_CHECK_IF(cuSeqlen > static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
                  OP_LOGE(context, "cuSeqlen is too large for int32 indexing, got %ld", cuSeqlen),
                  return ge::GRAPH_FAILED);
- 
-     const int64_t *qslData = nullptr;
-     if (!qslAbsent) {
-         const gert::Tensor *qslTensor = context->GetOptionalInputTensor(QUERY_START_LOC_INDEX);
-         qslData = (qslTensor != nullptr) ? qslTensor->GetData<int64_t>() : nullptr;
-         if (qslData != nullptr) {
-             OP_CHECK_IF(qslData[0] != 0, OP_LOGE(context, "queryStartLoc[0] must be 0"), return ge::GRAPH_FAILED);
-             OP_CHECK_IF(qslData[qslSize - 1] != cuSeqlen,
-                         OP_LOGE(context, "queryStartLoc[last] must equal cuSeqlen, got %ld vs %ld",
-                                 qslData[qslSize - 1], cuSeqlen),
-                         return ge::GRAPH_FAILED);
-             for (int64_t i = 0; i + 1 < qslSize; ++i) {
-                 const int64_t cur = qslData[i];
-                 const int64_t nxt = qslData[i + 1];
-                 OP_CHECK_IF(cur < 0 || cur > cuSeqlen,
-                             OP_LOGE(context, "queryStartLoc[%ld] out of range: %ld (cuSeqlen=%ld)", i, cur, cuSeqlen),
-                             return ge::GRAPH_FAILED);
-                 OP_CHECK_IF(
-                     nxt < 0 || nxt > cuSeqlen,
-                     OP_LOGE(context, "queryStartLoc[%ld] out of range: %ld (cuSeqlen=%ld)", i + 1, nxt, cuSeqlen),
-                     return ge::GRAPH_FAILED);
-                 OP_CHECK_IF(
-                     nxt < cur,
-                     OP_LOGE(context,
-                             "queryStartLoc must be non-decreasing, got queryStartLoc[%ld]=%ld queryStartLoc[%ld]=%ld",
-                             i, cur, i + 1, nxt),
-                     return ge::GRAPH_FAILED);
-             }
-         }
-     }
  
      if (!qslAbsent && isDecodeMode && inputMode == 2) {
          const int64_t batchFromQsl = qslSize - 1;
@@ -236,6 +208,7 @@
      }
  
      tiling.hasCacheIndices = 0;
+     tiling.cacheIndicesStride = 1;
      bool ciAbsent = true;
      auto ciShapePtr = context->GetOptionalInputShape(CACHE_INDICES_INDEX);
      if (ciShapePtr != nullptr) {
@@ -244,29 +217,18 @@
          ciAbsent = (ciDimNum == 0) || (ciDimNum == 1 && ciStorageShape.GetDim(0) <= 0);
          if (!ciAbsent) {
              auto ciShape = EnsureNotScalar(ciStorageShape);
-             OP_CHECK_IF(ciShape.GetDimNum() != 1, OP_LOGE(context, "cacheIndices must be 1D"), return ge::GRAPH_FAILED);
-             OP_CHECK_IF(ciShape.GetDim(0) != batch, OP_LOGE(context, "cacheIndices.size must equal batch"),
+             // Spec decode passes cache indices as [batch, num_spec + 1];
+             // kernels read the first column with cacheIndicesStride.
+             OP_CHECK_IF(ciShape.GetDimNum() != 1 && ciShape.GetDimNum() != 2,
+                         OP_LOGE(context, "cacheIndices must be 1D or 2D"), return ge::GRAPH_FAILED);
+             OP_CHECK_IF(ciShape.GetDim(0) != batch, OP_LOGE(context, "cacheIndices first dim must equal batch"),
                          return ge::GRAPH_FAILED);
-             tiling.hasCacheIndices = 1;
- 
-             const gert::Tensor *ciTensor = context->GetOptionalInputTensor(CACHE_INDICES_INDEX);
-             const int64_t *ciData = (ciTensor != nullptr) ? ciTensor->GetData<int64_t>() : nullptr;
-             if (ciData != nullptr) {
-                 for (int64_t i = 0; i < batch; ++i) {
-                     const int64_t v = ciData[i];
-                     if (v == tiling.padSlotId) {
-                         continue;
-                     }
-                     OP_CHECK_IF(v > static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
-                                 OP_LOGE(context, "cacheIndices[%ld]=%ld exceeds int32 range", i, v),
-                                 return ge::GRAPH_FAILED);
-                     OP_CHECK_IF(v < 0 || v >= numCacheLines,
-                                 OP_LOGE(context,
-                                         "cacheIndices[%ld]=%ld out of range [0, num_cache_lines=%ld), padSlotId=%ld", i,
-                                         v, numCacheLines, tiling.padSlotId),
-                                 return ge::GRAPH_FAILED);
-                 }
+             if (ciShape.GetDimNum() == 2) {
+                 OP_CHECK_IF(ciShape.GetDim(1) <= 0, OP_LOGE(context, "cacheIndices second dim must be positive"),
+                             return ge::GRAPH_FAILED);
+                 tiling.cacheIndicesStride = ciShape.GetDim(1);
              }
+             tiling.hasCacheIndices = 1;
          }
      }
      if (ciAbsent) {
@@ -294,21 +256,7 @@
              OP_CHECK_IF(ismShape.GetDim(0) != batch, OP_LOGE(context, "initialStateMode.size must equal batch"),
                          return ge::GRAPH_FAILED);
  
-             const gert::Tensor *ismTensor = context->GetOptionalInputTensor(INITIAL_STATE_MODE_INDEX);
-             const int64_t *ismData = (ismTensor != nullptr) ? ismTensor->GetData<int64_t>() : nullptr;
-             if (ismData != nullptr) {
-                 bool hasNonZeroInitialStateMode = false;
-                 for (int64_t i = 0; i < batch; ++i) {
-                     const int64_t v = ismData[i];
-                     OP_CHECK_IF(v != 0 && v != 1,
-                                 OP_LOGE(context, "initialStateMode[%ld]=%ld is invalid (only supports 0/1)", i, v),
-                                 return ge::GRAPH_FAILED);
-                     hasNonZeroInitialStateMode = hasNonZeroInitialStateMode || (v != 0);
-                 }
-                 tiling.hasInitialStateMode = hasNonZeroInitialStateMode ? 1 : 0;
-             } else {
-                 tiling.hasInitialStateMode = 1;
-             }
+             tiling.hasInitialStateMode = 1;
          }
      }
  
@@ -335,34 +283,6 @@
                                      "spec decode requires stateLen >= (width-1) + (seqlen-1), got stateLen=%ld req=%ld",
                                      stateLen, reqStateLen),
                              return ge::GRAPH_FAILED);
-             }
- 
-             const gert::Tensor *natTensor = context->GetOptionalInputTensor(NUM_ACCEPTED_TOKENS_INDEX);
-             const int64_t *natData = (natTensor != nullptr) ? natTensor->GetData<int64_t>() : nullptr;
-             if (natData != nullptr) {
-                 for (int64_t i = 0; i < batch; ++i) {
-                     const int64_t a = natData[i];
-                     OP_CHECK_IF(a < 0, OP_LOGE(context, "numAcceptedTokens[%ld]=%ld is invalid (must be >= 0)", i, a),
-                                 return ge::GRAPH_FAILED);
- 
-                     if (inputMode == 2) {
-                         OP_CHECK_IF(
-                             a > 1,
-                             OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds decode 2D token count (1)", i, a),
-                             return ge::GRAPH_FAILED);
-                     } else if (inputMode == 1) {
-                         OP_CHECK_IF(a > seqLen,
-                                     OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds seqlen=%ld in 3D update", i, a,
-                                             seqLen),
-                                     return ge::GRAPH_FAILED);
-                     } else if (inputMode == 0 && qslData != nullptr) {
-                         const int64_t lenI = qslData[i + 1] - qslData[i];
-                         OP_CHECK_IF(a > lenI,
-                                     OP_LOGE(context, "numAcceptedTokens[%ld]=%ld exceeds varlen segment length=%ld", i,
-                                             a, lenI),
-                                     return ge::GRAPH_FAILED);
-                     }
-                 }
              }
  
              tiling.hasNumAcceptedTokens = 1;
@@ -414,28 +334,39 @@
      if (!qslAbsent) {
          auto qslDesc2 = context->GetOptionalInputDesc(QUERY_START_LOC_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, qslDesc2);
-         OP_CHECK_IF(qslDesc2->GetDataType() != ge::DT_INT64, OP_LOGE(context, "queryStartLoc dtype must be int64"),
-                     return ge::GRAPH_FAILED);
+         const ge::DataType qslDtype = qslDesc2->GetDataType();
+         OP_CHECK_IF(qslDtype != ge::DT_INT32 && qslDtype != ge::DT_INT64,
+                     OP_LOGE(context, "queryStartLoc dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+         tiling.queryStartLocUseInt64 = (qslDtype == ge::DT_INT64) ? 1 : 0;
      }
+     tiling.cacheIndicesUseInt64 = 0;
      if (tiling.hasCacheIndices == 1) {
          auto ciDesc = context->GetOptionalInputDesc(CACHE_INDICES_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, ciDesc);
-         OP_CHECK_IF(ciDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "cacheIndices dtype must be int64"),
-                     return ge::GRAPH_FAILED);
+         const ge::DataType ciDtype = ciDesc->GetDataType();
+         OP_CHECK_IF(ciDtype != ge::DT_INT32 && ciDtype != ge::DT_INT64,
+                     OP_LOGE(context, "cacheIndices dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+         tiling.cacheIndicesUseInt64 = (ciDtype == ge::DT_INT64) ? 1 : 0;
      }
      if (tiling.hasInitialStateMode == 1) {
          auto ismDesc = context->GetOptionalInputDesc(INITIAL_STATE_MODE_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, ismDesc);
-         OP_CHECK_IF(ismDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "initialStateMode dtype must be int64"),
-                     return ge::GRAPH_FAILED);
+         const ge::DataType ismDtype = ismDesc->GetDataType();
+         OP_CHECK_IF(ismDtype != ge::DT_BOOL && ismDtype != ge::DT_INT32 && ismDtype != ge::DT_INT64,
+                     OP_LOGE(context, "initialStateMode dtype must be bool, int32 or int64"), return ge::GRAPH_FAILED);
+         tiling.initialStateModeDtype =
+             (ismDtype == ge::DT_INT64) ? 2 : ((ismDtype == ge::DT_INT32) ? 1 : 0);
      }
+     tiling.numAcceptedTokensUseInt64 = 0;
      if (tiling.hasNumAcceptedTokens == 1) {
          OP_CHECK_IF(width != 4, OP_LOGE(context, "numAcceptedTokens is only supported for width=4 currently"),
                      return ge::GRAPH_FAILED);
          auto natDesc = context->GetOptionalInputDesc(NUM_ACCEPTED_TOKENS_INDEX);
          OP_CHECK_NULL_WITH_CONTEXT(context, natDesc);
-         OP_CHECK_IF(natDesc->GetDataType() != ge::DT_INT64, OP_LOGE(context, "numAcceptedTokens dtype must be int64"),
-                     return ge::GRAPH_FAILED);
+         const ge::DataType natDtype = natDesc->GetDataType();
+         OP_CHECK_IF(natDtype != ge::DT_INT32 && natDtype != ge::DT_INT64,
+                     OP_LOGE(context, "numAcceptedTokens dtype must be int32 or int64"), return ge::GRAPH_FAILED);
+         tiling.numAcceptedTokensUseInt64 = (natDtype == ge::DT_INT64) ? 1 : 0;
      }
  
      tiling.dim = dim;
@@ -452,4 +383,3 @@
  }
  
  #endif
- 

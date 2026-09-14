@@ -235,35 +235,10 @@ def _serialize_partial_param_value(
     self: MinimaxM2ToolParser,
     value: str,
     param_types: list[str],
-    *,
-    is_complete: bool,
 ) -> str:
     value = value.strip()
-    if is_complete:
-        converted = _coerce_param_value(value, param_types)
-        return json.dumps(converted, ensure_ascii=False)
-
-    if not value:
-        return ""
-
-    normalized_types = {t.lower() for t in param_types}
-    string_types = {"string", "str", "text"}
-
-    if "null" in normalized_types and not (normalized_types & string_types) and "null".startswith(value.lower()):
-        return value.lower()
-
-    if {"boolean", "bool"} & normalized_types:
-        lower_value = value.lower()
-        if any(candidate.startswith(lower_value) for candidate in ("true", "false")):
-            return lower_value
-
-    if {"integer", "int", "number", "float"} & normalized_types:
-        return value
-
-    if {"object", "array"} & normalized_types and value[:1] in "{[":
-        return value
-
-    return json.dumps(value, ensure_ascii=False)[:-1]
+    converted = _coerce_param_value(value, param_types)
+    return json.dumps(converted, ensure_ascii=False)
 
 
 def _build_partial_arguments(
@@ -290,29 +265,21 @@ def _build_partial_arguments(
         value_start = name_end + 1
         value_end = invoke_body.find("</parameter>", value_start)
         param_complete = value_end != -1
-        if param_complete:
-            param_value = invoke_body[value_start:value_end]
-            search_pos = value_end + len("</parameter>")
-        else:
-            param_value = invoke_body[value_start:]
-            search_pos = len(invoke_body)
-
-        if not param_complete and not param_value.strip():
+        if not param_complete:
             break
+
+        param_value = invoke_body[value_start:value_end]
+        search_pos = value_end + len("</parameter>")
 
         param_types = _get_param_types_from_config(param_name, param_config)
         serialized_value = self._serialize_partial_param_value(
             param_value,
             param_types,
-            is_complete=param_complete,
         )
         if not serialized_value:
             break
 
         args_parts.append(f"{json.dumps(param_name, ensure_ascii=False)}:{serialized_value}")
-
-        if not param_complete:
-            break
 
     if not args_parts:
         return "{}" if invoke_complete else ""
@@ -490,11 +457,14 @@ def _patched_extract_tool_calls_streaming(
 
     delta_tool_call = self._extract_delta_tool_call(current_text)
 
-    if delta_tool_call or content_before:
+    if delta_tool_call:
         return DeltaMessage(
             content=content_before,
-            tool_calls=[delta_tool_call] if delta_tool_call else None,
+            tool_calls=[delta_tool_call],
         )
+
+    if content_before:
+        return DeltaMessage(content=content_before)
 
     if (
         not delta_text

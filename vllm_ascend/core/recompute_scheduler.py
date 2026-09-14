@@ -219,6 +219,7 @@ class RecomputeScheduler(Scheduler):
                 # they are all rejected.
                 and request.num_computed_tokens + 2 - request.num_output_placeholders
                 >= request.num_prompt_tokens + request.max_tokens
+                or request.num_computed_tokens >= self.max_model_len
             ):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
@@ -484,6 +485,7 @@ class RecomputeScheduler(Scheduler):
                     # Get locally-cached tokens.
                     if (
                         self.connector is not None
+                        and not self.is_kv_producer
                         and self.has_mamba_layers
                         and isinstance(
                             self.kv_cache_manager.coordinator,
@@ -826,6 +828,41 @@ class RecomputeScheduler(Scheduler):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
+    def _get_hybrid_kv_load_failed_request_ids(self, invalid_block_ids: set[int]) -> set[str]:
+        """Find requests whose first Hybrid KV cache group failed to load.
+
+        ``KVConnectorOutput.invalid_block_ids`` has no cache-group dimension.
+        MooncakeHybridConnector therefore reports block IDs from group 0 as
+        request identifiers. They must not be passed to vLLM's block-level
+        recovery, which assumes exactly one KV cache group.
+        """
+        failed_req_ids: set[str] = set()
+        candidate_requests = list(self.running)
+        candidate_requests.extend(self.skipped_waiting)
+        for request in candidate_requests:
+            req_block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            if req_block_ids and any(block_id in invalid_block_ids for block_id in req_block_ids[0]):
+                failed_req_ids.add(request.request_id)
+        return failed_req_ids
+
+    def _retry_hybrid_kv_load_failures(
+        self,
+        failed_req_ids: set[str],
+        outputs: dict[int, list[EngineCoreOutput]],
+    ) -> None:
+        """Finish failed Hybrid KV loads and ask the PD proxy to retry them."""
+        requests = [self.requests[req_id] for req_id in failed_req_ids if req_id in self.requests]
+        self.finish_requests(failed_req_ids, RequestStatus.FINISHED_STOPPED)
+        for request in requests:
+            outputs[request.client_index].append(
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    finish_reason=FinishReason.STOP,
+                    new_token_ids=[],
+                    stop_reason="recomputed",
+                )
+            )
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -854,15 +891,39 @@ class RecomputeScheduler(Scheduler):
             if kv_stats:
                 kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
 
-        failed_kv_load_req_ids = None
+        failed_kv_load_req_ids: set[str] | None = None
+        retry_hybrid_kv_load_req_ids: set[str] | None = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
-            # These blocks contain externally computed tokens that failed to
-            # load. Identify affected requests and adjust their computed token
-            # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids,
-                num_scheduled_tokens,
-            )
+            if isinstance(self.kv_cache_manager.coordinator, HybridKVCacheCoordinator):
+                # vLLM's block-level recovery unpacks exactly one cache group.
+                # Hybrid groups can have different block sizes and cannot be
+                # rolled back from the connector's flat block-ID set. Retry the
+                # complete request through the PD proxy instead.
+                failed_kv_load_req_ids = self._get_hybrid_kv_load_failed_request_ids(
+                    kv_connector_output.invalid_block_ids
+                )
+                if not failed_kv_load_req_ids:
+                    logger.error(
+                        "Could not map invalid Hybrid KV cache blocks to an active request. "
+                        "Invalid group-0 block IDs: %s",
+                        kv_connector_output.invalid_block_ids,
+                    )
+                elif self.recompute_kv_load_failures:
+                    retry_hybrid_kv_load_req_ids = failed_kv_load_req_ids
+                    logger.warning(
+                        "Hybrid KV load failed for %d request(s). Returning the complete "
+                        "request to the PD proxy for recomputation. Request IDs: %s",
+                        len(failed_kv_load_req_ids),
+                        failed_kv_load_req_ids,
+                    )
+            else:
+                # These blocks contain externally computed tokens that failed
+                # to load. Identify affected requests and adjust their computed
+                # token count to trigger recomputation of the invalid blocks.
+                failed_kv_load_req_ids = self._handle_invalid_blocks(
+                    kv_connector_output.invalid_block_ids,
+                    num_scheduled_tokens,
+                )
 
         # return recomputed requests as EngineCoreOutput
         if scheduler_output.recomputed_reqs is not None:
@@ -1068,6 +1129,8 @@ class RecomputeScheduler(Scheduler):
                         trace_headers=request.trace_headers,
                     )
                 )
+        elif retry_hybrid_kv_load_req_ids:
+            self._retry_hybrid_kv_load_failures(retry_hybrid_kv_load_req_ids, outputs)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:

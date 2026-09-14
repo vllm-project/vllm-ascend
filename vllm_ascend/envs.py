@@ -133,10 +133,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # force_topk sampler optimization: 0=disabled (default), >0=global
     # top-k candidate ceiling (e.g. 2048). Replaces full-vocab sort with
     # a single topk + compact-space computation to reduce sampling latency
-    # on large vocabularies (V>=150k).
-    "VLLM_ASCEND_SAMPLER_FORCE_TOPK": lambda: int(
-        os.getenv("VLLM_ASCEND_SAMPLER_FORCE_TOPK", "0")
-    ),
+    # on large vocabularies (V>=150k). This variable is not sensitive.
+    "VLLM_ASCEND_SAMPLER_FORCE_TOPK": lambda: int(os.getenv("VLLM_ASCEND_SAMPLER_FORCE_TOPK", "0")),
 }
 
 # end-env-vars-definition

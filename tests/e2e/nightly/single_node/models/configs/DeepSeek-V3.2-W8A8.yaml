@@ -21,6 +21,7 @@ test_cases:
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3000"
     server_cmd:
       - "--tensor-parallel-size"
       - "8"

@@ -62,9 +62,9 @@ public:
     AscendC::LocalTensor<T> tokenLocal;
     AscendC::GlobalTensor<T> keyInputGt;
     AscendC::GlobalTensor<T> keyCacheInputGt;
-    AscendC::GlobalTensor<uint32_t> groupLenGt;
-    AscendC::GlobalTensor<uint32_t> groupKeyIdxGt;
-    AscendC::GlobalTensor<uint32_t> groupKeyCacheIdxGt;
+    AscendC::GlobalTensor<int32_t> groupLenGt;
+    AscendC::GlobalTensor<int32_t> groupKeyIdxGt;
+    AscendC::GlobalTensor<int32_t> groupKeyCacheIdxGt;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tokenBuf;
     __aicore__ inline StoreKVBlockBase() {}
 
@@ -84,7 +84,6 @@ public:
         numCache = tilingData->numCache;
         groupInfoLen = tilingData->groupInfoLen;
 
-
         coreId = AscendC::GetBlockIdx();
         coreTail = tilingData->coreTail;
         blockNum = AscendC::GetBlockNum();
@@ -101,21 +100,21 @@ public:
         
         keyInputGt.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(keyIn));
         keyCacheInputGt.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(keyCacheIn));
-        groupLenGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupLen));
-        groupKeyIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupKeyIdx));
-        groupKeyCacheIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(groupKeyCacheIdx));
+        groupLenGt.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(groupLen));
+        groupKeyIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(groupKeyIdx));
+        groupKeyCacheIdxGt.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(groupKeyCacheIdx));
 
         pipeThis->InitBuffer(tokenBuf,  blockTableSize*tokenByteSize);
         tokenLocal = tokenBuf.Get<T>();
 
         AscendC::DataCopyExtParams copyParams{1, 0,  0, 0, 0}; // todo: full block length
         AscendC::DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
-        for (uint32_t i = 0; i < corePerNum; i++) {
-            uint32_t idx = (coreId+i*blockNum);
+        for (int32_t i = 0; i < corePerNum; i++) {
+            int32_t idx = (coreId+i*blockNum);
          
-            // if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
-            //     continue;
-            // }
+            if( groupLenGt.GetValue(idx)<= 0 || groupKeyIdxGt.GetValue(idx)<0 || groupKeyCacheIdxGt.GetValue(idx)<0){
+                continue;
+            }
            
             copyParams.blockLen = groupLenGt.GetValue(idx)*tokenByteSize; // in bytes
             DataCopyPad(tokenLocal, keyInputGt[ groupKeyIdxGt.GetValue(idx)*tokenSize], copyParams, padParams); // note: offset order

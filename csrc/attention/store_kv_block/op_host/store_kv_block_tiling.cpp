@@ -34,9 +34,9 @@ struct StoreKVBlockParams {
     uint32_t blockTableSize{0};
     uint32_t typeByte{0};
     uint32_t tokenSize{1};
-    uint32_t tilingKey{0};
+    uint32_t tilingKey{1};
     uint64_t workspaceSize{0};
-    uint64_t groupInfoLen{0};
+    uint32_t groupInfoLen{0};
     uint32_t corepernum{0};
     uint32_t coretail{0};
     uint64_t sysWorkspaceSize{0};
@@ -121,11 +121,15 @@ static ge::graphStatus StoreKVBlockTilingFunc(gert::TilingContext* context) {
     }
 
     StoreKVBlockTilingData tilingData;
-    if (params.blockTableSize > 0) tilingData.set_blockTableSize(params.blockTableSize);
-    if (params.typeByte > 0) tilingData.set_typeByte(params.typeByte);
-    if (params.tokenSize > 0) tilingData.set_tokenSize(params.tokenSize);
-    if (params.corepernum > 0 || params.coretail != 0) tilingData.set_corePerNum(params.corepernum);
-    if (params.coretail < 48) tilingData.set_coreTail(params.coretail);
+    // if (params.blockTableSize > 0) tilingData.set_blockTableSize(params.blockTableSize);
+    // if (params.typeByte > 0) tilingData.set_typeByte(params.typeByte);
+    // if (params.tokenSize > 0) tilingData.set_tokenSize(params.tokenSize);
+    // if (params.corepernum > 0 || params.coretail != 0) tilingData.set_corePerNum(params.corepernum);
+    tilingData.set_blockTableSize(params.blockTableSize);
+    tilingData.set_typeByte(params.typeByte);
+    tilingData.set_tokenSize(params.tokenSize);
+    tilingData.set_corePerNum(params.corepernum);
+    if (params.coretail < params.coreNum) tilingData.set_coreTail(params.coretail);     
     if (params.numTokens > 0) tilingData.set_numTokens(params.numTokens);
     if (params.numCache > 0) tilingData.set_numCache(params.numCache);
     if (params.groupInfoLen > 0) tilingData.set_groupInfoLen(params.groupInfoLen);
