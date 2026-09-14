@@ -249,6 +249,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cu
         seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
         step=0,
         query_start_loc_np=input_batch.query_start_loc_np,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
     )
 
 
@@ -477,6 +478,12 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
         input_batch.num_tokens_after_padding = 2
     num_tokens = input_batch.num_tokens_after_padding
     target_num_tokens = num_tokens // 2 if replicated_pcp and input_batch.has_prefill else num_tokens
+    target_pcp_manager = speculator.pcp_manager
+    local_hidden_states = torch.ones(target_num_tokens, 4)
+    global_hidden_states = torch.full((num_tokens, 4), 2.0)
+    target_pcp_manager.restore_hidden_states.return_value = global_hidden_states
+    aux_hidden_states = [global_hidden_states] if speculator_cls is AscendEagleSpeculator else None
+    should_restore = replicated_pcp and batch_kind != "idle" and aux_hidden_states is None
     target_sync = SimpleNamespace(
         eager=True,
         uniform_token_count=None,
@@ -487,6 +494,9 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     def parent_propose(*args, **kwargs):
         assert args[0] is input_batch
         assert (speculator.model_state.pcp_manager is None) is replicated_pcp
+        assert (speculator.pcp_manager is None) is replicated_pcp
+        assert args[3] is (global_hidden_states if should_restore else local_hidden_states)
+        assert args[4] is aux_hidden_states
         # Exercise upstream's real reuse checks; only the collective is mocked.
         with patch.object(dp_utils, "sync_cudagraph_and_dp_padding") as sync:
             sync.return_value = (SimpleNamespace(cg_mode=CUDAGraphMode.NONE), object())
@@ -522,13 +532,23 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     ):
         actual = speculator.propose(
             input_batch,
-            *[MagicMock() for _ in range(10)],
+            MagicMock(),
+            MagicMock(),
+            local_hidden_states,
+            aux_hidden_states,
+            *[MagicMock() for _ in range(6)],
             dp_sync=target_sync,
+            dummy_run=batch_kind == "idle",
         )
 
     assert actual is expected
     assert speculator.input_batch is input_batch
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
+    assert speculator.pcp_manager is target_pcp_manager
+    if should_restore:
+        target_pcp_manager.restore_hidden_states.assert_called_once_with(local_hidden_states)
+    else:
+        target_pcp_manager.restore_hidden_states.assert_not_called()
 
 
 def test_propose_preserves_v028_dp_token_counts() -> None:
