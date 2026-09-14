@@ -110,9 +110,14 @@ class BaseV2Runner:
     intermediate_tensors: IntermediateTensors
     _slice_kimi_sp_intermediate_tensors: Callable[[int], None]
 
-    def execute_model(self, scheduler_output, intermediate_tensors, dummy_run=False, **kwargs):
+    def execute_model(
+        self, scheduler_output, intermediate_tensors, dummy_run=False, skip_attn_for_dummy_run=False, **kwargs
+    ):
         n = scheduler_output.num_tokens
-        self._slice_kimi_sp_intermediate_tensors(n)
+        if not dummy_run:
+            self._slice_kimi_sp_intermediate_tensors(n)
+        elif not skip_attn_for_dummy_run:
+            self.prepare_dummy_attn(SimpleNamespace(num_tokens_after_padding=n))
         # Mirror the pinned upstream copy boundary, not the SP implementation:
         # upstream uses the full token count for both source and destination.
         views = {}
@@ -125,6 +130,9 @@ class BaseV2Runner:
             raise RuntimeError("model failure")
         return IntermediateTensors(views)
 
+    def prepare_dummy_attn(self, input_batch, **kwargs):
+        return (), torch.empty(0)
+
 
 def make_v2_runner(namespace, buffers, *, tp=2, sp=True):
     runner = namespace["V2Runner"]()
@@ -134,6 +142,7 @@ def make_v2_runner(namespace, buffers, *, tp=2, sp=True):
     runner.model_state = SimpleNamespace()
     runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.pcp_manager = None
     return runner
 
 
@@ -243,7 +252,7 @@ def runtime():
         {"NPUModelRunner"},
         v2_namespace,
         bases={"NPUModelRunner": "BaseV2Runner"},
-        methods={"NPUModelRunner": {"execute_model", "_slice_kimi_sp_intermediate_tensors"}},
+        methods={"NPUModelRunner": {"execute_model", "_slice_kimi_sp_intermediate_tensors", "prepare_dummy_attn"}},
     )
     namespace["V2Runner"] = v2_namespace["NPUModelRunner"]
     return namespace, context
@@ -423,10 +432,10 @@ def test_mrv2_enables_kimi_pp_sp(dp):
     assert namespace["enable_kimi_k3_sp"](vc)
 
 
-@pytest.mark.parametrize("dummy_run", [False, True])
+@pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("tp,sp", [(1, True), (2, True), (4, True), (2, False)])
-def test_mrv2_receive_restores_capacity(runtime, dummy_run, fail, tp, sp):
+def test_mrv2_receive_restores_capacity(runtime, dummy_run, skip_attn, fail, tp, sp):
     namespace, _ = runtime
     buffers = IntermediateTensors(
         {
@@ -442,11 +451,14 @@ def test_mrv2_receive_restores_capacity(runtime, dummy_run, fail, tp, sp):
         incoming = IntermediateTensors(
             {name: torch.ones_like(tensor[:local_tokens]) for name, tensor in buffers.items()}
         )
+        scheduler_output = SimpleNamespace(num_tokens=num_tokens, total_num_scheduled_tokens=num_tokens)
         if fail:
             with pytest.raises(RuntimeError, match="model failure"):
-                runner.execute_model(SimpleNamespace(num_tokens=num_tokens), incoming, dummy_run=dummy_run)
+                runner.execute_model(scheduler_output, incoming, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn)
         else:
-            output = runner.execute_model(SimpleNamespace(num_tokens=num_tokens), incoming, dummy_run=dummy_run)
+            output = runner.execute_model(
+                scheduler_output, incoming, dummy_run=dummy_run, skip_attn_for_dummy_run=skip_attn
+            )
             for name, tensor in output.items():
                 assert tensor.shape == incoming[name].shape
                 assert tensor.data_ptr() == buffers[name].data_ptr() or local_tokens == 0

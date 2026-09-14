@@ -284,6 +284,10 @@ class NPUModelRunner(GPUModelRunner):
             self.intermediate_tensors if enable_kimi_k3_sp(self.vllm_config) and not self.is_first_pp_rank else None
         )
         try:
+            if dummy_run and skip_attn_for_dummy_run:
+                # Memory profiling skips prepare_inputs and prepare_dummy_attn.
+                # Its eager batch keeps the scheduler's full token count.
+                self._slice_kimi_sp_intermediate_tensors(scheduler_output.total_num_scheduled_tokens)
             output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
@@ -571,6 +575,8 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        # Dummy batches bypass prepare_inputs; use their dispatched padded size.
+        self._slice_kimi_sp_intermediate_tensors(input_batch.num_tokens_after_padding)
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
