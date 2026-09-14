@@ -36,7 +36,7 @@ test_cases:
     benchmarks:
       spec_decode:
         case_type: spec_decode
-        dataset_path_local: vllm-ascend/gsm8k
+        dataset_path: vllm-ascend/gsm8k
         request_conf: vllm_api_general_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 8192
