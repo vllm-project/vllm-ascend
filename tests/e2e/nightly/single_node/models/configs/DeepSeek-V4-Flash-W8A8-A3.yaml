@@ -13,6 +13,7 @@ test_cases:
       ASCEND_LAUNCH_BLOCKING: "0"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--enable-prefix-caching"
       - "--max-model-len"
