@@ -313,7 +313,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states_fp32 = (
                         router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
                     )
-                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    if hasattr(gate, "weight_fp32"):
+                        router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    else:
+                        _gate_out = gate(shared_hidden_states)
+                        router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -335,7 +339,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
                 )
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                if hasattr(gate, "weight_fp32"):
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                else:
+                    _gate_out = gate(shared_hidden_states)
+                    router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()
