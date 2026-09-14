@@ -407,7 +407,8 @@ def test_mla_prolog_v3_cache_mode_bsnd():
 
 
 @torch.inference_mode()
-def test_mla_prolog_v3_partial_quant():
+def test_mla_prolog_v3_partial_quant_rejected_on_a5():
+    """The A5 custom operator rejects otherwise valid PARTIAL INT8 inputs."""
     _skip_if_mla_prolog_v3_unavailable()
 
     token_num = 1
@@ -437,27 +438,25 @@ def test_mla_prolog_v3_partial_quant():
     cache_index = torch.arange(token_num, dtype=torch.int64).npu()
     dequant_scale_w_uq_qr = torch.rand((1, head_num * (d + dr)), dtype=torch.float).npu()
 
-    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
-        token_x,
-        weight_dq,
-        weight_uq_qr,
-        weight_uk,
-        weight_dkv_kr,
-        rmsnorm_gamma_cq,
-        rmsnorm_gamma_ckv,
-        rope_sin,
-        rope_cos,
-        kv_cache,
-        kr_cache,
-        cache_index=cache_index,
-        dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
-        cache_mode="PA_BSND",
-        weight_quant_mode=1,
-        kv_cache_quant_mode=0,
-    )
-
-    assert query.shape == (token_num, head_num, hckv)
-    assert query_rope.shape == (token_num, head_num, dr)
+    with pytest.raises(RuntimeError):
+        torch.ops._C_ascend.npu_mla_prolog_v3(
+            token_x,
+            weight_dq,
+            weight_uq_qr,
+            weight_uk,
+            weight_dkv_kr,
+            rmsnorm_gamma_cq,
+            rmsnorm_gamma_ckv,
+            rope_sin,
+            rope_cos,
+            kv_cache,
+            kr_cache,
+            cache_index=cache_index,
+            dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
+            cache_mode="PA_BSND",
+            weight_quant_mode=1,
+            kv_cache_quant_mode=0,
+        )
 
     gc.collect()
     torch.npu.empty_cache()
@@ -465,7 +464,8 @@ def test_mla_prolog_v3_partial_quant():
 
 
 @torch.inference_mode()
-def test_mla_prolog_v3_full_int8_quant():
+def test_mla_prolog_v3_full_int8_quant_rejected_on_a5():
+    """The A5 custom operator rejects otherwise valid FULL INT8 inputs."""
     _skip_if_mla_prolog_v3_unavailable()
 
     token_num = 1
@@ -500,30 +500,28 @@ def test_mla_prolog_v3_full_int8_quant():
     dequant_scale_w_uq_qr = torch.rand((1, head_num * (d + dr)), dtype=torch.float).npu()
     dequant_scale_w_dkv_kr = torch.rand((1, hckv + dr), dtype=torch.float).npu()
 
-    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
-        token_x,
-        weight_dq,
-        weight_uq_qr,
-        weight_uk,
-        weight_dkv_kr,
-        rmsnorm_gamma_cq,
-        rmsnorm_gamma_ckv,
-        rope_sin,
-        rope_cos,
-        kv_cache,
-        kr_cache,
-        cache_index=cache_index,
-        dequant_scale_x=dequant_scale_x,
-        dequant_scale_w_dq=dequant_scale_w_dq,
-        dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
-        dequant_scale_w_dkv_kr=dequant_scale_w_dkv_kr,
-        cache_mode="PA_BSND",
-        weight_quant_mode=2,
-        kv_cache_quant_mode=0,
-    )
-
-    assert query.shape == (token_num, head_num, hckv)
-    assert query_rope.shape == (token_num, head_num, dr)
+    with pytest.raises(RuntimeError):
+        torch.ops._C_ascend.npu_mla_prolog_v3(
+            token_x,
+            weight_dq,
+            weight_uq_qr,
+            weight_uk,
+            weight_dkv_kr,
+            rmsnorm_gamma_cq,
+            rmsnorm_gamma_ckv,
+            rope_sin,
+            rope_cos,
+            kv_cache,
+            kr_cache,
+            cache_index=cache_index,
+            dequant_scale_x=dequant_scale_x,
+            dequant_scale_w_dq=dequant_scale_w_dq,
+            dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
+            dequant_scale_w_dkv_kr=dequant_scale_w_dkv_kr,
+            cache_mode="PA_BSND",
+            weight_quant_mode=2,
+            kv_cache_quant_mode=0,
+        )
 
     gc.collect()
     torch.npu.empty_cache()
