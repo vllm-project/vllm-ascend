@@ -40,9 +40,7 @@ def allocate_kvpp_cache(
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
     scratch = (
-        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
-        if scratch_size
-        else []
+        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)] if scratch_size else []
     )
     caches: dict[str, tuple[torch.Tensor, ...]] = {}
     target_index = 0
