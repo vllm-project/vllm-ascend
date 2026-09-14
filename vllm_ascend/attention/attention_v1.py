@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -1636,8 +1637,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value=value,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
-            slot_mapping=slot_mapping,
+            slot_mapping=self._mask_dflash_cache_slots(slot_mapping),
         )
+
+    def _mask_dflash_cache_slots(self, slots: torch.Tensor) -> torch.Tensor:
+        null_block_size = getattr(self, "_dflash_null_block_size", 0)
+        if not null_block_size:
+            return slots
+        valid = (slots >= null_block_size) & (slots < self._dflash_cache_slot_limit)
+        return torch.where(valid, slots, PAD_SLOT_ID)
 
     def reshape_and_cache(
         self,
@@ -1657,7 +1665,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
-            slots = attn_metadata.slot_mapping
+            slots = self._mask_dflash_cache_slots(attn_metadata.slot_mapping)
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             DeviceOperator.reshape_and_cache(
                 key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,

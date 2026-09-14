@@ -50,6 +50,11 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
 )
+from vllm_ascend.core.dflash_cache import (
+    align_dflash_cache_specs,
+    uses_mixed_dflash_cache,
+    validate_dflash_cache_views,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -163,10 +168,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]
             page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
-            # Ascend exposes K and V as separate block-first views even when
-            # the backend's logical cache shape starts with the K/V dimension.
-            # Consequently, padded pages are indexed by their runtime block
-            # stride and are safe for hybrid Attention/Mamba allocations.
+            # Ascend exposes K and V as separate contiguous block-first planes.
+            # Page-size padding alone does NOT align physical block ownership
+            # when Full/SWA token block sizes differ. Mixed DFlash is aligned
+            # below before the planner constructs shared hybrid allocations.
             # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on
             # main; page_size_padded alone carries the padding there.
             if vllm_version_is("0.28.0"):
@@ -182,7 +187,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
-    return kv_cache_spec
+    return align_dflash_cache_specs(vllm_config, kv_cache_spec)
 
 
 def build_attn_metadata(
@@ -1173,6 +1178,15 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    validate_dflash_cache_views(vllm_config, kv_cache_config, kv_cache_raw_tensors, kv_caches)
+    if uses_mixed_dflash_cache(vllm_config) and any(isinstance(s, MambaSpec) for s in layer_kv_cache_spec.values()):
+        layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+        for name, spec in layer_kv_cache_spec.items():
+            if isinstance(spec, AttentionSpec):
+                # Physical null block 0 expands into several 128-token kernel
+                # blocks. Ignore the ENTIRE reserved range on both write paths.
+                layers[name].impl._dflash_null_block_size = spec.block_size
+                layers[name].impl._dflash_cache_slot_limit = kv_cache_config.num_blocks * spec.block_size
     return kv_caches
 
 
