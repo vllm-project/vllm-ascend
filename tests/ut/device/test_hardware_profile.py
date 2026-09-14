@@ -50,6 +50,7 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -82,6 +83,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,
