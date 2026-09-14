@@ -482,6 +482,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_USE_FASTOKENS=1
 
         # pp=2
         export VLLM_PP_LAYER_PARTITION="41,37"
@@ -509,7 +510,7 @@ Before you start, please
             --max-num-seqs 64 \
             --quantization ascend \
             --gpu-memory-utilization 0.85 \
-            --api-server-count 1 \
+            --api-server-count 16 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -556,6 +557,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+        export VLLM_USE_FASTOKENS=1
 
         # pp=2
         export VLLM_PP_LAYER_PARTITION="41,37"
@@ -608,7 +610,7 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         # d0: api server on this node; d1: --headless
-        server_role_args="--api-server-count 1"
+        server_role_args="--api-server-count 16"
 
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -631,6 +633,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
 
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
@@ -702,6 +705,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
 
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
@@ -799,6 +803,11 @@ python load_balance_proxy_server_example.py \
 Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
+
+**API server and tokenizer configurations:**
+
+- `VLLM_USE_FASTOKENS=1`: Enables the `fastokens` backend for Hugging Face fast tokenizers to accelerate input tokenization and output detokenization. The `fastokens` package must be installed.
+- `--api-server-count 16`: Starts 16 API server processes for each API-facing `vllm serve` instance to improve frontend concurrency. It is configured on prefill node 0 (p0) and decode node 0 (d0); prefill node 1 (p1) and decode node 1 (d1) remain headless.
 
 **PP2 prefill node-specific configurations (p0/p1):**
 
