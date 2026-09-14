@@ -3,7 +3,6 @@
 from collections.abc import Callable
 
 import torch
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -29,6 +28,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._lora_triton_workspaces: dict[int, torch.Tensor] = {}
         self.lora_config = kwargs.get("lora_config")
         ascend_device_type = get_ascend_device_type()
+        self.ascend_device_type = ascend_device_type
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
@@ -207,13 +207,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 
-    def _should_use_prefill(self) -> bool:
+    def _in_graph_mode(self) -> bool:
+        try:
+            return torch.npu.is_current_stream_capturing()
+        except Exception:
+            return False
+
+    def _use_sgmv(self) -> bool:
         if not self.is_prefill:
             return False
         return not (
-            is_forward_context_available()
-            and bool(get_forward_context().capturing)
-            and get_ascend_device_type() == AscendDeviceType._310P
+            self._in_graph_mode() and self.ascend_device_type == AscendDeviceType._310P
         )
 
     def _apply_expand(
@@ -232,7 +236,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         expand_slice_fun: Callable = (
-            self._expand_slice_prefill if self._should_use_prefill() else self._expand_slice_decode
+            self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         )
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
@@ -247,7 +251,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        shrink_fun: Callable = self._shrink_prefill if self._should_use_prefill() else self._shrink_decode
+        shrink_fun: Callable = self._shrink_prefill if self._use_sgmv() else self._shrink_decode
         shrink_fun(y, x, w_t_all, scale)
         y = y.view_as(y_org)
 
@@ -341,7 +345,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         # Embedding layer only need expand op
-        expand_fun: Callable = self._expand_prefill if self._should_use_prefill() else self._expand_decode
+        expand_fun: Callable = self._expand_prefill if self._use_sgmv() else self._expand_decode
         x = x.to(torch.float32)
         expand_fun(y, x, lora_b_stacked, add_inputs)
 
