@@ -49,6 +49,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/flash_mla_with_kvcache/flash_mla_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
@@ -659,8 +660,23 @@ at::Tensor npu_causal_conv1d_custom(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t max_query_len)
 {
+    if (max_query_len >= 0) {
+        const c10::optional<at::IntArrayRef> no_cpu_metadata = c10::nullopt;
+        const char* activation = activation_mode == 1 ? "silu" : "none";
+        const int64_t null_block_id = -1;
+        const int64_t head_num = 0;
+        const int64_t update_bound = run_mode == 1 ? max_query_len : -1;
+        // Padded segments are skipped by the kernel.
+        output.zero_();
+        EXEC_NPU_CMD(aclnnCausalConv1dV2, x, weight, bias_opt, conv_state,
+            query_start_loc_opt, cache_indices_opt, initial_state_mode_opt, num_accepted_tokens_opt,
+            no_cpu_metadata, no_cpu_metadata, no_cpu_metadata, no_cpu_metadata,
+            activation, pad_slot_id, null_block_id, run_mode, head_num, update_bound, output);
+        return output;
+    }
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
@@ -3256,9 +3272,27 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor? num_accepted_tokens_opt, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
-        "                         int run_mode"
+        "                         int run_mode, int max_query_len=-1"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+
+    ops.def(
+        "flash_mla_with_kvcache_metadata(Tensor cache_seqlens, int num_heads_q, int num_heads_kv, "
+        "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, int head_dim_qk=576, int head_dim_v=512, "
+        "int mask_mode=0, str layout_q='BSND') -> Tensor");
+    ops.impl("flash_mla_with_kvcache_metadata", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache_metadata);
+
+    ops.def(
+        "flash_mla_with_kvcache(Tensor q, Tensor k_cache, Tensor? block_table=None, "
+        "Tensor? cache_seqlens=None, Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
+        "Tensor? attn_mask=None, Tensor? metadata=None, int head_dim_v=512, "
+        "float softmax_scale=1.0, int mask_mode=0, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, str layout_q='TND', str layout_kv='PA_NZ', "
+        "str? layout_out=None, bool return_softmax_lse=False) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_with_kvcache", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache);
 
     ops.def(
         "moe_gating_top_k_hash("

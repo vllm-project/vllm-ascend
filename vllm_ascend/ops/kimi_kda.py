@@ -18,7 +18,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
 )
@@ -26,6 +25,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -175,6 +175,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         super().__init__(config, vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
+        self._conv_max_query_len = 1 + (
+            getattr(getattr(vllm_config, "speculative_config", None), "num_speculative_tokens", 0) or 0
+        )
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -208,18 +211,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.o_norm.eps = config.rms_norm_eps
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # npu_causal_conv1d_custom consumes an activation-dtype [W, 3C]
-        # tensor. Materialize that kernel layout once after weight loading.
-        self.register_parameter(
+        # tensor. This is derived runtime storage, not a checkpoint parameter.
+        # Keep it as a nonpersistent buffer so strict loading still checks the
+        # original conv1d.weight and module device/dtype moves include the copy.
+        self.register_buffer(
             _PACKED_CONV_WEIGHT_NAME,
-            nn.Parameter(
-                torch.empty(
-                    self.conv_size,
-                    3 * self.local_projection_size,
-                    dtype=self.model_config.dtype,
-                    device=self.conv1d.weight.device,
-                ),
-                requires_grad=False,
+            torch.empty(
+                self.conv_size,
+                3 * self.local_projection_size,
+                dtype=self.model_config.dtype,
+                device=self.conv1d.weight.device,
             ),
+            persistent=False,
         )
         original_process_weights = self.conv1d.quant_method.process_weights_after_loading
 
@@ -370,8 +373,34 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
+        max_query_len: int = 1,
     ) -> torch.Tensor:
         output = torch.empty_like(mixed_qkv)
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            if cache_indices.ndim == 2:
+                cache_indices = cache_indices[:, 0]
+            initial = None
+            if initial_state_mode is not None:
+                initial = (
+                    initial_state_mode.contiguous()
+                    if initial_state_mode.dtype == torch.bool
+                    else initial_state_mode.to(torch.int32).contiguous()
+                )
+            return torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_t,
+                conv_state,
+                None,
+                query_start_loc.to(torch.int32).contiguous(),
+                cache_indices.to(torch.int32).contiguous(),
+                initial,
+                None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32).contiguous(),
+                1,
+                PAD_SLOT_ID,
+                run_mode,
+                mixed_qkv.shape[0] if run_mode == 0 else max_query_len,
+            )
         # Consume the operator's declared output alias. Returning ``output``
         # independently would let graph functionalization treat the custom-op
         # result as dead and expose the uninitialized allocation instead.
@@ -394,19 +423,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _pack_conv_weights(self) -> None:
         if self.conv1d.weight.is_meta:
             return
-        packed_param = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        packed_buffer = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
         packed_weight = (
             self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             .transpose(0, 1)
-            .to(device=packed_param.device, dtype=packed_param.dtype)
+            .to(dtype=packed_buffer.dtype)
             .contiguous()
         )
-        replace_parameter(
-            self,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
+        if packed_buffer.device == packed_weight.device and packed_buffer.shape == packed_weight.shape:
+            packed_buffer.copy_(packed_weight)
+        else:
+            # Loading may materialize a meta tensor or temporarily move CPU
+            # offloaded parameters to the execution device. Keep runtime data
+            # on the processed weight's device; normal reloads retain storage.
+            setattr(self, _PACKED_CONV_WEIGHT_NAME, packed_weight)
 
     def _run_recurrent(
         self,
@@ -512,7 +542,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
 
         conv_state, recurrent_state = self.kv_cache
-        conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        conv_weights_t = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
@@ -552,6 +582,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 None,
                 run_mode=1,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
+                max_query_len=self._conv_max_query_len if envs.VLLM_ASCEND_ENABLE_FLASH_MLA else 1,
             )
             q_spec, k_spec, v_spec = (
                 rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in mixed_spec.chunk(3, dim=-1)

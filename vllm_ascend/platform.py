@@ -28,6 +28,8 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend import envs
+
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -230,6 +232,14 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            if use_sparse or use_compress or attn_selector_config.use_pcp:
+                raise ValueError("A5 Flash attention requires dense uncompressed attention with PCP=DCP=1")
+            if use_mla:
+                return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+            if attn_selector_config.attn_type == "decoder":
+                return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
@@ -352,7 +362,21 @@ class NPUPlatform(Platform):
         return 24  # safe default (24 Cube Cores)
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Target and draft can have the same numeric layer index. The
+            # runner owns canonical per-name caches; upstream preserves both
+            # entries and binds each layer by its full name.
+            return
+        super().check_runner_kv_caches_multi_layer()
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The upstream hook runs after model construction and aligns the
+            # complete attention token against every Mamba state segment.
+            super().update_block_size_for_backend(vllm_config)
+
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
@@ -458,6 +482,27 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            from vllm_ascend.device.device_config import is_950
+
+            cache = vllm_config.cache_config
+            parallel = vllm_config.parallel_config
+            if not is_950() or not vllm_config.model_config.use_mla:
+                raise ValueError("Flash MLA requires an A5 dense MLA target")
+            if parallel.decode_context_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
+                raise ValueError("Flash MLA requires PCP=DCP=1")
+            if cache.cache_dtype not in ("auto", "bfloat16", "float16"):
+                raise ValueError("Flash MLA requires unquantized KV cache")
+            if vllm_config.kv_transfer_config is not None or getattr(cache, "use_kda_recoverssm", False):
+                raise ValueError("Flash MLA does not support KV transfer or KDA recoverSSM")
+            if cache.mamba_cache_mode not in ("none", "align"):
+                raise ValueError("Flash MLA supports Mamba cache modes none/align")
+            if vllm_config.model_config.is_hybrid:
+                from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+                if get_conv_state_layout() != "SD":
+                    raise ValueError("Flash MLA requires SD convolution state layout")
 
         cls._validate_indexer_pp_config(vllm_config)
 
