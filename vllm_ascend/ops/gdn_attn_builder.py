@@ -535,6 +535,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
+    _SPEC_GRAPH_PAD_SLOT_ID = NULL_BLOCK_ID
+
+    def _can_pad_spec_decode(self, graph_request_count: int, num_spec_decode_tokens: int) -> bool:
+        return (
+            graph_request_count <= self.decode_cudagraph_max_bs
+            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+        )
+
     def _pad_spec_decode_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
@@ -551,12 +559,21 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         assert spec_query_start_loc is not None
         assert num_accepted_tokens is not None
 
+        # Request and token buffers have different capacities under MTP.
+        # Check token indices separately before modifying any captured inputs.
+        assert attn_metadata.non_spec_token_indx is not None
+        assert attn_metadata.spec_token_indx is not None
+        if attn_metadata.spec_token_indx.numel() > self.spec_token_indx.numel():
+            raise ValueError("Spec token indices exceed the graph token buffer capacity")
+        if attn_metadata.non_spec_token_indx.numel() > self.non_spec_token_indx.numel():
+            raise ValueError("Non-spec token indices exceed the graph token buffer capacity")
+
         attn_metadata.spec_state_indices_tensor = _materialize_graph_request_tensor(
             self.spec_state_indices_tensor,
             spec_state_indices,
             actual_request_count,
             graph_request_count,
-            NULL_BLOCK_ID,
+            self._SPEC_GRAPH_PAD_SLOT_ID,
         )
         attn_metadata.spec_sequence_masks = _materialize_graph_request_tensor(
             self.spec_sequence_masks,
@@ -983,8 +1000,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             self.use_full_cuda_graph
             and num_prefills == 0
             and num_decodes == 0
-            and graph_request_count <= self.decode_cudagraph_max_bs
-            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+            and self._can_pad_spec_decode(graph_request_count, num_spec_decode_tokens)
         ):
             self._pad_spec_decode_metadata(attn_metadata, graph_request_count)
         elif (

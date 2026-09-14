@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import TypeVar
+from typing import Any, TypeVar
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +31,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -533,13 +534,12 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     )
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]] = {}
     encoder_cache_metadata = object()
-    block_states = []
+    block_states: list[Any] = []
+    connector_metadata = object()
+    output_fields = dyntra_lb_scheduler_module.SchedulerOutput.__dataclass_fields__
 
     class RecordingSchedulerOutput(SimpleNamespace):
-        __dataclass_fields__ = {
-            "kv_connector_block_state": object(),
-            "ec_manager_metadata": object(),
-        }
+        __dataclass_fields__ = output_fields
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
@@ -549,29 +549,41 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         "SchedulerOutput",
         RecordingSchedulerOutput,
     )
-    monkeypatch.setattr(
-        scheduler.kv_cache_manager,
-        "take_boundary_state_offloads",
-        lambda: boundary_state_offloads,
-    )
+    if not vllm_version_is("0.28.0"):
+        monkeypatch.setattr(
+            scheduler.kv_cache_manager,
+            "take_boundary_state_offloads",
+            lambda: boundary_state_offloads,
+        )
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
         "get_manager_metadata",
         lambda: encoder_cache_metadata,
         raising=False,
     )
-    monkeypatch.setattr(
-        scheduler,
-        "_build_kv_connector_meta",
-        lambda connector, scheduler_output: block_states.append(scheduler_output.kv_connector_block_state),
-    )
+
+    def build_metadata(connector, output):
+        assert connector is scheduler.connector
+        if vllm_version_is("0.28.0"):
+            assert "kv_connector_block_state" not in vars(output)
+            block_states.append(None)
+        else:
+            block_states.append(output.kv_connector_block_state)
+        return connector_metadata
+
+    monkeypatch.setattr(scheduler, "_build_kv_connector_meta", build_metadata)
 
     scheduler_output = scheduler.schedule()
 
     assert len(block_states) == 1
-    assert block_states[0].boundary_state_offloads is boundary_state_offloads
-    assert block_states[0].block_ids == {}
-    assert scheduler_output.kv_connector_block_state is None
+    if vllm_version_is("0.28.0"):
+        assert block_states == [None]
+        assert "kv_connector_block_state" not in vars(scheduler_output)
+    else:
+        assert block_states[0].boundary_state_offloads is boundary_state_offloads
+        assert block_states[0].block_ids == {}
+        assert scheduler_output.kv_connector_block_state is None
+    assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 
 

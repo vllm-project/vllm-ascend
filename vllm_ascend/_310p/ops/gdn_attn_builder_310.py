@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.cumpute_causal_conv1d_metadata_310 import (
     compute_causal_conv1d_metadata,
@@ -38,6 +39,17 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     310P does not support Triton. Its prefill metadata remains device-specific,
     while decode graph buffers share the common builder-owned contract.
     """
+
+    # The 310P conv kernel expects PAD_SLOT_ID, not a valid state block.
+    _SPEC_GRAPH_PAD_SLOT_ID = PAD_SLOT_ID
+
+    def _can_pad_spec_decode(self, graph_request_count: int, num_spec_decode_tokens: int) -> bool:
+        # MTP token buffers can hold (1 + K) tokens per request. Do not apply
+        # the common single-token limit to 310P concurrent spec replay.
+        return (
+            graph_request_count <= self.decode_cudagraph_max_bs
+            and num_spec_decode_tokens <= self.spec_token_indx.numel()
+        )
 
     def _build_prefill_has_initial_state_and_causal_conv1d_meta(
         self,

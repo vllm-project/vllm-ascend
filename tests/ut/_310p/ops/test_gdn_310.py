@@ -17,8 +17,9 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
@@ -58,6 +59,24 @@ def test_zero_padded_tokens_masks_only_padded_token_positions():
     assert torch.count_nonzero(masked[:, 2:]) == 0
 
 
+@pytest.mark.parametrize(
+    "requests,tokens,expected",
+    [(4, 4, True), (4, 16, True), (5, 16, False), (4, 17, False)],
+)
+def test_builder310_spec_padding_checks_request_and_token_capacities(requests, tokens, expected):
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    builder.decode_cudagraph_max_bs = 4
+    builder.spec_token_indx = torch.empty(16, dtype=torch.int32)
+    assert builder._can_pad_spec_decode(requests, tokens) is expected
+
+
+def test_common_spec_padding_keeps_existing_token_limit():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder)
+    builder.decode_cudagraph_max_bs = 4
+    assert builder._can_pad_spec_decode(4, 4)
+    assert not builder._can_pad_spec_decode(4, 16)
+
+
 def test_mask_padded_recurrent_accepted_tokens_zeros_dummy_requests():
     accepted_tokens = torch.tensor([2, 3, 4], dtype=torch.int64)
     actual_seq_lengths = torch.tensor([4, 0, 1], dtype=torch.int32)
@@ -71,7 +90,8 @@ def test_mask_padded_recurrent_accepted_tokens_zeros_dummy_requests():
     assert masked.tolist() == [2, 0, 4]
 
 
-def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
+@pytest.mark.parametrize("overflow", [None, "spec", "non_spec"])
+def test_builder310_pads_spec_decode_metadata_with_dummy_requests(overflow):
     builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
     builder.spec_state_indices_tensor = torch.full((4, 2), -1, dtype=torch.int32)
     builder.spec_sequence_masks = torch.empty(4, dtype=torch.bool)
@@ -96,13 +116,26 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
         spec_token_indx=torch.arange(8, dtype=torch.int32),
     )
 
+    if overflow is not None:
+        if overflow == "spec":
+            attn_metadata.spec_token_indx = torch.arange(9, dtype=torch.int32)
+        else:
+            attn_metadata.non_spec_token_indx = torch.arange(1, dtype=torch.int32)
+        before = builder.spec_state_indices_tensor.clone()
+        with pytest.raises(ValueError, match="graph token buffer capacity"):
+            builder._pad_spec_decode_metadata(attn_metadata, graph_request_count=4)
+        torch.testing.assert_close(builder.spec_state_indices_tensor, before)
+        return
+
     builder._pad_spec_decode_metadata(attn_metadata, graph_request_count=4)
 
+    # 310P pads with PAD_SLOT_ID (-1), not NULL_BLOCK_ID (0), so FULL replay
+    # does not write into mamba block 0. Pad accepted tokens stay 1 (not 0).
     assert attn_metadata.spec_state_indices_tensor.tolist() == [
         [3, 30],
         [4, 40],
-        [NULL_BLOCK_ID, NULL_BLOCK_ID],
-        [NULL_BLOCK_ID, NULL_BLOCK_ID],
+        [PAD_SLOT_ID, PAD_SLOT_ID],
+        [PAD_SLOT_ID, PAD_SLOT_ID],
     ]
     assert attn_metadata.spec_sequence_masks.tolist() == [True, True, False, False]
     assert attn_metadata.spec_query_start_loc.tolist() == [0, 4, 8, 8, 8]
