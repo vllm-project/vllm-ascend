@@ -22,7 +22,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B)          |
+| Qwen3-Omni-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking) \| [Hugging Face](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking) |
 | Qwen3-Omni-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               |  N/A|
 
 The W8A8 quantized weights are not available for direct download, you can obtain them by quantizing the BF16 model using **msmodelslim**. Refer to the [Quantization Guide](../../user_guide/feature_guide/quantization.md) for details. All model paths in this document should be adjusted to your actual local paths.
@@ -40,6 +40,8 @@ These are the recommended numbers of cards, which can be adjusted according to t
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -216,6 +218,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve your_model_path \
     --served-model-name qwen3-omni \
     --trust-remote-code \

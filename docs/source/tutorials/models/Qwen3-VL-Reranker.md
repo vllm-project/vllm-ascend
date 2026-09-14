@@ -12,10 +12,14 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
-- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
+|  Weight Version        | Download Links |
+|------------------------|----------------|
+| `Qwen3-VL-Reranker-8B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B) |
+| `Qwen3-VL-Reranker-2B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -149,6 +153,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
@@ -164,6 +169,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
