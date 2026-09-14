@@ -165,7 +165,7 @@ pytest -sv tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py::t
 
 **Warning**: `tensor.item()` operations cause synchronization overhead on NPU when the `tensor` is on device.
 
-If the `tensor` is a device tensor, calling `item()` will triggers a synchronous data transfer from NPU to CPU. This can severely degrade performance in hot paths, causing `AsyncScheduler` to block here.
+If the `tensor` is a device tensor, calling `item()` will trigger a synchronous data transfer from NPU to CPU. This can severely degrade performance in hot paths, causing `AsyncScheduler` to block here.
 
 **Review Requirements:**
 
