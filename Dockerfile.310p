@@ -94,7 +94,7 @@ RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
         aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
       esac && \
       TOOLCHAIN=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' /vllm-workspace/vllm/rust-toolchain.toml) && \
-      python3 -c "import urllib.request; urllib.request.urlretrieve('${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init', '/tmp/rustup-init')" && \
+      curl -fsSL "${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
       chmod +x /tmp/rustup-init && \
       /tmp/rustup-init -y --default-toolchain "${TOOLCHAIN:-stable}" && \
       rm /tmp/rustup-init && \
