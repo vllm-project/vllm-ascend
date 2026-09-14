@@ -45,11 +45,13 @@ def _make_padded_input_batch() -> MagicMock:
     return input_batch
 
 
+@pytest.mark.parametrize("speculator_cls", [AscendMTPSpeculator, AscendEagleSpeculator])
 @pytest.mark.parametrize(
     ("target_pcp_size", "expected_execution_pcp_size"),
     [(2, 1), (1, 1)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
+    speculator_cls,
     target_pcp_size: int,
     expected_execution_pcp_size: int,
 ) -> None:
@@ -95,11 +97,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
-        patch.object(
-            speculator_module,
-            "replace",
-            side_effect=fake_replace,
-        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.pcp_utils.replace",
             side_effect=fake_replace,
@@ -115,7 +112,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             return_value=object(),
         ),
     ):
-        speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
+        speculator = speculator_cls(target_config, torch.device("cpu"))
 
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
@@ -129,13 +126,11 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
 
-    draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
-    assert draft_config.model_config is draft_model_config
-    assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
+    # No second VllmConfig construction/validation for a dense draft under MoE.
+    assert not hasattr(speculator, "draft_vllm_config")
 
 
 @pytest.mark.parametrize(("replicated_pcp", "manager_is_disabled"), [(True, True), (False, False)])
@@ -314,9 +309,11 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
     speculator.draft_attn_layer_names = {"draft.layer"}
     local_draft_metadata = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     global_draft_metadata = object()
-    speculator.model_state = SimpleNamespace(
-        attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
-    )
+    # Replicated draft layers are excluded from the target's attention groups.
+    target_metadata = {"target.layer": object()}
+    if not replicated_pcp:
+        target_metadata["draft.layer"] = local_draft_metadata
+    speculator.model_state = SimpleNamespace(attn_metadata=target_metadata)
     speculator._build_draft_attn_metadata = MagicMock(
         return_value={"draft.layer": global_draft_metadata},
     )
@@ -328,7 +325,7 @@ def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_
             is_draft_model_prefill=True,
         )
 
-    rebuild_metadata = replicated_pcp and attn_architecture in ("DSA", "SFA")
+    rebuild_metadata = replicated_pcp
     expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
     assert actual == [{"draft.layer": expected_metadata}]
     assert actual[0]["draft.layer"] is expected_metadata

@@ -2524,17 +2524,21 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         attn_metadata: dsa_v1.DSAMetadataDict,
     ) -> bool:
         """Restore one global batch and update each replicated cache once."""
-        pcp_metadata = next(iter(attn_metadata.values()))
+        assert self.swa_cache_layer is not None
+        pcp_metadata = attn_metadata[self.swa_cache_layer.prefix]
         assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
         global_hidden_states = self._gather_and_restore_hidden_states(
             hidden_states,
             pcp_metadata,
         )
 
-        global_dsa_metadata_by_prefix = {}
-        for cache_prefix, metadata in attn_metadata.items():
-            assert isinstance(metadata, AscendDSAPCPMetadata)
-            global_dsa_metadata_by_prefix[cache_prefix] = metadata.global_dsa_metadata
+        # The shared metadata dictionary can also contain PCP=1 draft layers.
+        # Only the PCP entries belong to this target's global cache view.
+        global_dsa_metadata_by_prefix = {
+            cache_prefix: metadata.global_dsa_metadata
+            for cache_prefix, metadata in attn_metadata.items()
+            if isinstance(metadata, AscendDSAPCPMetadata)
+        }
         global_layer_metadata = self._get_layer_metadata(
             layer_name,
             global_dsa_metadata_by_prefix,
@@ -2576,7 +2580,8 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
     ) -> tuple[int, int, int]:
         if attn_metadata is None:
             return super()._get_o_proj_input_shape(attn_metadata)
-        pcp_metadata = next(iter(attn_metadata.values()))
+        assert self.swa_cache_layer is not None
+        pcp_metadata = attn_metadata[self.swa_cache_layer.prefix]
         assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
         return (
             pcp_metadata.local_num_tokens_after_padding,
