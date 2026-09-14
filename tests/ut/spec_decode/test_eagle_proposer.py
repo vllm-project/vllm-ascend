@@ -1157,6 +1157,9 @@ class TestEagleProposerPropose:
         mock_common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
         mock_common_attn_metadata.dcp_local_seq_lens = dcp_local_seq_lens
         mock_common_attn_metadata.dcp_local_seq_lens_cpu = dcp_local_seq_lens_cpu
+        if not vllm_version_is("0.28.0"):
+            mock_common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound = None
+            mock_common_attn_metadata.req_idx = None
         mock_common_attn_metadata._seq_lens_cpu = _seq_lens_cpu
         mock_common_attn_metadata._num_computed_tokens_cpu = _num_computed_tokens_cpu
         mock_common_attn_metadata._num_computed_tokens_cache = _num_computed_tokens_cache

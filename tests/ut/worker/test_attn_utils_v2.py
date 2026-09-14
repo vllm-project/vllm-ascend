@@ -479,6 +479,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         )
 
     cache_components = kv_caches[layer_name]
+    assert isinstance(cache_components, list)
     if vllm_version_is("0.28.0"):
         assert len(runner_kv_caches) == 1
         assert runner_kv_caches[0] is cache_components

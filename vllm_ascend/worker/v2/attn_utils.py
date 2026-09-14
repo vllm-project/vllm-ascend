@@ -925,6 +925,14 @@ def allocate_kv_cache_main(
     )
 
 
+class _DeviceAwareKVCacheList(list):
+    """Ascend cache list compatible with vLLM main's device filtering."""
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
 class _DeviceAwareKVCacheTuple(tuple):
     """Ascend cache tuple compatible with vLLM main's device filtering."""
 
@@ -1182,11 +1190,13 @@ def _reshape_kv_cache_v2(
     if not vllm_version_is("0.28.0"):
         # vLLM #53781 builds ModelRunner.kv_caches by reading `.device` from
         # each value returned by init_kv_cache. Ascend represents split K/V
-        # and recurrent states as tuples, so retain that contract while
+        # and recurrent states as tuples or lists, so retain that contract while
         # exposing the device used by the new upstream filter.
         for layer_name, cache in kv_caches.items():
             if isinstance(cache, tuple):
                 kv_caches[layer_name] = _DeviceAwareKVCacheTuple(cache)
+            elif isinstance(cache, list):
+                kv_caches[layer_name] = _DeviceAwareKVCacheList(cache)
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
