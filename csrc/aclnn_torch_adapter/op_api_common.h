@@ -271,6 +271,25 @@ inline void *GetOpApiLibHandler(const char *libName) {
   return handler;
 }
 
+// Some CANN operators share a name with an incompatible experimental custom
+// operator. Resolve these from the installed CANN library only.
+inline void *GetCANNOpApiFuncAddr(const char *apiName)
+{
+    constexpr const char *TRANSFORMER_OP_API_LIB = "libopapi_transformer.so";
+    static auto transformerOpApiHandler = GetOpApiLibHandler(TRANSFORMER_OP_API_LIB);
+    if (transformerOpApiHandler != nullptr) {
+        auto func = GetOpApiFuncAddrInLib(transformerOpApiHandler, TRANSFORMER_OP_API_LIB, apiName);
+        if (func != nullptr) {
+            return func;
+        }
+    }
+    static auto opApiHandler = GetOpApiLibHandler(GetOpApiLibName());
+    if (opApiHandler == nullptr) {
+        return nullptr;
+    }
+    return GetOpApiFuncAddrInLib(opApiHandler, GetOpApiLibName(), apiName);
+}
+
 inline void *GetOpApiFuncAddr(const char *apiName)
 {
     if (!g_custom_lib_path.empty()) {
@@ -684,16 +703,16 @@ typedef int (*InitHugeMemThreadLocal)(void *, bool);
 typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
 
-#define EXEC_NPU_CMD(aclnn_api, ...)                                          \
+#define EXEC_NPU_CMD_WITH_LOADER(aclnn_api, loader, ...)                      \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
-        GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                      \
-    static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);           \
+        loader(#aclnn_api "GetWorkspaceSize");                               \
+    static const auto opApiFuncAddr = loader(#aclnn_api);                     \
     static const auto initMemAddr =                                           \
-        GetOpApiFuncAddr("InitHugeMemThreadLocal");                           \
+        loader("InitHugeMemThreadLocal");                                    \
     static const auto unInitMemAddr =                                         \
-        GetOpApiFuncAddr("UnInitHugeMemThreadLocal");                         \
-    static const auto releaseMemAddr = GetOpApiFuncAddr("ReleaseHugeMem");    \
+        loader("UnInitHugeMemThreadLocal");                                  \
+    static const auto releaseMemAddr = loader("ReleaseHugeMem");             \
     TORCH_CHECK(                                                              \
         getWorkspaceSizeFuncAddr != nullptr && opApiFuncAddr != nullptr,      \
         #aclnn_api, " or ", #aclnn_api "GetWorkspaceSize", " not in ",        \
@@ -750,5 +769,11 @@ typedef void (*ReleaseHugeMem)(void *, bool);
       unInitMemFunc(nullptr, false);                                          \
     }                                                                         \
   } while (false)
+
+#define EXEC_NPU_CMD(aclnn_api, ...) \
+    EXEC_NPU_CMD_WITH_LOADER(aclnn_api, GetOpApiFuncAddr, __VA_ARGS__)
+
+#define EXEC_CANN_CMD(aclnn_api, ...) \
+    EXEC_NPU_CMD_WITH_LOADER(aclnn_api, GetCANNOpApiFuncAddr, __VA_ARGS__)
 
 #endif

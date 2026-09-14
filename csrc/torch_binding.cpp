@@ -800,72 +800,67 @@ std::vector<bool> is_contiguous_axes(const at::Tensor &tensor)
     return result;
 }
 
-std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, const at::Tensor &norm_weight,
-                                                          const at::Tensor &rope_sin, int64_t cmp_ratio, int64_t coff)
+at::Tensor construct_compressor_output_tensor(const at::Tensor &x, const at::Tensor &wkv,
+                                             const c10::optional<at::Tensor> &cu_seqlens,
+                                             int64_t cmp_ratio, int64_t coff)
 {
-    constexpr int DIM_3 = 3;
-    auto x_dim = x.dim();
-    at::SmallVector<int64_t, 8> cmp_kv_size;
-    at::Tensor cmp_kv;
-    auto cmp_s = 0;
-    if (x_dim == DIM_3) {
-        cmp_s = (x.size(1) + cmp_ratio - 1) / cmp_ratio;
-        cmp_kv_size = {x.size(0), cmp_s, norm_weight.size(0)};
+    constexpr int BSH_RANK = 3;
+    at::SmallVector<int64_t, BSH_RANK> cmp_kv_size;
+    const int64_t head_dim = wkv.size(0) / coff;
+    if (x.dim() == BSH_RANK) {
+        const int64_t cmp_s = (x.size(1) + cmp_ratio - 1) / cmp_ratio;
+        cmp_kv_size = {x.size(0), cmp_s, head_dim};
     } else {
-        cmp_s = rope_sin.size(0);
-        cmp_kv_size = {cmp_s, norm_weight.size(0)};
+        const int64_t batch_size = cu_seqlens->size(0) - 1;
+        const int64_t cmp_s = std::min(x.size(0), x.size(0) / cmp_ratio + batch_size);
+        cmp_kv_size = {cmp_s, head_dim};
     }
-
-    cmp_kv = at::empty(cmp_kv_size, x.options().dtype(x.dtype()));
-
-    return std::tuple<at::Tensor>(cmp_kv);
+    return at::empty(cmp_kv_size, x.options());
 }
 
 
-std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
-                                  at::Tensor &state_cache, const at::Tensor &ape, const at::Tensor &norm_weight,
-                                  const at::Tensor &rope_sin, const at::Tensor &rope_cos,
-                                  const c10::optional<at::Tensor> &state_block_table,
-                                  const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
-                                  const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim, int64_t cmp_ratio,
-                                  int64_t coff, double norm_eps, int64_t rotary_mode, int64_t cache_mode)
+at::Tensor compressor(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
+                      at::Tensor &state_cache, const at::Tensor &ape,
+                      const c10::optional<at::Tensor> &state_block_table,
+                      const c10::optional<at::Tensor> &cu_seqlens, const c10::optional<at::Tensor> &seqused,
+                      const c10::optional<at::Tensor> &start_pos, int64_t cmp_ratio, int64_t coff, int64_t cache_mode)
 {
-    constexpr int CONTINUOUS = 1;
-    constexpr int32_t DIM_1 = 1;
-    constexpr int32_t DIM_2 = 2;
-    constexpr int32_t DIM_3 = 3;
-    constexpr int32_t VALUE_0 = 0;
-    auto x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_2 || x_dim == DIM_3, "x dim num[", x_dim, "] should be 2 or 3");
+    constexpr int TH_RANK = 2;
+    constexpr int BSH_RANK = 3;
+    TORCH_CHECK(x.dim() == TH_RANK || x.dim() == BSH_RANK, "compressor x must have rank 2 or 3");
+    TORCH_CHECK(wkv.dim() == TH_RANK, "compressor wkv must have rank 2");
+    TORCH_CHECK(cmp_ratio > 0, "compressor cmp_ratio must be positive");
+    TORCH_CHECK(coff == 1 || coff == 2, "compressor coff must be 1 or 2");
+    TORCH_CHECK(wkv.size(0) % coff == 0, "compressor wkv rows must be divisible by coff");
+    TORCH_CHECK(state_cache.dim() == BSH_RANK, "compressor state_cache must have rank 3");
+    if (x.dim() == TH_RANK) {
+        TORCH_CHECK(cu_seqlens.has_value() && cu_seqlens->dim() == 1 && cu_seqlens->size(0) >= 1,
+                    "compressor TH layout requires a rank-1 cu_seqlens with B+1 entries");
+    } else {
+        TORCH_CHECK(!cu_seqlens.has_value(), "compressor BSH layout requires cu_seqlens=None");
+    }
 
-    TORCH_CHECK(norm_weight.defined(), "Check norm_weight != nullptr failed");
-    auto norm_weight_dim = norm_weight.dim();
-    TORCH_CHECK(norm_weight_dim == DIM_1, "norm_weight dim num[", norm_weight_dim, "] should be 1");
+    static const bool cann_compressor_available =
+        GetCANNOpApiFuncAddr("aclnnCompressorGetWorkspaceSize") != nullptr &&
+        GetCANNOpApiFuncAddr("aclnnCompressor") != nullptr;
+    TORCH_CHECK(cann_compressor_available,
+                "DeepSeek V4 Compressor requires CANN 9.2.0-beta.2 and its matching ops-transformer package. "
+                "Install the matching packages and rebuild vllm-ascend.");
 
-    TORCH_CHECK(rope_sin.defined(), "Check rope_sin != nullptr failed");
-    auto rope_sin_dim = rope_sin.dim();
-    TORCH_CHECK(rope_sin_dim == x_dim, "rope_sin dim num[", rope_sin_dim, "] should be equal to x dim num[", x_dim,
-                "]");
+    at::Tensor cmp_kv = construct_compressor_output_tensor(x, wkv, cu_seqlens, cmp_ratio, coff);
+    // The formal ACLNN interface requires these output descriptors even for
+    // inference. Keep their documented shapes, but never consume their contents.
+    auto intermediate_size = cmp_kv.sizes().vec();
+    intermediate_size.insert(intermediate_size.end() - 1, coff * cmp_ratio);
+    at::Tensor softmax_score = at::empty(intermediate_size, x.options().dtype(at::kFloat));
+    at::Tensor kv = at::empty(intermediate_size, x.options().dtype(at::kFloat));
+    const int64_t state_cache_stride_dim0 = state_cache.stride(0);
+    constexpr bool GRAD_ENABLED = false;
 
-    TORCH_CHECK(cmp_ratio > VALUE_0, "cmp_ratio should be greater than 0");
-
-    std::tuple<at::Tensor> output = construct_compressor_output_tensor(x, norm_weight, rope_sin, cmp_ratio, coff);
-    at::Tensor cmp_kv = std::get<0>(output);
-
-    auto state_cache_dim = state_cache.dim();
-    TORCH_CHECK(state_cache_dim == DIM_3, "state_cache dim num[", state_cache_dim, "] should be 3");
-    auto contiguous_axes_result = is_contiguous_axes(state_cache);
-    // if (cache_mode == CONTINUOUS) {
-    //     TORCH_CHECK(contiguous_axes_result[0] && contiguous_axes_result[1] && contiguous_axes_result[2],
-    //                 "when cache_mode == ", cache_mode, ", state_cache must be contiguous on all axes");
-    // }
-    int64_t state_cache_stride_dim0 = state_cache.stride(0);
-
-    EXEC_NPU_CMD(aclnnCompressor, x, wkv, wgate, state_cache, ape, norm_weight, rope_sin, rope_cos,
-                    state_block_table, cu_seqlens, seqused, start_pos, rope_head_dim, cmp_ratio, coff, norm_eps,
-                    rotary_mode, cache_mode, state_cache_stride_dim0, cmp_kv);
-
-    return std::tuple<at::Tensor>(cmp_kv);
+    EXEC_CANN_CMD(aclnnCompressor, x, wkv, wgate, state_cache, ape, state_block_table, cu_seqlens,
+                  seqused, start_pos, cmp_ratio, coff, cache_mode, state_cache_stride_dim0,
+                  GRAD_ENABLED, cmp_kv, softmax_score, kv);
+    return cmp_kv;
 }
 
 void check_compressor_metadata_common(
@@ -3139,12 +3134,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "compressor("
             "Tensor x, Tensor wkv, Tensor wgate, "
-            "Tensor(a!) state_cache, Tensor ape, Tensor norm_weight, "
-            "Tensor rope_sin, Tensor rope_cos, "
+            "Tensor(a!) state_cache, Tensor ape, "
             "Tensor? state_block_table, Tensor? cu_seqlens, "
             "Tensor? seqused, Tensor? start_pos, "
-            "int rope_head_dim, int cmp_ratio, int coff, "
-            "float norm_eps, int rotary_mode, int cache_mode"
+            "int cmp_ratio, int coff, int cache_mode"
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);

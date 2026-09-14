@@ -33,6 +33,11 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 
 ## 4 Installation
 
+Source builds containing the formal CANN Compressor migration require CANN
+9.2.0-beta.2 and matching ops packages. See the [migration validation guide](../../developer_guide/compressor_cann_migration.md)
+for the pinned vLLM revision, TorchNPU compatibility caveat and operator tests.
+The prebuilt images below do not automatically include this migration.
+
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image-selection).
