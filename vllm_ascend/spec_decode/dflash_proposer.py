@@ -168,6 +168,8 @@ class AscendDflashProposer(AscendEagleProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
