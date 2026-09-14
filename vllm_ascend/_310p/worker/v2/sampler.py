@@ -79,6 +79,16 @@ class Ascend310PSampler:
             device=device,
         )
         top_p_gpu = torch.ones(max_num_reqs, dtype=torch.float32, device=device)
+        self.temperature_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
+        self.seeds_cpu = torch.zeros(max_num_reqs, dtype=torch.int64, device="cpu")
+        self.top_k_cpu = torch.full(
+            (max_num_reqs,),
+            fill_value=max(self.vocab_size, 1),
+            dtype=torch.int32,
+            device="cpu",
+        )
+        self.top_p_cpu = torch.ones(max_num_reqs, dtype=torch.float32, device="cpu")
+        self._sampling_state_dirty = False
         self.sampling_states = SimpleNamespace(
             temperature=SimpleNamespace(gpu=temperature_gpu),
             seeds=SimpleNamespace(gpu=seeds_gpu),
@@ -120,7 +130,6 @@ class Ascend310PSampler:
             raise NotImplementedError(
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
-
         if not (0 <= req_idx < self.max_num_reqs):
             return
 
@@ -138,15 +147,16 @@ class Ascend310PSampler:
         self._temperature_np[req_idx] = temperature
         self._top_p_np[req_idx] = top_p
         self._top_k_np[req_idx] = top_k
-        self.sampling_states.temperature.gpu[req_idx] = temperature
-        self.sampling_states.top_p.gpu[req_idx] = top_p
-        self.sampling_states.top_k.gpu[req_idx] = top_k
+        self.temperature_cpu[req_idx] = temperature
+        self.top_p_cpu[req_idx] = top_p
+        self.top_k_cpu[req_idx] = top_k
 
         seed = getattr(sampling_params, "seed", None)
         self._seeds_set[req_idx] = seed is not None
         if seed is None:
             seed = int(np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX))
-        self.sampling_states.seeds.gpu[req_idx] = int(seed)
+        self.seeds_cpu[req_idx] = int(seed)
+        self._sampling_state_dirty = True
 
         if self._seeds_set[req_idx]:
             source = torch.Generator(device="cpu")
@@ -156,8 +166,15 @@ class Ascend310PSampler:
             self._source_generators.pop(req_idx, None)
 
     def apply_staged_writes(self) -> None:
-        # Params are written directly to device buffers in ``add_request``.
-        pass
+        if not self._sampling_state_dirty:
+            return
+        # MTP proposer is first device consumer. Bulk H2D copies replace
+        # per-request scalar assignments.
+        self.sampling_states.temperature.gpu.copy_(self.temperature_cpu, non_blocking=True)
+        self.sampling_states.seeds.gpu.copy_(self.seeds_cpu, non_blocking=True)
+        self.sampling_states.top_k.gpu.copy_(self.top_k_cpu, non_blocking=True)
+        self.sampling_states.top_p.gpu.copy_(self.top_p_cpu, non_blocking=True)
+        self._sampling_state_dirty = False
 
     def _maybe_bind_vocab_size(self, vocab_size: int) -> None:
         if self.vocab_size > 0 or vocab_size <= 0:
@@ -167,6 +184,7 @@ class Ascend310PSampler:
         # Replace unset top_k defaults (initialized to 1 when vocab was unknown).
         unset = self._top_k_np <= 1
         self._top_k_np[unset] = self.vocab_size
+        self.top_k_cpu[unset] = self.vocab_size
         self.sampling_states.top_k.gpu[unset] = self.vocab_size
 
     def _batch_needs_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
@@ -270,8 +288,9 @@ class Ascend310PSampler:
             sampled = torch.where(is_random, random_sampled, greedy).to(torch.int32)
 
         num_sampled = input_batch.seq_lens.new_ones(num_reqs)
+        sampled_2d = sampled.view(-1, 1)
         return SamplerOutput(
-            sampled_token_ids=sampled.view(-1, 1),
+            sampled_token_ids=sampled_2d,
             logprobs_tensors=None,
             num_nans=None,
             num_sampled=num_sampled,

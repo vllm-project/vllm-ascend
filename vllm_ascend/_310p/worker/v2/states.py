@@ -61,10 +61,9 @@ class Ascend310PStagedWriteTensor:
             self.gpu = self._uva_buffer.uva
             self._dirty_indices.clear()
             return
-        indices = sorted(self._dirty_indices)
-        indices_device = torch.tensor(indices, dtype=torch.int64, device=self.device)
-        values = self.cpu[indices].to(self.device, non_blocking=True)
-        self.gpu.index_copy_(0, indices_device, values)
+        # Non-UVA request vectors are small. One bulk H2D is cheaper on 310P
+        # than creating device indices plus IndexCopy for a few dirty rows.
+        self.gpu.copy_(self.cpu, non_blocking=True)
         self._dirty_indices.clear()
 
 
@@ -107,6 +106,7 @@ class Ascend310PRequestState(AscendRequestState):
         self.num_computed_tokens_np = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = torch.zeros(max_num_reqs, dtype=torch.int32, device="cpu")
         self.last_sampled_tokens = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device=device)
+        self.last_sampled_tokens_cpu = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device="cpu")
         self.max_seq_len = np.zeros(max_num_reqs, dtype=np.int32)
         self.draft_tokens = torch.zeros(
             max_num_reqs,
@@ -134,4 +134,4 @@ class Ascend310PRequestState(AscendRequestState):
         req_idx = self.req_id_to_index[req_id]
         self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
         if num_computed_tokens > 0:
-            self.last_sampled_tokens[req_idx, 0] = all_token_ids[num_computed_tokens - 1]
+            self.last_sampled_tokens_cpu[req_idx, 0] = all_token_ids[num_computed_tokens - 1]
