@@ -475,8 +475,17 @@ def test_get_mamba_group_info_rejects_invalid_cache_groups(case):
             "wrapped.0": spec if case == "inconsistent_within_wrapper" else other_spec,
             "wrapped.1": other_spec,
         }
-        wrapped_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-        assert wrapped_spec is not None
+        if case == "inconsistent_within_wrapper":
+            # from_specs would reject layers that diverge inside the wrapper
+            # (returning None before the resolver runs), so build the wrapped
+            # group directly to exercise the in-memory inconsistency path.
+            wrapped_spec = UniformTypeKVCacheSpecs(
+                block_size=spec.block_size,
+                kv_cache_specs=layer_specs,
+            )
+        else:
+            wrapped_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+            assert wrapped_spec is not None
         wrapped_group = KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=wrapped_spec)
         if case == "inconsistent_within_wrapper":
             groups = [wrapped_group]
