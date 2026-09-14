@@ -1288,9 +1288,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             input_batch,
             self.speculator.draft_logits,
         )
-        self._sampled_tokens_cpu = self.rejection_sampler.sampled_tokens_cpu
-        self._num_sampled_cpu = self.rejection_sampler.num_sampled_cpu
-        self._num_rejected_cpu = self.rejection_sampler.num_rejected_cpu
+        num_reqs = input_batch.num_reqs
+        self._sampled_tokens_cpu = self.rejection_sampler.sampled_tokens_cpu[:num_reqs]
+        self._num_sampled_cpu = self.rejection_sampler.num_sampled_cpu[:num_reqs]
+        self._num_rejected_cpu = self.rejection_sampler.num_rejected_cpu[:num_reqs]
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     def postprocess_sampled(
@@ -1305,6 +1306,9 @@ class NPUModelRunner310V2(NPUModelRunner):
         # CPU mirrors were produced during sampling. Device arguments remain in
         # the upstream signature for MTP proposer/output compatibility.
         del num_sampled, num_rejected, query_start_loc
+        if self._sampled_tokens_cpu is not None:
+            assert self.rejection_sampler is not None
+            self.rejection_sampler.synchronize_cpu()
         sampled_tokens_cpu = self._sampled_tokens_cpu
         num_sampled_cpu = _post_update_cpu(
             self._postprocess_idx_mapping_np,
