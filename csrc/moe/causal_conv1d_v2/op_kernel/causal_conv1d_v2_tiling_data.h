@@ -1,0 +1,91 @@
+/**
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file causal_conv1d_v2_tiling_data.h
+ * \brief CausalConv1dV2 tiling data structure.
+ */
+
+#ifndef CAUSAL_CONV1D_V2_TILING_DATA_H_
+#define CAUSAL_CONV1D_V2_TILING_DATA_H_
+
+#include <cstdint>
+
+enum FnExecutionPlan : int64_t {
+    FN_EXECUTION_PLAN_INVALID = 0,
+    FN_EXECUTION_PLAN_CUTBS = 1,
+    FN_EXECUTION_PLAN_CUTBSD = 2,
+};
+
+inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
+{
+    if (baseDimCnt <= 0) {
+        return FN_EXECUTION_PLAN_INVALID;
+    }
+    if (baseDimCnt <= 1) {
+        return FN_EXECUTION_PLAN_CUTBS;
+    }
+    return FN_EXECUTION_PLAN_CUTBSD;
+}
+
+struct CausalConv1dV2TilingData {
+
+    int64_t dim;
+    int64_t cuSeqlen;
+    int64_t seqLen;
+    int64_t inputMode;
+
+    int64_t width;
+
+    int64_t stateLen;
+    int64_t numCacheLines;
+    int64_t convStateStride0;
+    int64_t convStateStride1;
+
+    int64_t batch;
+
+    int64_t activationMode;
+    int64_t padSlotId;
+    int64_t hasBias;
+    int64_t headNum;
+    int64_t headDim;
+
+    int64_t baseDim;
+    int64_t baseDimCnt;
+
+    int64_t hasNumAcceptedTokens;
+
+    int64_t hasCacheIndices;
+    int64_t hasInitialState;
+
+    int64_t hasInitStateWorkspace;
+
+    int64_t queryStartLocUseCpu;
+    int64_t cacheIndicesUseCpu;
+    int64_t hasInitialStateUseCpu;
+    int64_t numAcceptedTokensUseCpu;
+    int64_t queryStartLocDtype;
+    int64_t cacheIndicesDtype;
+    int64_t hasInitialStateDtype;
+    int64_t numAcceptedTokensDtype;
+
+    int64_t tokenBlockSize;
+    int64_t tokenBlockCnt;
+
+    int64_t hasExplicitTokenSeqRanges;
+    int64_t explicitTokenSeqRangeCount;
+    int64_t tokenTileStartSeq[128];
+    int64_t tokenTileEndSeq[128];
+
+    int64_t hasNullBlock;
+    int64_t nullBlockId;
+    int64_t maxQueryLen;
+
+};
+#endif

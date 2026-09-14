@@ -481,16 +481,17 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
     attention.conv1d = nn.Module()
     source = torch.arange(18 * 4, dtype=torch.float32).reshape(18, 1, 4)
     attention.conv1d.weight = nn.Parameter(source)
-    attention.register_parameter(
+    attention.register_buffer(
         _PACKED_CONV_WEIGHT_NAME,
-        nn.Parameter(torch.empty(4, 18, dtype=torch.bfloat16), requires_grad=False),
+        torch.empty(4, 18, dtype=torch.bfloat16),
+        persistent=False,
     )
-    original = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    original = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     original_ptr = original.data_ptr()
 
     attention._pack_conv_weights()
 
-    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    packed = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     assert packed.data_ptr() == original_ptr
     assert packed.dtype == torch.bfloat16
     assert packed.is_contiguous()

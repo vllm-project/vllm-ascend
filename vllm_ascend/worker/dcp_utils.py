@@ -635,6 +635,23 @@ class DCPManager:
         is_sfa_dcp = self._is_sfa_dcp_metadata_builder(attn_metadata_builder)
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
         if is_mla and not is_sfa_dcp:
+            flash = getattr(attn_metadata, "flash", None)
+            dcp_seq_lens_base = getattr(flash, "dcp_seq_lens_base", None)
+            dcp_seq_lens_delta = getattr(flash, "dcp_seq_lens_delta", None)
+            if dcp_seq_lens_base is not None and dcp_seq_lens_delta is not None:
+                source_seq_lens = seq_lens.to(
+                    device=dcp_seq_lens_base.device,
+                    dtype=dcp_seq_lens_base.dtype,
+                    non_blocking=True,
+                )
+                num_reqs = min(source_seq_lens.shape[0], dcp_seq_lens_base.shape[0] - 1)
+                dcp_seq_lens_base[:num_reqs].copy_(
+                    source_seq_lens[:num_reqs],
+                    non_blocking=True,
+                )
+                dcp_seq_lens_base[num_reqs:].zero_()
+                dcp_seq_lens_delta.fill_(draft_index + 1)
+                return
             assert attn_metadata.decode is not None, (
                 "MLA DCP speculative draft metadata must be classified as decode "
                 "before backend-specific metadata is finalized."

@@ -381,6 +381,33 @@ def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:
         )
 
 
+def test_update_spec_decode_drafting_metadata_updates_flash_dcp_delta() -> None:
+    manager = object.__new__(DCPManager)
+    base = torch.zeros(3, dtype=torch.int32)
+    delta = torch.full((), -1, dtype=torch.int32)
+    attn_metadata = SimpleNamespace(
+        decode=None,
+        flash=SimpleNamespace(
+            dcp_seq_lens_base=base,
+            dcp_seq_lens_delta=delta,
+        ),
+    )
+
+    with (
+        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True),
+        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
+    ):
+        manager.update_spec_decode_drafting_cp_metadata(
+            attn_metadata=attn_metadata,
+            kv_cache_spec=object(),
+            seq_lens=torch.tensor([3]),
+            draft_index=2,
+        )
+
+    assert torch.equal(base, torch.tensor([3, 0, 0], dtype=torch.int32))
+    assert delta.item() == 3
+
+
 def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
     manager = object.__new__(DCPManager)
     manager.dcp_world_rank = 1

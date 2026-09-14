@@ -39,6 +39,21 @@ def test_mla_dcp_extends_v1_backend() -> None:
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
 
 
+def test_mla_dcp_flash_overrides_attention_and_skips_fia_graph_update() -> None:
+    import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
+
+    assert AscendMlaDCPImpl._forward_flash is not AscendMLAImpl._forward_flash
+    with patch.object(mla_cp.envs, "VLLM_ASCEND_ENABLE_FLASH_MLA", True):
+        assert (
+            AscendMlaDCPImpl.update_graph_params(
+                update_stream=None,
+                forward_context=None,
+                num_tokens=1,
+            )
+            is None
+        )
+
+
 def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries() -> None:
     decode = AscendMLADCPDecodeMetadata(
         input_positions=torch.arange(4),

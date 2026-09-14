@@ -5,6 +5,40 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
+namespace vllm_ascend {
+at::Tensor flash_mla_with_kvcache_metadata_meta(
+    const at::Tensor &cache_seqlens,
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t head_dim_qk,
+    int64_t head_dim_v,
+    int64_t mask_mode,
+    c10::string_view layout_q);
+
+std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
+    const at::Tensor &query,
+    const at::Tensor &k_cache,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &cache_seqlens,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t head_dim_v,
+    double softmax_scale,
+    int64_t mask_mode,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse);
+}
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -696,7 +730,8 @@ at::Tensor npu_causal_conv1d_custom_meta(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t max_query_len)
 {
     return output;
 }
@@ -2212,6 +2247,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    ops.impl("flash_mla_with_kvcache_metadata", &vllm_ascend::flash_mla_with_kvcache_metadata_meta);
+    ops.impl("flash_mla_with_kvcache", &vllm_ascend::flash_mla_with_kvcache_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);

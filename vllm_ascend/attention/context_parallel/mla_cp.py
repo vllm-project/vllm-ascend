@@ -9,7 +9,11 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend import envs
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionState,
+    AscendFlashAttentionMetadata,
+)
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 # isort: off
@@ -29,7 +33,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    maybe_save_kv_layer_to_connector,
+    notify_kv_cache_written,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -38,6 +47,11 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+    wait_for_device_metadata,
+)
 
 
 class MLASplitAttentionKind(Enum):
@@ -84,6 +98,21 @@ class AscendMLADCPDecodeMetadata(AscendMLADecodeMetadata):
     cp_history_seq_len: list[int] | None = None
 
 
+@dataclass
+class AscendMLADCPFlashMetadata(AscendFlashAttentionMetadata):
+    """Stable buffers used by Flash MLA when KV is sharded across DCP ranks."""
+
+    current_schedule: torch.Tensor
+    history_cache_lens: torch.Tensor
+    partial_token_live: torch.Tensor
+    current_block_table: torch.Tensor
+    current_slots: torch.Tensor
+    current_kv_cache: torch.Tensor
+    dcp_seq_lens_base: torch.Tensor
+    dcp_seq_lens_delta: torch.Tensor
+    block_size: int
+
+
 class AscendMlaDCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendMLAMetadataBuilder,
@@ -106,11 +135,217 @@ class AscendMlaDCPMetadataBuilder(
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        if self.cp_local_block_size <= 0:
+            raise RuntimeError(
+                f"Invalid cp_kv_cache_interleave_size: {self.cp_local_block_size}"
+            )
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size,
             self.cp_virtual_block_size,
         )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AscendMLAMetadata:
+        if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            return super().build(common_prefix_len, common_attn_metadata, fast_build)
+
+        common = common_attn_metadata
+        flash = self._build_dcp_flash_metadata(common)
+        return self.metadata_cls(
+            num_actual_tokens=common.num_actual_tokens,
+            num_input_tokens=common.num_input_tokens,
+            slot_mapping=common.slot_mapping,
+            query_start_loc=common.query_start_loc,
+            seq_lens=common.seq_lens,
+            seq_lens_cpu=None,
+            block_tables=common.block_table_tensor,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=0,
+            causal=common.causal,
+            attn_state=common.attn_state,
+            flash=flash,
+        )
+
+    def _build_dcp_flash_metadata(
+        self,
+        common: AscendCommonAttentionMetadata,
+    ) -> AscendMLADCPFlashMetadata:
+        batch = common.num_reqs
+        tokens = max(common.num_actual_tokens, common.num_input_tokens)
+        table = common.block_table_tensor[:batch]
+        block_size = self.kernel_block_size or self.kv_cache_spec.block_size
+        key = "dcp", batch, tokens, table.shape[1]
+        if key not in self._flash_buffers:
+            rows = batch + 1
+            int_args = {"dtype": torch.int32, "device": self.device}
+            float_args = {"dtype": self.kv_cache_spec.dtype, "device": self.device}
+            words = ((36 + 72) * rows + 1) * 16
+            words = cdiv(words, 4096) * 4096
+            current_table_width = max(1, cdiv(tokens, block_size))
+            current_blocks = max(1, cdiv(tokens, block_size) + batch)
+            self._flash_buffers[key] = AscendMLADCPFlashMetadata(
+                query=torch.empty((tokens, self.flash_num_heads, 576), **float_args),
+                schedule=torch.empty(words, **int_args),
+                cu=torch.zeros(rows + 1, **int_args),
+                used_q=torch.zeros(rows, **int_args),
+                cache_lens=torch.zeros(rows, **int_args),
+                block_table=torch.zeros((rows, table.shape[1]), **int_args),
+                slots=torch.full((tokens,), -1, dtype=torch.int64, device=self.device),
+                live_boundaries=torch.zeros(tokens + 1, **int_args),
+                token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
+                positions=torch.zeros(tokens, dtype=torch.int64, device=self.device),
+                attn_mask=self._flash_attn_mask,
+                max_query_len=tokens,
+                max_seq_len=table.shape[1] * block_size,
+                is_prefill=common.max_query_len > self.decode_threshold,
+                current_schedule=torch.empty(words, **int_args),
+                history_cache_lens=torch.zeros(rows, **int_args),
+                partial_token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
+                current_block_table=torch.zeros((rows, current_table_width), **int_args),
+                current_slots=torch.full((tokens,), -1, dtype=torch.int64, device=self.device),
+                current_kv_cache=torch.empty((current_blocks, block_size, 576), **float_args),
+                dcp_seq_lens_base=torch.zeros(rows, **int_args),
+                dcp_seq_lens_delta=torch.full((), -1, **int_args),
+                block_size=block_size,
+            )
+        flash = self._flash_buffers[key]
+        assert isinstance(flash, AscendMLADCPFlashMetadata)
+        flash.is_prefill = common.max_query_len > self.decode_threshold
+        # -1 selects the live common seq_lens. Speculative drafting replaces
+        # it with draft_index + 1 and provides an explicit device-side base.
+        flash.dcp_seq_lens_delta.fill_(-1)
+
+        def build_metadata() -> None:
+            flash.cu[: batch + 1].copy_(common.query_start_loc[: batch + 1])
+            flash.cu[batch + 1].fill_(tokens)
+            flash.used_q[:batch].copy_(flash.cu[1 : batch + 1] - flash.cu[:batch])
+            flash.used_q[:batch].masked_fill_(common.seq_lens[:batch] <= 0, 0)
+            flash.used_q[batch:].zero_()
+
+            effective_seq_lens = torch.where(
+                flash.dcp_seq_lens_delta >= 0,
+                flash.dcp_seq_lens_base[:batch] + flash.dcp_seq_lens_delta,
+                common.seq_lens[:batch],
+            )
+            local_full_lens = get_dcp_local_seq_lens(
+                effective_seq_lens,
+                self.dcp_size,
+                self.cp_local_block_size,
+            )[:, self.dcp_rank]
+            history_lens = (effective_seq_lens - flash.used_q[:batch]).clamp(min=0)
+            local_history_lens = get_dcp_local_seq_lens(
+                history_lens,
+                self.dcp_size,
+                self.cp_local_block_size,
+            )[:, self.dcp_rank]
+            flash.cache_lens[:batch].copy_(local_full_lens)
+            flash.cache_lens[batch:].zero_()
+            flash.history_cache_lens[:batch].copy_(local_history_lens)
+            flash.history_cache_lens[batch:].zero_()
+
+            flash.block_table[:batch].copy_(table)
+            flash.block_table[batch:].zero_()
+            flash.slots.fill_(-1)
+            slots = common.slot_mapping[:tokens]
+            flash.slots[: slots.shape[0]].copy_(slots)
+            flash.live_boundaries.zero_()
+            live_rows = (flash.used_q > 0).to(torch.int32)
+            flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live_rows)
+            flash.live_boundaries.scatter_add_(
+                0,
+                (flash.cu[:-1] + flash.used_q).long(),
+                -live_rows,
+            )
+            flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+            flash.slots.masked_fill_(~flash.token_live, -1)
+            flash.positions.zero_()
+            positions = common.positions[:tokens]
+            flash.positions[: positions.shape[0]].copy_(positions)
+
+            blocks_per_row = torch.div(
+                flash.used_q + block_size - 1,
+                block_size,
+                rounding_mode="floor",
+            )
+            block_offsets = torch.zeros_like(blocks_per_row)
+            torch.cumsum(blocks_per_row[:-1], dim=0, out=block_offsets[1:])
+            block_columns = torch.arange(
+                flash.current_block_table.shape[1],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            flash.current_block_table.copy_(
+                block_offsets.unsqueeze(1) + block_columns.unsqueeze(0)
+            )
+            flash.current_block_table.masked_fill_(
+                block_columns.unsqueeze(0) >= blocks_per_row.unsqueeze(1),
+                0,
+            )
+            token_indices = torch.arange(tokens, dtype=torch.int32, device=self.device)
+            token_rows = torch.searchsorted(
+                flash.cu[1:],
+                token_indices,
+                right=True,
+            ).long()
+            token_offsets = token_indices - flash.cu[token_rows]
+            flash.current_slots.copy_(
+                block_offsets[token_rows].long() * block_size + token_offsets.long()
+            )
+            flash.current_slots.masked_fill_(~flash.token_live, -1)
+
+            partial_lens = (
+                flash.history_cache_lens if common.causal else flash.cache_lens
+            )
+            flash.partial_token_live.copy_(
+                flash.token_live & (partial_lens[token_rows] > 0)
+            )
+            partial_schedule = torch.ops._C_ascend.flash_mla_with_kvcache_metadata(
+                partial_lens,
+                self.flash_num_heads * self.dcp_size,
+                1,
+                cu_seqlens_q=flash.cu,
+                seqused_q=flash.used_q,
+                max_seqlen_q=flash.max_query_len,
+                max_seqlen_kv=flash.max_seq_len,
+                head_dim_qk=576,
+                head_dim_v=512,
+                mask_mode=0,
+                layout_q="TND",
+            )
+            flash.schedule.copy_(partial_schedule)
+            if common.causal:
+                current_schedule = torch.ops._C_ascend.flash_mla_with_kvcache_metadata(
+                    flash.used_q,
+                    self.flash_num_heads,
+                    1,
+                    cu_seqlens_q=flash.cu,
+                    seqused_q=flash.used_q,
+                    max_seqlen_q=flash.max_query_len,
+                    max_seqlen_kv=flash.max_query_len,
+                    head_dim_qk=576,
+                    head_dim_v=512,
+                    mask_mode=3,
+                    layout_q="TND",
+                )
+                flash.current_schedule.copy_(current_schedule)
+
+        if self._device_metadata_enabled:
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.ATTENTION,
+                    build_metadata,
+                    id(flash.schedule),
+                ),
+            )
+        else:
+            build_metadata()
+        return flash
 
     def build_chunked_metadata(
         self,
@@ -223,6 +458,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            return
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
@@ -329,6 +566,191 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 torch.npu.graph_task_update_end(update_stream)
 
                 event.record(update_stream)
+
+    def _run_dcp_flash_mla(
+        self,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        *,
+        block_table: torch.Tensor,
+        cache_lens: torch.Tensor,
+        flash: AscendMLADCPFlashMetadata,
+        schedule: torch.Tensor,
+        mask_mode: int,
+        max_seqlen_kv: int,
+        token_has_kv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output, softmax_lse = torch.ops._C_ascend.flash_mla_with_kvcache(
+            query,
+            kv_cache.unsqueeze(1),
+            block_table=block_table,
+            cache_seqlens=cache_lens,
+            cu_seqlens_q=flash.cu,
+            seqused_q=flash.used_q,
+            attn_mask=flash.attn_mask if mask_mode == 3 else None,
+            metadata=schedule,
+            head_dim_v=512,
+            softmax_scale=self.scale,
+            mask_mode=mask_mode,
+            max_seqlen_q=flash.max_query_len,
+            max_seqlen_kv=max_seqlen_kv,
+            layout_q="TND",
+            layout_kv="PA_BNBD",
+            layout_out="NTD",
+            return_softmax_lse=True,
+        )
+        output = output.transpose(0, 1).contiguous()
+        if softmax_lse.dim() == 2:
+            softmax_lse = softmax_lse.transpose(0, 1).unsqueeze(-1)
+        elif softmax_lse.dim() == 3 and softmax_lse.shape[0] == query.shape[1]:
+            softmax_lse = softmax_lse.transpose(0, 1)
+        softmax_lse = softmax_lse.contiguous()
+        invalid = ~token_has_kv.view(-1, 1, 1)
+        output.masked_fill_(invalid, 0)
+        # The existing DCP merge kernels use +inf as the invalid-shard marker.
+        softmax_lse.masked_fill_(invalid, float("inf"))
+        return output, softmax_lse
+
+    def _forward_flash(
+        self,
+        layer_name,
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        output=None,
+    ):
+        if output is None:
+            raise ValueError("A5 Flash MLA requires an explicit output buffer.")
+        if attn_metadata is None:
+            return output.zero_()
+        flash = attn_metadata.flash
+        if not isinstance(flash, AscendMLADCPFlashMetadata):
+            raise RuntimeError(
+                "Flash MLA DCP requires AscendMLADCPFlashMetadata; "
+                "falling back to fused_infer_attention is not allowed."
+            )
+
+        num_tokens = flash.query.shape[0]
+        wait_for_device_metadata(
+            DeviceMetadataStage.ATTENTION,
+            id(flash.schedule),
+        )
+        if num_tokens == 0:
+            return output.zero_()
+
+        x, current_kv, current_k_pe = self._flash_mla_preprocess(
+            hidden_states,
+            flash,
+        )
+        # Remote P/D loads and DSpark drafts are both represented as decode
+        # work here, so this wait must not depend on num_prefills.
+        # It is a no-op when the step has no connector metadata.
+        wait_for_kv_layer_from_connector(layer_name)
+        self._flash_mla_scatter_kv(
+            current_kv,
+            current_k_pe,
+            kv_cache,
+            flash.slots,
+        )
+        notify_kv_cache_written(layer_name)
+
+        gathered_query = self._dcp_all_gather(flash.query, dim=1)
+        if not attn_metadata.causal:
+            local_output, local_lse = self._run_dcp_flash_mla(
+                gathered_query,
+                kv_cache,
+                block_table=flash.block_table,
+                cache_lens=flash.cache_lens,
+                flash=flash,
+                schedule=flash.schedule,
+                mask_mode=0,
+                max_seqlen_kv=flash.max_seq_len,
+                token_has_kv=flash.partial_token_live,
+            )
+            latent = self._merge_dcp_attention_output(
+                local_output,
+                local_lse,
+                self.kv_lora_rank,
+            )
+            result = self._flash_mla_postprocess(
+                x,
+                latent,
+                flash,
+                output,
+                batch_major=True,
+            )
+            maybe_save_kv_layer_to_connector(layer_name, [kv_cache])
+            return result
+
+        history_output, history_lse = self._run_dcp_flash_mla(
+            gathered_query,
+            kv_cache,
+            block_table=flash.block_table,
+            cache_lens=flash.history_cache_lens,
+            flash=flash,
+            schedule=flash.schedule,
+            mask_mode=0,
+            max_seqlen_kv=flash.max_seq_len,
+            token_has_kv=flash.partial_token_live,
+        )
+
+        # Overlap the history all-to-all with causal attention on the replicated
+        # current query block, following the DCP split introduced in PR 16362.
+        main_stream = torch.npu.current_stream()
+        comm_stream = _dcp_mtp_comm_stream()
+        history_ready = main_stream.record_event()
+        history_output.record_stream(comm_stream)
+        history_lse.record_stream(comm_stream)
+        with torch.npu.stream(comm_stream):
+            comm_stream.wait_event(history_ready)
+            history_attn_out_lse = torch.ops.vllm.sfa_dcp_a2a_fused(
+                history_output.float(),
+                history_lse.float(),
+                self.dcp_size,
+                1,
+                self.dcp_group.unique_name if self.dcp_size > 1 else "",
+                return_lse=True,
+            )
+            history_comm_done = comm_stream.record_event()
+        history_attn_out_lse.record_stream(main_stream)
+
+        self._flash_mla_scatter_kv(
+            current_kv,
+            current_k_pe,
+            flash.current_kv_cache,
+            flash.current_slots,
+        )
+        current_output, current_lse = self._run_dcp_flash_mla(
+            flash.query,
+            flash.current_kv_cache,
+            block_table=flash.current_block_table,
+            cache_lens=flash.used_q,
+            flash=flash,
+            schedule=flash.current_schedule,
+            mask_mode=3,
+            max_seqlen_kv=flash.max_query_len,
+            token_has_kv=flash.token_live,
+        )
+
+        main_stream.wait_event(history_comm_done)
+        current_attn_out_lse = torch.cat(
+            (current_output.float(), current_lse.float()),
+            dim=-1,
+        )
+        latent = fused_sfa_dcp_lse_combine(
+            torch.stack((history_attn_out_lse, current_attn_out_lse)),
+            self.kv_lora_rank,
+            scatter_dim=0,
+        )
+        result = self._flash_mla_postprocess(
+            x,
+            latent,
+            flash,
+            output,
+            batch_major=True,
+        )
+        maybe_save_kv_layer_to_connector(layer_name, [kv_cache])
+        return result
 
     def get_context_seq_len_npu(self, index: int, attn_metadata: AscendMLAMetadata):
         prefill_metadata = attn_metadata.prefill

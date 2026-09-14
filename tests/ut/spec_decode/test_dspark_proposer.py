@@ -261,6 +261,7 @@ class _DSparkProposerTestBase:
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
         draft_sample_method: str = "greedy",
+        use_cuda_graph: bool = False,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace(), draft_sample_method)
@@ -279,6 +280,7 @@ class _DSparkProposerTestBase:
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
+            proposer.use_cuda_graph = use_cuda_graph
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
             proposer.model = (
@@ -575,7 +577,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             hf_config=hf_config,
             draft_sample_method=draft_sample_method,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        expected_max_query_tokens = _MAX_BATCH_SIZE * (1 + _NUM_SPECULATIVE_TOKENS)
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens

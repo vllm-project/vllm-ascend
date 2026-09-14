@@ -502,7 +502,7 @@ def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
         assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MTP"
 
 
-def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
+def test_k3_mla_pd_dcp2_tp2(k3_models: dict[str, str]) -> None:
     prefill_port, decode_port = get_open_port(), get_open_port()
     transfer_config = {
         "kv_connector": "MooncakeConnectorV1",
@@ -515,9 +515,13 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     # P also builds the draft KV that D consumes; both peers need the same
     # target/draft layer layout even though P only generates one token.
     prefill_args.pop("compilation_config")
+    prefill_args["decode_context_parallel_size"] = 2
+    prefill_args["cp_kv_cache_interleave_size"] = 128
     prefill_args["enforce_eager"] = True
     prefill_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_producer", kv_port=get_open_port())
     decode_args = _engine_args(k3_models, "mla", tp=2)
+    decode_args["decode_context_parallel_size"] = 2
+    decode_args["cp_kv_cache_interleave_size"] = 128
     decode_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_consumer", kv_port=get_open_port())
     servers = [
         [k3_models["target"], "--port", str(prefill_port), *_serve_args(prefill_args)],
@@ -525,7 +529,7 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     ]
     # Use the normal P/D transfer protocol directly so missing transfer metadata
     # cannot silently fall back to local prefill and make this test pass.
-    with RemotePDServer(servers):
+    with RemotePDServer(servers, env_dict={"VLLM_ASCEND_ENABLE_FLASH_MLA": "1"}):
         prefill_url = f"http://127.0.0.1:{prefill_port}/v1/completions"
         decode_url = f"http://127.0.0.1:{decode_port}/v1/completions"
         prompt = _prompt(129, salt=129)["prompt_token_ids"]

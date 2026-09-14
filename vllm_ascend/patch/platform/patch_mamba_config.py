@@ -8,6 +8,8 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend import envs
+
 
 def _get_sparse_index_kpool(model_config) -> int | None:
     """Return the active sparse index-kpool ratio, if configured."""
@@ -108,7 +110,14 @@ def verify_and_update_config(cls, vllm_config) -> None:
         attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
     index_kpool = _get_sparse_index_kpool(model_config)
-    if index_kpool is not None:
+    if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        # Packed attention pages must cover both convolution and SSM state.
+        attn_block_size = kernel_block_size * cdiv(
+            mamba_raw_page_size,
+            kernel_block_size * attn_token_page_size,
+        )
+        cache_config.block_size = max(cache_config.block_size or 0, attn_block_size)
+    elif index_kpool is not None:
         # The compressed indexer storage block is consumed by a CANN kernel
         # whose block size must be a multiple of 16. Keep the scheduler block
         # C128-aligned while making block_size / index_kpool C16-aligned too.
@@ -147,12 +156,16 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # same large-page class as attention. Preserve the generic Ascend SSM+conv
     # layout for other hybrid models.
     target_mamba_page_size = (
-        max(attn_page_size, mamba_raw_page_size) if index_kpool is not None else attn_page_size + conv_block_page_size
+        max(attn_page_size, mamba_raw_page_size)
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA or index_kpool is not None
+        else attn_page_size + conv_block_page_size
     )
     if cache_config.mamba_page_size_padded is None or cache_config.mamba_page_size_padded != target_mamba_page_size:
         cache_config.mamba_page_size_padded = target_mamba_page_size
         padding_bytes = (
-            target_mamba_page_size - mamba_raw_page_size if index_kpool is not None else conv_block_page_size
+            target_mamba_page_size - mamba_raw_page_size
+            if envs.VLLM_ASCEND_ENABLE_FLASH_MLA or index_kpool is not None
+            else conv_block_page_size
         )
         mamba_padding_pct = 100 * padding_bytes / target_mamba_page_size
         logger.info(
