@@ -1320,6 +1320,8 @@ def refresh_block_size(vllm_config):
         # Hybrid attention+mamba models rely on the model-specific sizing
         # logic rather than the generic platform default.
         return
+    if cache_config.user_specified_block_size:
+        return
 
     if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:

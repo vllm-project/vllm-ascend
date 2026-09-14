@@ -344,6 +344,40 @@ def _make_coordinator_for_effective_block_size(
     return coordinator
 
 
+@pytest.mark.parametrize("prefix_match_unit,expected_hash", [(None, 128), (64, 64)])
+def test_dcp1_hybrid_hash_unit_divides_every_group(monkeypatch, prefix_match_unit, expected_hash):
+    config = _make_vllm_config(enable_prefix_caching=True, dcp=1, block_size=128)
+    config.cache_config.prefix_match_unit = prefix_match_unit
+    cache = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.bfloat16,
+                )
+            ),
+            SimpleNamespace(
+                kv_cache_spec=MambaSpec(
+                    block_size=3072,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                )
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils._orig_resolve_kv_cache_block_sizes",
+        lambda *_: (3072, 3072),
+    )
+    assert _ascend_resolve_kv_cache_block_sizes(cache, config) == (3072, expected_hash)
+    config.cache_config.prefix_match_unit = 96
+    with pytest.raises(ValueError, match="Invalid prefix_match_unit"):
+        _ascend_resolve_kv_cache_block_sizes(cache, config)
+
+
 def test_ascend_mla_page_size_includes_scale_storage() -> None:
     spec = AscendMLAAttentionSpec(
         block_size=16,
@@ -734,7 +768,8 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
     assert groups is not None
     expected_num_blocks = 100
-    bytes_per_block = page_size * (24 + 5 * replication_size)
+    draft_page_size = 384 * 1 * (64 + 64) * 2 * replication_size
+    bytes_per_block = page_size * 24 + draft_page_size * 5
     monkeypatch.setattr(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
@@ -750,9 +785,7 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     assert len(config.kv_cache_tensors) == 29
     assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
     assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
-    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [
-        page_size * replication_size * expected_num_blocks
-    ] * 5
+    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [draft_page_size * expected_num_blocks] * 5
     assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
 
 
@@ -768,7 +801,7 @@ def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
     assert {spec.block_size for spec in unified.values()} == {384}
     assert {
         spec.page_size_bytes for spec in unified.values() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
-    } == {4 * 488448}
+    } == {4 * 384 * 128 * 2}
 
 
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
@@ -1331,3 +1364,25 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
     )
     assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
+
+
+@pytest.mark.parametrize("replication_size", [1, 2, 8])
+@pytest.mark.parametrize("block_size", [128, 384])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("head_size_v", [64, 128])
+def test_replicated_draft_page_sizes_match_base_spec(replication_size, block_size, padded, head_size_v):
+    base = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=8,
+        head_size=64,
+        head_size_v=head_size_v,
+        dtype=torch.bfloat16,
+    )
+    if padded:
+        base = replace(base, page_size_padded=base.unpadded_page_size_bytes + 4096)
+    spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(base, replication_size)
+    assert spec.block_size == block_size
+    assert spec.lane_page_size_bytes == base.unpadded_page_size_bytes
+    assert spec.page_size_bytes == replication_size * base.unpadded_page_size_bytes
+    assert spec.real_page_size_bytes == replication_size * base.real_page_size_bytes
+    assert spec.unpadded_page_size_bytes == replication_size * base.unpadded_page_size_bytes

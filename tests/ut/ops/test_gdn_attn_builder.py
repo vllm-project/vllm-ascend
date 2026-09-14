@@ -316,28 +316,6 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
-def test_dspark_reorder_threshold_includes_target_token():
-    vllm_config = _make_vllm_config(num_speculative_tokens=7)
-    vllm_config.speculative_config.method = "dspark"
-    vllm_config.parallel_config.decode_context_parallel_size = 16
-    spec = MambaSpec(
-        block_size=16,
-        shapes=((1,), (1,)),
-        dtypes=(torch.float32,),
-        mamba_cache_mode="none",
-        num_speculative_blocks=0,
-    )
-
-    builder = AscendGDNAttentionMetadataBuilder(
-        spec,
-        ["layer0"],
-        vllm_config,
-        torch.device("cpu"),
-    )
-
-    assert builder.reorder_batch_threshold == 8
-
-
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -1142,3 +1120,22 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
+
+
+@pytest.mark.parametrize("sample_from_anchor", [False, True])
+def test_dspark_target_reorder_threshold_includes_base_token_regardless_of_anchor(
+    sample_from_anchor: bool,
+):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+    )
+    builder.vllm_config.speculative_config.method = "dspark"
+    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
+    )
+
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+    assert builder.reorder_batch_threshold == 8

@@ -113,7 +113,7 @@ class TestCommonCP(unittest.TestCase):
         expected = torch.empty(3, 4, 64, dtype=torch.float32)
         fused_a2a.return_value = expected
 
-        actual = impl._merge_dcp_attention_output(output, lse, 64)
+        actual = impl._merge_dcp_attention_output(output, lse)
 
         self.assertIs(actual, expected)
         fused_a2a.assert_called_once()
