@@ -81,6 +81,26 @@ def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
     )
 
 
+def _should_reshape_wo_a_to_3d(
+    prefix: str,
+    quant_config: QuantizationConfig | None,
+    dtype: torch.dtype,
+) -> bool:
+    """Whether a DSV4 wo_a weight must be reshaped to
+    [n_local_groups, hidden_size, o_lora_rank] for npu_transpose_batchmatmul.
+    """
+    supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
+        HardwareCapability.DYNAMIC_MX_QUANT_FUSION
+    )
+    reshape_bf16_wo_a = (
+        "wo_a" in prefix
+        and supports_dynamic_mx_quant_fusion
+        and quant_config is None
+        and dtype == torch.bfloat16
+    )
+    return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
+
+
 class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
@@ -104,6 +124,17 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             # shared_expert_gate in ND format, leaving non-310P policy intact.
             if not keep_nd_weight:
                 layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+        # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
+        # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
+        # applies to load-format=dummy too, where weight_loader never runs.
+        if (
+            _should_reshape_wo_a_to_3d(layer.prefix, layer.quant_config, layer.weight.data.dtype)
+            and layer.weight.data.ndim == 2
+        ):
+            layer.weight.data = (
+                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
+            )
 
     def apply(
         self,
@@ -460,21 +491,12 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
-            HardwareCapability.DYNAMIC_MX_QUANT_FUSION
-        )
-        reshape_bf16_wo_a = (
-            "wo_a" in self.prefix
-            and supports_dynamic_mx_quant_fusion
-            and self.quant_config is None
-            and loaded_weight.dtype == torch.bfloat16
-        )
-        if "wo_a" in self.prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a):
+        if _should_reshape_wo_a_to_3d(self.prefix, self.quant_config, loaded_weight.dtype):
             if self.weight.ndim == 2:
+                # Keep the raw 2D layout here. The 2D -> 3D reshape happens in
+                # process_weights_after_loading so it also runs for
+                # load-format=dummy, where weight_loader is never called.
                 super().weight_loader(param, loaded_weight)
-                self.weight.data = (
-                    self.weight.data.view(self.n_local_groups, self.o_lora_rank, -1).transpose(2, 1).contiguous()
-                )
             else:
                 # In RL update flows, wo_a can be loaded again after being
                 # transformed into [n_local_groups, hidden_size, o_lora_rank].
