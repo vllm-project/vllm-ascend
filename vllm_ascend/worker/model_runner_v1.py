@@ -4388,6 +4388,10 @@ class NPUModelRunner(GPUModelRunner):
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         )
 
+    # Declared here because _uses_sfa_kv_parent below reads it before the
+    # assignment inside _allocate_kv_cache_tensors, which mypy cannot infer.
+    hybrid_with_attn_and_mamba: bool
+
     def _uses_sfa_kv_parent(self, layer_name: str, spec: AttentionSpec) -> bool:
         # Model-level use_sparse also covers heterogeneous GQA draft layers.
         # KVPP (ascend_config.kvpp_config.size > 1) short-circuits allocation
