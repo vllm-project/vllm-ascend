@@ -1,4 +1,4 @@
-test_name: "DeepSeek-V4-Pro-w4a8-prefix-cache-PD-MRV2"
+test_name: "DSV4-Pro-W4A8-1M-PD-MRV2"
 model: "Eco-Tech/DeepSeek-V4-Pro-0813-w4a8"
 num_nodes: 4
 npu_per_node: 16
@@ -13,37 +13,37 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 4
-    dp_size_local: 2
+    dp_size: 2
+    dp_size_local: 1
     dp_rank_start: 0
-    tp_size: 8
+    tp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 4
-    dp_size_local: 2
-    dp_rank_start: 2
-    tp_size: 8
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 16
-    dp_size_local: 8
+    dp_size: 2
+    dp_size_local: 1
     dp_rank_start: 0
-    tp_size: 2
+    tp_size: 16
     dp_address: "${NODE_2_IP}"
 
   - node_index: 3
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 16
-    dp_size_local: 8
-    dp_rank_start: 8
-    tp_size: 2
+    dp_size: 2
+    dp_size_local: 1
+    dp_rank_start: 1
+    tp_size: 16
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
@@ -57,20 +57,17 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
 
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_CONNECT_TIMEOUT: "6000"
-  HCCL_BUFFSIZE: "1024"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
   <<: *env_common
   HCCL_CONNECT_TIMEOUT: "1200"
-  HCCL_BUFFSIZE: "1800"
 
 templates:
   - node_index: 0
@@ -95,9 +92,9 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "1048576"
       - --max-num-batched-tokens
-      - "4096"
+      - "2048"
       - --max-num-seqs
       - "16"
       - --no-disable-hybrid-kv-cache-manager
@@ -116,14 +113,14 @@ templates:
       - --quantization
       - "ascend"
       - --block-size
-      - "32"
+      - "128"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true,"enable_fused_mc2":1}'
+      - '{"enable_cpu_binding": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 2, "tp_size": 16}}}'
 
   - node_index: 1
     envs:
@@ -147,9 +144,9 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "1048576"
       - --max-num-batched-tokens
-      - "4096"
+      - "2048"
       - --max-num-seqs
       - "16"
       - --no-disable-hybrid-kv-cache-manager
@@ -168,14 +165,14 @@ templates:
       - --quantization
       - "ascend"
       - --block-size
-      - "32"
+      - "128"
       - --enforce-eager
       - --speculative-config
       - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true,"enable_fused_mc2":1}'
+      - '{"enable_cpu_binding": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 2, "tp_size": 16}}}'
 
   - node_index: 2
     envs:
@@ -199,14 +196,14 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "1048576"
       - --max-num-batched-tokens
-      - "180"
+      - "384"
       - --max-num-seqs
-      - "30"
+      - "60"
       - --async-scheduling
       - --block-size
-      - "32"
+      - "128"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -228,9 +225,9 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30800", "engine_id": "8", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30800", "engine_id": "8", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 2, "tp_size": 16}}}'
       - --additional-config
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":false,"recompute_scheduler_enable":true}'
 
   - node_index: 3
     envs:
@@ -254,14 +251,14 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "204800"
+      - "1048576"
       - --max-num-batched-tokens
-      - "180"
+      - "384"
       - --max-num-seqs
-      - "30"
+      - "60"
       - --async-scheduling
       - --block-size
-      - "32"
+      - "128"
       - --no-enable-prefix-caching
       - --tokenizer-mode
       - "deepseek_v4"
@@ -283,42 +280,30 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30800", "engine_id": "8", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30800", "engine_id": "8", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 2, "tp_size": 16}}}'
       - --additional-config
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":false,"recompute_scheduler_enable":true}'
 
 benchmarks:
-  perf_TPOT50_128k_1_prefix_warmup:
+  perf_1M_1k_prefix99_warmup:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    dataset_path: vllm-ascend/GSM8K-in1M-bs4-prefix99-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 4
+    num_prompts: 1
     max_out_len: 1
-    batch_size: 4
+    batch_size: 1
     request_rate: 0
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90:
+  perf_1M_1k_prefix99:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    dataset_path: vllm-ascend/GSM8K-in1M-bs4-prefix99-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 192
+    num_prompts: 4
     max_out_len: 1024
-    batch_size: 48
-    request_rate: 1
-    baseline: 471.8498
+    batch_size: 1
+    request_rate: 0
+    baseline: 16.9460
     threshold: 0.95
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    temperature: 1.0
-    top_p: 1.0
-    thinking: "true"
-    max_out_len: 65536
-    batch_size: 32
-    baseline: 93.33
-    threshold: 10
