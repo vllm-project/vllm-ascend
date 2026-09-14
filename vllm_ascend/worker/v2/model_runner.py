@@ -420,6 +420,14 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL and not adaptive_verification_manager:
+            uniform_lengths_proven = (
+                self.speculative_config is None
+                and self.dp_size == 1
+                and self.pcp_manager is None
+                and not self.use_dcp
+                and self.decode_query_len == 1
+                and batch_desc.uniform_token_count == 1
+            )
             # This is only required for vllm-ascend.
             query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
                 num_tokens_after_padding,
@@ -428,6 +436,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc_np,
                 batch_desc.cg_mode,
                 batch_desc.num_reqs,
+                uniform_lengths_proven=uniform_lengths_proven,
             )
 
         query_start_loc = self.input_buffers.query_start_loc
@@ -783,6 +792,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        uniform_lengths_proven: bool = False,
     ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
@@ -793,7 +803,9 @@ class NPUModelRunner(GPUModelRunner):
         descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
         # This checks query lengths, not request phase: short prefills can also
         # match. Graph dispatch is responsible for excluding incompatible prefills.
-        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        has_uniform_decode_query_lens = uniform_lengths_proven or np.all(
+            np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len
+        )
         matches_uniform_decode_graph_shape = (
             has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
         )

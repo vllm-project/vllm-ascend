@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, _is_compatible
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+import vllm_ascend.worker.v2.model_runner as ascend_model_runner
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -101,6 +103,338 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+def _legacy_pad_query_start_loc_for_fia(
+    runner,
+    num_tokens_padded,
+    num_reqs_padded,
+    num_reqs,
+    query_start_loc_np,
+    cudagraph_runtime_mode=None,
+    batch_desc_num_reqs=None,
+):
+    descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
+    has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == runner.decode_query_len)
+    matches_uniform_decode_graph_shape = (
+        has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * runner.decode_query_len
+    )
+    if (
+        cudagraph_runtime_mode == CUDAGraphMode.FULL
+        and runner.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        and not matches_uniform_decode_graph_shape
+    ):
+        num_reqs_padded = num_reqs
+    else:
+        num_reqs_padded = descriptor_num_reqs
+
+    if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * runner.decode_query_len:
+        assert num_reqs <= num_reqs_padded
+        last_loc = query_start_loc_np[num_reqs]
+        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
+            np.arange(1, num_reqs_padded + 1 - num_reqs) * runner.decode_query_len + last_loc
+        )
+    else:
+        assert num_reqs == num_reqs_padded
+        query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
+        num_reqs_padded = num_reqs_padded + 1
+
+    return query_start_loc_np, num_reqs_padded
+
+
+@pytest.mark.parametrize(
+    "dtype, query_lens, decode_query_len, num_tokens_padded, descriptor_num_reqs, strided",
+    [
+        (np.int32, [1, 1], 1, 4, 4, False),
+        (np.int64, [2, 1], 1, 4, 4, False),
+        (np.int32, [2, 4], 4, 8, 2, True),
+        (np.int64, [], 1, 0, 0, True),
+    ],
+    ids=["u-none-d1-padded", "mixed-short-prefill", "strided-int32", "zero-req-int64-strided"],
+)
+def test_pad_query_start_loc_unproven_matches_legacy(
+    dtype, query_lens, decode_query_len, num_tokens_padded, descriptor_num_reqs, strided
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.decode_query_len = decode_query_len
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    num_reqs = len(query_lens)
+
+    size = descriptor_num_reqs + 3
+    expected = np.full(size * (2 if strided else 1), -7, dtype=dtype)
+    actual = expected.copy()
+    expected_view = expected[::2] if strided else expected
+    actual_view = actual[::2] if strided else actual
+    expected_view[: num_reqs + 1] = np.cumsum([0, *query_lens], dtype=dtype)
+    actual_view[: num_reqs + 1] = expected_view[: num_reqs + 1]
+
+    legacy_array, legacy_num_reqs_padded = _legacy_pad_query_start_loc_for_fia(
+        runner,
+        num_tokens_padded,
+        descriptor_num_reqs,
+        num_reqs,
+        expected_view,
+        CUDAGraphMode.FULL,
+        descriptor_num_reqs,
+    )
+    patched_array, patched_num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded,
+        descriptor_num_reqs,
+        num_reqs,
+        actual_view,
+        CUDAGraphMode.FULL,
+        descriptor_num_reqs,
+    )
+
+    assert patched_array is actual_view
+    assert legacy_array is expected_view
+    assert patched_array.shape == legacy_array.shape
+    assert patched_array.strides == legacy_array.strides
+    assert patched_num_reqs_padded == legacy_num_reqs_padded
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_pad_query_start_loc_uniform_certificate_skips_diff_and_preserves_descriptor_shape():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.decode_query_len = 1
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    storage = np.full(12, -1, dtype=np.int32)
+    query_start_loc = storage[::2]
+    query_start_loc[:3] = [0, 1, 2]
+
+    with (
+        patch.object(ascend_model_runner.np, "diff", side_effect=AssertionError("diff should be skipped")),
+        patch.object(ascend_model_runner.np, "all", side_effect=AssertionError("all should be skipped")),
+    ):
+        actual, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+            num_tokens_padded=4,
+            num_reqs_padded=4,
+            num_reqs=2,
+            query_start_loc_np=query_start_loc,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_desc_num_reqs=4,
+            uniform_lengths_proven=True,
+        )
+
+    assert actual is query_start_loc
+    assert num_reqs_padded == 4
+    assert actual.strides == (storage.itemsize * 2,)
+    np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+def test_cudagraph_compatibility_rejects_incompatible_uniform_u1():
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=4,
+        uniform_token_count=1,
+    )
+
+    assert _is_compatible(desc, 2, 2, 1, 0, None, 1)
+    assert not _is_compatible(desc, 2, 2, None, 0, None, 1)
+    assert not _is_compatible(desc, 2, 4, 2, 0, None, 1)
+
+
+class _StopAtQueryStartTransfer(Exception):
+    pass
+
+
+def _run_prepare_inputs_until_query_start_transfer(
+    query_lens,
+    *,
+    cg_mode=CUDAGraphMode.FULL,
+    descriptor_num_tokens=4,
+    descriptor_num_reqs=4,
+    descriptor_uniform_token_count=1,
+    runner_overrides=None,
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.max_num_reqs = 8
+    runner.device = "cpu"
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    runner.speculative_config = None
+    runner.dp_size = 1
+    runner.pcp_manager = None
+    runner.use_dcp = False
+    runner.decode_query_len = 1
+    runner.adaptive_verification = None
+    runner.input_buffers = SimpleNamespace(
+        query_start_loc=torch.empty(runner.max_num_reqs + 2, dtype=torch.int32),
+        seq_lens_np=np.zeros(runner.max_num_reqs, dtype=np.int32),
+    )
+    runner._update_seq_lens_cpu = Mock()
+    for name, value in (runner_overrides or {}).items():
+        setattr(runner, name, value)
+
+    req_ids = list(range(len(query_lens)))
+    batch_req_state = SimpleNamespace(
+        num_tokens=sum(query_lens),
+        req_ids=req_ids,
+        num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
+        idx_mapping_np=np.arange(len(query_lens), dtype=np.int32),
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={},
+        has_structured_output_requests=False,
+    )
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=descriptor_num_tokens,
+        num_reqs=descriptor_num_reqs,
+        uniform_token_count=descriptor_uniform_token_count,
+    )
+
+    captured = {}
+
+    def fake_async_copy_to_gpu(data, device=None, out=None):
+        if out is runner.input_buffers.query_start_loc:
+            captured["query_start_loc_np"] = data.copy()
+            captured["query_start_loc_out"] = out
+            raise _StopAtQueryStartTransfer
+        assert out is None
+        captured["idx_mapping_np"] = data.copy()
+        return torch.as_tensor(data, device=device)
+
+    original_diff = ascend_model_runner.np.diff
+    original_all = ascend_model_runner.np.all
+    original_helper = runner._pad_query_start_loc_for_fia
+    counts = {"diff": 0, "all": 0}
+    helper_returns = []
+
+    def counting_diff(*args, **kwargs):
+        counts["diff"] += 1
+        return original_diff(*args, **kwargs)
+
+    def counting_all(*args, **kwargs):
+        counts["all"] += 1
+        return original_all(*args, **kwargs)
+
+    def wrapped_helper(*args, **kwargs):
+        result = original_helper(*args, **kwargs)
+        helper_returns.append(result)
+        return result
+
+    with (
+        patch.object(runner, "_pad_query_start_loc_for_fia", side_effect=wrapped_helper) as helper,
+        patch.object(ascend_model_runner, "async_copy_to_gpu", side_effect=fake_async_copy_to_gpu),
+        patch.object(ascend_model_runner, "build_attn_state", return_value=object()) as build_attn_state,
+        patch.object(ascend_model_runner.np, "diff", side_effect=counting_diff),
+        patch.object(ascend_model_runner.np, "all", side_effect=counting_all),
+        pytest.raises(_StopAtQueryStartTransfer),
+    ):
+        runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+
+    return SimpleNamespace(
+        runner=runner,
+        batch_desc=batch_desc,
+        captured=captured,
+        counts=counts,
+        helper=helper,
+        helper_returns=helper_returns,
+        build_attn_state=build_attn_state,
+    )
+
+
+def test_prepare_inputs_uniform_certificate_full_u1_skips_helper_predicate():
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=4,
+        uniform_token_count=1,
+    )
+    assert _is_compatible(desc, 2, 2, 1, 0, 1, 1)
+    assert _is_compatible(desc, 4, 4, 1, 0, 1, 1)
+
+    result = _run_prepare_inputs_until_query_start_transfer([1, 1])
+
+    result.runner._update_seq_lens_cpu.assert_called_once()
+    result.helper.assert_called_once()
+    args = result.helper.call_args.args
+    assert args[:3] == (4, 4, 2)
+    assert args[4:] == (CUDAGraphMode.FULL, 4)
+    assert result.helper.call_args.kwargs == {"uniform_lengths_proven": True}
+    assert result.counts == {"diff": 0, "all": 0}
+    assert result.helper_returns[0][1] == 4
+    np.testing.assert_array_equal(
+        result.captured["query_start_loc_np"][:5],
+        np.array([0, 1, 2, 3, 4], dtype=np.int32),
+    )
+
+
+def test_prepare_inputs_full_u_none_keeps_original_uniform_predicate_and_descriptor_shape():
+    result = _run_prepare_inputs_until_query_start_transfer(
+        [1, 1],
+        descriptor_uniform_token_count=None,
+    )
+
+    result.helper.assert_called_once()
+    assert result.helper.call_args.kwargs == {"uniform_lengths_proven": False}
+    assert result.counts == {"diff": 1, "all": 1}
+    assert result.helper_returns[0][1] == 4
+    np.testing.assert_array_equal(
+        result.captured["query_start_loc_np"][:5],
+        np.array([0, 1, 2, 3, 4], dtype=np.int32),
+    )
+
+
+def test_prepare_inputs_full_u_none_mixed_lengths_use_legacy_dummy_padding():
+    result = _run_prepare_inputs_until_query_start_transfer(
+        [2, 1],
+        descriptor_uniform_token_count=None,
+    )
+
+    result.helper.assert_called_once()
+    assert result.helper.call_args.kwargs == {"uniform_lengths_proven": False}
+    assert result.counts == {"diff": 1, "all": 1}
+    assert result.helper_returns[0][1] == 3
+    np.testing.assert_array_equal(
+        result.captured["query_start_loc_np"][:4],
+        np.array([0, 2, 3, 4], dtype=np.int32),
+    )
+
+
+@pytest.mark.parametrize(
+    "runner_overrides, descriptor_uniform_token_count",
+    [
+        ({"speculative_config": object()}, 1),
+        ({"dp_size": 2}, 1),
+        ({"pcp_manager": object()}, 1),
+        ({"use_dcp": True}, 1),
+        ({"decode_query_len": 2}, 1),
+        ({}, 2),
+    ],
+    ids=[
+        "speculative-config",
+        "dp-size",
+        "pcp-manager",
+        "dcp",
+        "decode-query-len",
+        "descriptor-u2",
+    ],
+)
+def test_prepare_inputs_uniform_certificate_false_for_each_gate(runner_overrides, descriptor_uniform_token_count):
+    result = _run_prepare_inputs_until_query_start_transfer(
+        [1, 1],
+        descriptor_uniform_token_count=descriptor_uniform_token_count,
+        runner_overrides=runner_overrides,
+    )
+
+    result.helper.assert_called_once()
+    assert result.helper.call_args.kwargs == {"uniform_lengths_proven": False}
+    assert result.counts == {"diff": 1, "all": 1}
+
+
+@pytest.mark.parametrize("cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE], ids=lambda mode: mode.name)
+def test_prepare_inputs_non_full_modes_skip_fia_helper_and_preserve_cumsum(cg_mode):
+    result = _run_prepare_inputs_until_query_start_transfer([1, 1], cg_mode=cg_mode)
+
+    result.helper.assert_not_called()
+    assert result.counts == {"diff": 0, "all": 0}
+    np.testing.assert_array_equal(
+        result.captured["query_start_loc_np"][:5],
+        np.array([0, 1, 2, 2, 2], dtype=np.int32),
+    )
 
 
 @pytest.mark.parametrize(
