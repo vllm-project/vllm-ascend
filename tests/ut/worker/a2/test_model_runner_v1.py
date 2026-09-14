@@ -69,6 +69,79 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
             runner._dummy_run(1)
 
 
+class TestMegaMoEDPMetadata(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce")
+    def test_idle_rank_uses_active_token_shape_and_graph_mode(
+        self,
+        mock_all_reduce,
+        mock_get_dp_group,
+        _mock_should_skip,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 3
+        runner.dp_rank = 1
+        runner.vllm_config = MagicMock()
+        mock_get_dp_group.return_value.cpu_group = object()
+
+        def populate_metadata(packed_tensor, group):
+            self.assertIs(group, mock_get_dp_group.return_value.cpu_group)
+            packed_tensor[0] = torch.tensor([4, 1, 8], dtype=torch.int32)
+            packed_tensor[1] = torch.tensor(
+                [CUDAGraphMode.FULL.value, CUDAGraphMode.NONE.value, CUDAGraphMode.FULL.value],
+                dtype=torch.int32,
+            )
+            packed_tensor[2] = torch.tensor([1, 0, 1], dtype=torch.int32)
+
+        mock_all_reduce.side_effect = populate_metadata
+
+        max_tokens, tokens_across_dp, graph_mode = runner._sync_metadata_across_dp(
+            num_tokens=1,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            is_dummy_run=True,
+        )
+
+        self.assertEqual(max_tokens, 8)
+        torch.testing.assert_close(tokens_across_dp, torch.tensor([4, 8, 8], dtype=torch.int32))
+        self.assertEqual(graph_mode, CUDAGraphMode.FULL)
+
+    @patch("vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_dp_group")
+    @patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce")
+    def test_all_dummy_ranks_preserve_capture_metadata(
+        self,
+        mock_all_reduce,
+        mock_get_dp_group,
+        _mock_should_skip,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_size = 2
+        runner.dp_rank = 0
+        runner.vllm_config = MagicMock()
+        mock_get_dp_group.return_value.cpu_group = object()
+
+        def populate_metadata(packed_tensor, _group):
+            packed_tensor[0] = torch.tensor([16, 8], dtype=torch.int32)
+            packed_tensor[1] = torch.tensor(
+                [CUDAGraphMode.FULL.value, CUDAGraphMode.FULL.value],
+                dtype=torch.int32,
+            )
+            packed_tensor[2].zero_()
+
+        mock_all_reduce.side_effect = populate_metadata
+
+        max_tokens, tokens_across_dp, graph_mode = runner._sync_metadata_across_dp(
+            num_tokens=16,
+            cudagraph_mode=CUDAGraphMode.FULL,
+            is_dummy_run=True,
+        )
+
+        self.assertEqual(max_tokens, 16)
+        torch.testing.assert_close(tokens_across_dp, torch.tensor([16, 8], dtype=torch.int32))
+        self.assertEqual(graph_mode, CUDAGraphMode.FULL)
+
+
 class TestNPUModelRunnerHiddenStateGather(unittest.TestCase):
     @patch("vllm_ascend.worker.model_runner_v1.tensor_model_parallel_all_gather")
     @patch("vllm_ascend.worker.model_runner_v1.get_forward_context")
