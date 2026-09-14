@@ -486,6 +486,59 @@ def test_mla_aux_capture_keeps_raw_prefix_sum(runtime, residual_kind):
     assert model._maybe_add_hidden_state([], 2, hidden, residual) == []
 
 
+@pytest.mark.parametrize("owns_speculator,use_spec_pp", [(True, True), (False, True), (False, False)])
+@pytest.mark.parametrize("prefill_chunk", [False, True])
+def test_mrv2_pp_refreshes_host_positions(owns_speculator, use_spec_pp, prefill_chunk):
+    events = []
+
+    class BaseStateRunner:
+        def postprocess_sampled(self, *args):
+            events.append("reject")
+            self.req_states.num_computed_tokens.gpu[0] = 11
+
+        def postprocess_num_computed_tokens(self, input_batch):
+            events.append("advance")
+            self.req_states.num_computed_tokens.gpu[0] = 27
+
+        def _copy_num_computed_tokens_to_cpu(self):
+            events.append("copy")
+            self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
+
+    namespace = {"BaseStateRunner": BaseStateRunner}
+    load_definitions(
+        "vllm_ascend/worker/v2/model_runner.py",
+        {"NPUModelRunner"},
+        namespace,
+        bases={"NPUModelRunner": "BaseStateRunner"},
+        methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
+    )
+    runner = namespace["NPUModelRunner"]()
+    runner.speculator = object() if owns_speculator else None
+    runner.use_spec_pp = use_spec_pp
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"r": 0},
+        num_computed_tokens=SimpleNamespace(gpu=torch.tensor([19])),
+        num_computed_tokens_cpu=torch.tensor([19]),
+    )
+    runner.num_computed_tokens_cpu = torch.tensor([-1])
+    runner.num_computed_tokens_event = SimpleNamespace(synchronize=lambda: events.append("wait"))
+    runner.input_buffers = SimpleNamespace(seq_lens_cpu=torch.zeros(1, dtype=torch.int64))
+    if prefill_chunk:
+        runner.postprocess_num_computed_tokens(SimpleNamespace())
+        expected_position = 27
+    else:
+        runner.postprocess_sampled(None, None, None, None)
+        expected_position = 11
+    scheduler = SimpleNamespace(num_scheduled_tokens={"r": 4}, scheduled_cached_reqs=SimpleNamespace(req_ids=["r"]))
+    runner._update_seq_lens_cpu(scheduler, ["r"])
+    if use_spec_pp:
+        assert events == ["advance" if prefill_chunk else "reject", "copy", "wait"]
+        assert runner.input_buffers.seq_lens_cpu[0] == expected_position + 4
+    else:
+        assert events == ["advance" if prefill_chunk else "reject"]
+        assert runner.input_buffers.seq_lens_cpu[0] == 23
+
+
 def graph_classes():
     class BaseGraphManager:
         def __init__(self):
