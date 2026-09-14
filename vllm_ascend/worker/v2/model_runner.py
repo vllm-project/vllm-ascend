@@ -432,16 +432,17 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
                 query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
 
-                if batch_desc.cg_mode == CUDAGraphMode.FULL:
-                    query_start_loc_np, num_reqs_padded = self._pad_adaptive_query_start_loc_for_fia(
-                        num_tokens_after_padding,
-                        num_reqs_padded,
-                        num_reqs,
-                        query_start_loc_np,
-                    )
+        if self.use_fia and self.adaptive_verification is not None:
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                query_start_loc_np, num_reqs_padded = self._pad_adaptive_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                )
 
-                query_start_loc = self.input_buffers.query_start_loc
-                async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+            query_start_loc = self.input_buffers.query_start_loc
+            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
