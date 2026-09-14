@@ -41,6 +41,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
     """
 
+    _mamba_group_ids: list[int]
+    _mamba_spec: MambaSpec | None
+
     def _get_mamba_group_info(self, kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
         if self._mamba_spec is None:
             group_ids: list[int] = []
