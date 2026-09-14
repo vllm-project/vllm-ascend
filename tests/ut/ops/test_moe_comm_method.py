@@ -140,7 +140,7 @@ class TestMoECommMethod(TestBase):
         comm_impl.swiglu_alpha = 1.702
         comm_impl.swiglu_beta = 1.0
         comm_impl.mega_moe = mega_moe
-        comm_impl.mega_moe_symm_buffer = object()
+        comm_impl.mega_moe_symm_buffer = MagicMock()
         comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
         comm_impl.token_dispatcher.max_num_tokens_per_rank = 128
         comm_impl.token_dispatcher.global_bs = 1
