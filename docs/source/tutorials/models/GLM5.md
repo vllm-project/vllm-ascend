@@ -20,14 +20,18 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
-- `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
-- `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
-- `GLM-5.1-w8a8c8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP). The weights have been verified on Atlas 800 A3 and are recommended for use.
-- `GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4). The weights have been verified on Ascend 950DT and are recommended for use.
+|  Weight Version                   | Hardware Requirements      | Download Links |
+|-----------------------------------|----------------------------|----------------|
+| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
+| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
+| `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
+| `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
+|`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
+|`GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized)| The weights have been verified on Ascend 950DT and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -199,7 +203,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
     export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -240,6 +245,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -274,7 +280,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_BUFFSIZE=200
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -351,6 +358,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
     --port 8077 \
@@ -393,6 +401,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
     --port 8077 \
@@ -447,7 +456,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -488,7 +498,8 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -671,7 +682,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -733,7 +745,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -795,7 +808,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -860,7 +874,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \

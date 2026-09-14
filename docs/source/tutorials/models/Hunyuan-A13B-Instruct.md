@@ -10,7 +10,13 @@ Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by T
 
 - `Hunyuan-A13B-Instruct`(BF16 version): [Download model weight](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct).
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+|  Weight Version                       | Download Links |
+|---------------------------------------|----------------|
+| `Hunyuan-A13B-Instruct`(BF16 version) | [ModelScope](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct) |
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### Installation
 
@@ -73,6 +79,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export HF_HOME=/data
 export MODEL_PATH="Hunyuan-A13B-Instruct"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL_PATH} \
     --trust-remote-code \
     --host 0.0.0.0 \
