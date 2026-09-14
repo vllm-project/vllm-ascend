@@ -48,22 +48,39 @@ def make_draft(config):
     return draft
 
 
-@pytest.mark.parametrize("architecture", ["K3DSparkModel", "Qwen3DSparkModel", "DSparkDraftModel"])
-def test_routes_only_k3_mla_to_specialization(monkeypatch, architecture):
+@pytest.mark.parametrize("target_use_mla", [False, True])
+@pytest.mark.parametrize(
+    "architecture,draft_use_mla",
+    [
+        ("K3DSparkModel", True),
+        ("OtherMLADraftModel", True),
+        ("K3DSparkModel", False),
+        ("Qwen3DSparkModel", False),
+        ("DSparkDraftModel", False),
+    ],
+)
+def test_routes_by_draft_mla_capability(monkeypatch, architecture, draft_use_mla, target_use_mla):
     mla_constructor = MagicMock()
     shared_constructor = MagicMock()
     monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
     monkeypatch.setattr(shared, "AscendDSparkSpeculator", shared_constructor)
     config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=target_use_mla),
         speculative_config=SimpleNamespace(
             method="dspark",
             use_dspark=lambda: True,
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
-        )
+            draft_model_config=SimpleNamespace(
+                use_mla=draft_use_mla,
+                hf_config=SimpleNamespace(architectures=[architecture]),
+            ),
+        ),
     )
-    init_speculator(config, torch.device("cpu"))
-    assert mla_constructor.call_count == (architecture == "K3DSparkModel")
-    assert shared_constructor.call_count == (architecture != "K3DSparkModel")
+    device = torch.device("cpu")
+    result = init_speculator(config, device)
+    selected, unused = (mla_constructor, shared_constructor) if draft_use_mla else (shared_constructor, mla_constructor)
+    selected.assert_called_once_with(config, device)
+    unused.assert_not_called()
+    assert result is selected.return_value
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
