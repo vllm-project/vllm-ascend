@@ -243,6 +243,43 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
 
+    def test_process_weights_fused_mc2_layout(self):
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        original_weight_shape = layer.w13_weight.shape
+        original_scale_shape = layer.w13_weight_scale.shape
+        mock_config = create_mock_ascend_config()
+        mock_config.enable_fused_mc2 = 1
+
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
+                return_value=mock_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.maybe_trans_nz",
+                side_effect=lambda tensor: tensor,
+            ) as mock_maybe_trans_nz,
+        ):
+            self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(
+            layer.w13_weight.shape,
+            (original_weight_shape[0], original_weight_shape[2], original_weight_shape[1]),
+        )
+        self.assertEqual(
+            layer.w13_weight_scale.shape,
+            (original_scale_shape[0], original_scale_shape[2] // 2, original_scale_shape[1], 2),
+        )
+        self.assertEqual(layer.w13_weight_scale.dtype, torch.float8_e8m0fnu)
+        self.assertEqual(layer.w2_weight_scale.dtype, torch.float8_e8m0fnu)
+        self.assertTrue(layer.w13_weight.is_contiguous())
+        self.assertTrue(layer.w2_weight.is_contiguous())
+        self.assertTrue(layer.w13_weight_scale.is_contiguous())
+        self.assertTrue(layer.w2_weight_scale.is_contiguous())
+        self.assertEqual(mock_maybe_trans_nz.call_count, 2)
+
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size

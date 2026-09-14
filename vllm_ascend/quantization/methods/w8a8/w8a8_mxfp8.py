@@ -32,7 +32,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -365,10 +365,22 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        if get_ascend_config().enable_fused_mc2 == 1:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            layer.w13_weight_scale.data = (
+                layer.w13_weight_scale.data.transpose(1, 2).contiguous().view(torch.float8_e8m0fnu)
+            )
+            layer.w2_weight_scale.data = (
+                layer.w2_weight_scale.data.transpose(1, 2).contiguous().view(torch.float8_e8m0fnu)
+            )
+        else:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
         # Mark as transformed
         layer._mxfp8_transformed = True

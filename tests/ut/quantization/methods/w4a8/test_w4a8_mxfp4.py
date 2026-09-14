@@ -120,6 +120,32 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
+    def test_process_weights_fused_mc2_layout(self, mock_npu, mock_get_ascend_config):
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        mock_config = create_mock_ascend_config()
+        mock_config.enable_fused_mc2 = 1
+        mock_get_ascend_config.return_value = mock_config
+        layer = nn.Module()
+        layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
+        layer.w2_weight = nn.Parameter(torch.randint(0, 255, (8, 128, 128), dtype=torch.uint8), requires_grad=False)
+        layer.w13_weight_scale = nn.Parameter(
+            torch.randint(0, 255, (8, 256, 4), dtype=torch.uint8), requires_grad=False
+        )
+        layer.w2_weight_scale = nn.Parameter(torch.randint(0, 255, (8, 128, 8), dtype=torch.uint8), requires_grad=False)
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.w13_weight.shape, (8, 64, 256))
+        self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
+        self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
+        self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
+        self.assertEqual(layer.w13_weight_scale.dtype, torch.float8_e8m0fnu)
+        self.assertEqual(layer.w2_weight_scale.dtype, torch.float8_e8m0fnu)
+        self.assertTrue(layer.w13_weight_scale.is_contiguous())
+        self.assertTrue(layer.w2_weight_scale.is_contiguous())
+
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
