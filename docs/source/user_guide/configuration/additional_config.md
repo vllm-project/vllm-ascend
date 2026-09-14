@@ -328,7 +328,7 @@ An example of additional configuration is as follows:
 }
 ```
 
-### KV layer parallelism (KVPP)
+### KV pipeline parallelism (KVPP)
 
 Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
 KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
