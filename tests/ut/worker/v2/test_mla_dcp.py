@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -227,3 +229,39 @@ def test_decode_builder_excludes_current_queries_from_history(monkeypatch, rank,
     assert result.cp_seq_len == [owned(129), owned(131), 0]
     assert result.cp_history_seq_len == [owned(128), owned(128), 0]
     assert result.actual_seq_lengths_q == [1, 4, 5]
+
+
+@pytest.mark.parametrize("query_width", [1, 3, 8])
+def test_dspark_dcp_graph_update_uses_request_lengths(monkeypatch, query_width):
+    from vllm_ascend.attention.context_parallel import mla_cp
+
+    num_reqs = 3
+    num_tokens = num_reqs * query_width
+    q = torch.empty(num_reqs, query_width, 2, 4)
+    decode = SimpleNamespace(cp_seq_len=[65, 128], actual_seq_lengths_q=[query_width * i for i in range(1, 4)])
+    event = Mock()
+    params = SimpleNamespace(
+        attn_params={num_tokens: [(q, q, q, q, 2, 1, "BSND", None, 0, 1.0, None, 128, [1, 1, 1], [1, 1, 1], q, q)]},
+        handles={num_tokens: [object()]},
+        events={num_tokens: [event]},
+        workspaces={num_tokens: None},
+    )
+    monkeypatch.setattr(mla_cp, "get_draft_graph_params", lambda: params)
+    monkeypatch.setattr(mla_cp, "_EXTRA_CTX", SimpleNamespace(is_draft_model=True, is_draft_model_prefill=False))
+    monkeypatch.setattr(torch.npu, "stream", lambda _: nullcontext())
+    monkeypatch.setattr(torch.npu, "graph_task_update_begin", Mock())
+    monkeypatch.setattr(torch.npu, "graph_task_update_end", Mock())
+    op = Mock()
+    monkeypatch.setattr(mla_cp.torch_npu, "npu_fused_infer_attention_score", SimpleNamespace(out=op))
+    stream = object()
+    AscendMlaDCPImpl.update_graph_params(
+        stream,
+        SimpleNamespace(),
+        num_tokens,
+        draft_attn_metadatas=[{"draft": SimpleNamespace(decode=decode)}],
+    )
+    assert op.call_args.kwargs["actual_seq_lengths_kv"] == [65, 128, 0]
+    assert op.call_args.kwargs["actual_seq_lengths"] == [query_width] * num_reqs
+    assert op.call_args.kwargs["sparse_mode"] == 0
+    assert op.call_args.kwargs["atten_mask"] is None
+    event.record.assert_called_once_with(stream)
