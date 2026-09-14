@@ -195,8 +195,6 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
-    # Model Runner V2 only. "default" keeps the upstream vLLM policy.
-    v2_policy: str = "default"
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -229,11 +227,6 @@ class EplbConfig:
             raise ValueError('eplb_heat_collection_stage must be one of ["all", "prefill", "decode"]')
         if self.load_collection_phase not in ["all", "prefill", "decode"]:
             raise ValueError('load_collection_phase must be one of ["all", "prefill", "decode"]')
-        if self.v2_policy not in [
-            "default",
-            "policy_swift_balancer",
-        ]:
-            raise ValueError("v2_policy must be one of default or policy_swift_balancer")
 
         logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)
@@ -371,8 +364,7 @@ class AscendConfig:
                 "num_redundant_experts": 0,
                 "eplb_policy_type": 2,
                 "eplb_heat_collection_stage": "all",
-                "load_collection_phase": "all",
-                "v2_policy": "default"
+                "load_collection_phase": "all"
             },
             "rejection_sampler_config": {
                 "enable_block_verify": false,
