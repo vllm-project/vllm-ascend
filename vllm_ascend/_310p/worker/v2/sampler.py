@@ -180,6 +180,32 @@ class Ascend310PSampler:
     def _any_random(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self._temperature_np[idx_mapping_np] >= _SAMPLING_EPS))
 
+    def apply_sampling_params(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> torch.Tensor:
+        """FP32 copy + temperature + top-k/top-p for MTP rejection verify.
+
+        Mirrors upstream ``Sampler.apply_sampling_params`` (without penalties /
+        logit bias) so ``RejectionSampler310V2`` matches MRV1 tempered verify.
+        """
+        self._maybe_bind_vocab_size(logits.shape[-1])
+        processed = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        if not self._batch_needs_logits_processing(idx_mapping_np):
+            return processed
+        _apply_temperature_pytorch(
+            processed,
+            expanded_idx_mapping,
+            self.sampling_states.temperature.gpu,
+        )
+        do_top_k = np.any(self._top_k_np[idx_mapping_np] != max(self.vocab_size, 1))
+        do_top_p = np.any(self._top_p_np[idx_mapping_np] != 1.0)
+        top_k = self.sampling_states.top_k.gpu[expanded_idx_mapping] if do_top_k else None
+        top_p = self.sampling_states.top_p.gpu[expanded_idx_mapping] if do_top_p else None
+        return apply_top_k_top_p(processed, top_k, top_p)
+
     def _build_row_generators(
         self,
         expanded_idx_mapping_np: np.ndarray,

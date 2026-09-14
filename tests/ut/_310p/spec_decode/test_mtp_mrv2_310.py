@@ -6,6 +6,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
@@ -15,6 +16,7 @@ from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import AutoRegressiveAclGr
 from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import AscendMTPSpeculator310
 from vllm_ascend._310p.worker.v2.spec_utils import (
     greedy_rejection_sample_cpu,
+    probabilistic_rejection_sample_cpu,
     set_draft_step_host,
     update_draft_inputs_cpu,
 )
@@ -39,6 +41,71 @@ class TestMRv2Mtp310(TestBase):
 
         self.assertEqual(num_sampled.tolist(), [2])
         self.assertEqual(sampled[0, :2].tolist(), [1, 2])
+
+    def test_probabilistic_rejection_accepts_when_u_below_p_draft(self):
+        """MRV1 IS_NGRAM: accept draft iff u < p(draft); forced u=0 always accepts."""
+        # After softmax, token1 dominates first row → p(draft=1) high.
+        target_logits = torch.tensor(
+            [
+                [0.0, 5.0, 0.0],
+                [0.0, 0.0, 5.0],
+            ],
+            dtype=torch.float32,
+        )
+        draft_sampled = torch.tensor([9, 1], dtype=torch.int32)  # draft at +1 is 1
+        cu_num_logits = torch.tensor([0, 2], dtype=torch.int32)
+        temperature_np = np.array([0.8], dtype=np.float32)
+        idx_mapping_np = np.array([0], dtype=np.int32)
+
+        with patch(
+            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
+            side_effect=[0.0, 0.99],  # accept draft; bonus near end of CDF → token 2
+        ):
+            sampled, num_sampled = probabilistic_rejection_sample_cpu(
+                target_logits,
+                draft_sampled,
+                cu_num_logits,
+                num_speculative_steps=1,
+                temperature_np=temperature_np,
+                idx_mapping_np=idx_mapping_np,
+                source_generators={},
+            )
+
+        self.assertEqual(int(num_sampled[0].item()), 2)
+        self.assertEqual(int(sampled[0, 0].item()), 1)  # accepted draft
+        self.assertEqual(int(sampled[0, 1].item()), 2)  # bonus from last logit row
+
+    def test_probabilistic_rejection_recovers_when_u_rejects_draft(self):
+        """u >= p(draft) → recovered token from residual (draft mass zeroed)."""
+        target_logits = torch.tensor(
+            [
+                [0.0, 5.0, 4.0],  # draft=1; residual keeps token 2
+                [1.0, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        draft_sampled = torch.tensor([0, 1], dtype=torch.int32)
+        cu_num_logits = torch.tensor([0, 2], dtype=torch.int32)
+        temperature_np = np.array([1.0], dtype=np.float32)
+        idx_mapping_np = np.array([0], dtype=np.int32)
+
+        with patch(
+            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
+            return_value=0.999,  # always reject / pick high CDF
+        ):
+            sampled, num_sampled = probabilistic_rejection_sample_cpu(
+                target_logits,
+                draft_sampled,
+                cu_num_logits,
+                num_speculative_steps=1,
+                temperature_np=temperature_np,
+                idx_mapping_np=idx_mapping_np,
+                source_generators={},
+            )
+
+        self.assertEqual(int(num_sampled[0].item()), 1)
+        # Recovered must not be the rejected draft token 1.
+        self.assertNotEqual(int(sampled[0, 0].item()), 1)
 
     def test_update_draft_inputs_uses_host_step_under_capture(self):
         num_reqs = 2

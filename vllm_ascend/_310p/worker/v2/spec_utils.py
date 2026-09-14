@@ -122,6 +122,10 @@ def get_num_sampled_and_rejected_cpu(
     return num_sampled_out, num_rejected.to(device=num_sampled.device)
 
 
+_SAMPLING_EPS = 1e-5
+_UNIFORM_TINY = float(torch.finfo(torch.float32).tiny)
+
+
 def greedy_rejection_sample_cpu(
     target_logits: torch.Tensor,
     draft_sampled: torch.Tensor,
@@ -168,6 +172,123 @@ def greedy_rejection_sample_cpu(
             sampled_cpu[req_idx, 0] = int(target_argmax_cpu[start])
             accepted = 1
         num_sampled_cpu[req_idx] = accepted
+
+    return (
+        sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+    )
+
+
+def _draw_uniform_cpu(generator: torch.Generator | None) -> float:
+    if generator is None:
+        u = torch.rand((), dtype=torch.float32)
+    else:
+        u = torch.rand((), dtype=torch.float32, generator=generator)
+    return float(u.clamp_min_(_UNIFORM_TINY).item())
+
+
+def _sample_from_probs_row_cpu(probs_row: torch.Tensor, generator: torch.Generator | None) -> int:
+    """Inverse-CDF sample one token from a 1-D probability row (CPU)."""
+    row = probs_row.detach().to(dtype=torch.float32, device="cpu")
+    total = float(row.sum().item())
+    if total <= 0.0:
+        return int(row.argmax().item())
+    u = _draw_uniform_cpu(generator) * total
+    cdf = row.cumsum(dim=-1)
+    return int(torch.searchsorted(cdf, torch.tensor([u], dtype=torch.float32), right=True).item())
+
+
+def probabilistic_rejection_sample_cpu(
+    target_logits: torch.Tensor,
+    draft_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_speculative_steps: int,
+    temperature_np: np.ndarray,
+    idx_mapping_np: np.ndarray,
+    source_generators: dict[int, torch.Generator],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MTP rejection with temperature (Leviathan, draft one-hot / IS_NGRAM).
+
+    Aligns with MRV1 ``rejection_random_sample_pytorch`` when ``draft_probs`` is
+    None: accept draft iff ``u < p_target(draft)``; on reject sample a recovered
+    token from the residual distribution; bonus token sampled from the last
+    logit row. Greedy requests (``temperature≈0``) keep argmax semantics.
+
+    ``target_logits`` must already include temperature / top-k / top-p processing.
+    """
+    from vllm_ascend._310p.sample.sampler import _prepare_cpu_generators_310p
+
+    cu_np = cu_num_logits.detach().cpu().numpy()
+    num_reqs = cu_np.shape[0] - 1
+    max_tokens = num_speculative_steps + 1
+    sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
+    num_sampled_cpu = torch.zeros(num_reqs, dtype=torch.int32)
+
+    # Softmax once on-device; per-step gathers stay cheap for small K.
+    probs = torch.softmax(target_logits, dim=-1, dtype=torch.float32)
+    target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
+    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32).numpy()
+
+    # Prepare CPU RNG keyed by request-state index (MRV1 generator cache).
+    sources = {int(req): gen for req, gen in source_generators.items()}
+    prepared = _prepare_cpu_generators_310p(sources) if sources else {}
+
+    for batch_idx in range(num_reqs):
+        start = int(cu_np[batch_idx])
+        end = int(cu_np[batch_idx + 1])
+        if end <= start:
+            continue
+        req_state_idx = int(idx_mapping_np[batch_idx])
+        is_greedy = float(temperature_np[req_state_idx]) < _SAMPLING_EPS
+        gen = prepared.get(req_state_idx)
+
+        accepted = 0
+        for logit_idx in range(start, end):
+            is_bonus = logit_idx >= end - 1
+            if is_greedy:
+                target_token = int(target_argmax_cpu[logit_idx])
+                if accepted < num_speculative_steps and not is_bonus:
+                    draft_token = int(draft_cpu[logit_idx + 1])
+                    if draft_token == target_token:
+                        sampled_cpu[batch_idx, accepted] = target_token
+                        accepted += 1
+                        continue
+                sampled_cpu[batch_idx, accepted] = target_token
+                accepted += 1
+                break
+
+            # Probabilistic (MRV1 IS_NGRAM / MTP): u < p(draft).
+            if accepted < num_speculative_steps and not is_bonus:
+                draft_token = int(draft_cpu[logit_idx + 1])
+                if draft_token < 0:
+                    # Invalid pad draft → force recover/bonus path.
+                    row = probs[logit_idx].detach().cpu()
+                    sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+                    accepted += 1
+                    break
+                p_draft = float(probs[logit_idx, draft_token].item())
+                u = _draw_uniform_cpu(gen)
+                if u < p_draft:
+                    sampled_cpu[batch_idx, accepted] = draft_token
+                    accepted += 1
+                    continue
+                # Reject: sample recovered token from residual (zero draft mass).
+                row = probs[logit_idx].detach().cpu().clone()
+                row[draft_token] = 0.0
+                sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+                accepted += 1
+                break
+
+            # Bonus token (all drafts accepted) or final logit.
+            row = probs[logit_idx].detach().cpu()
+            sampled_cpu[batch_idx, accepted] = _sample_from_probs_row_cpu(row, gen)
+            accepted += 1
+            break
+
+        if accepted == 0:
+            sampled_cpu[batch_idx, 0] = int(target_argmax_cpu[start])
+            accepted = 1
+        num_sampled_cpu[batch_idx] = accepted
 
     return (
         sampled_cpu.to(device=target_logits.device, non_blocking=True),
