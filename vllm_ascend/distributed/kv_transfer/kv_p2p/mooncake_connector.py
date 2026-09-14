@@ -2934,10 +2934,10 @@ class MooncakeConnectorWorker:
         use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
             self.kv_group2layeridx, self.block_size_scale
         )
-        local_block_ids = [
+        local_block_ids: list[list[int]] = [
             [] for _ in (self.kv_group2layeridx if use_transfer_group_block_ids else meta.local_block_ids)
         ]
-        remote_block_ids = [
+        remote_block_ids: list[list[int]] = [
             [] for _ in (self.kv_group2layeridx if use_transfer_group_block_ids else meta.remote_block_ids)
         ]
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
