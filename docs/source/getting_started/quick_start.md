@@ -8,7 +8,8 @@ This guide uses Qwen3-0.6B as an example to help you run your first offline infe
 - Python: {{ release_python_version }}
 - Docker
 - Supported hardware:
-{% include "getting_started/installation/supported_hardware.inc.md" %}
+
+{% filter indent(4, true) %}{% include "getting_started/installation/supported_hardware.inc.md" %}{% endfilter %}
 
 ??? note "Software stack included in the vLLM Ascend image"
 

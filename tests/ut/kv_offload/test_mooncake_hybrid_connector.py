@@ -1,3 +1,4 @@
+import queue
 import sys
 import threading
 import time
@@ -14,11 +15,16 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
+from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
+    KVCacheSendingThread,
+    KVCacheTaskTracker,
+    MooncakeAgentMetadata,
+    MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
 )
@@ -54,6 +60,78 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
         return thread
+
+    def test_group_transfer_and_completion(self):
+        thread = self._make_thread()
+        self.addCleanup(thread.executor.shutdown, wait=True)
+        thread.use_hybrid = True
+        thread.tp_rank = 0
+        thread._prefill_pp_size = 1
+        thread.hma_group_size = 2
+        thread.kv_cache_specs = [MagicMock(), MagicMock(spec=MambaSpec)]
+        thread.task_tracker = KVCacheTaskTracker()
+        thread.request_queue = queue.Queue()
+        thread.proc_not_transfer_request = {}
+        thread.proc_not_transfer_request_lock = threading.Lock()
+        thread.side_channel_port = thread.local_handshake_port = 32000
+        thread.local_engine_id = "decode"
+        thread.remote_metadata_lock = threading.Lock()
+        thread.kv_caches_base_addr = {
+            "decode": {32000: [0x1000, 0x2000, 0x3000]},
+            "prefill": {31002: [0x4000, 0x5000, 0x6000]},
+        }
+        thread.remote_te_port = {"prefill": {31002: 7777}}
+        # Two buffers share the first group's blocks; the state group has its own stride.
+        thread.addr_group_idx = [[0], [0], [1]]
+        thread.block_len_per_addr = [16, 8, 32]
+        thread.block_stride_per_addr = [32, 16, 64]
+        thread.engine = MagicMock()
+        thread._send_done_recv_signal = MagicMock()
+
+        for outcome in ("success", "empty", "failure"):
+            with self.subTest(outcome=outcome):
+                request_id = f"decode-{outcome}"
+                remote_request_id = f"prefill-{outcome}"
+                thread.engine.reset_mock()
+                thread.engine.batch_transfer_sync_read.return_value = -1 if outcome == "failure" else 0
+                thread._send_done_recv_signal.reset_mock()
+                thread.task_tracker.add_req_to_process(request_id)
+                thread.add_request(
+                    request_id=request_id,
+                    remote_request_id=remote_request_id,
+                    local_block_ids=([], []) if outcome == "empty" else ([2, 3], [4]),
+                    remote_block_ids=([1, 2], [3]),
+                    remote_engine_id="prefill",
+                    remote_host="192.0.2.1",
+                    remote_handshake_port=31002,
+                    offset=0,
+                    tp_num_need_pulls=1,
+                    all_task_done=True,
+                )
+                req_meta = thread.request_queue.get_nowait()
+                thread._mark_request_task_submitted(req_meta)
+                with patch(
+                    "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.logger.exception"
+                ) as log_exception:
+                    thread._handle_request(req_meta)
+                self.assertEqual(log_exception.call_count, int(outcome == "failure"))
+                if outcome == "empty":
+                    thread.engine.batch_transfer_sync_read.assert_not_called()
+                else:
+                    thread.engine.batch_transfer_sync_read.assert_called_once_with(
+                        "192.0.2.1:7777",
+                        [0x1040, 0x2020, 0x3100],
+                        [0x4020, 0x5010, 0x60C0],
+                        [32, 16, 32],
+                    )
+                thread._send_done_recv_signal.assert_called_once_with(remote_request_id, "192.0.2.1", 31002, {})
+                self.assertEqual(thread.get_and_clear_finished_requests(), {request_id})
+                self.assertEqual(thread.get_and_clear_finished_requests(), set())
+                self.assertFalse(thread.task_tracker.reqs_to_process)
+                self.assertFalse(thread.request_task_counts)
+                self.assertFalse(thread.finished_request_markers)
+                self.assertFalse(thread.proc_not_transfer_request)
+                self.assertEqual(thread.request_queue.unfinished_tasks, 0)
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
         expected_device_index = 5
@@ -242,6 +320,205 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.executor.submit.assert_called_once_with(thread._handle_peer_requests, peer_key)
 
 
+class TestMooncakeHybridConnectorWorker(unittest.TestCase):
+    def setUp(self):
+        for patcher in (
+            patch.dict("os.environ"),
+            patch.multiple(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
+                init_ascend_config=MagicMock(),
+                get_ascend_config=MagicMock(),
+                get_transfer_timeout_value=MagicMock(return_value=30),
+                get_ip=MagicMock(return_value="127.0.0.1"),
+                get_tp_group=MagicMock(),
+                get_pp_group=MagicMock(return_value=types.SimpleNamespace(rank_in_group=0)),
+                global_te=MagicMock(),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _make_worker(self, prefill_tp_size, decode_tp_size, tp_rank, pcp_size, pcp_rank, dp_rank, use_mamba, role):
+        tp_size = prefill_tp_size if role == "kv_producer" else decode_tp_size
+        dp_size = 2 if role == "kv_producer" else 1
+        extra_config = {
+            "prefill": {"tp_size": prefill_tp_size, "dp_size": 2},
+            "decode": {"tp_size": decode_tp_size, "dp_size": 1},
+        }
+        config = types.SimpleNamespace(
+            parallel_config=types.SimpleNamespace(
+                tensor_parallel_size=tp_size,
+                prefill_context_parallel_size=pcp_size,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_rank=dp_rank,
+                data_parallel_size=dp_size,
+                data_parallel_rank_local=dp_rank,
+                data_parallel_size_local=dp_size,
+            ),
+            kv_transfer_config=types.SimpleNamespace(
+                kv_role=role,
+                kv_port=31000 if role == "kv_producer" else 32000,
+                get_from_extra_config=extra_config.get,
+            ),
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=not use_mamba,
+                hf_config=types.SimpleNamespace(**({} if use_mamba else {"compress_ratios": [1, 4]})),
+                hf_text_config=types.SimpleNamespace(num_key_value_heads=8),
+            ),
+            cache_config=types.SimpleNamespace(block_size=128),
+            scheduler_config=types.SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        )
+        state_spec = (
+            MagicMock(spec=MambaSpec, block_size=128, shapes=((2, 2), (2, 2)), dtypes=(torch.float32, torch.float32))
+            if use_mamba
+            else types.SimpleNamespace(block_size=128)
+        )
+        cache_config = types.SimpleNamespace(
+            kv_cache_groups=[
+                types.SimpleNamespace(kv_cache_spec=types.SimpleNamespace(block_size=512), layer_names=["layer.0"]),
+                types.SimpleNamespace(kv_cache_spec=state_spec, layer_names=["layer.1"]),
+            ]
+        )
+        host = f"192.0.2.{pcp_rank * tp_size + tp_rank + 1}"
+        engine_id = f"{role}-{dp_rank}-{pcp_rank}-{tp_rank}"
+        with patch.multiple(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
+            get_tensor_model_parallel_rank=MagicMock(return_value=tp_rank),
+            get_tensor_model_parallel_world_size=MagicMock(return_value=tp_size),
+            get_pcp_group=MagicMock(return_value=types.SimpleNamespace(rank_in_group=pcp_rank, world_size=pcp_size)),
+            get_ip=MagicMock(return_value=host),
+        ):
+            worker = MooncakeConnectorWorker(config, engine_id, cache_config)
+            worker.use_sparse = False
+            if role == "kv_producer":
+                metadata = MooncakeAgentMetadata(engine_id, 7777, 128, [], 0, [], (0, 0), local_ip=host)
+                worker.kv_send_thread = KVCacheSendingThread(
+                    config,
+                    tp_rank,
+                    prefill_tp_size,
+                    engine_id,
+                    host,
+                    worker.side_channel_port,
+                    metadata,
+                    threading.Event(),
+                    {},
+                    pcp_rank,
+                )
+            else:
+                worker.kv_recv_thread = MagicMock()
+        return worker
+
+    def test_start_load_kv_replica_routing_and_completion(self):
+        cases = [
+            # PCP, P-TP, D-TP, P-DP rank, Mamba receive branch.
+            (1, 2, 2, 0, False),
+            (2, 2, 2, 0, False),
+            (1, 4, 2, 1, False),
+            (4, 4, 2, 1, False),
+            (1, 2, 2, 1, True),
+            (2, 2, 2, 1, True),
+        ]
+        for pcp_size, prefill_tp_size, decode_tp_size, dp_rank, use_mamba in cases:
+            with self.subTest(pcp_size=pcp_size, prefill_tp_size=prefill_tp_size, mamba=use_mamba):
+                senders: dict[int, MooncakeConnectorWorker] = {}
+                handshake_metadata = {}
+                for pcp_rank in range(pcp_size):
+                    for tp_rank in range(prefill_tp_size):
+                        worker = self._make_worker(
+                            prefill_tp_size,
+                            decode_tp_size,
+                            tp_rank,
+                            pcp_size,
+                            pcp_rank,
+                            dp_rank,
+                            use_mamba,
+                            "kv_producer",
+                        )
+                        self.assertNotIn(worker.handshake_port, senders)
+                        senders[worker.handshake_port] = worker
+                        key = (0, tp_rank) if pcp_size == 1 else (0, pcp_rank, tp_rank)
+                        handshake_metadata[key] = worker.kv_send_thread.metadata
+                        with (
+                            patch(
+                                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.zmq_ctx"
+                            ) as ctx,
+                            patch.object(worker.kv_send_thread, "run_busy_loop") as run_busy_loop,
+                        ):
+                            worker.kv_send_thread.run()
+                            self.assertEqual(
+                                ctx.call_args.args[1], f"tcp://{worker.side_channel_host}:{worker.handshake_port}"
+                            )
+                            run_busy_loop.assert_called_once()
+
+                scheduler = MooncakeConnectorScheduler(worker.vllm_config, "prefill", worker.kv_cache_config)
+                scheduler.set_xfer_handshake_metadata_from_workers(handshake_metadata)
+                base_port = 31000 + dp_rank * prefill_tp_size * pcp_size
+                self.assertEqual(scheduler.side_channel_port, base_port)
+                self.assertEqual(set(senders), set(range(base_port, base_port + prefill_tp_size * pcp_size)))
+                decoders = [
+                    self._make_worker(prefill_tp_size, decode_tp_size, rank, 1, 0, 0, use_mamba, "kv_consumer")
+                    for rank in range(decode_tp_size)
+                ]
+
+                # Reuse the workers across requests, with different P and D request IDs.
+                for request_id in ("req-0", "req-1", "req-2", "req-3"):
+                    with self.subTest(request_id=request_id):
+                        request = MockRequest(
+                            request_id,
+                            list(range(513)),
+                            {"do_remote_decode": True},
+                            RequestStatus.FINISHED_LENGTH_CAPPED,
+                        )
+                        delay_free, params = scheduler.request_finished_all_groups(request, ([10, 11, 12], [30, 31]))
+                        self.assertTrue(delay_free)
+                        self.assertEqual(params["remote_block_ids"], ([10, 11], [30, 31]))
+                        if pcp_size == 1:
+                            # Old request metadata defaults to one replica.
+                            params.pop("remote_pcp_size")
+                        metadata = MooncakeConnectorMetadata()
+                        metadata.add_new_req(f"decode-{request_id}", ([20, 21], [40, 41]), 513, params)
+                        metadata.reqs_in_batch = {f"decode-{request_id}"}
+                        source_ports = set()
+                        for decoder in decoders:
+                            decoder.kv_recv_thread.reset_mock()
+                            decoder.start_load_kv(metadata)
+                            decoder.kv_recv_thread.add_request.assert_called_once()
+                            pull = decoder.kv_recv_thread.add_request.call_args.kwargs
+                            port = pull["remote_handshake_port"]
+                            self.assertIn(port, senders)
+                            source_ports.add(port)
+                            self.assertEqual(pull["remote_host"], senders[port].side_channel_host)
+                            self.assertEqual(pull["remote_engine_id"], senders[port].engine_id)
+                            self.assertEqual(pull["request_id"], f"decode-{request_id}")
+                            self.assertEqual(pull["remote_request_id"], request_id)
+                            self.assertEqual(pull["local_block_ids"], ([20, 21], [40, 41]))
+                            self.assertEqual(pull["remote_block_ids"], ([10, 11], [30, 31]))
+                            self.assertEqual(
+                                (pull["offset"], pull["tp_num_need_pulls"], pull["all_task_done"]), (0, 1, True)
+                            )
+                            self.assertIsNone(pull.get("remote_port_send_num"))
+                            if prefill_tp_size == decode_tp_size:
+                                self.assertEqual((port - base_port) % prefill_tp_size, decoder.tp_rank)
+                        self.assertEqual(len(source_ports), decode_tp_size)
+                        self.assertEqual(len({(port - base_port) // prefill_tp_size for port in source_ports}), 1)
+
+                        scheduler._reqs_in_batch.add(request_id)
+                        send_metadata = scheduler.build_connector_meta(MagicMock())
+                        for port, sender in senders.items():
+                            sender.start_load_kv(send_metadata)
+                            tracker = sender.kv_send_thread.task_tracker
+                            if port in source_ports:
+                                self.assertEqual(tracker.get_and_clear_finished_requests(), set())
+                                self.assertEqual(set(tracker.delayed_free_requests), {request_id})
+                                # Only actual sources wait for D's DONE message.
+                                tracker.update_done_task_count(request_id)
+                            self.assertEqual(tracker.get_and_clear_finished_requests(), {request_id})
+                            self.assertEqual(tracker.get_and_clear_finished_requests(), set())
+                            self.assertFalse(tracker.delayed_free_requests)
+                            self.assertFalse(tracker.reqs_to_process)
+
+
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
     def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
         alignment = 2 * 1024 * 1024
@@ -313,6 +590,7 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.side_channel_host = "127.0.0.1"
         scheduler.side_channel_port = 12345
         scheduler.tp_size = 1
+        scheduler.pcp_size = 1
         scheduler.multi_nodes_meta_mapping = {}
         return scheduler
 
@@ -324,10 +602,10 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
 
-    def test_request_finished_trims_logical_compressed_group_spans(self):
+    def test_request_finished_preserves_group_layout_with_pcp(self):
         scheduler = self._make_scheduler()
-        scheduler.group_block_size = [512, 16384]
-        scheduler.num_swa_blocks = [0, 0]
+        scheduler.group_block_size = [512, 16384, 128]
+        scheduler.num_swa_blocks = [0, 0, 2]
         request = MockRequest(
             "req-compressed",
             prompt_token_ids=list(range(513)),
@@ -335,17 +613,22 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
             status=RequestStatus.FINISHED_LENGTH_CAPPED,
         )
 
-        delay_free, params = scheduler.request_finished_all_groups(
-            request,
-            ([10, 11, 12], [20, 21]),
-        )
-
-        self.assertTrue(delay_free)
-        self.assertIsNotNone(params)
-        assert params is not None
-        self.assertEqual(params["remote_block_ids"], ([10, 11], [20]))
-        # This unused compatibility field remains in the legacy physical-block unit.
-        self.assertEqual(params["num_prompt_blocks"], 5)
+        for pcp_size in (1, 2, 4):
+            with self.subTest(pcp_size=pcp_size):
+                scheduler.pcp_size = pcp_size
+                delay_free, params = scheduler.request_finished_all_groups(
+                    request,
+                    ([10, 11, 12], [20, 21], [30, 31, 32, 33, 34, 35]),
+                )
+                self.assertTrue(delay_free)
+                self.assertIsNotNone(params)
+                assert params is not None
+                self.assertEqual(params["remote_block_ids"], ([10, 11], [20], [33, 34]))
+                self.assertEqual(params["remote_pcp_size"], pcp_size)
+                self.assertEqual(params["remote_ptp_size"], scheduler.tp_size)
+                self.assertIn(request.request_id, scheduler._reqs_need_send)
+                # This unused compatibility field remains in the legacy physical-block unit.
+                self.assertEqual(params["num_prompt_blocks"], 5)
 
     def test_request_finished_trims_before_swa_clip(self):
         scheduler = self._make_scheduler()

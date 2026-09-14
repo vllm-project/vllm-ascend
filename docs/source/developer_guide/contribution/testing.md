@@ -23,7 +23,11 @@ The fastest way to set up a test environment is to use the main branch's contain
         -v $(pwd):/vllm-project \
         -v ~/.cache:/root/.cache \
         -ti $IMAGE bash
+    ```
 
+    Run the remaining commands inside the container:
+
+    ```bash
     # (Optional) Configure mirror to speed up download
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
@@ -40,7 +44,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
     git clone -b {{ vllm_ascend_version }} --depth 1 https://github.com/vllm-project/vllm-ascend.git
-    git clone --depth 1 https://github.com/vllm-project/vllm.git
+    git clone -b {{ vllm_version }} --depth 1 https://github.com/vllm-project/vllm.git
 
     # vllm
     cd $SRC_WORKSPACE/vllm
@@ -63,8 +67,8 @@ The fastest way to set up a test environment is to use the main branch's contain
 
     # Update DEVICE according to your device (/dev/davinci[0-7])
     export DEVICE=/dev/davinci0
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -98,8 +102,8 @@ The fastest way to set up a test environment is to use the main branch's contain
 === "Multi-cards"
 
     ```bash
-    # Update the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:main
+    # A2 Ubuntu image; use nightly-main-a3 for A3 and add -openeuler for openEuler.
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -266,8 +270,10 @@ How tests are selected:
 Adding a new test requires no configuration change: place the UT file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
-the test tree. Routing metadata (runner mapping, partitions, estimated times)
-lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+the test tree. Routing metadata (runner mapping, partitions) lives in
+[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+Estimated times used for load balancing live in
+`.github/workflows/scripts/estimated_times.yaml`.
 
 You can preview locally which runners a set of tests would be routed to:
 

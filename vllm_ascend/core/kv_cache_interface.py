@@ -32,11 +32,17 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
+    if not vllm_version_is("0.28.0"):
+        # vLLM #53906 added an optional MLA storage-view override. It is not
+        # Ascend's derived number of physical rows per logical block.
+        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
+        if isinstance(kv_cache_spec, MLAAttentionSpec):
+            storage_block_size = kv_cache_spec.storage_block_size
+            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
@@ -61,22 +67,21 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
 
-    @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels.
+    if vllm_version_is("0.28.0"):
 
-        vLLM #51718 replaced ``MLAAttentionSpec.compress_ratio`` with
-        ``AttentionSpec.tokens_per_state`` on main. Both express how many
-        logical tokens one physical stored state covers.
-        """
-        if vllm_version_is("0.28.0"):
+        @property
+        def storage_block_size(self) -> int:
+            """Legacy physical geometry; main uses get_storage_block_size.
+
+            On main, #53906 initializes a dataclass field with this name.
+            A read-only property would reject that constructor assignment.
+            """
             return self.block_size // self.compress_ratio
-        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
         return (
-            self.storage_block_size
+            get_storage_block_size(self)
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )

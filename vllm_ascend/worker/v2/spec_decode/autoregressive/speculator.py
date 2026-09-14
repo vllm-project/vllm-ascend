@@ -496,14 +496,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         }
 
         if is_draft_model_prefill:
-            prepared_attn_metadata, _ = self._prepare_replicated_prefill_attn(
-                attn_metadata,
-                None,
-                num_reqs_padded,
-                num_tokens_padded,
-            )
-            assert prepared_attn_metadata is not None
-            return [prepared_attn_metadata]
+            if self.attn_architecture in ("DSA", "SFA"):
+                prepared_attn_metadata, _ = self._prepare_replicated_prefill_attn(
+                    attn_metadata,
+                    None,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                )
+                assert prepared_attn_metadata is not None
+                attn_metadata = prepared_attn_metadata
+            return [attn_metadata]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 

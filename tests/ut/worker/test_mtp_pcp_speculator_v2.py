@@ -294,40 +294,46 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
     assert parent_args[3] is global_slot_mappings
 
 
-@pytest.mark.parametrize("replicated_pcp", [False, True])
-def test_graph_prefill_builds_draft_metadata(replicated_pcp: bool) -> None:
+@pytest.mark.parametrize(
+    ("attn_architecture", "replicated_pcp", "rebuild_metadata"),
+    [
+        ("DSA", True, True),
+        ("DSA", False, False),
+        ("SFA", True, True),
+        ("MLA", True, False),
+    ],
+)
+def test_graph_prefill_builds_draft_metadata(
+    attn_architecture: str, replicated_pcp: bool, rebuild_metadata: bool
+) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = replicated_pcp
+    speculator.attn_architecture = attn_architecture
+    speculator.input_batch = _make_padded_input_batch()
+    speculator.input_batch.is_dummy = False
+    speculator.block_tables = MagicMock()
+    speculator.kv_cache_config = object()
     speculator.draft_attn_layer_names = {"draft.layer"}
-    local_draft_metadata = object()
+    local_draft_metadata = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     global_draft_metadata = object()
     speculator.model_state = SimpleNamespace(
-        attn_metadata={
-            "draft.layer": local_draft_metadata,
-            "target.layer": object(),
-        }
+        attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
     )
-    prepared_draft_metadata = global_draft_metadata if replicated_pcp else local_draft_metadata
-    speculator._prepare_replicated_prefill_attn = MagicMock(
-        return_value=(
-            {"draft.layer": prepared_draft_metadata},
-            None,
+    speculator._build_draft_attn_metadata = MagicMock(
+        return_value={"draft.layer": global_draft_metadata},
+    )
+
+    with patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}):
+        actual = speculator.build_draft_attn_metadatas(
+            num_reqs_padded=2,
+            num_tokens_padded=8,
+            is_draft_model_prefill=True,
         )
-    )
 
-    actual = speculator.build_draft_attn_metadatas(
-        num_reqs_padded=4,
-        num_tokens_padded=8,
-        is_draft_model_prefill=True,
-    )
-
-    assert actual == [{"draft.layer": prepared_draft_metadata}]
-    speculator._prepare_replicated_prefill_attn.assert_called_once_with(
-        {"draft.layer": local_draft_metadata},
-        None,
-        4,
-        8,
-    )
+    expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
+    assert actual == [{"draft.layer": expected_metadata}]
+    assert speculator._build_draft_attn_metadata.call_count == int(rebuild_metadata)
+    assert local_draft_metadata.decode.actual_seq_lengths_q[-1] == 8
 
 
 @pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")

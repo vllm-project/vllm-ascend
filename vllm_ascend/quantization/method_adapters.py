@@ -39,6 +39,37 @@ def _forwardable_weight_attrs(extra_weight_attrs: dict) -> dict:
     return {key: value for key, value in extra_weight_attrs.items() if key not in _VLLM_PARAMETER_CTOR_ATTRS}
 
 
+def _make_mx_scale_weight_loader(
+    weight_loader,
+    tp_rank: int,
+    input_size_per_partition: int,
+    group_size: int,
+):
+    """Load scales without losing the global MX group phase at TP boundaries."""
+
+    def mx_scale_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+        # Some checkpoint loaders provide an already sharded tensor. Accept an
+        # exact local shape before applying any global TP offset to avoid
+        # slicing the same shard twice.
+        if loaded_weight.shape == param.shape:
+            param.data.copy_(loaded_weight)
+            return None
+
+        input_dim = getattr(param, "input_dim", None)
+        if input_dim is not None and input_size_per_partition % group_size != 0:
+            global_start = tp_rank * input_size_per_partition
+            # A TP boundary can split an MX group. Start from the scale of
+            # that shared boundary group instead of evenly chunking scales.
+            scale_start = global_start // group_size
+            scale_count = param.shape[input_dim]
+            loaded_weight = loaded_weight.narrow(input_dim, scale_start, scale_count)
+            param.data.copy_(loaded_weight)
+            return None
+        return weight_loader(param, loaded_weight)
+
+    return mx_scale_weight_loader
+
+
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
@@ -147,6 +178,16 @@ class AscendLinearMethod(LinearMethodBase):
                 or is_mx_quant_type(self.quant_method)
             ):
                 param.input_dim = 1
+            if isinstance(layer, RowParallelLinear) and getattr(
+                self.quant_method, "supports_unaligned_tp_groups", False
+            ):
+                assert hasattr(self.quant_method, "group_size")
+                param.weight_loader = _make_mx_scale_weight_loader(
+                    weight_loader,
+                    layer.tp_rank,
+                    input_size_per_partition,
+                    self.quant_method.group_size,
+                )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Any, ClassVar, Literal
 
 import torch
+import torch_npu
 from torch import nn
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -31,11 +32,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-)
-from vllm.model_executor.layers.mhc import (
-    MHCFusedPostPreOp,
-    MHCPostOp,
-    MHCPreOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -64,6 +60,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -245,10 +242,20 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+        if self.experts.is_internal_router:
+            # The Ascend MoE runner owns the gate in this mode. Pass hidden
+            # states through the router_logits slot so it can compute routing
+            # exactly once inside the fused path.
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
@@ -374,10 +381,6 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-            self.mhc_pre_op = MHCPreOp()
-            self.mhc_post_op = MHCPostOp()
-            self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -412,9 +415,8 @@ class Glm5NextDecoderLayer(nn.Module):
             return hidden_states, residual, None, None
 
         # mHC start. `post`/`comb` carry the previous layer's deferred
-        # hc_post inputs (its ffn-pre outputs); when present, fuse that
-        # hc_post with this layer's attn hc_pre into one kernel (inter-layer
-        # fusion). Layer 0 has no incoming state -> standalone hc_pre.
+        # hc_post inputs (its ffn-pre outputs); apply the existing HcPost and
+        # HcPre kernels before attention. Layer 0 has no incoming state.
         x = hidden_states
         if post is None:
             if self.layer_idx == 0:
@@ -429,7 +431,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
         else:
-            residual, post, comb, x = self.hc_fused_post_pre(
+            residual, post, comb, x = self.hc_post_pre(
                 x,
                 residual,
                 post,
@@ -454,8 +456,8 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.is_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
-        residual, post, comb, x = self.hc_fused_post_pre(
+        # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
+        residual, post, comb, x = self.hc_post_pre(
             x,
             residual,
             post,
@@ -475,7 +477,7 @@ class Glm5NextDecoderLayer(nn.Module):
 
         # mHC end. The last mHC layer materializes its final hc_post (nothing
         # to fuse with) then contracts; every other layer defers its hc_post to
-        # the next layer's fused pre, returning the state.
+        # the next layer's pre, returning the state.
         if self.layer_idx == self.num_hidden_layers - 1:
             x = self.hc_post(x, residual, post, comb)
             x = hc_contract(x, self.n)
@@ -492,20 +494,22 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ):
-        post_mix, res_mix, layer_input = self.mhc_pre_op(
-            residual=x,
-            fn=hc_fn,
-            hc_scale=hc_scale,
-            hc_base=hc_base,
-            rms_eps=self.rms_norm_eps,
-            hc_pre_eps=self.hc_eps,
-            hc_sinkhorn_eps=self.hc_eps,
-            hc_post_mult_value=self.mhc_post_mult_value,
-            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
-            norm_weight=norm_weight,
-            norm_eps=norm_eps,
+        layer_input, post_mix, res_mix = torch.ops._C_ascend.npu_hc_pre_v2(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.n,
+            self.mhc_sinkhorn_iterations,
+            self.rms_norm_eps,
+            self.hc_eps,
         )
-        return post_mix, res_mix, layer_input
+        # HcPre uses 2 * sigmoid for post mixing; retain the model's scale.
+        if self.mhc_post_mult_value != 2.0:
+            post_mix = post_mix * (self.mhc_post_mult_value / 2.0)
+        if norm_weight is not None:
+            layer_input = torch_npu.npu_rms_norm(layer_input, norm_weight, epsilon=norm_eps)[0]
+        return post_mix.unsqueeze(-1), res_mix, layer_input
 
     def hc_post(
         self,
@@ -514,9 +518,11 @@ class Glm5NextDecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        return self.mhc_post_op(x, residual, post, comb)
+        return torch.ops._C_ascend.npu_hc_post(
+            x.unsqueeze(0), residual.unsqueeze(0), post.squeeze(-1).unsqueeze(0), comb.unsqueeze(0)
+        ).squeeze(0)
 
-    def hc_fused_post_pre(
+    def hc_post_pre(
         self,
         x: torch.Tensor,
         residual: torch.Tensor,
@@ -528,24 +534,16 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ):
-        return self.mhc_fused_post_pre_op(
-            x=x,
-            residual=residual,
-            post_layer_mix=post,
-            comb_res_mix=comb,
-            fn=hc_fn,
-            hc_scale=hc_scale,
-            hc_base=hc_base,
-            rms_eps=self.rms_norm_eps,
-            hc_pre_eps=self.hc_eps,
-            hc_sinkhorn_eps=self.hc_eps,
-            hc_post_mult_value=self.mhc_post_mult_value,
-            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
-            n_splits=1,
-            tile_n=1,
+        residual = self.hc_post(x, residual, post, comb)
+        post, comb, layer_input = self.hc_pre(
+            residual,
+            hc_fn,
+            hc_scale,
+            hc_base,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
         )
+        return residual, post, comb, layer_input
 
 
 class Glm5NextModel(nn.Module):
@@ -913,6 +911,25 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+        },
+        # ModelSlim W8A8 checkpoints group the KDA forget-gate tensors under
+        # ``forget_gate``; the runtime KDA module keeps those parameters flat.
+        orig_to_new_substr={
+            ".forget_gate.": ".",
+            ".attn_hc.fn": ".hc_attn_fn",
+            ".attn_hc.base": ".hc_attn_base",
+            ".attn_hc.scale": ".hc_attn_scale",
+            ".ffn_hc.fn": ".hc_ffn_fn",
+            ".ffn_hc.base": ".hc_ffn_base",
+            ".ffn_hc.scale": ".hc_ffn_scale",
+        },
+    )
+
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
@@ -980,6 +997,12 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
+        # The visual merger's down_proj already contains the exported rotation.
+        # Ignore the standalone QuaRot tensor to avoid applying it a second time.
+        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
