@@ -1,7 +1,9 @@
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import algos as speculator_algos
+from vllm.transformers_utils.model_arch_config_convertor import ModelArchConfigConvertorBase
 from vllm.utils.import_utils import LazyLoader
 
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
@@ -24,6 +26,30 @@ else:
 # the lightweight config here as well so ModelConfig can parse the draft before
 # speculative post-init normalizes its architecture.
 register_k3_dspark_config()
+
+
+# vLLM v0.26 predates the K3 MLA classification added by vLLM #50000. Patch
+# the converter before either target or draft ModelConfig is constructed so
+# the compressed KV-cache geometry and DCP validation both see use_mla=True.
+def _patch_k3_dspark_mla_detection() -> None:
+    current = ModelArchConfigConvertorBase.is_deepseek_mla
+    if getattr(current, "_vllm_ascend_k3_dspark_mla", False):
+        return
+
+    @wraps(current)
+    def is_deepseek_mla(self: ModelArchConfigConvertorBase) -> bool:
+        if (
+            getattr(self.hf_text_config, "model_type", None) == "k3_dspark"
+            and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+        ):
+            return True
+        return current(self)
+
+    is_deepseek_mla._vllm_ascend_k3_dspark_mla = True  # type: ignore[attr-defined]
+    ModelArchConfigConvertorBase.is_deepseek_mla = is_deepseek_mla
+
+
+_patch_k3_dspark_mla_detection()
 
 
 # Backport vLLM #48639. v0.26 unconditionally rewrites Speculators DSpark
