@@ -216,6 +216,10 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             return False
         if qkv_proj.ndim != 3 or qkv_proj.shape[1] != 1:
             return False
+        # A packed [T, 1, ...] projection has exactly one sequence. Reuse
+        # [T] host metadata below instead of copying cu_seqlens on every layer.
+        if cu_seqlens.ndim != 1 or cu_seqlens.numel() != 2:
+            return False
         token_count = qkv_proj.shape[0]
         if qkv_proj.shape[2] != 3 * self.num_heads * self.head_size:
             return False
@@ -256,13 +260,10 @@ class AscendMMEncoderAttention(MMEncoderAttention):
 
         q_pad, k_pad, v_pad = vision_qkv_rope_pad(qkv_proj[:, 0, :], rotary_pos_emb_cos, rotary_pos_emb_sin)
         token_count = qkv_proj.shape[0]
-        actual_q, actual_kv = maybe_compute_actual_seq_lengths(
-            self._maybe_compute_cu_seqlens(1, token_count, cu_seqlens),
-            token_count,
-            token_count,
-            cudagraph_mm_encoder=False,
-        )
-        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_q, actual_kv)
+        # The guard establishes one packed sequence [0, T], so the FIA host
+        # lengths are known without a per-layer device-to-host conversion.
+        actual_seq_lengths = [token_count]
+        context = self._run_vit_fia(q_pad, k_pad, v_pad, actual_seq_lengths, actual_seq_lengths)
         return self._maybe_unpad_output(context, self.head_size).unsqueeze(0)
 
     def _forward_eager_fia(

@@ -180,6 +180,15 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
             )
         )
 
+        self.assertFalse(
+            layer._can_use_fused_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                torch.tensor([0, 20, 41], dtype=torch.int32),
+            )
+        )
+
         qkv.dtype = torch.float16
         self.assertFalse(
             layer._can_use_fused_qkv_rope_pad_fia(

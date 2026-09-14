@@ -2,9 +2,16 @@ import torch
 from vllm.triton_utils import tl, triton
 
 _NUM_VECTOR_CORES_910B3 = 40
+_BLOCK_T = 4
 
 
-@triton.jit(do_not_specialize=["token_count"])
+def _get_num_cores(token_count: int) -> int:
+    """Launch only the vector cores needed for the token tiles."""
+    token_block_count = max(1, (token_count + _BLOCK_T - 1) // _BLOCK_T)
+    return min(_NUM_VECTOR_CORES_910B3, token_block_count)
+
+
+@triton.jit(do_not_specialize=["token_count", "num_cores"])
 def _vision_qkv_rope_pad_kernel(
     qkv_proj,
     cos_half,
@@ -13,6 +20,7 @@ def _vision_qkv_rope_pad_kernel(
     k_out,
     v_out,
     token_count,
+    num_cores,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PADDED_DIM: tl.constexpr,
@@ -20,7 +28,6 @@ def _vision_qkv_rope_pad_kernel(
     HALF_TILE: tl.constexpr,
     PAD_TILE: tl.constexpr,
     BLOCK_T: tl.constexpr,
-    NUM_CORES: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     qkv_token_stride = 3 * NUM_HEADS * HEAD_DIM
@@ -28,7 +35,7 @@ def _vision_qkv_rope_pad_kernel(
     out_token_stride = NUM_HEADS * PADDED_DIM
 
     token_block_count = tl.cdiv(token_count, BLOCK_T)
-    blocks_per_core = tl.cdiv(token_block_count, NUM_CORES)
+    blocks_per_core = tl.cdiv(token_block_count, num_cores)
     block_start = core_id * blocks_per_core
     block_end = tl.minimum(block_start + blocks_per_core, token_block_count)
     for block_id in tl.range(block_start, block_end):
@@ -226,7 +233,8 @@ def vision_qkv_rope_pad(
             if not out.is_contiguous():
                 raise ValueError(f"{name} must be contiguous")
 
-    _vision_qkv_rope_pad_kernel[(_NUM_VECTOR_CORES_910B3,)](
+    num_cores = _get_num_cores(token_count)
+    _vision_qkv_rope_pad_kernel[(num_cores,)](
         qkv_proj,
         cos_half,
         sin_half,
@@ -234,13 +242,13 @@ def vision_qkv_rope_pad(
         k_out,
         v_out,
         token_count,
+        num_cores,
         NUM_HEADS=8,
         HEAD_DIM=72,
         PADDED_DIM=128,
         HALF_DIM=36,
         HALF_TILE=64,
         PAD_TILE=32,
-        BLOCK_T=4,
-        NUM_CORES=_NUM_VECTOR_CORES_910B3,
+        BLOCK_T=_BLOCK_T,
     )
     return q_out, k_out, v_out
