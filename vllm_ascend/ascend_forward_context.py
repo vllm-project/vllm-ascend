@@ -278,6 +278,33 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+def get_a5_mega_moe_buffer_tokens_per_rank(
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int | None = None,
+) -> int:
+    """Resolve the A5 MegaMoE capacity for the current PD role."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_producer = bool(getattr(kv_transfer_config, "is_kv_producer", False))
+    if kv_role in ("kv_producer", "kv_both") or (kv_role is None and is_kv_producer):
+        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
+    else:
+        if mc2_tokens_capacity is None:
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if mc2_tokens_capacity is None:
+            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+        execution_tokens_per_rank = mc2_tokens_capacity
+
+    ascend_config = get_ascend_config()
+    expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
+    buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
+        ascend_config.mega_moe_max_tokens,
+        execution_tokens_per_rank,
+        expert_parallel_size,
+    )
+    return buffer_tokens_per_rank
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -356,6 +383,27 @@ def _select_capacity_and_world_size_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    ascend_config = get_ascend_config()
+    eplb_config = ascend_config.eplb_config
+    buffer_tokens_per_rank = (
+        get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
+        if ascend_config.enable_fused_mc2 == 1
+        else 0
+    )
+    normalized_activation = None if activation is None else activation.lower().removeprefix("moeactivation.")
+    use_mega_moe = (
+        ascend_config.enable_fused_mc2 == 1
+        and world_size > 1
+        and num_tokens <= buffer_tokens_per_rank
+        and quant_type in _A5_MEGA_MOE_QUANT_TYPES
+        and normalized_activation in (None, "silu", "swiglu")
+        and group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
+        and not eplb_config.dynamic_eplb
+        and eplb_config.num_redundant_experts == 0
+        and not ascend_config.mix_placement
+    )
+    if use_mega_moe:
+        return MoECommType.FUSED_MC2
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:

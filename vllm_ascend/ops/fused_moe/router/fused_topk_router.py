@@ -27,6 +27,75 @@ from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTo
 
 DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID = 129257
 DEEPSEEK_V4_IMAGE_SENTINEL_COUNT = 5
+_VISION_GATING_OP_NAME = "npu_moe_gating_top_k"
+_VISION_GATING_REQUIRED_ARGUMENTS = frozenset(("image_bias", "image_token_mask"))
+
+
+def _npu_moe_gating_vision_op() -> Callable | None:
+    """Return the optional fused op only when its schema supports vision routing."""
+    op = getattr(torch.ops._C_ascend, _VISION_GATING_OP_NAME, None)
+    if op is None:
+        return None
+
+    schemas_by_overload = getattr(op, "_schemas", None) or {}
+    schemas = list(schemas_by_overload.values())
+    schema = getattr(op, "_schema", None)
+    if schema is not None:
+        schemas.append(schema)
+    default_overload = getattr(op, "default", None)
+    default_schema = getattr(default_overload, "_schema", None)
+    if default_schema is not None:
+        schemas.append(default_schema)
+
+    for candidate in schemas:
+        argument_names = {argument.name for argument in candidate.arguments}
+        if argument_names >= _VISION_GATING_REQUIRED_ARGUMENTS:
+            return op
+    return None
+
+
+def select_deepseek_v4_vision_experts_with_fusion_op(
+    vision_gating_op: Callable,
+    router_logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    tid2eid: torch.Tensor | None,
+    bias_vl: torch.Tensor,
+    text_bias: torch.Tensor | None,
+    top_k: int,
+    renormalize: bool,
+    k_group: int,
+    group_count: int,
+    routed_scaling_factor: float = 1.0,
+    eps: float = 1e-20,
+    image_sentinel_lo: int = DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select DeepSeek V4 vision experts with the optional fused operator."""
+    image_hi = image_sentinel_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
+    image_token_mask = (input_ids >= image_sentinel_lo) & (input_ids < image_hi)
+    topk_weights, topk_ids, _ = vision_gating_op(
+        router_logits,
+        k=top_k,
+        bias=text_bias,
+        input_ids=input_ids,
+        tid2eid=tid2eid,
+        image_bias=bias_vl,
+        image_token_mask=image_token_mask,
+        k_group=k_group,
+        group_count=group_count,
+        routed_scaling_factor=1.0,
+        eps=eps,
+        group_select_mode=1,
+        renorm=0,
+        norm_type=2,
+        out_flag=False,
+    )
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
+            torch.finfo(topk_weights.dtype).tiny
+        )
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
+    return topk_weights, topk_ids
 
 
 def select_deepseek_v4_vision_experts(
@@ -118,6 +187,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.tid2eid = tid2eid
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
+        self.vision_gating_op = _npu_moe_gating_vision_op() if bias_vl is not None else None
 
     def is_fused_supported(
         self,

@@ -38,6 +38,7 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
     PrepareAndFinalizeWithMC2,
+    PrepareAndFinalizeWithMegaMoE,
 )
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
@@ -46,6 +47,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
@@ -286,6 +288,14 @@ class AlltoAllCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
+class _MegaMoEBypassTokenDispatcher(MoETokenDispatcher[None]):
+    def token_dispatch(self, token_dispatch_input):
+        raise RuntimeError("A5 MegaMoE bypasses token_dispatch; use MegaMoEBackend.fused_experts instead.")
+
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        raise RuntimeError("A5 MegaMoE bypasses token_combine; use MegaMoEBackend.fused_experts instead.")
+
+
 class FusedMC2CommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -300,7 +310,7 @@ class FusedMC2CommImpl(MoECommMethod):
         super().__init__(moe_config)
         self._mega_moe_hccl_state_stale = False
         self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if self.enable_fused_mc2 == 1 and not self._is_a5_backend and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
             # Resolve the Python ABI once, before the first collective/capture.
@@ -327,9 +337,13 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return _MegaMoEBypassTokenDispatcher()
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            return PrepareAndFinalizeWithMegaMoE(self.moe_config)
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def prepare_hccl_teardown(self) -> bool:
