@@ -467,6 +467,17 @@ def test_mrv2_receive_restores_capacity(runtime, dummy_run, skip_attn, fail, tp,
         assert runner.intermediate_tensors is buffers
 
 
+@pytest.mark.parametrize("block_size", [None, 2])
+def test_empty_first_stage_preserves_residual_schema(runtime, block_size):
+    namespace, context = runtime
+    context.tp = 1
+    context.pp = SimpleNamespace(is_first_rank=True, is_last_rank=False)
+    model = make_model(namespace, context, 0, 0, block_size, False, False)
+    output = model(None, torch.arange(2), None, inputs_embeds=torch.ones(2, 3))
+    expected_shape = (2, 3) if block_size is None else (2, 0, 3)
+    assert output["residual"].shape == expected_shape
+
+
 @pytest.mark.parametrize("residual_kind", ["none", "ordinary", "attn_res_bank"])
 def test_mla_aux_capture_keeps_raw_prefix_sum(runtime, residual_kind):
     namespace, _ = runtime

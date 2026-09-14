@@ -771,7 +771,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             if residual is None:
                 # An explicitly empty first PP stage has no additive residual
                 # yet. A zero tensor preserves its semantics in the PP buffers.
-                residual = torch.zeros_like(hidden_states)
+                if self.config.attn_res_block_size is not None:
+                    residual = hidden_states.new_zeros(hidden_states.shape[0], 0, hidden_states.shape[-1])
+                else:
+                    residual = torch.zeros_like(hidden_states)
             return add_pp_transport_tensors(
                 IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
                 PPTransportDataType.AUX_HIDDEN_STATES,
