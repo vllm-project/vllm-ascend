@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -293,6 +294,20 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # Upstream removed these deprecated fields on main. The subclass owns them
+    # (kw_only + default) so the release tree still sees them and ``unpadded``
+    # can forward them unchanged on both trees.
+    _seq_lens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+    _num_computed_tokens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+
+    # Upstream renamed dcp_local_seq_lens_cpu to
+    # dcp_local_seq_lens_cpu_upper_bound and added req_idx on main. Own the
+    # removed field plus the added ones (kw_only + default) so ``unpadded``
+    # forwards them and stays a faithful sub-batch on both trees.
+    dcp_local_seq_lens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = field(default=None, kw_only=True)
+    req_idx: np.ndarray | None = field(default=None, kw_only=True)
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
@@ -371,6 +386,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            dcp_local_seq_lens_cpu_upper_bound=_slice_reqs(self.dcp_local_seq_lens_cpu_upper_bound),
+            req_idx=_slice_reqs(self.req_idx),
             is_prefilling=_slice_reqs(self.is_prefilling),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),

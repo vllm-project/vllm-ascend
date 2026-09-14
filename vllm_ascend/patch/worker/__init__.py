@@ -15,9 +15,31 @@
 # limitations under the License.
 #
 
+from types import ModuleType
+
+import vllm.triton_utils as _vllm_triton_utils
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+# main2main compat: vllm main decorates sampling/spec-decode Triton kernels with
+# triton_kernel_dispatcher_with_warmup, whose _is_autotuned reads
+# ``triton.runtime.autotuner.Autotuner`` at import time. When Triton is disabled,
+# vllm.triton_utils.triton is a TritonPlaceholder without `runtime`, so importing
+# vllm.v1.spec_decode.utils raises AttributeError. Give the placeholder the
+# attributes it reads; a dummy Autotuner matches no kernel, so detection is inert.
+if not HAS_TRITON and not hasattr(_vllm_triton_utils.triton, "runtime"):
+    _autotuner_stub = ModuleType("triton.runtime.autotuner")
+    for _attr_name, _attr_value in (
+        ("Autotuner", type("Autotuner", (), {})),
+        ("Heuristics", type("Heuristics", (), {})),
+    ):
+        setattr(_autotuner_stub, _attr_name, _attr_value)
+    _runtime_stub = ModuleType("triton.runtime")
+    _autotuner_attr = "autotuner"
+    _runtime_attr = "runtime"
+    setattr(_runtime_stub, _autotuner_attr, _autotuner_stub)
+    setattr(_vllm_triton_utils.triton, _runtime_attr, _runtime_stub)
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton

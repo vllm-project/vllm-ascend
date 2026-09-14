@@ -58,4 +58,26 @@ def bind_kv_cache(
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Ascend variant of the main ``bind_kv_cache_to_layers``.
+
+    Main split layer binding out of ``bind_kv_cache``; ``Attention.bind_kv_cache``
+    still raises NotImplementedError on NPU, so bind the raw tensor directly and
+    keep sharing the ReplaySSM ring trackers.
+    """
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+
+    if not vllm_version_is("0.28.0"):
+        ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
 utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.28.0"):
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

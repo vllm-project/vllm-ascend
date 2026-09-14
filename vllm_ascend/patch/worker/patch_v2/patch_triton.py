@@ -12,6 +12,7 @@ from vllm_ascend.ops.triton.v2.apply_grammar_bitmask import _apply_grammar_bitma
 from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
@@ -42,7 +43,16 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
+if vllm_version_is("0.28.0"):
+    # Release resolves the module global at launch time, so swapping it works.
+    dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
+else:
+    # Main wraps the kernel in a triton_kernel_dispatcher_with_warmup that binds
+    # it at decoration time, so swapping the module global is inert; swap the
+    # dispatcher's bound kernel instead (arg names match upstream).
+    dflash_speculator.prepare_dflash_inputs.kernel = (  # type: ignore[attr-defined]
+        _prepare_dflash_inputs_kernel_ascend
+    )
 # triton ops that filed in ops/triton
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel

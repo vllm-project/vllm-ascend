@@ -43,7 +43,7 @@ def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     return positions, query, key
 
 
-def check_parent_init_signature_has_not_changed(parent_func, child_func):
+def check_parent_init_signature_has_not_changed(parent_func, child_func, allowed_extra_params=()):
     parent_sig = inspect.signature(parent_func)
     parent_params = set(parent_sig.parameters) - {"self"}
 
@@ -51,7 +51,9 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     child_params = set(child_sig.parameters) - {"self"}
 
     added = parent_params - child_params
-    removed = child_params - parent_params
+    # Parameters the child keeps only to stay compatible with the release vLLM
+    # tree are intentional, not upstream drift.
+    removed = (child_params - parent_params) - set(allowed_extra_params)
 
     assert not added, (
         f"{parent_func.__name__} added new parameter(s): {added}. "
@@ -363,5 +365,14 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+            YaRNScalingRotaryEmbedding.__init__,
+            AscendYaRNRotaryEmbedding.__init__,
+            allowed_extra_params=(
+                "extrapolation_factor",
+                "attn_factor",
+                "apply_yarn_scaling",
+                "mscale",
+                "mscale_all_dim",
+                "attention_factor",
+            ),
         )

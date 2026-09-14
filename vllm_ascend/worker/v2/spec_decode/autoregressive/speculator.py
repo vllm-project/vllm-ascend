@@ -21,7 +21,6 @@ from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -42,11 +41,9 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
-from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_metadata_wrapper,
-    build_draft_attn_metadata_factory,
-)
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.spec_decode.draft_attn_metadata import AscendDraftAttnMetadataMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
@@ -59,7 +56,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
+class AscendAutoRegressiveSpeculator(AscendDraftAttnMetadataMixin, AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
@@ -456,41 +453,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             cudagraph_runtime_mode,
             mm_inputs,
         )
-
-    def _build_draft_attn_metadata(  # type: ignore[misc]
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
-        num_query_per_req: int = 1,
-        causal: bool = True,
-        query_start_loc_np: np.ndarray | None = None,
-    ) -> dict[str, Any] | None:
-        assert self.input_batch is not None
-        with build_draft_attn_metadata_factory(
-            self.input_buffers.positions,
-            num_tokens_padded,
-            torch.from_numpy(self.input_batch.is_prefilling_np),
-        ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-                query_start_loc_np=query_start_loc_np,
-            )
-        if attn_metadata is not None:
-            # Ascend-specific: force DecodeOnly attention state for the draft model.
-            for metadata in attn_metadata.values():
-                if metadata is None:
-                    continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
-        return attn_metadata
 
     def build_draft_attn_metadatas(
         self,

@@ -217,6 +217,17 @@ class NPUModelRunner(GPUModelRunner):
             if mtp_target_hidden_states is not None:
                 pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
+        # A replicated draft consumes the global batch, but upstream
+        # ``sample_tokens`` snapshots ``draft_hidden_states`` from the runner's
+        # pre-restore (PCP-local) hidden states. Restore them to the global
+        # layout here so the draft's copy/proposal extents match.
+        hidden_states = getattr(state, "hidden_states", None)
+        if torch.is_tensor(hidden_states):
+            state = state._replace(
+                hidden_states=pcp_manager.restore_hidden_states(hidden_states),
+            )
+            self.execute_model_state = state
+
         aux_hidden_states = state.aux_hidden_states
         if aux_hidden_states:
             restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))

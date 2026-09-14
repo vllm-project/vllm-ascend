@@ -37,6 +37,8 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
     speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
     speculator.use_fp64_gumbel = False
+    # Speculator.__init__ sets this; __new__ bypasses it.
+    speculator.draft_watermarker = None
     logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 1.0]])
     idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
     sample_pos = torch.tensor([8, 12])

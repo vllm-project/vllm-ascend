@@ -173,6 +173,10 @@ if not _npu_available:
     torch_npu.npu.stream = MagicMock()  # type: ignore[attr-defined]
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
+    # CPU UTs have no PrivateUse1 (NPU) pin-memory hooks registered, so
+    # `Tensor.pin_memory()` raises "Please register PrivateUse1HooksInterface".
+    # On CPU the call is a no-op for these tests anyway.
+    torch.Tensor.pin_memory = lambda self, *args, **kwargs: self  # type: ignore[method-assign,assignment]
 
 import pytest
 
@@ -310,3 +314,57 @@ def _mock_ascend_store_deps(request):
         patch(f"{_pfx}.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _reinstate_mooncake_group_mocks(request):
+    """Re-apply the mooncake connector's parallel-group mocks.
+
+    The connector's own module-level patches can be lost when another test
+    module replaces/restores ``vllm_ascend...mooncake_connector`` in
+    ``sys.modules``; re-applying them to the class's real globals per test
+    keeps ``KVCacheSendingThread`` off the uninitialized real process groups.
+    """
+    if "kv_offload/test_mooncake_connector.py" not in request.node.nodeid:
+        yield
+        return
+    from unittest.mock import patch
+
+    test_mod = request.module
+    cls = getattr(test_mod, "KVCacheSendingThread", None)
+    if cls is None:
+        yield
+        return
+    overrides = {
+        "get_pp_group": MagicMock(return_value=MagicMock(rank_in_group=0, world_size=1)),
+        "get_pcp_group": MagicMock(return_value=MagicMock(rank_in_group=0, world_size=1)),
+        "get_tp_group": MagicMock(return_value=MagicMock(rank_in_group=0, world_size=4)),
+        "get_tensor_model_parallel_world_size": MagicMock(return_value=4),
+        "get_tensor_model_parallel_rank": MagicMock(return_value=0),
+    }
+    with patch.dict(cls.__init__.__globals__, overrides):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_balance_run_engine_core_order(request):
+    """Undo a later profiling-chunk ``run_engine_core`` wrapper.
+
+    ``patch_profiling_chunk`` is imported lazily by ``NPUPlatform`` when a test
+    enables profiling chunks; if that happens after the platform registry
+    applied DyntraLB, the profiling wrapper becomes outermost and breaks the
+    balance/dyntra wrapper-order guard. Restore the wrapper profiling captured
+    so the guard sees the production chain.
+    """
+    if "test_patch_balance_schedule.py" not in request.node.nodeid:
+        yield
+        return
+    import vllm.v1.engine.core as _engine_core_mod
+
+    profiling = sys.modules.get("vllm_ascend.patch.platform.patch_profiling_chunk")
+    if profiling is not None:
+        patched = getattr(profiling, "_patched_run_engine_core", None)
+        original = getattr(profiling, "_original_run_engine_core", None)
+        if patched is not None and original is not None and _engine_core_mod.EngineCoreProc.run_engine_core is patched:
+            _engine_core_mod.EngineCoreProc.run_engine_core = original  # type: ignore[method-assign]
+    yield

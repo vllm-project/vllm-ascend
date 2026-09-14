@@ -955,6 +955,39 @@ def _reshape_mamba_kv_cache(
     return state_tensors
 
 
+class AscendKVCacheViews(tuple):
+    """Per-layer Ascend KV cache component views.
+
+    Upstream ``GPUModelRunner.initialize_kv_cache`` filters ``kv_caches_dict``
+    values by ``cache.device``. Ascend keeps each layer's K/V (or indexer/scale)
+    components as a tuple, so expose the first component's device while keeping
+    tuple semantics for forward-context binding and KV connectors.
+    """
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+class AscendKVCacheViewsList(list):
+    """List variant of :class:`AscendKVCacheViews` (e.g. Mamba states)."""
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+def _wrap_kv_cache_views(kv_caches: dict[str, Any]) -> dict[str, Any]:
+    for layer_name, view in kv_caches.items():
+        if isinstance(view, (AscendKVCacheViews, AscendKVCacheViewsList)):
+            continue
+        if isinstance(view, tuple):
+            kv_caches[layer_name] = AscendKVCacheViews(view)
+        elif isinstance(view, list):
+            kv_caches[layer_name] = AscendKVCacheViewsList(view)
+    return kv_caches
+
+
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
@@ -1173,7 +1206,7 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
-    return kv_caches
+    return _wrap_kv_cache_views(kv_caches)
 
 
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator

@@ -1,4 +1,5 @@
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -72,6 +73,7 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder: Any | None = None,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。

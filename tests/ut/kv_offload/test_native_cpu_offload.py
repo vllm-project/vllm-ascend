@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -37,11 +38,16 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
+    # main requires the originating KV cache group index; 0.28.0 has no such field.
+    group_kwargs: dict[str, Any] = {}
+    if not vllm_version_is("0.28.0"):
+        group_kwargs["group_id"] = 0
     return OffloadingConfig(
         groups=(
             OffloadingGroupConfig(
                 tokens_per_block=16,
                 layer_names=("model.layers.0.self_attn",),
+                **group_kwargs,
             ),
         ),
         worker_kv_bytes_per_block=64,

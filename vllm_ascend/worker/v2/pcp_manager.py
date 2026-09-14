@@ -18,6 +18,7 @@
 #
 
 from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 import torch
@@ -64,18 +65,21 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        parent_kwargs: dict[str, Any] = {
+            "pcp_world_size": pcp_world_size,
+            "pcp_rank": pcp_rank,
+            "device": device,
+            "max_num_reqs": max_num_reqs,
+            "max_num_tokens": max_num_tokens,
+            "block_tables": block_tables,
+            "dcp_world_size": dcp_world_size,
+            "dcp_rank": dcp_rank,
+            "cp_interleave": cp_interleave,
+        }
+        if vllm_version_is("0.28.0"):
+            # Main dropped req_states: the manager now owns its local batch.
+            parent_kwargs["req_states"] = req_states
+        super().__init__(**parent_kwargs)
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
@@ -327,6 +331,35 @@ class AscendPCPManager(PCPManager):
             num_valid_tokens,
         )
         return local_batch
+
+    def prepare_draft_prefill(
+        self,
+        input_batch: Any,
+        input_ids: torch.Tensor,
+    ) -> None:
+        """Keep the draft on the global batch for replicated PCP.
+
+        Upstream's base manager rewrites the draft prefill to a PCP-local
+        batch. Ascend's PCP draft is always replicated (PCP=1 draft runs on
+        the global batch), so the base ``draft_prefill_batch`` must stay
+        unset; otherwise ``AutoRegressiveSpeculator.propose`` shrinks
+        ``num_tokens_padded`` to the local extent while the hidden states are
+        still global, producing a copy shape mismatch.
+        """
+        return
+
+    def restore_for_sampling(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, Any]:
+        """Skip the gather when the hidden states are already global.
+
+        A replicated PCP draft restores the target hidden states to the global
+        layout before ``sample_tokens``; the base would all-gather them a
+        second time.
+        """
+        restore_idx = self._hidden_restore_idx
+        if restore_idx is not None and hidden_states.shape[0] == restore_idx.shape[0]:
+            assert self._global_batch is not None
+            return hidden_states, self._global_batch
+        return super().restore_for_sampling(hidden_states)
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore active tokens and zero any fixed-graph padding rows."""

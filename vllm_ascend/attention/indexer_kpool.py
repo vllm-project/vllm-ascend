@@ -160,14 +160,13 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
         raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
         raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens_cpu = None
+        seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
         if seq_lens_cpu is not None:
-            seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
+            seq_lens_cpu = torch.div(
+                seq_lens_cpu[:num_reqs],
+                self.compress_ratio,
+                rounding_mode="floor",
+            )
         expanded_block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         split = self.kernel_blocks_per_logical_block
         if expanded_block_table.shape[1] % split:

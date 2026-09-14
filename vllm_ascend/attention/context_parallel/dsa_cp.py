@@ -932,7 +932,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         # --- SAS metadata (all requests combined) ---
         num_heads = self.model_config.hf_config.num_attention_heads
-        index_topk = self.model_config.hf_config.index_topk
+        index_topk = (getattr(self.model_config, "hf_text_config", None) or self.model_config.hf_config).index_topk
 
         if self._device_metadata_enabled:
             assert build_local_metadata is not None
@@ -1293,7 +1293,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,
-                topk=self.model_config.hf_config.index_topk,
+                topk=(getattr(self.model_config, "hf_text_config", None) or self.model_config.hf_config).index_topk,
                 quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
                 cu_seqlens_q=qli_cu_seqlens_q,
                 seqused_k=qli_seqused_k,

@@ -18,11 +18,12 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.draft_attn_metadata import AscendDraftAttnMetadataMixin
 
 logger = logging.getLogger(__name__)
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
+class AscendDFlashSpeculator(AscendDraftAttnMetadataMixin, DFlashSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():

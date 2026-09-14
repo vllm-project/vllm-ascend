@@ -37,10 +37,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.draft_attn_metadata import AscendDraftAttnMetadataMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(AscendDraftAttnMetadataMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

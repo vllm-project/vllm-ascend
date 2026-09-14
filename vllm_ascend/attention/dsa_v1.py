@@ -902,7 +902,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if sas_metadata is None:
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-            index_topk = self.model_config.hf_config.index_topk
+            index_topk = (getattr(self.model_config, "hf_text_config", None) or self.model_config.hf_config).index_topk
             cmp_ratio = (
                 _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
                 if self.compressor_ratio <= 1
@@ -971,7 +971,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                topk=self.model_config.hf_config.index_topk,
+                topk=(getattr(self.model_config, "hf_text_config", None) or self.model_config.hf_config).index_topk,
                 quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
                 cu_seqlens_q=query_start_loc,
                 seqused_k=qli_seqused_k,
