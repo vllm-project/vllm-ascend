@@ -193,6 +193,40 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("max_length", "expected"),
+    [
+        (145, 144),
+        (144, 128),
+        (17, 16),
+        (16, 0),
+    ],
+)
+def test_producer_hit_cap_leaves_recompute_token(monkeypatch, max_length, expected):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(
+            is_kv_producer=True, is_kv_consumer=False
+        ),
+    )
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == expected
+
+
+@pytest.mark.parametrize("max_length", [16, 17, 144, 145])
+def test_producer_hit_cap_is_transparent_on_consumer(monkeypatch, max_length):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(
+            is_kv_producer=False, is_kv_consumer=True
+        ),
+    )
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == max_length
+
+
+@pytest.mark.parametrize(
     ("kv_transfer_config", "expected"),
     [
         (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
@@ -204,6 +238,20 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
 )
 def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     assert mod._skips_eagle_block_drop(kv_transfer_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("kv_transfer_config", "expected"),
+    [
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
+        (None, False),
+    ],
+)
+def test_is_kv_producer_role_semantics(kv_transfer_config, expected):
+    assert mod._is_kv_producer(kv_transfer_config) is expected
 
 
 @pytest.mark.parametrize(
