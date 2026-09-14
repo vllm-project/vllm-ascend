@@ -192,3 +192,20 @@ def test_plan_rebalance_moves_an_imbalanced_layer():
 
     assert not np.array_equal(plan.placement, old)
     assert np.isfinite(plan.accepted_scores[0])
+
+
+def test_plan_rebalance_swaps_experts_without_redundancy():
+    load = np.array([[[10.0, 9.0, 1.0, 1.0]]])
+    old = np.array([[[0, 1], [2, 3]]])
+    config = StairConfig(
+        hysteresis_enabled=False,
+        p95_regression_tolerance=1.0,
+        lpt_max_backtracks=64,
+    )
+
+    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
+
+    assert not np.array_equal(plan.placement, old)
+    np.testing.assert_array_equal(np.bincount(plan.placement.ravel()), np.ones(4, dtype=int))
+    assert plan.accepted_scores[0] < placement_score(load[:, 0], np.ones(1), old[0]).mean
+    validate_plan(old, plan, num_experts=4, pair_cap=1)
