@@ -12,6 +12,7 @@ env_common: &env_common
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
+  HCCL_HOST_SOCKET_PORT_RANGE: "auto"
 
 deployment:
   - envs:
