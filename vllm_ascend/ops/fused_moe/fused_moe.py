@@ -79,10 +79,13 @@ def _reduced_after_pre_transform(
 # torch._dynamo.disable would be the smaller change but vLLM compiles with
 # fullgraph=True, where a graph break raises instead of degrading.
 #
-# Every op writes into a separate `out`. With no shared expert the caller's
-# `result` *is* `fused_output`, so writing back into the input would corrupt a
-# tensor the caller still holds; the original code rebound a local name to a
-# fresh tensor and this keeps that contract.
+# The shared and final reductions land in place, so the predicate saying
+# "already reduced" costs nothing at all -- see _all_reduce_in_place for why the
+# collective itself needs no second buffer, and the two call sites for why their
+# tensors are safe to overwrite. Only the pre-transform op still writes into a
+# separate `out`: its input is the kernel's own output, which the caller still
+# holds, and for a model with neither a latent transform nor a DP-only shared
+# expert the call site skips it outright, so there is nothing to win there.
 
 
 def _moe_pre_transform_all_reduce(
@@ -100,36 +103,49 @@ def _moe_pre_transform_all_reduce(
     out.copy_(tensor_model_parallel_all_reduce(fused_output) if need else fused_output)
 
 
+def _all_reduce_in_place(states: torch.Tensor) -> None:
+    """Reduce `states` over TP without a second buffer.
+
+    vLLM declares the collective out-of-place because a custom op may not both
+    mutate and return a tensor, but the communicator this platform uses reduces
+    in place and hands the same tensor back: NPUCommunicator inherits
+    DeviceCommunicatorBase.all_reduce, whose body is `dist.all_reduce(input_);
+    return input_`. So the returned tensor already *is* the input, and the copy
+    that used to follow moved every byte a second time for nothing. The identity
+    check keeps this correct if some communicator ever does allocate, paying the
+    copy only in that case.
+    """
+    reduced = tensor_model_parallel_all_reduce(states)
+    if reduced is not states:
+        states.copy_(reduced)
+
+
 def _moe_shared_all_reduce(
-    shared_output: torch.Tensor,
-    out: torch.Tensor,
+    states: torch.Tensor,
     is_sequence_parallel: bool,
     has_routed_output_transform: bool,
     tp_or_ep_gt_one: bool,
     shared_dp_only: bool,
 ) -> None:
-    comm_type = _EXTRA_CTX.moe_comm_type
-    reduced = _reduced_after_pre_transform(
-        comm_type,
+    if _reduced_after_pre_transform(
+        _EXTRA_CTX.moe_comm_type,
         is_sequence_parallel,
         has_routed_output_transform,
         tp_or_ep_gt_one,
         shared_dp_only,
-    )
-    out.copy_(tensor_model_parallel_all_reduce(shared_output) if reduced else shared_output)
+    ):
+        _all_reduce_in_place(states)
 
 
 def _moe_final_all_reduce(
     states: torch.Tensor,
-    out: torch.Tensor,
     is_sequence_parallel: bool,
     has_routed_output_transform: bool,
     tp_or_ep_gt_one: bool,
     shared_dp_only: bool,
 ) -> None:
-    comm_type = _EXTRA_CTX.moe_comm_type
     reduced = _reduced_after_pre_transform(
-        comm_type,
+        _EXTRA_CTX.moe_comm_type,
         is_sequence_parallel,
         has_routed_output_transform,
         tp_or_ep_gt_one,
@@ -137,12 +153,22 @@ def _moe_final_all_reduce(
     )
     # Sequence-parallel outputs are token shards, so reducing them
     # position-wise would corrupt the result.
-    need = not reduced and not is_sequence_parallel
-    out.copy_(tensor_model_parallel_all_reduce(states) if need else states)
+    if not reduced and not is_sequence_parallel:
+        _all_reduce_in_place(states)
 
 
-def _moe_all_reduce_fake(
-    src: torch.Tensor,
+def _moe_in_place_all_reduce_fake(
+    states: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    return
+
+
+def _moe_pre_transform_all_reduce_fake(
+    fused_output: torch.Tensor,
     out: torch.Tensor,
     is_sequence_parallel: bool,
     has_routed_output_transform: bool,
@@ -153,17 +179,24 @@ def _moe_all_reduce_fake(
 
 
 for _op_name, _op_func in (
-    ("ascend_moe_pre_transform_all_reduce", _moe_pre_transform_all_reduce),
     ("ascend_moe_shared_all_reduce", _moe_shared_all_reduce),
     ("ascend_moe_final_all_reduce", _moe_final_all_reduce),
 ):
     direct_register_custom_op(
         op_name=_op_name,
         op_func=_op_func,
-        fake_impl=_moe_all_reduce_fake,
-        mutates_args=["out"],
+        fake_impl=_moe_in_place_all_reduce_fake,
+        mutates_args=["states"],
         dispatch_key="PrivateUse1",
     )
+
+direct_register_custom_op(
+    op_name="ascend_moe_pre_transform_all_reduce",
+    op_func=_moe_pre_transform_all_reduce,
+    fake_impl=_moe_pre_transform_all_reduce_fake,
+    mutates_args=["out"],
+    dispatch_key="PrivateUse1",
+)
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
@@ -289,9 +322,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return shared_output
         if self._get_shared_expert_parallel_mode() is not SharedExpertParallelMode.TENSOR_PARALLEL:
             return shared_output
-        reduced = torch.empty_like(shared_output)
-        torch.ops.vllm.ascend_moe_shared_all_reduce(shared_output, reduced, *self._reduce_static_flags)
-        return reduced
+        # Reduced in place. forward() rebinds shared_output to this return
+        # value, and the very next thing upstream does to it is an in-place
+        # `*=` in _maybe_apply_routed_scale_to_output, so the tensor is already
+        # the runner's own to overwrite.
+        torch.ops.vllm.ascend_moe_shared_all_reduce(shared_output, *self._reduce_static_flags)
+        return shared_output
 
     @property
     def local_num_experts(self) -> int:
@@ -350,9 +386,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # output_is_reduced is ignored on purpose: MoERunner.forward always
         # supplies it, and it is exactly the value that goes stale. The op
         # recomputes the predicate from the comm type in effect right now.
-        reduced = torch.empty_like(states)
-        torch.ops.vllm.ascend_moe_final_all_reduce(states, reduced, *self._reduce_static_flags)
-        states = reduced
+        #
+        # Reduced in place. forward() rebinds its `result` to this return value
+        # and then only hands it to _maybe_add_zero_expert_output, so nothing
+        # reads the un-reduced contents afterwards.
+        torch.ops.vllm.ascend_moe_final_all_reduce(states, *self._reduce_static_flags)
         if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
         return states
