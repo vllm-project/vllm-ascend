@@ -74,15 +74,11 @@ class PreemptOffloadWorker:
                 scheduler_gpu_kv_cache_tensors.append(t)
         scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
         if self.cpu_capacity_bytes is None:
-            scheduler_num_cpu_blocks = max(
-                1, int(self.offload_host_memory_ratio * self.num_gpu_blocks)
-            )
+            scheduler_num_cpu_blocks = max(1, int(self.offload_host_memory_ratio * self.num_gpu_blocks))
         else:
             scheduler_num_cpu_blocks = max(
                 1,
-                self.num_gpu_blocks
-                * self.cpu_capacity_bytes
-                // scheduler_gpu_total_bytes,
+                self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes,
             )
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
@@ -105,9 +101,7 @@ class PreemptOffloadWorker:
         if self.cpu_capacity_bytes is None:
             self.num_cpu_blocks = scheduler_num_cpu_blocks
         else:
-            self.num_cpu_blocks = max(
-                1, self.cpu_capacity_bytes // total_bytes_per_block
-            )
+            self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
         if self.num_cpu_blocks != scheduler_num_cpu_blocks:
             self.num_cpu_blocks = scheduler_num_cpu_blocks
             logger.warning(

@@ -37,23 +37,16 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
+
 class PreemptOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
     """CPU KV cache preservation for recompute-preempted requests."""
 
     @staticmethod
-    def _resolve_offload_capacity(
-        extra_config: dict[str, Any], world_size: int
-    ) -> tuple[int | None, float]:
-        offload_host_memory_ratio = float(
-            extra_config.get("offload_host_memory_ratio", 1)
-        )
-        if (
-            not math.isfinite(offload_host_memory_ratio)
-            or offload_host_memory_ratio <= 0
-        ):
+    def _resolve_offload_capacity(extra_config: dict[str, Any], world_size: int) -> tuple[int | None, float]:
+        offload_host_memory_ratio = float(extra_config.get("offload_host_memory_ratio", 1))
+        if not math.isfinite(offload_host_memory_ratio) or offload_host_memory_ratio <= 0:
             raise ValueError(
-                "offload_host_memory_ratio must be a positive finite number, "
-                f"got {offload_host_memory_ratio!r}"
+                f"offload_host_memory_ratio must be a positive finite number, got {offload_host_memory_ratio!r}"
             )
 
         if "cpu_bytes_to_use_per_rank" in extra_config:
@@ -65,8 +58,7 @@ class PreemptOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
 
         if cpu_capacity_per_rank is not None and cpu_capacity_per_rank <= 0:
             raise ValueError(
-                "The effective per-rank CPU offload memory must be positive, "
-                f"got {cpu_capacity_per_rank} bytes"
+                f"The effective per-rank CPU offload memory must be positive, got {cpu_capacity_per_rank} bytes"
             )
         return cpu_capacity_per_rank, offload_host_memory_ratio
 
@@ -87,9 +79,7 @@ class PreemptOffloadConnectorV1(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(enable_offload_prefix_caching, bool):
             raise ValueError(f"enable_offload_prefix_caching must be a boolean, got {enable_offload_prefix_caching!r}")
         world_size = vllm_config.parallel_config.world_size
-        cpu_capacity_per_rank, offload_host_memory_ratio = self._resolve_offload_capacity(
-            extra_config, world_size
-        )
+        cpu_capacity_per_rank, offload_host_memory_ratio = self._resolve_offload_capacity(extra_config, world_size)
 
         self.scheduler_manager: PreemptOffloadScheduler | None = None
         self.worker_handler: PreemptOffloadWorker | None = None

@@ -140,9 +140,7 @@ def test_preempt_offload_connector_capacity_priority():
 
     assert resolve({}, 8) == (None, 1.0)
     assert resolve({"offload_host_memory_ratio": 1.5}, 8) == (None, 1.5)
-    assert resolve(
-        {"cpu_bytes_to_use": 800, "offload_host_memory_ratio": 2}, 8
-    ) == (100, 2.0)
+    assert resolve({"cpu_bytes_to_use": 800, "offload_host_memory_ratio": 2}, 8) == (100, 2.0)
     assert resolve(
         {
             "cpu_bytes_to_use_per_rank": 200,
@@ -228,13 +226,11 @@ def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
 
     with (
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.vllm_version_is",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
             return_value=True,
         ),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.get_kv_cache_tensor_layers",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
         ),
         patch(
@@ -277,13 +273,11 @@ def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
 
     with (
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.vllm_version_is",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
             return_value=False,
         ),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.get_kv_cache_tensor_layers",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
         ),
         patch(
@@ -326,13 +320,11 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
 
     with (
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.vllm_version_is",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
             return_value=False,
         ),
         patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool."
-            "preempt_offload_connector.manager.get_kv_cache_tensor_layers",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
         ),
         patch(
