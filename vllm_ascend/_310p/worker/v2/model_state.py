@@ -125,12 +125,16 @@ class _Ascend310PModelStateMixin:
         return {"positions": positions}
 
     def custom_sampler(self, sampler):
-        del sampler
         # MTP propose/_dummy_run reads sampler.sampling_states.temperature/seeds.
         # ``object.__new__`` UT fixtures may omit attrs set in real ``__init__``.
         max_num_reqs = int(getattr(self, "max_num_reqs", 1) or 1)
         device = getattr(self, "device", torch.device("cpu"))
-        base_sampler = Ascend310PSampler(max_num_reqs, device)
+        vocab_size = getattr(getattr(sampler, "sampling_states", None), "vocab_size", None)
+        if vocab_size is None:
+            model_config = getattr(self, "model_config", None)
+            if model_config is not None and hasattr(model_config, "get_vocab_size"):
+                vocab_size = model_config.get_vocab_size()
+        base_sampler = Ascend310PSampler(max_num_reqs, device, vocab_size=vocab_size)
         vllm_config = getattr(self, "vllm_config", None)
         spec_config = None if vllm_config is None else vllm_config.speculative_config
         if spec_config is None:

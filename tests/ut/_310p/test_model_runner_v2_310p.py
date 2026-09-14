@@ -382,11 +382,41 @@ def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
     assert copies_arg is copies
 
 
-def test_sampler_rejects_random_sampling_parameters() -> None:
-    sampler = Ascend310PSampler()
+def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     sampler.add_request(0, 4, SamplingParams(temperature=0))
+    sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
+    assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
+    assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(1, 4, SamplingParams(temperature=1))
+        sampler.add_request(2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+
+
+def test_sampler_temperature_scales_logits_before_argmax() -> None:
+    """Non-1 temperature must change relative logits before greedy/top paths."""
+    from vllm_ascend._310p.worker.v2.sampler import _apply_temperature_pytorch
+
+    logits = torch.tensor([[2.0, 4.0, 0.0], [1.0, 1.0, 1.0]], dtype=torch.float32)
+    expanded = torch.tensor([0, 1], dtype=torch.int64)
+    temperature = torch.tensor([0.5, 1.0], dtype=torch.float32)
+    _apply_temperature_pytorch(logits, expanded, temperature)
+    torch.testing.assert_close(logits[0], torch.tensor([4.0, 8.0, 0.0]))
+    torch.testing.assert_close(logits[1], torch.tensor([1.0, 1.0, 1.0]))
+
+
+def test_sampler_greedy_call_returns_argmax() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=4)
+    sampler.add_request(0, 2, SamplingParams(temperature=0))
+    logits = torch.tensor([[0.1, 3.0, 0.2, 0.0]], dtype=torch.float32)
+    input_batch = SimpleNamespace(
+        expanded_idx_mapping=torch.tensor([0], dtype=torch.int32),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+        num_reqs=1,
+        seq_lens=torch.ones(1, dtype=torch.int32),
+    )
+    out = sampler(logits, input_batch)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
 
 
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
