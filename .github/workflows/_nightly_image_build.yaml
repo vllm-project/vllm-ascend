@@ -86,9 +86,9 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ inputs.build_type }}" = "daily" ]; then
-            MATRIX='{"include":[{"arch_name":"amd64","arch_runner":"ubuntu-latest","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"ubuntu-latest","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"ubuntu-22.04-arm","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"ubuntu-22.04-arm","arch_platform":"linux/arm64","os":"openeuler"}]}'
+            MATRIX='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
-            MATRIX='{"include":[{"arch_name":"arm64","arch_runner":"ubuntu-22.04-arm","arch_platform":"linux/arm64","os":"ubuntu"}]}'
+            MATRIX='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
           fi
           echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
 
@@ -119,11 +119,11 @@ jobs:
       - name: Login to SWR
         id: login-swr
         if: ${{ inputs.should_push }}
-        env:
-          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
-          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-        run: |
-          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin ${{ inputs.swr_registry }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Build nightly-${{ inputs.target }} image
         id: build
@@ -132,7 +132,7 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
@@ -161,7 +161,7 @@ jobs:
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
                 CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
-                if docker manifest inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
                   break
@@ -206,7 +206,11 @@ jobs:
             BUILD_ARGS+=(--build-arg BASE_IMAGE="${BASE_IMAGE}")
           fi
 
-          docker build "${BUILD_ARGS[@]}" -t "$IMAGE" .
+          if [ "${{ inputs.should_push }}" = "true" ]; then
+            docker buildx build "${BUILD_ARGS[@]}" --tag "$IMAGE" --push .
+          else
+            docker buildx build "${BUILD_ARGS[@]}" --tag "$IMAGE" .
+          fi
 
           # Export outputs for merge job
           exec >> $GITHUB_OUTPUT
@@ -234,27 +238,29 @@ jobs:
           PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
           FULL_TAG="${{ steps.build.outputs.full_tag }}"
           if [ "${{ inputs.build_type }}" = "release" ]; then
-            # release mode: retag the built image to a stable tag without arch info,
-            # then push only that single tag (no arch-suffixed tag is pushed).
-            docker tag ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }} ${PUSH_REGISTRY}:${FULL_TAG}
-            docker push ${PUSH_REGISTRY}:${FULL_TAG}
+            # release mode: create a stable tag without arch info pointing to the
+            # arch-suffixed image already pushed by the build step (buildx build --push).
+            docker buildx imagetools create \
+              -t "${PUSH_REGISTRY}:${FULL_TAG}" \
+              "${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
           else
-            # daily mode keeps arch-suffixed tags in the temp registry for later merge
-            docker push ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}
+            # daily mode: arch-suffixed tags were already pushed by the build step.
+            echo "daily arch-suffixed tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
           fi
 
       - name: Push ubuntu arm64 image to release SWR (no arch tag)
         if: ${{ inputs.should_push && inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64' && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
           RELEASE_SWR_REGISTRY="${{ inputs.swr_registry }}/ascend/vllm-ascend"
           RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
           # Release copy uses a stable tag without arch info (single-arch arm64 image)
           RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
           SOURCE_IMAGE="${{ steps.build.outputs.swr_temp_registry }}:${{ steps.build.outputs.full_tag }}-${{ matrix.arch_name }}"
-          docker tag "${SOURCE_IMAGE}" "${RELEASE_IMAGE}"
-          docker push "${RELEASE_IMAGE}"
+          docker buildx imagetools create \
+            -t "${RELEASE_IMAGE}" \
+            "${SOURCE_IMAGE}"
 
   merge-image:
     name: Merge multi-arch nightly-${{ inputs.target }}
@@ -265,11 +271,11 @@ jobs:
     if: ${{ inputs.should_push && always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
     steps:
       - name: Login to SWR
-        env:
-          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
-          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-        run: |
-          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin ${{ inputs.swr_registry }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
       - name: Create multi-arch manifest
         run: |
@@ -279,7 +285,7 @@ jobs:
           TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
 
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
-          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
           DATE="${{ needs.build.outputs.date }}"
           # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>
