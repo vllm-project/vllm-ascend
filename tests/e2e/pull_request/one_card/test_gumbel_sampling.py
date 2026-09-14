@@ -639,6 +639,8 @@ class TestGumbelSampling:
         speculator._step_cols = torch.arange(2, dtype=torch.int32, device=DEVICE)
         speculator.draft_logits = torch.zeros(2, 2, 1031, device=DEVICE)
         speculator.use_fp64_gumbel = False
+        if not vllm_version_is("0.28.0"):
+            speculator.draft_watermarker = None
         logits = torch.randn(2, 1031, device=DEVICE)
         idx_mapping = torch.tensor([1, 0], dtype=torch.int32, device=DEVICE)
         sample_pos = torch.tensor([8, 12], dtype=torch.int32, device=DEVICE)
