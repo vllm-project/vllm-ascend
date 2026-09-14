@@ -29,12 +29,40 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
 )
-
+from vllm_ascend.core.prefix_cache import (
+    kv_cache_group_participates_in_prefix_caching,
+    prefix_cache_group_ids,
+)
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _num_blocks_for_reconciled_hit(
+    blocks: list[KVCacheBlock],
+    group_hit_length: int,
+    final_hit_length: int,
+) -> int:
+    """Translate common-prefix tokens back to this manager's block list.
+
+    A UniformType group may pack full-attention KV and compressed-key state in
+    one physical scheduler page. Its representative nested spec can therefore
+    report an effective size (for example 768 * 4) that is not the token span
+    of each returned physical block (768). Derive the span from the lookup
+    result itself instead of reinterpreting the representative spec.
+    """
+    if not blocks or group_hit_length <= 0 or final_hit_length <= 0:
+        return 0
+    assert group_hit_length % len(blocks) == 0, (
+        "cache lookup returned a non-integral token span per physical block: "
+        f"hit_length={group_hit_length}, blocks={len(blocks)}"
+    )
+    tokens_per_block = group_hit_length // len(blocks)
+    # A partial physical page cannot be restored as a prefix-cache hit.  Keep
+    # only fully covered scheduler pages, matching num_computed_tokens.
+    return min(len(blocks), final_hit_length // tokens_per_block)
 
 
 def _select_kv_token_budget(
@@ -125,6 +153,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector=metrics_collector,
         )
 
+        self.prefix_cache_group_ids = prefix_cache_group_ids(kv_cache_config.kv_cache_groups)
+
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
         # Conservatively fall back to flag all groups when no group is flagged.
@@ -155,15 +185,21 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # can be a multiple of hash_block_size.
         self.hash_block_size = hash_block_size
         if enable_caching:
-            assert all(
-                self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
-                for g in kv_cache_config.kv_cache_groups
-            ), "block_size must be divisible by hash_block_size"
+            participating_sizes = [
+                self._get_effective_block_size(kv_cache_config.kv_cache_groups[group_id].kv_cache_spec)
+                for group_id in self.prefix_cache_group_ids
+            ]
+            assert all(block_size % hash_block_size == 0 for block_size in participating_sizes), (
+                "participating block_size must be divisible by hash_block_size"
+            )
         self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+            isinstance(
+                kv_cache_config.kv_cache_groups[group_id].kv_cache_spec,
+                MambaSpec,
+            )
+            and kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.mamba_cache_mode == "align"
+            and kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.block_size > hash_block_size
+            for group_id in self.prefix_cache_group_ids
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -202,8 +238,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         during cache hit lookup.
         """
         attention_groups: list[tuple[KVCacheSpec, list[int], type[SingleTypeKVCacheManager]]] = []
+        participating_group_ids = getattr(
+            self,
+            "prefix_cache_group_ids",
+            prefix_cache_group_ids(self.kv_cache_config.kv_cache_groups),
+        )
 
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            if i not in participating_group_ids:
+                continue
+
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
 
@@ -216,7 +260,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             else:
                 attention_groups.append((spec, [i], manager_cls))
 
-        assert len(attention_groups) > 1, "HybridKVCacheCoordinator requires at least two attention groups."
+        assert attention_groups, "AscendHybridKVCacheCoordinator requires a participating prefix-cache group."
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
@@ -306,7 +350,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # ``curr_hit_length``. Each eagle group applies the drop at most once
         # per candidate length (see issue #32802).
         eagle_verified: set[int] = set()
-
         while True:
             curr_hit_length = hit_length
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
@@ -368,9 +411,24 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         for spec, group_ids, _ in self.attention_groups:
             if not isinstance(spec, FullAttentionSpec):
                 continue
-            num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
+                    if getattr(spec, "kv_cache_specs", None) is not None or hasattr(
+                        spec, "compress_ratio"
+                    ):
+                        # Composite/compressed managers return scheduler physical
+                        # block IDs. The runtime representative may be an
+                        # MLAAttentionSpec without ``kv_cache_specs`` and expose a
+                        # 3072-token logical size despite 768-token physical pages.
+                        num_blocks = _num_blocks_for_reconciled_hit(
+                            blks,
+                            hit_length_by_group[group_id],
+                            hit_length,
+                        )
+                    else:
+                        # Ordinary full attention retains its partially covered
+                        # tail block, matching the upstream manager contract.
+                        num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
                     del blks[num_blocks:]
                     hit_length_by_group[group_id] = hit_length
 
@@ -436,12 +494,16 @@ def get_kv_cache_coordinator(
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+    has_prefix_cache_groups = any(
+        kv_cache_group_participates_in_prefix_caching(group) for group in kv_cache_config.kv_cache_groups
+    )
+    coordinator_enable_caching = enable_caching and has_prefix_cache_groups
+    if has_prefix_cache_groups and _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
             use_eagle,
-            enable_caching,
+            coordinator_enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
@@ -453,12 +515,12 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
         )
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+    if len(kv_cache_config.kv_cache_groups) == 1 or not coordinator_enable_caching:
         orig_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
             use_eagle=use_eagle,
-            enable_caching=enable_caching,
+            enable_caching=coordinator_enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
@@ -473,7 +535,7 @@ def get_kv_cache_coordinator(
         kv_cache_config,
         max_model_len,
         use_eagle,
-        enable_caching,
+        coordinator_enable_caching,
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
         pcp_world_size=1,
