@@ -19,7 +19,8 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
     storages = {
         part.untyped_storage().data_ptr(): part.untyped_storage() for parts in caches.values() for part in parts
     }
-    assert sum(storage.nbytes() for storage in storages.values()) == total_bytes
+    alignment = kvpp_cache.KVPP_BUFFER_ALIGNMENT
+    assert sum(storage.nbytes() for storage in storages.values()) == total_bytes + len(storages) * alignment
     assert all(torch.count_nonzero(part).item() == 0 for parts in caches.values() for part in parts)
 
     def storage_id(index):
@@ -29,11 +30,14 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
     assert storage_id(10) == storage_id(16)
     assert len({storage_id(i) for i in (9, 10, 12, 13, 14, 17)}) == 6
     for index, size in ((9, 76), (10, 76), (12, 32), (13, 48), (14, 64), (17, 96)):
-        assert caches[layer_name(index)][0].untyped_storage().nbytes() == size * num_blocks
+        cache = caches[layer_name(index)][0]
+        assert cache.data_ptr() % alignment == 0
+        assert cache.untyped_storage().nbytes() == size * num_blocks + alignment
+        assert cache.storage_offset() + size * num_blocks <= cache.untyped_storage().nbytes()
 
     parts = (*caches[layer_name(11)], *caches[indexer_name(11)])
     assert [part.numel() for part in parts] == [64 * num_blocks, 8 * num_blocks, 4 * num_blocks]
-    assert [part.storage_offset() for part in parts] == [0, 64 * num_blocks, 72 * num_blocks]
+    assert [part.data_ptr() - parts[0].data_ptr() for part in parts] == [0, 64 * num_blocks, 72 * num_blocks]
     assert all(part.untyped_storage().data_ptr() == storage_id(11) for part in parts)
     caches[layer_name(9)][0][0] = 7
     assert all(caches[layer_name(i)][0][0].item() == 7 for i in (11, 15))
