@@ -112,7 +112,10 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+    --no-enable-chunked-prefill \
+    --no-enable-prefix-caching \
+    --block-size 128
 ```
 
 Then use the OpenAI-compatible client:
@@ -163,6 +166,9 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
+    enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    block_size=128,
 )
 
 # Outputs will be deterministic regardless of batch size
@@ -174,6 +180,20 @@ for output in outputs:
     print(f"Prompt: {prompt!r}")
     print(f"Generated: {generated_text!r}\n")
 ```
+
+## Scheduling Limitations
+
+Chunked prefill, prefix caching, and request preemption (eviction and recomputation) are not supported with batch invariance.
+
+These scheduling features are not disabled automatically. You must explicitly disable chunked prefill and prefix caching in your configuration, and pair the chunked prefill disabling with a KV cache block size of 128 — pass `--block-size 128` together with `--no-enable-chunked-prefill` when starting the server, or `block_size=128` together with `enable_chunked_prefill=False` for offline inference — as shown in the examples above.
+
+Request preemption is triggered when the KV cache runs out: the preempted request is evicted and recomputed later. The recomputed prefill includes the tokens generated before the preemption, so attention processes them through the prefill (P) path instead of the original decode (D) path — the P and D computations cannot be aligned, which breaks batch invariance. To reduce the chance of preemption, increase the available KV cache or lower the per-request and concurrent pressure:
+
+- Decrease `--max-num-seqs` so fewer requests share the KV cache.
+- Set `--max-model-len` to the smallest value your workload needs, and cap the per-request output length (`max_tokens`).
+- Increase `--gpu-memory-utilization` to leave more memory for the KV cache.
+
+Use the startup logs (`GPU KV cache size` and `Maximum concurrency for ... tokens per request`) to size your workload against the KV cache capacity, and watch the engine stats: `GPU KV cache usage` approaching 100% signals imminent preemption. See the [preemption FAQ](../../faqs.md#22-why-does-tpot-increase-drastically-as-concurrency-grows) for details.
 
 ## Tested Models
 

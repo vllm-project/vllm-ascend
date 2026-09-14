@@ -55,7 +55,8 @@ def _hc_pre_cpu(
     hc_fn: torch.Tensor,
     hc_scale: torch.Tensor,
     hc_base: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pre_mix: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     x_float = x.float()
     x_flat = x_float.flatten(-2)
     inv_rms = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + NORM_EPS)
@@ -78,8 +79,9 @@ def _hc_pre_cpu(
         comb_frag = comb_frag / (comb_frag.sum(-1, keepdim=True) + HC_EPS)
         comb_frag = comb_frag / (comb_frag.sum(-2, keepdim=True) + HC_EPS)
 
-    y = (pre.unsqueeze(-1) * x_float).sum(dim=-2).to(x.dtype)
-    return y, post, comb_frag
+    mix_for_y = pre_mix.float() if pre_mix is not None else pre
+    y = (mix_for_y.unsqueeze(-1) * x_float).sum(dim=-2).to(x.dtype)
+    return y, post, comb_frag, pre
 
 
 def _assert_close_with_pass_rate(
@@ -105,7 +107,7 @@ def _assert_close_with_pass_rate(
 
 def _compare_hc_pre_with_cpu(shape: tuple[int, ...]):
     x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
-    expected_y, expected_post, expected_comb_frag = _hc_pre_cpu(
+    expected_y, expected_post, expected_comb_frag, _ = _hc_pre_cpu(
         x,
         hc_fn,
         hc_scale,
@@ -176,6 +178,48 @@ def test_npu_hc_pre_v2_bf16_dsv4_flash_hidden_size():
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_extended_hidden_size():
     _compare_hc_pre_with_cpu((2, HC_MULT, EXTENDED_HIDDEN_SIZE))
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_npu_hc_pre_v3_uses_external_pre_mix():
+    shape = (2, HC_MULT, HIDDEN_SIZE)
+    x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
+    pre_mix = torch.rand(shape[:-1], dtype=torch.float32)
+    expected_y, expected_post, expected_comb_frag, expected_pre = _hc_pre_cpu(x, hc_fn, hc_scale, hc_base, pre_mix)
+    y, post, comb_frag, pre = torch.ops._C_ascend.npu_hc_pre_v3(
+        x.npu(),
+        hc_fn.npu(),
+        hc_scale.npu(),
+        hc_base.npu(),
+        pre_mix.npu(),
+        hc_mult=HC_MULT,
+        hc_sinkhorn_iters=HC_SINKHORN_ITERS,
+        norm_eps=NORM_EPS,
+        hc_eps=HC_EPS,
+    )
+    assert y.shape == (shape[0], shape[-1])
+    assert post.shape == (shape[0], HC_MULT)
+    assert comb_frag.shape == (shape[0], HC_MULT, HC_MULT)
+    assert pre.shape == (shape[0], HC_MULT)
+    assert y.dtype == torch.bfloat16
+    assert post.dtype == torch.float32
+    assert comb_frag.dtype == torch.float32
+    assert pre.dtype == torch.float32
+    for actual, expected, diff_threshold, required_pass_rate in (
+        (y, expected_y, Y_DIFF_THRESHOLD, Y_REQUIRED_PASS_RATE),
+        (post, expected_post, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+        (comb_frag, expected_comb_frag, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+        (pre, expected_pre, AUX_DIFF_THRESHOLD, AUX_REQUIRED_PASS_RATE),
+    ):
+        _assert_close_with_pass_rate(
+            actual,
+            expected,
+            diff_threshold=diff_threshold,
+            required_pass_rate=required_pass_rate,
+        )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

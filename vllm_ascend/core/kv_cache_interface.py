@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 import torch
@@ -13,6 +14,7 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -32,12 +34,42 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
+    if not vllm_version_is("0.28.0"):
+        # vLLM #53906 added an optional MLA storage-view override. It is not
+        # Ascend's derived number of physical rows per logical block.
+        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
+        if isinstance(kv_cache_spec, MLAAttentionSpec):
+            storage_block_size = kv_cache_spec.storage_block_size
+            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+
+
+def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
+    """Whether state caches advance by a padded page size shared with attention.
+
+    Ascend mixed pools can bind one physical page to both an attention cache and a
+    recurrent state cache. The attention side of such a pool is addressed by an explicit
+    physical block stride (``indexes_kv_by_block_stride``) and the state caches are
+    padded to that same page size, so every view over the shared page has to advance by
+    the padded page size: otherwise a state update for one scheduler block ID would land
+    in the pages owned by another block ID.
+
+    The capability belongs to the pool rather than to a single spec, because hybrid
+    models also pad Mamba pages through ``cache_config.mamba_page_size_padded`` while
+    keeping the packed contiguous state layout, so padding alone does not require this
+    layout.
+    """
+    specs = list(kv_cache_specs)
+    state_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+    if not state_specs:
+        return False
+    if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
+        return False
+    return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,22 +93,21 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
 
-    @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels.
+    if vllm_version_is("0.28.0"):
 
-        vLLM #51718 replaced ``MLAAttentionSpec.compress_ratio`` with
-        ``AttentionSpec.tokens_per_state`` on main. Both express how many
-        logical tokens one physical stored state covers.
-        """
-        if vllm_version_is("0.28.0"):
+        @property
+        def storage_block_size(self) -> int:
+            """Legacy physical geometry; main uses get_storage_block_size.
+
+            On main, #53906 initializes a dataclass field with this name.
+            A read-only property would reject that constructor assignment.
+            """
             return self.block_size // self.compress_ratio
-        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
         return (
-            self.storage_block_size
+            get_storage_block_size(self)
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )

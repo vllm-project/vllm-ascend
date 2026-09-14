@@ -368,7 +368,8 @@ class AscendPCPManager(PCPManager):
     def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         # Runtime dummy inputs use the runner buffers, whereas FULL graphs
         # capture PCP-local storage. Refresh that storage after a real batch.
-        input_buffers = self.input_buffers
+        input_buffers = self._input_buffers
+        assert input_buffers is not None
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs_after_padding
         for name in ("input_ids", "positions", "is_padding"):

@@ -32,12 +32,23 @@ using namespace optiling::detail;
         op.Process(); \
     } while (0)
 
+// arch22: 含 candidate_topk_index 输入/输出 (两级TopK)
+#define INVOKE_LI_CANDIDATE_OP_IMPL(templateClass, ...) \
+    do { \
+        templateClass<QLIV2Type<__VA_ARGS__>> op; \
+        op.Init(query, key, weights, queryScale, keyScale, cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK, \
+                blockTable, outputIdxOffset, metadata, candidateTopkIndex, sparseIndices, sparseValues, \
+                candidateTopkIndexOut, user, tiling_data, &tPipe); \
+        op.Process(); \
+    } while (0)
+
 template <int DT_Q, int DT_K, int DT_OUT, int PAGE_ATTENTION, int Q_LAYOUT_T, int K_LAYOUT_T>
 __global__ __aicore__ void quant_lightning_indexer_v2(
     __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights, __gm__ uint8_t *queryScale,
     __gm__ uint8_t *keyScale, __gm__ uint8_t *cuSeqlensQ, __gm__ uint8_t *cuSeqlensK, __gm__ uint8_t *sequsedQ,
     __gm__ uint8_t *sequsedK, __gm__ uint8_t *cmpResidualK, __gm__ uint8_t *blockTable, __gm__ uint8_t *outputIdxOffset,
-    __gm__ uint8_t *metadata, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues, __gm__ uint8_t *workspace,
+    __gm__ uint8_t *metadata, __gm__ uint8_t *candidateTopkIndex, __gm__ uint8_t *sparseIndices,
+    __gm__ uint8_t *sparseValues, __gm__ uint8_t *candidateTopkIndexOut, __gm__ uint8_t *workspace,
     __gm__ uint8_t *tiling)
 {
     TPipe tPipe;
@@ -72,7 +83,7 @@ __global__ __aicore__ void quant_lightning_indexer_v2(
     }
 
 #else
-    INVOKE_LI_NO_KFC_OP_IMPL(QLIV2Preload, int8_t, int8_t, float, uint16_t, int32_t, PAGE_ATTENTION,
-                             LI_LAYOUT(Q_LAYOUT_T), LI_LAYOUT(K_LAYOUT_T));
+    INVOKE_LI_CANDIDATE_OP_IMPL(QLIV2Preload, int8_t, int8_t, float, uint16_t, int32_t, PAGE_ATTENTION,
+                                LI_LAYOUT(Q_LAYOUT_T), LI_LAYOUT(K_LAYOUT_T));
 #endif
 }

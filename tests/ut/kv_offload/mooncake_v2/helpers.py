@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -15,6 +15,15 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadata,
     MooncakeTransferMetadataGroups,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def make_kv_cache_tensor(
+    *, size: int, layers: list[str], layer_stride: int, block_stride: int, offset: int = 0
+) -> KVCacheTensor:
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layers, block_stride=block_stride, offset=offset)
+    return KVCacheTensor(size=size, layers=layers, layer_stride=layer_stride, block_stride=block_stride, offset=offset)
 
 
 def make_full_spec(block_size: int = 16, num_kv_heads: int = 1) -> FullAttentionSpec:
