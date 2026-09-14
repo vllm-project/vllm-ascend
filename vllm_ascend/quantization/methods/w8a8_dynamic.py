@@ -292,6 +292,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         assert topk_weights is not None
+        if topk_weights.dtype == torch.float32 and self.in_dtype == torch.bfloat16:
+            topk_weights = torch.ops._C_ascend.npu_static_cast(
+                topk_weights, "float32", "bfloat16"
+            )
+        else:
+            topk_weights = topk_weights.to(self.in_dtype)
 
         act_name = getattr(activation, "value", activation)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
