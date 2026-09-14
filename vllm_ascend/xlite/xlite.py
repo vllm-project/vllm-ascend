@@ -637,7 +637,9 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         xlite_config.index_topk = hf_config.index_topk
         xlite_config.index_rope_interleaved = getattr(hf_config, "indexer_rope_interleave", False)
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
-        xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
+        xlite_config.index_full_mask = list(  # type: ignore[attr-defined]
+            map(lambda x: str(x).lower().startswith("full"), index_types)
+        )
 
     def _build_model(self) -> None:
         super()._build_model()
@@ -661,7 +663,7 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         mla_caches: list[tuple[torch.Tensor, ...]] = []
 
         idx = 0
-        index_mask = self.xlite_config.index_full_mask or [True] * self.xlite_config.n_layers
+        index_mask = getattr(self.xlite_config, "index_full_mask", None) or [True] * self.xlite_config.n_layers
         dummy_indexer_cache = (_DUMMY_TENSOR,)
         for mask in index_mask:
             indexer_caches.append(kv_caches[idx] if mask else dummy_indexer_cache)
