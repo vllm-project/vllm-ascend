@@ -72,6 +72,7 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 MLA_FIA_SPLIT_TARGET_BATCH = 32
 MLA_FIA_SPLIT_MAX_INPUTS = 16
 _KV_CACHE_NZ_DIM = 16
+_FIA_FP8_CACHE_NZ_DIM = 32
 
 
 def _mla_fia_num_splits(batch_size: int) -> int:
@@ -1549,13 +1550,53 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         return attn_output
 
+    def _nz_cache_inputs(
+        self, nope_cache: torch.Tensor, rope_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        block_num, block_size, num_kv_heads, nope_dim = nope_cache.shape
+        rope_block_num, rope_block_size, rope_num_kv_heads, rope_dim = (
+            rope_cache.shape
+        )
+        if (
+            block_num != rope_block_num
+            or block_size != rope_block_size
+            or num_kv_heads != 1
+            or rope_num_kv_heads != 1
+        ):
+            raise RuntimeError(
+                "resident MLA caches must share [Block, BlockSize, 1] dimensions"
+            )
+        nope_nz_dim = (
+            _FIA_FP8_CACHE_NZ_DIM if self.fa_quant_layer else _KV_CACHE_NZ_DIM
+        )
+        if nope_dim % nope_nz_dim or rope_dim % _KV_CACHE_NZ_DIM:
+            raise RuntimeError(
+                "resident MLA cache widths must align to PA_NZ tiles"
+            )
+        return (
+            nope_cache.view(
+                block_num,
+                num_kv_heads,
+                nope_dim // nope_nz_dim,
+                block_size,
+                nope_nz_dim,
+            ),
+            rope_cache.view(
+                block_num,
+                rope_num_kv_heads,
+                rope_dim // _KV_CACHE_NZ_DIM,
+                block_size,
+                _KV_CACHE_NZ_DIM,
+            ),
+        )
+
     def _exec_kv_no_rope(
         self,
         kv_no_split: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize/cache MLA KV while preserving K3's raw q/k slice."""
+        """Normalize/cache MLA KV, written via scatter(cache_mode=Norm)."""
         assert self.kv_a_layernorm is not None
         assert len(kv_cache) > 1, "MLA requires separate latent and positional KV caches"
         num_tokens = kv_no_split.shape[0]
@@ -1705,22 +1746,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
-            nz_fmt_last_dim = 16
-            k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
-            )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
-        elif self.enable_kv_nz:
-            nz_fmt_last_dim = 16
-            k_nope = k_nope.view(
-                -1, self.num_kv_heads, self.kv_lora_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
+        if (
+            self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5
+        ) or self.enable_kv_nz:
+            k_nope, k_pe = self._nz_cache_inputs(k_nope, k_pe)
         else:
             k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
             k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
