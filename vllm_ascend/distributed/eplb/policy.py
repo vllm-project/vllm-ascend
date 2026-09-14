@@ -1,29 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Adapters for using Ascend EPLB policies with the vLLM V2 state."""
+"""Adapter for using Ascend SwiftBalancer with the vLLM V2 state."""
 
 from typing import Any
 
 import torch
 
-ASCEND_V2_POLICY_TYPES = {
-    "policy_swift_balancer": 2,
-}
+SWIFT_BALANCER_POLICY_TYPE = 2
 
 
 class AscendV2EplbPolicy:
-    """Adapt an Ascend EPLB policy to the upstream vLLM policy contract."""
+    """Adapt Ascend SwiftBalancer to the upstream vLLM policy contract."""
 
-    def __init__(self, policy_name: str) -> None:
+    def __init__(self) -> None:
         from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
-        try:
-            policy_type = ASCEND_V2_POLICY_TYPES[policy_name]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported Ascend V2 EPLB policy: {policy_name}") from exc
-        self.policy_name = policy_name
-        self._policy: Any = PolicyFactory.generate_policy(policy_type)
+        self._policy: Any = PolicyFactory.generate_policy(SWIFT_BALANCER_POLICY_TYPE)
 
     @staticmethod
     def _build_physical_load(

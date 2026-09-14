@@ -14,7 +14,6 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
@@ -111,12 +110,9 @@ class AscendEplbState(_eplb_state.EplbState):
         model_config: ModelConfig,
     ) -> None:
         super().add_model(model, model_config)
-        policy_name = get_ascend_config().eplb_config.v2_policy
-        if policy_name == "default":
-            return
         policy = getattr(self, "_ascend_v2_policy", None)
-        if policy is None or policy.policy_name != policy_name:
-            policy = AscendV2EplbPolicy(policy_name)
+        if policy is None:
+            policy = AscendV2EplbPolicy()
             self._ascend_v2_policy = policy
         self.policy = policy
 
