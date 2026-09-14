@@ -11,6 +11,8 @@ import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadata
+from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -50,20 +52,28 @@ def make_draft(config):
 
 @pytest.mark.parametrize("target_use_mla", [False, True])
 @pytest.mark.parametrize(
-    "architecture,draft_use_mla",
+    "architecture,draft_use_mla,text_fields,outer_fields,expect_dense_mla",
     [
-        ("K3DSparkModel", True),
-        ("OtherMLADraftModel", True),
-        ("K3DSparkModel", False),
-        ("Qwen3DSparkModel", False),
-        ("DSparkDraftModel", False),
+        ("K3DSparkModel", True, {}, {}, True),
+        ("OtherMLADraftModel", True, {}, {}, True),
+        ("K3DSparkModel", False, {}, {}, False),
+        ("Qwen3DSparkModel", False, {}, {}, False),
+        ("DSparkDraftModel", False, {}, {}, False),
+        ("DSparkDraftModel", True, {"compress_ratios": [0, 4, 128], "index_topk": 2048}, {}, False),
+        ("CompressedMLADraftModel", True, {"compress_ratios": [0]}, {}, False),
+        ("WrappedMLADraftModel", True, {}, {"compress_ratios": [0, 4]}, False),
+        ("SparseMLADraftModel", True, {"index_topk": 2048}, {}, False),
+        ("KpoolMLADraftModel", True, {"index_topk": 2048, "index_kpool": 4}, {}, True),
     ],
 )
-def test_routes_by_draft_mla_capability(monkeypatch, architecture, draft_use_mla, target_use_mla):
+def test_routes_by_draft_mla_capability(
+    monkeypatch, architecture, draft_use_mla, target_use_mla, text_fields, outer_fields, expect_dense_mla
+):
     mla_constructor = MagicMock()
     shared_constructor = MagicMock()
     monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
     monkeypatch.setattr(shared, "AscendDSparkSpeculator", shared_constructor)
+    text_config = SimpleNamespace(**text_fields)
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=target_use_mla),
         speculative_config=SimpleNamespace(
@@ -71,16 +81,52 @@ def test_routes_by_draft_mla_capability(monkeypatch, architecture, draft_use_mla
             use_dspark=lambda: True,
             draft_model_config=SimpleNamespace(
                 use_mla=draft_use_mla,
-                hf_config=SimpleNamespace(architectures=[architecture]),
+                hf_config=SimpleNamespace(architectures=[architecture], **outer_fields),
+                hf_text_config=text_config,
             ),
         ),
     )
     device = torch.device("cpu")
     result = init_speculator(config, device)
-    selected, unused = (mla_constructor, shared_constructor) if draft_use_mla else (shared_constructor, mla_constructor)
+    selected, unused = (
+        (mla_constructor, shared_constructor) if expect_dense_mla else (shared_constructor, mla_constructor)
+    )
     selected.assert_called_once_with(config, device)
     unused.assert_not_called()
     assert result is selected.return_value
+
+
+@pytest.mark.parametrize(
+    "metadata_cls,config_fields",
+    [
+        (AscendDSAMetadata, {"compress_ratios": [0, 4, 128], "index_topk": 2048}),
+        (AscendSFAMetadata, {"index_topk": 2048}),
+    ],
+)
+def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, metadata_cls, config_fields):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.num_query_per_req = 5
+    mla_constructor = MagicMock()
+    monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
+    monkeypatch.setattr(shared, "AscendDSparkSpeculator", MagicMock(return_value=spec))
+    hf_config = SimpleNamespace(architectures=["DSparkDraftModel"], **config_fields)
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            use_dspark=lambda: True,
+            draft_model_config=SimpleNamespace(use_mla=True, hf_config=hf_config, hf_text_config=hf_config),
+        )
+    )
+    selected = init_speculator(config, torch.device("cpu"))
+    assert selected is spec
+    mla_constructor.assert_not_called()
+    # Use the backend's actual type: neither DSA nor SFA has a dense decode
+    # object. Only the fields touched by the shared update are needed here.
+    metadata = metadata_cls.__new__(metadata_cls)
+    assert not hasattr(metadata, "decode")
+    layers = {"draft": metadata}
+    assert selected._update_draft_attn_metadata(layers, 2) is layers
+    assert metadata.actual_seq_lengths_q == [5, 10]
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
