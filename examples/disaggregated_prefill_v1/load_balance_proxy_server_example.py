@@ -177,7 +177,7 @@ def extract_cached_tokens(response_json: dict) -> int | None:
     usage = response_json.get("usage") or {}
     prompt_tokens_details = usage.get("prompt_tokens_details") or {}
     cached_tokens = prompt_tokens_details.get("cached_tokens")
-    return cached_tokens if isinstance(cached_tokens, int) else None
+    return cached_tokens if isinstance(cached_tokens, int) else 0
 
 
 def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -> bool:
