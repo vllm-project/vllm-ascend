@@ -36,7 +36,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegress
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata, AscendMlaDCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -468,16 +467,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
         query_start_loc_np: np.ndarray | None = None,
-        *,
-        seq_lens_cpu: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         assert self.input_batch is not None
         with build_draft_attn_metadata_factory(
             self.input_buffers.positions,
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
-            seq_lens_cpu=seq_lens_cpu,
-            uniform_mla_query=step > 0,
         ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,
@@ -519,47 +514,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             )
             assert prepared_attn_metadata is not None
             return [prepared_attn_metadata]
-
-        if self.attn_architecture == "MLA" and self.block_tables.cp_size > 1:
-            assert self.input_batch is not None
-            num_reqs = self.input_batch.num_reqs
-            # prepare_decode_inputs has already applied rejection rollback
-            # and advanced to the first single-token draft query. Copy once
-            # before replay; each step owns its history/current split lengths.
-            first_seq_lens = self.input_buffers.seq_lens[:num_reqs].to("cpu")
-            base_seq_lens = torch.zeros(num_reqs_padded, dtype=torch.int32)
-            base_seq_lens[:num_reqs] = first_seq_lens
-            base_metadata = self._build_draft_attn_metadata(
-                num_reqs=num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_reqs_padded,
-                seq_lens_cpu_upper_bound=base_seq_lens,
-                step=1,
-                seq_lens_cpu=base_seq_lens,
-            )
-            assert base_metadata is not None
-            draft_attn_metadatas = []
-            for step in range(1, self.num_speculative_steps):
-                seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
-                advance = step - 1 if getattr(self, "advance_draft_positions", True) else 0
-                seq_lens_cpu[:num_reqs] = (first_seq_lens + advance).clamp(max=self.max_model_len)
-                # Layers in one attention group share the same metadata. Keep
-                # that sharing within a step, but isolate mutable step lengths.
-                step_groups = {}
-                per_step_metadata = {}
-                for name, metadata in base_metadata.items():
-                    group_key = id(metadata)
-                    if group_key not in step_groups:
-                        step_groups[group_key] = AscendMlaDCPMetadataBuilder.build_decode_graph_step(
-                            metadata,
-                            seq_lens_cpu,
-                            self.block_tables.cp_size,
-                            self.block_tables.cp_rank,
-                            self.block_tables.cp_interleave,
-                        )
-                    per_step_metadata[name] = step_groups[group_key]
-                draft_attn_metadatas.append(per_step_metadata)
-            return draft_attn_metadatas
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
@@ -625,12 +579,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             return
 
         if self.attn_architecture in ("DSA", "SFA"):
-            return
-
-        if any(isinstance(getattr(m, "decode", None), AscendMLADCPDecodeMetadata) for m in attn_metadata.values()):
-            # DCP metadata was built from the current draft GPU lengths (or
-            # the per-step CPU snapshot for FULL replay). Target lengths are
-            # speculative upper bounds until rejection has been applied.
             return
 
         attn_meta = next(iter(attn_metadata.values()))
