@@ -103,12 +103,7 @@ def _qualifies_fast_path(
       - loads: the last row base + BLOCK - 1 never passes the storage end,
         for both fragments.
     """
-    if (
-        ql_nope.stride(0) < 0
-        or ql_nope.stride(1) < 0
-        or q_pe.stride(0) < 0
-        or q_pe.stride(1) < 0
-    ):
+    if ql_nope.stride(0) < 0 or ql_nope.stride(1) < 0 or q_pe.stride(0) < 0 or q_pe.stride(1) < 0:
         return False
     if block_n > total_dim or ql_nope.shape[-1] + block_r > total_dim:
         return False
@@ -134,7 +129,8 @@ def prep_query_head_major(
         [H, T, nope_dim + rope_dim] contiguous tensor, in the layout
         ``all_gather_into_tensor`` produces for a head gather (each rank's
         head chunk is contiguous along dim 0); or ``None`` when the shapes
-        cannot be proven legal for the kernel (see ``_qualifies_fast_path``),
+        cannot be proven legal for the kernel (see ``_qualifies_fast_path``)
+        or when the input is empty (``num_tokens == 0`` or ``num_heads == 0``),
         in which case callers fall back to the torch ``cat -> permute ->
         contiguous`` assembly. No guarded Triton kernel is used.
 
@@ -144,25 +140,25 @@ def prep_query_head_major(
     """
     if ql_nope.shape[:2] != q_pe.shape[:2]:
         raise RuntimeError(
-            f"query gather prep requires matching (T, H), got {tuple(ql_nope.shape)} and {tuple(q_pe.shape)}"
+            f"prep_query_head_major requires matching (T, H), got {tuple(ql_nope.shape)} and {tuple(q_pe.shape)}"
         )
     if ql_nope.dtype != q_pe.dtype:
-        raise RuntimeError("query gather prep requires ql_nope and q_pe to share a dtype")
+        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype")
+
     num_tokens, num_heads, nope_dim = ql_nope.shape
+    if num_tokens == 0 or num_heads == 0:
+        return None
     rope_dim = q_pe.shape[-1]
     total_dim = nope_dim + rope_dim
-
+    block_n = next_power_of_2(nope_dim)
+    block_r = next_power_of_2(rope_dim)
+    if not _qualifies_fast_path(ql_nope, q_pe, block_n, block_r, rope_dim, total_dim):
+        return None
     out = torch.empty(
         (num_heads, num_tokens, total_dim),
         dtype=ql_nope.dtype,
         device=ql_nope.device,
     )
-    if num_tokens == 0 or num_heads == 0:
-        return out
-    block_n = next_power_of_2(nope_dim)
-    block_r = next_power_of_2(rope_dim)
-    if not _qualifies_fast_path(ql_nope, q_pe, block_n, block_r, rope_dim, total_dim):
-        return None
     grid = (num_tokens * num_heads,)
     _q_gather_prep_head_major_kernel[grid](
         ql_nope,
