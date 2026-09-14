@@ -33,9 +33,6 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextStateCache,
 )
-from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import (
-    SparseAttnIndexerKpool,
-)
 
 
 class Indexer(nn.Module):
@@ -100,12 +97,6 @@ class Indexer(nn.Module):
         self.scale_fmt = None
         self.quant_block_size = self.head_dim
         self.topk_indices_buffer = topk_indices_buffer
-        # FP32 weight copies for the fp32 K/gate/weights projections. Cached
-        # lazily after the checkpoint weights are loaded so the quantitative
-        # work of the first forward matches the last.
-        self._wk_weight_f32: torch.Tensor | None = None
-        self._gate_weight_f32: torch.Tensor | None = None
-
         # Completed pools store BF16 vectors without quantization scales.
         self.k_cache = Glm5NextIndexerCache(
             head_dim=self.head_dim,
@@ -123,22 +114,16 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
         )
-        self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
-        from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
-        self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        self.indexer_op = SparseAttnIndexerKpool(
-            self.k_cache,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-            tail_cache=self.state_cache,
+    def get_ascend_indexer_backend_cls(self):
+        # Lazy import keeps the model module independent from the shared ops
+        # registry during process startup.
+        from vllm_ascend.attention.indexer_kpool import (
+            Glm5NextKPoolIndexerBackend,
         )
+
+        return Glm5NextKPoolIndexerBackend
 
     def forward(
         self,
@@ -147,64 +132,8 @@ class Indexer(nn.Module):
         positions,
         rotary_emb,
     ) -> torch.Tensor:
-        # Match glm-next-0806's kpool contract: the scoring chain consumes a
-        # raw bf16 Q (no FWHT/fp8 rotation), an fp32 K that survives the norm
-        # and the compressed-K insertion, raw head weights scaled only by the
-        # softmax/head factors, and an fp32 gate. FP32 K/gate keep near-tie
-        # pool rankings stable on long-context tasks.
-        q, _ = self.wq_b(qr)
-        q = q.view(-1, self.n_head, self.head_dim)
-
-        hidden_f32 = hidden_states.float()
-        if self._wk_weight_f32 is None:
-            self._wk_weight_f32 = self.wk_weights_proj.weight.detach().float()
-            self._gate_weight_f32 = self.index_kpool_compress_gate.detach().float()
-        kw = torch.mm(hidden_f32, self._wk_weight_f32.t())
-        weights = kw[:, self.head_dim :].to(torch.bfloat16)
-        k = self.k_norm(kw[:, : self.head_dim])
-
-        if self.rope_dim > 0:
-            q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
-            k_pe, k_nope = torch.split(
-                k,
-                [self.rope_dim, self.head_dim - self.rope_dim],
-                dim=-1,
-            )
-            # RoPE runs on the bf16 half; the nope half keeps fp32 so the cache
-            # write matches the FP32 state the compressor reads back.
-            k_pe = k_pe.to(torch.bfloat16)
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-            # Note: RoPE (NeoX) can introduce extra leading dimensions during
-            # compilation so we need to reshape back to token-flattened shapes.
-            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim).float()
-            # `rotary_emb` is shape-preserving; `q_pe` is already
-            # [num_tokens, n_head, rope_dim].
-            q = torch.cat([q_pe, q_nope], dim=-1)
-            # `k_pe` is [num_tokens, 1, rope_dim] (MQA); keep the pe rounded to
-            # bf16 but embed it back into the fp32 K row.
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
-        # else: qk_rope_head_dim=0 — no rope component. q is already
-        # [num_tokens, n_head, head_dim] and k is [num_tokens, head_dim] (all
-        # nope), so skip the rope split / rotary / cat entirely; otherwise the
-        # split/reshape would build 0-element tensors (breaks dynamo tracing).
-
-        q = q.to(torch.bfloat16)
-        weights = weights * (self.softmax_scale * self.n_head**-0.5)
-        gate_weight_f32 = self._gate_weight_f32
-        assert gate_weight_f32 is not None
-        gate_score = torch.mm(hidden_f32, gate_weight_f32.t())
-
-        return self.indexer_op(
-            hidden_states,
-            q,
-            k,
-            weights,
-            gate_score=gate_score,
-            compress_ape=self.index_kpool_compress_ape,
-            index_kpool=self.index_kpool,
-            positions=positions,
-        )
+        del hidden_states, qr, positions, rotary_emb
+        raise RuntimeError("GLM-Next Indexer must run through IndexerWrapper's Ascend backend.")
 
 
 class Glm5NextMLAAttention(nn.Module):
