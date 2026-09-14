@@ -99,6 +99,18 @@ class TestKVPoolScheduler(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "TP mismatch"):
             KVPoolScheduler(config, use_layerwise=True)
 
+    def test_mooncake_layerwise_hybrid_layout_allowed(self):
+        # Hybrid/multi-group KV cache layouts used to be rejected by Mooncake
+        # layerwise; they must now construct successfully (commit is driven
+        # by the worker-side _LayerCommitMarker).
+        config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.uses_hybrid_kv_cache",
+            return_value=True,
+        ):
+            scheduler = KVPoolScheduler(config, use_layerwise=True)
+        self.assertTrue(scheduler.use_hybrid)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_early_returns(self, mock_client_cls):
         for role, block_size, token_count in [("kv_consumer", 16, 64), ("kv_producer", 64, 32)]:

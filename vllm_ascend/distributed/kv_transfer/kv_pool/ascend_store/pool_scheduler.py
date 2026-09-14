@@ -181,8 +181,6 @@ class KVPoolScheduler:
             self.backend_name,
             self.use_layerwise,
         )
-        if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
-            raise ValueError("Mooncake layerwise does not yet support hybrid or multi-group KV cache layouts")
         if self.backend_name == "mooncake" and self.use_layerwise and self.tp_mismatch:
             raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
         self.layerwise_max_transfer_blocks = int(

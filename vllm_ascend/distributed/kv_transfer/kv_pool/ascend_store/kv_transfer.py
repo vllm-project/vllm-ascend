@@ -106,6 +106,15 @@ class _LayerRevokeTask:
     keys: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _LayerCommitMarker:
+    """Commit staged layerwise put sessions after the last saveable layer.
+
+    Hybrid models only stage a subset of layers (e.g. MLA groups), so the
+    fixed final-layer commit trigger never fires; the marker closes the gap.
+    """
+
+
 class LayerBatchBuilder:
     def __init__(
         self,
@@ -500,7 +509,7 @@ class LayerBatchBuilder:
         shared = self.build_shared(task, is_save)
         if shared is None:
             return None
-        layer_index = task.layer_id if task.use_key_major_ranges else task.layer_idx_in_group
+        layer_index = task.layer_idx_in_group
         return self.build_addrs(shared, layer_index)
 
 
@@ -1626,6 +1635,28 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if self._session_tracker is not None:
                 self._session_tracker.revoke_put_keys(keys)
 
+    def _commit_active_puts(self) -> None:
+        if self._active_put_keys is None:
+            return
+        active_keys = list(self._active_put_keys)
+        if active_keys:
+            try:
+                commit_results = require_aligned_batch_results(
+                    "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
+                )
+                _emit_commit_debug_event(self.final_layer_id, len(active_keys), commit_results)
+            except Exception:
+                self._revoke_range_keys(active_keys)
+                raise
+            failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
+            if failed_keys:
+                self._revoke_range_keys(failed_keys)
+            committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
+            if self._session_tracker is not None:
+                self._session_tracker.commit_put_keys(committed_keys)
+            self._remove_started_keys(active_keys)
+        self._active_put_keys = None
+
     def _handle_range_request(self, req_meta: LayerRangeReqMeta) -> None:
         layer_id = req_meta.layer_id
         if self._active_put_keys is None or layer_id == 0:
@@ -1660,26 +1691,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
 
-        if layer_id != self.final_layer_id:
-            return
-        active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
-        if active_keys:
-            try:
-                commit_results = require_aligned_batch_results(
-                    "batch_commit", active_keys, self.m_store.batch_commit(active_keys)
-                )
-                _emit_commit_debug_event(layer_id, len(active_keys), commit_results)
-            except Exception:
-                self._revoke_range_keys(active_keys)
-                raise
-            failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
-            if failed_keys:
-                self._revoke_range_keys(failed_keys)
-            committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
-            if self._session_tracker is not None:
-                self._session_tracker.commit_put_keys(committed_keys)
-            self._remove_started_keys(active_keys)
-        self._active_put_keys = None
+        if layer_id == self.final_layer_id:
+            self._commit_active_puts()
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
         layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
@@ -1692,7 +1705,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if shared is None:
                 raise RuntimeError("Mooncake range save requires shared block metadata")
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
             if not isinstance(req_meta, LayerRangeReqMeta):
                 raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
             self._handle_range_request(req_meta)
@@ -1723,6 +1736,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         if isinstance(request, _LayerRevokeTask):
             try:
                 self._revoke_range_keys(list(request.keys))
+            finally:
+                self.request_queue.task_done()
+            return
+        if isinstance(request, _LayerCommitMarker):
+            try:
+                self._commit_active_puts()
             finally:
                 self.request_queue.task_done()
             return
@@ -1963,7 +1982,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if shared is None:
                 raise RuntimeError("Mooncake range load requires shared block metadata")
             builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
+            req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
             if not isinstance(req_meta, LayerRangeReqMeta):
                 raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
             if data.attention_start_gate is not None:
