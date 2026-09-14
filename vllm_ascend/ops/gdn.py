@@ -41,6 +41,41 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
+def try_rearrange_single_token_mixed_qkv(
+    mixed_qkv: torch.Tensor,
+    q_dim: int,
+    k_dim: int,
+    v_dim: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Return zero-copy Q/K/V views for a contiguous single-token input.
+
+    For multiple tokens, Q/K/V slices retain the packed row stride and must be
+    copied into the head-major layout expected by the recurrent attention op.
+    With one token, the same split tensors are already contiguous, so reshaping
+    them directly avoids the otherwise redundant Q/K/V concatenation kernel.
+    """
+    if (
+        mixed_qkv.ndim != 2
+        or mixed_qkv.shape[0] != 1
+        or not mixed_qkv.is_contiguous()
+        or q_dim + k_dim + v_dim != mixed_qkv.shape[-1]
+        or head_k_dim <= 0
+        or head_v_dim <= 0
+        or q_dim % head_k_dim != 0
+        or k_dim % head_k_dim != 0
+        or v_dim % head_v_dim != 0
+    ):
+        return None
+
+    query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+    query = query.view(1, 1, -1, head_k_dim)
+    key = key.view(1, 1, -1, head_k_dim)
+    value = value.view(1, 1, -1, head_v_dim)
+    return query, key, value
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
