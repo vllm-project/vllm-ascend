@@ -35,6 +35,9 @@ class Ascend310PSampler:
         # Greedy-only: temperature stays 0; seeds unused but must exist for MTP.
         temperature_gpu = torch.zeros(max_num_reqs, dtype=torch.float32, device=device)
         seeds_gpu = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
+        self.temperature_cpu = torch.zeros(max_num_reqs, dtype=torch.float32, device="cpu")
+        self.seeds_cpu = torch.zeros(max_num_reqs, dtype=torch.int64, device="cpu")
+        self._sampling_state_dirty = False
         self.sampling_states = SimpleNamespace(
             temperature=SimpleNamespace(gpu=temperature_gpu),
             seeds=SimpleNamespace(gpu=seeds_gpu),
@@ -74,18 +77,26 @@ class Ascend310PSampler:
                 f"Unsupported sampling parameters on model runner v2 for 310P: {', '.join(unsupported)}."
             )
         if 0 <= req_idx < self.max_num_reqs:
-            self.sampling_states.temperature.gpu[req_idx] = 0.0
+            self.temperature_cpu[req_idx] = 0.0
             seed = getattr(sampling_params, "seed", None)
-            self.sampling_states.seeds.gpu[req_idx] = 0 if seed is None else int(seed)
+            self.seeds_cpu[req_idx] = 0 if seed is None else int(seed)
+            self._sampling_state_dirty = True
 
     def apply_staged_writes(self) -> None:
-        pass
+        if not self._sampling_state_dirty:
+            return
+        # MTP proposer is first device consumer. Two bulk H2D copies replace
+        # per-request scalar assignments.
+        self.sampling_states.temperature.gpu.copy_(self.temperature_cpu, non_blocking=True)
+        self.sampling_states.seeds.gpu.copy_(self.seeds_cpu, non_blocking=True)
+        self._sampling_state_dirty = False
 
     def __call__(self, logits: torch.Tensor, input_batch) -> SamplerOutput:
         sampled = logits.argmax(dim=-1).to(torch.int32)
         num_sampled = input_batch.seq_lens.new_ones(input_batch.num_reqs)
+        sampled_2d = sampled.view(-1, 1)
         return SamplerOutput(
-            sampled_token_ids=sampled.view(-1, 1),
+            sampled_token_ids=sampled_2d,
             logprobs_tensors=None,
             num_nans=None,
             num_sampled=num_sampled,
