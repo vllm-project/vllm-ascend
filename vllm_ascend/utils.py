@@ -259,6 +259,12 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
+    # aclnnMatmulWeightNz rejects mat2 with n == 1 or k == 1 in FRACTAL_NZ (EZ1001),
+    # e.g. Qwen3.6-35B-A3B linear-attention beta/decay projections sharded to
+    # [1, 2048] under TP. Keep such weights in ND on every platform.
+    if weight.dim() >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1):
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
