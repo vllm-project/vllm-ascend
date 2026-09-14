@@ -32,6 +32,24 @@ from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.utils import enable_sp
 
 
+def _prefill_cu_seqlens_310(attn_metadata: GDNAttentionMetadata) -> torch.Tensor:
+    """Reuse the scheduler's host boundaries instead of D2H in every layer.
+
+    The chunk wrapper consumes these boundaries on the CPU. Its existing
+    device fallback remains necessary for older metadata and mixed ordinary
+    decode/prefill batches, whose host chunk metadata excludes decode rows.
+    Keep the original device tensor for causal-conv and recurrent kernels.
+    """
+    device_cu = attn_metadata.non_spec_query_start_loc
+    prefill = getattr(attn_metadata, "non_spec_prefill_metadata", None)
+    if attn_metadata.num_decodes or prefill is None:
+        return device_cu
+    host_cu = getattr(prefill.chunk, "cu_seqlens_host", None)
+    if host_cu is None or len(host_cu) != device_cu.numel():
+        return device_cu
+    return torch.tensor(host_cu, dtype=torch.int64, device="cpu")
+
+
 def _zero_padded_tokens(
     tensor: torch.Tensor,
     valid_tokens: torch.Tensor,
@@ -395,7 +413,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     beta=beta_non_spec,
                     initial_state=initial_state,
                     output_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc,
+                    cu_seqlens=_prefill_cu_seqlens_310(attn_metadata),
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
