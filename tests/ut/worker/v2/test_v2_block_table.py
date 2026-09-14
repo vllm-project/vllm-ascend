@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -91,7 +92,7 @@ def test_init_keeps_explicit_kernel_block_sizes():
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
     if not hasattr(block_table_mod, "vllm_version_is"):
         return
-    seen = {}
+    seen: dict[str, Any] = {}
 
     def recording_init(self, *args, **kwargs):
         seen["args"] = args
@@ -115,7 +116,7 @@ def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
 def test_init_omits_slot_mapping_enabled_on_v028():
     if not hasattr(block_table_mod, "vllm_version_is"):
         return
-    seen = {}
+    seen: dict[str, Any] = {}
 
     def recording_init(self, *args, **kwargs):
         seen["args"] = args
