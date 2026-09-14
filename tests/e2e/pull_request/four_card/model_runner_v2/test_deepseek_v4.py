@@ -106,12 +106,14 @@ def test_deepseek_v4_mtp_full_decode_only():
     ("compilation_config", "enable_adaptive_verification"),
     [
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]}, False,
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            False,
             id="full_decode_only",
         ),
         pytest.param({}, False, id="default_full_and_piecewise"),
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]}, True,
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            True,
             id="full_decode_only-adaptive",
         ),
     ],
