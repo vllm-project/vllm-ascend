@@ -11,7 +11,6 @@ from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
 
 def make_policy(*, changed, new_deployment):
     policy = AscendV2EplbPolicy.__new__(AscendV2EplbPolicy)
-    policy.policy_name = "test"
     policy._policy = MagicMock()
     policy._policy.rebalance_experts.return_value = (
         changed,
@@ -19,6 +18,20 @@ def make_policy(*, changed, new_deployment):
         new_deployment,
     )
     return policy
+
+
+def test_uses_swift_balancer_policy(monkeypatch):
+    generated_policy = object()
+    generate_policy = MagicMock(return_value=generated_policy)
+    monkeypatch.setattr(
+        "vllm_ascend.eplb.core.policy.policy_factory.PolicyFactory.generate_policy",
+        generate_policy,
+    )
+
+    policy = AscendV2EplbPolicy()
+
+    assert policy._policy is generated_policy
+    generate_policy.assert_called_once_with(2)
 
 
 def test_build_physical_load_splits_replicated_expert_load():

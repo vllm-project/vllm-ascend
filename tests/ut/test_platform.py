@@ -138,6 +138,19 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.parallel_config.eplb_config.communicator)
 
+    def test_validate_eplb_config_warns_about_upstream_policy(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning_once") as warning:
+            _validate_eplb_config(vllm_config)
+
+        warning.assert_called_once_with(
+            "The eplb_config.policy option is not supported on Ascend; "
+            "only the Ascend policy_swift_balancer policy is supported and will be used."
+        )
+
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
@@ -247,22 +260,12 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_allows_v2_ascend_policy(self):
+    def test_validate_eplb_config_rejects_v2_policy_option(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
-        vllm_config.parallel_config.enable_eplb = True
         vllm_config.additional_config = {"eplb_config": {"v2_policy": "policy_swift_balancer"}}
 
-        with patch.dict("os.environ", {}, clear=True):
-            _validate_eplb_config(vllm_config)
-
-    def test_validate_eplb_config_requires_eplb_for_v2_ascend_policy(self):
-        vllm_config = self.mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
-        vllm_config.parallel_config.enable_eplb = False
-        vllm_config.additional_config = {"eplb_config": {"v2_policy": "policy_swift_balancer"}}
-
-        with self.assertRaisesRegex(ValueError, "v2_policy requires --enable-eplb"):
+        with self.assertRaisesRegex(ValueError, "unsupported fields: v2_policy"):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_rejects_v2_legacy_fields(self):
@@ -270,7 +273,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.use_v2_model_runner = True
         vllm_config.additional_config = {"eplb_config": {"dynamic_eplb": True}}
 
-        with self.assertRaisesRegex(ValueError, "legacy fields are not supported: dynamic_eplb"):
+        with self.assertRaisesRegex(ValueError, "unsupported fields: dynamic_eplb"):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_rejects_v1_load_collection_phase(self):

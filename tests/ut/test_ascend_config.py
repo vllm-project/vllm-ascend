@@ -203,18 +203,6 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
 
-    def test_eplb_v2_policy_validation(self):
-        self.assertEqual(EplbConfig().v2_policy, "default")
-        self.assertEqual(
-            EplbConfig(v2_policy="policy_swift_balancer").v2_policy,
-            "policy_swift_balancer",
-        )
-        with self.assertRaisesRegex(
-            ValueError,
-            "v2_policy must be one of default or policy_swift_balancer",
-        ):
-            EplbConfig(v2_policy="policy_flashlb")
-
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
