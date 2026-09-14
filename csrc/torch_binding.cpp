@@ -2832,7 +2832,9 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
-    ops.def("get_physical_device_id(int user_device_id) -> int", &vllm_ascend::get_physical_device_id);
+    ops.def("get_physical_device_id(int user_device_id) -> int");
+    ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_physical_device_id);
     ops.def(
         "npu_causal_conv1d_310(Tensor x, "
         "                         Tensor weight, "
@@ -2890,8 +2892,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
-    // No tensor arguments: register a catch-all implementation, not PrivateUse1.
-    ops.def("get_physical_device_id(int user_device_id) -> int", &vllm_ascend::get_physical_device_id);
+    ops.def("get_physical_device_id(int user_device_id) -> int");
+    ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_physical_device_id);
 
     // vLLM-Ascend custom ops
     // Gemma RmsNorm
