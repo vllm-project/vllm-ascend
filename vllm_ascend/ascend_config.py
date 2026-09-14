@@ -692,11 +692,7 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if (
-            self.multistream_overlap_shared_expert
-            and effective_flashcomm
-            and vc.parallel_config.data_parallel_size > 1
-        ):
+        if self.multistream_overlap_shared_expert and effective_flashcomm and vc.parallel_config.data_parallel_size > 1:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
                 "multistream_overlap_shared_expert is disabled: combined with FlashComm1 (SP) "
