@@ -93,10 +93,7 @@ def _should_reshape_wo_a_to_3d(
         HardwareCapability.DYNAMIC_MX_QUANT_FUSION
     )
     reshape_bf16_wo_a = (
-        "wo_a" in prefix
-        and supports_dynamic_mx_quant_fusion
-        and quant_config is None
-        and dtype == torch.bfloat16
+        "wo_a" in prefix and supports_dynamic_mx_quant_fusion and quant_config is None and dtype == torch.bfloat16
     )
     return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
 
