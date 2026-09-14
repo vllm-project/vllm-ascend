@@ -87,7 +87,6 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_cp_a
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_cp_a2a.py
 ```
 
-
 ## Split MLA history/current attention
 
 The split MLA path calls `sfa_dcp_a2a_fused(..., defer_combine=True)` on the
