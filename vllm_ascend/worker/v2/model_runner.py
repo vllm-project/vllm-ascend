@@ -57,7 +57,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import enable_kimi_k3_sp, lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -85,6 +85,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    intermediate_tensors: IntermediateTensors | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -277,15 +278,24 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-            **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+        # prepare_inputs gives the upstream copy a local-sized target view.
+        # Keep the full-capacity backing for later (possibly larger) batches.
+        pp_buffers = (
+            self.intermediate_tensors if enable_kimi_k3_sp(self.vllm_config) and not self.is_first_pp_rank else None
         )
+        try:
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+                **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+            )
+        finally:
+            if pp_buffers is not None:
+                self.intermediate_tensors = pp_buffers
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -543,7 +553,20 @@ class NPUModelRunner(GPUModelRunner):
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
+        self._slice_kimi_sp_intermediate_tensors(input_batch.num_tokens_after_padding)
         return input_batch
+
+    def _slice_kimi_sp_intermediate_tensors(self, num_tokens: int) -> None:
+        if not enable_kimi_k3_sp(self.vllm_config) or self.is_first_pp_rank:
+            return
+        assert self.intermediate_tensors is not None
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        local_num_tokens = (num_tokens + tp_size - 1) // tp_size
+        # Upstream slices both the source and destination by the full token
+        # count. Narrow the destination first so a shard cannot broadcast.
+        self.intermediate_tensors = IntermediateTensors(
+            {name: tensor[:local_num_tokens] for name, tensor in self.intermediate_tensors.tensors.items()}
+        )
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False

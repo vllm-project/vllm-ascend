@@ -20,6 +20,24 @@ for the model support matrix and the
 This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
 `FULL_DECODE_ONLY` ACL Graph, and DSpark with a matching draft checkpoint.
 
+### Pipeline parallelism with sequence parallelism
+
+With expert parallelism enabled and TP greater than one, Kimi-K3 keeps token
+shards across PP stages, including at DP=1. Only the first stage shards the
+embedding output. Later stages receive the matching hidden-state and residual
+shards; the last stage gathers the final output. All stages must use the same
+TP size and token ordering.
+
+The PP payload includes attention-residual block states and any auxiliary
+hidden states captured on earlier stages. Dense MLP layers gather their input
+and reduce-scatter their output; routed MoE and shared experts retain their SP
+paths. Model Runner V1 uses the same local token count for PP receives,
+profiling and graph-capture buffers. Model Runner V2 uses local-sized receive
+views and graph input/output views while retaining persistent buffer storage
+across batches and graph gears.
+Existing context-parallel and speculative-decoding compatibility constraints
+still apply.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weights and Hardware
