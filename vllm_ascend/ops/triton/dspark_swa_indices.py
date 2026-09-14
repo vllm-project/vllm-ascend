@@ -57,6 +57,7 @@ if HAS_TRITON:
     )
     def _dspark_swa_indices_kernel(
         bt_ptr,  # block_table       [R_alloc, B]  i32/i64
+        stride_bt_r,  # block_table.stride(0): row pitch of a possibly sliced/padded table
         qsl_ptr,  # query_start_loc  [R_alloc + 1]  i32/i64
         seq_lens_ptr,  # seq_lens         [R_alloc]  i32/i64
         slots_ptr,  # out_slots        [T_padded, 1, INDEX_W]  i32
@@ -147,7 +148,7 @@ if HAS_TRITON:
         # (int32/int64 raise CompilationError). block-table values fit in 24
         # bits, so an fp32 roundtrip is lossless for the gather payload.
         r_offs = tl.arange(0, ROW_POW2)
-        bt_row_f32 = tl.load(bt_ptr + r * B + r_offs, mask=r_offs < B, other=0).to(tl.float32)
+        bt_row_f32 = tl.load(bt_ptr + r * stride_bt_r + r_offs, mask=r_offs < B, other=0).to(tl.float32)
         block_id = tl.gather(bt_row_f32, safe_num, 0).to(tl.int32)
 
         # ---- slot arithmetic + visible mask ----
@@ -351,6 +352,7 @@ def build_dspark_swa_indices_triton(
 
     _dspark_swa_indices_kernel[(R_alloc * num_cb,)](
         block_table,
+        block_table.stride(0),
         query_start_loc,
         seq_lens,
         out_slots,
