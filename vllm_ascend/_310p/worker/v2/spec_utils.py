@@ -406,11 +406,16 @@ def prepare_decode_inputs_cpu(
     target_seq_lens: torch.Tensor,
     num_rejected: torch.Tensor,
     input_buffers: InputBuffers,
+    sample_src_positions: torch.Tensor,
     max_model_len: int,
     max_num_reqs: int,
     advance_draft_positions: bool = True,
 ) -> None:
-    """Prepare draft decode inputs with small host syncs (K>1 path)."""
+    """Prepare draft decode inputs with small host syncs (K>1 path).
+
+    Signature matches upstream ``prepare_decode_inputs`` (incl.
+    ``sample_src_positions``) so patched call sites stay compatible.
+    """
     del max_num_reqs
     num_reqs = draft_tokens.shape[0]
     device = input_buffers.input_ids.device
@@ -437,6 +442,8 @@ def prepare_decode_inputs_cpu(
         torch.from_numpy(input_ids_host).to(device=device, dtype=input_buffers.input_ids.dtype, non_blocking=True),
         non_blocking=True,
     )
+    # Align with Triton: always advance the draft sampling key for decode steps.
+    sample_src_positions[:num_reqs].add_(1)
     if advance_draft_positions:
         # positions += 1 on-device for the active rows (avoid full-buffer D2H).
         pos = input_buffers.positions[:num_reqs]
@@ -469,12 +476,17 @@ def update_draft_inputs_cpu(
     output_draft_tokens: torch.Tensor,
     next_input_hidden_states: torch.Tensor,
     input_buffers: InputBuffers,
+    sample_src_positions: torch.Tensor,
     num_reqs: int,
     max_model_len: int,
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ) -> None:
-    """Update draft buffers for the next step using on-device ops where possible."""
+    """Update draft buffers for the next step using on-device ops where possible.
+
+    Signature matches upstream ``update_draft_inputs`` (incl.
+    ``sample_src_positions``).
+    """
     # ``.item()`` is a sync D2H and is illegal under NPU GLOBAL ACLGraph capture.
     if torch.npu.is_current_stream_capturing():
         step = _DRAFT_STEP_HOST
@@ -485,6 +497,8 @@ def update_draft_inputs_cpu(
     output_draft_tokens[:num_reqs, step].copy_(tokens)
     if step >= num_speculative_steps - 1:
         return
+    # Align with Triton: advance sampling key before preparing next draft inputs.
+    sample_src_positions[:num_reqs].add_(1)
     input_buffers.input_ids[:num_reqs].copy_(tokens)
     next_input_hidden_states[:num_reqs].copy_(hidden_states[:num_reqs])
     if advance_draft_positions:

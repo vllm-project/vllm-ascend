@@ -107,6 +107,38 @@ class TestMRv2Mtp310(TestBase):
         # Recovered must not be the rejected draft token 1.
         self.assertNotEqual(int(sampled[0, 0].item()), 1)
 
+    def test_prepare_decode_inputs_advances_sample_src_positions(self):
+        """Upstream K>1 path passes sample_src_positions; CPU fallback must accept it."""
+        from vllm_ascend._310p.worker.v2.spec_utils import prepare_decode_inputs_cpu
+
+        num_reqs = 2
+        draft_tokens = torch.tensor([7, 8], dtype=torch.int32)
+        target_seq_lens = torch.tensor([10, 12], dtype=torch.int32)
+        num_rejected = torch.tensor([0, 1], dtype=torch.int32)
+        sample_src_positions = torch.tensor([5, 6], dtype=torch.int64)
+        input_buffers = SimpleNamespace(
+            input_ids=torch.zeros(num_reqs, dtype=torch.int32),
+            positions=torch.tensor([4, 5], dtype=torch.int64),
+            query_start_loc=torch.zeros(num_reqs + 1, dtype=torch.int32),
+            seq_lens=torch.zeros(num_reqs, dtype=torch.int32),
+        )
+
+        prepare_decode_inputs_cpu(
+            draft_tokens,
+            target_seq_lens,
+            num_rejected,
+            input_buffers,
+            sample_src_positions,
+            max_model_len=128,
+            max_num_reqs=num_reqs,
+            advance_draft_positions=True,
+        )
+
+        self.assertEqual(input_buffers.input_ids.tolist(), [7, 8])
+        self.assertEqual(sample_src_positions.tolist(), [6, 7])
+        self.assertEqual(input_buffers.positions.tolist(), [5, 6])
+        self.assertEqual(input_buffers.seq_lens.tolist(), [11, 12])
+
     def test_update_draft_inputs_uses_host_step_under_capture(self):
         num_reqs = 2
         draft_tokens = torch.tensor([11, 22], dtype=torch.int32)
@@ -114,6 +146,7 @@ class TestMRv2Mtp310(TestBase):
         hidden_states = torch.randn(num_reqs, 4)
         output_draft_tokens = torch.full((num_reqs, 2), -1, dtype=torch.int32)
         next_input_hidden_states = torch.zeros(num_reqs, 4)
+        sample_src_positions = torch.tensor([9, 10], dtype=torch.int64)
         input_buffers = SimpleNamespace(
             input_ids=torch.zeros(num_reqs, dtype=torch.int32),
             positions=torch.tensor([3, 5], dtype=torch.int64),
@@ -129,6 +162,7 @@ class TestMRv2Mtp310(TestBase):
                 output_draft_tokens=output_draft_tokens,
                 next_input_hidden_states=next_input_hidden_states,
                 input_buffers=input_buffers,
+                sample_src_positions=sample_src_positions,
                 num_reqs=num_reqs,
                 max_model_len=128,
                 num_speculative_steps=2,
@@ -137,6 +171,7 @@ class TestMRv2Mtp310(TestBase):
 
         self.assertEqual(output_draft_tokens[:, 0].tolist(), [11, 22])
         self.assertEqual(input_buffers.positions.tolist(), [4, 6])
+        self.assertEqual(sample_src_positions.tolist(), [10, 11])
 
     def test_run_model_sets_rope_flag(self):
         flag_states: list[bool] = []
