@@ -874,6 +874,14 @@ class RecomputeScheduler(Scheduler):
                 )
 
         # Construct the scheduler output.
+        new_request_kwargs = (
+            {}
+            if vllm_version_is("0.28.0")
+            else {
+                "uses_mrope": self.model_uses_mrope,
+                "uses_xdrope": self.model_uses_xdrope,
+            }
+        )
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
             scheduled_resumed_reqs.clear()
@@ -882,8 +890,7 @@ class RecomputeScheduler(Scheduler):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
-                    uses_xdrope=self.model_uses_xdrope,
+                    **new_request_kwargs,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -892,8 +899,7 @@ class RecomputeScheduler(Scheduler):
                 NewRequestData.from_request(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
-                    uses_mrope=self.model_uses_mrope,
-                    uses_xdrope=self.model_uses_xdrope,
+                    **new_request_kwargs,
                 )
                 for req in scheduled_new_reqs
             ]
