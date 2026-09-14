@@ -441,6 +441,7 @@ class FusedMC2CommImpl(MoECommMethod):
         l2_bias = weights.w2_scale_bias
         activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
             self.mega_moe,
+            activation=fused_experts_input.activation,
             activation_clamp=activation_clamp,
             swiglu_alpha=self.swiglu_alpha,
             swiglu_beta=self.swiglu_beta,

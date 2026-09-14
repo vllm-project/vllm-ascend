@@ -151,6 +151,7 @@ class TestMoECommMethod(TestBase):
         fused_input.topk_weights = torch.ones(2, 2)
         fused_input.quant.quant_type = QuantType.NONE
         fused_input.routing.mc2_mask = None
+        fused_input.activation = "swigluoai_uninterleave"
         weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
 
         with patch(
