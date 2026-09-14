@@ -132,6 +132,7 @@ except ImportError:  # pragma: no cover - exercised on v0.28.0
     raise_if_nan_logits = None
 
 # yapf: enable
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
