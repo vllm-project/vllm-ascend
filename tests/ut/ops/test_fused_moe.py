@@ -375,84 +375,220 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
+@pytest.fixture
+def moe_reduce_ops_on_cpu(monkeypatch):
+    """Route the three MoE reduction ops to their own Python bodies.
+
+    What these tests exercise is the call sites and the predicates, so bind
+    the namespace entries to the very functions the op registration wraps;
+    this keeps the tests independent of the op dispatch configuration.
+    """
+    for name, impl in (
+        ("ascend_moe_shared_all_reduce", fused_moe_module._moe_shared_all_reduce),
+        ("ascend_moe_final_all_reduce", fused_moe_module._moe_final_all_reduce),
+        ("ascend_moe_pre_transform_all_reduce", fused_moe_module._moe_pre_transform_all_reduce),
+    ):
+        monkeypatch.setattr(torch.ops.vllm, name, impl, raising=False)
+
+
+def _make_reduce_runner(
+    is_sequence_parallel=False,
+    mode=SharedExpertParallelMode.TENSOR_PARALLEL,
+    routed_output_transform=None,
+):
+    """A runner carrying just the attributes the three reductions read."""
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.moe_config = SimpleNamespace(
+        is_sequence_parallel=is_sequence_parallel,
+        tp_size=2,
+        ep_size=2,
+    )
+    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
+    runner.routed_output_transform = routed_output_transform
+    return runner
+
+
+def _in_place_all_reduce_mock():
+    """Mimic the real collective: reduce in place, hand the input back.
+
+    DeviceCommunicatorBase.all_reduce is `dist.all_reduce(input_); return
+    input_`, and NPUCommunicator does not override it, so the tensor that comes
+    back is the one that went in. The ops rely on that to skip a copy.
+    """
+    return MagicMock(side_effect=lambda t: t.add_(1))
+
+
 @pytest.mark.parametrize(
-    ("is_sequence_parallel", "output_is_reduced", "should_reduce"),
+    ("moe_comm_type", "is_sequence_parallel", "should_reduce"),
     [
-        (False, False, True),
-        (False, True, False),
-        (True, False, False),
-        (True, True, False),
+        # ALLGATHER is the only comm type whose combine kernel leaves the routed
+        # output TP-partial, and even then sequence parallelism reduces it
+        # elsewhere -- reducing token shards position-wise would corrupt them.
+        (MoECommType.ALLGATHER, False, True),
+        (MoECommType.ALLGATHER, True, False),
+        (MoECommType.MC2, False, False),
+        (MoECommType.MC2, True, False),
+        (MoECommType.ALLTOALL, False, False),
+        (MoECommType.FUSED_MC2, False, False),
     ],
 )
-def test_final_output_never_all_reduces_sequence_shards(
+def test_final_output_reduction_follows_current_comm_type(
     monkeypatch,
+    moe_reduce_ops_on_cpu,
+    moe_comm_type,
     is_sequence_parallel,
-    output_is_reduced,
     should_reduce,
 ):
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
+    runner = _make_reduce_runner(is_sequence_parallel=is_sequence_parallel)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type),
+    )
     states = torch.ones(2, 4)
-    reduced_states = states + 1
-    all_reduce = MagicMock(return_value=reduced_states)
+    version_before = states._version
+    all_reduce = _in_place_all_reduce_mock()
     monkeypatch.setattr(
         fused_moe_module,
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
 
+    # output_is_reduced deliberately lies: it is the value MoERunner.forward
+    # evaluates once and the compiled artifact bakes in, so the op has to ignore
+    # it and rederive the decision from the comm type in effect right now.
     result = runner._maybe_reduce_final_output(
         states,
         trunc_size=None,
-        output_is_reduced=output_is_reduced,
+        output_is_reduced=True,
     )
 
+    # Reduced in place, so the caller keeps its own tensor either way.
+    assert result is states
     if should_reduce:
-        assert result is reduced_states
         all_reduce.assert_called_once_with(states)
+        torch.testing.assert_close(result, torch.full((2, 4), 2.0))
     else:
-        assert result is states
         all_reduce.assert_not_called()
+        torch.testing.assert_close(result, torch.ones(2, 4))
+        # The version counter ticks on any in-place write, so this is what
+        # pins down "costs nothing": not one byte moved. This path runs for
+        # every MoE layer of every decode step, where the comm type is always
+        # one the combine kernel already reduced.
+        assert states._version == version_before
+
+
+def test_final_output_copies_back_when_collective_allocates(monkeypatch, moe_reduce_ops_on_cpu):
+    """Correctness must not rest on the collective being in-place.
+
+    If some communicator ever returns a fresh tensor, the op copies the result
+    back into the caller's buffer instead of dropping it on the floor.
+    """
+    runner = _make_reduce_runner()
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+    states = torch.ones(2, 4)
+    out_of_place = MagicMock(side_effect=lambda t: t + 1)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "tensor_model_parallel_all_reduce",
+        out_of_place,
+    )
+
+    result = runner._maybe_reduce_final_output(states, trunc_size=None)
+
+    out_of_place.assert_called_once_with(states)
+    assert result is states
+    torch.testing.assert_close(result, torch.full((2, 4), 2.0))
+
+
+def test_final_output_truncates_after_reducing_in_place(monkeypatch, moe_reduce_ops_on_cpu):
+    runner = _make_reduce_runner()
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
+    )
+    states = torch.ones(2, 4)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "tensor_model_parallel_all_reduce",
+        _in_place_all_reduce_mock(),
+    )
+
+    result = runner._maybe_reduce_final_output(states, trunc_size=3)
+
+    assert result.shape == (2, 3)
+    torch.testing.assert_close(result, torch.full((2, 3), 2.0))
 
 
 @pytest.mark.parametrize(
-    ("mode", "fused_output_is_reduced", "reduce_shared"),
+    ("mode", "moe_comm_type", "reduce_shared"),
     [
-        (SharedExpertParallelMode.TENSOR_PARALLEL, False, False),
-        (SharedExpertParallelMode.TENSOR_PARALLEL, True, True),
-        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, True, False),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, False),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, True, False),
+        # Only TP-sharded shared-expert weights need their own collective, and
+        # then only when the combine kernel already reduced the routed half --
+        # otherwise the pair gets reduced once as a sum at the end.
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.MC2, True),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.ALLTOALL, True),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, MoECommType.ALLGATHER, False),
+        (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, MoECommType.MC2, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, MoECommType.MC2, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, MoECommType.MC2, False),
     ],
 )
 def test_shared_output_reduction_depends_on_weight_layout(
     monkeypatch,
+    moe_reduce_ops_on_cpu,
     mode,
-    fused_output_is_reduced,
+    moe_comm_type,
     reduce_shared,
 ):
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
+    runner = _make_reduce_runner(mode=mode)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type),
+    )
     shared_output = torch.ones(2, 4)
-    reduced_output = shared_output + 1
-    all_reduce = MagicMock(return_value=reduced_output)
+    version_before = shared_output._version
+    all_reduce = _in_place_all_reduce_mock()
     monkeypatch.setattr(
         fused_moe_module,
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
 
-    result = runner._reduce_shared_output_if_needed(
-        shared_output,
-        fused_output_is_reduced,
+    # Same stale value as in the final-output case: passed in, ignored, and
+    # rederived from the live comm type inside the op.
+    result = runner._reduce_shared_output_if_needed(shared_output, False)
+
+    # Reduced in place, so the caller keeps its own tensor either way.
+    assert result is shared_output
+    if reduce_shared:
+        all_reduce.assert_called_once_with(shared_output)
+        torch.testing.assert_close(result, torch.full((2, 4), 2.0))
+    else:
+        all_reduce.assert_not_called()
+        torch.testing.assert_close(result, torch.ones(2, 4))
+        # Nothing written: see the final-output case for why the version
+        # counter is the assertion that pins the copy down.
+        assert shared_output._version == version_before
+
+
+def test_shared_output_without_shared_expert_is_untouched(monkeypatch):
+    runner = _make_reduce_runner()
+    all_reduce = _in_place_all_reduce_mock()
+    monkeypatch.setattr(
+        fused_moe_module,
+        "tensor_model_parallel_all_reduce",
+        all_reduce,
     )
 
-    if reduce_shared:
-        assert result is reduced_output
-        all_reduce.assert_called_once_with(shared_output)
-    else:
-        assert result is shared_output
-        all_reduce.assert_not_called()
+    assert runner._reduce_shared_output_if_needed(None, True) is None
+    all_reduce.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -465,39 +601,38 @@ def test_shared_output_reduction_depends_on_weight_layout(
 )
 def test_local_shared_expert_dp_reduces_partial_routed_output(
     monkeypatch,
+    moe_reduce_ops_on_cpu,
     mode,
     reduce_routed,
 ):
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
-    runner.routed_output_transform = None
-    runner.moe_config = SimpleNamespace(
-        is_sequence_parallel=False,
-        tp_size=2,
-        ep_size=2,
+    runner = _make_reduce_runner(mode=mode)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER),
     )
     routed_output = torch.ones(2, 4)
-    reduced_output = routed_output + 1
-    all_reduce = MagicMock(return_value=reduced_output)
+    all_reduce = _in_place_all_reduce_mock()
     monkeypatch.setattr(
         fused_moe_module,
         "tensor_model_parallel_all_reduce",
         all_reduce,
     )
 
-    result, result_is_reduced = runner._maybe_reduce_routed_output_before_transform(
-        routed_output,
-        False,
-    )
+    result, _ = runner._maybe_reduce_routed_output_before_transform(routed_output, False)
 
     if reduce_routed:
-        assert result is reduced_output
-        assert result_is_reduced
+        # This one stays out-of-place: its input is the kernel's own output,
+        # which MoERunner.forward still holds.
+        assert result is not routed_output
         all_reduce.assert_called_once_with(routed_output)
+        torch.testing.assert_close(result, torch.full((2, 4), 2.0))
     else:
+        # Neither top-up branch can fire, so the call site skips the op
+        # outright rather than paying a copy for nothing.
         assert result is routed_output
-        assert not result_is_reduced
         all_reduce.assert_not_called()
+        torch.testing.assert_close(result, torch.ones(2, 4))
 
 
 def test_routed_experts_select_experts_validates_router_logits(monkeypatch):

@@ -76,6 +76,166 @@ direct_register_custom_op(
 )
 
 
+def _reduced_by_combine(comm_type, is_sequence_parallel: bool) -> bool:
+    """Whether the combine kernel already all-reduced the routed output over TP."""
+    return comm_type in (
+        MoECommType.ALLTOALL,
+        MoECommType.MC2,
+        MoECommType.FUSED_MC2,
+    ) or (comm_type == MoECommType.ALLGATHER and is_sequence_parallel)
+
+
+def _reduced_after_pre_transform(
+    comm_type,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> bool:
+    """Whether the routed output is reduced once the pre-transform step is done.
+
+    That step tops the reduction up in two cases -- a latent output transform
+    needs its input summed in latent space, and a DP-only shared expert needs
+    the routed half reduced on its own -- so the later two decisions have to
+    account for it or they would reduce a second time.
+    """
+    if _reduced_by_combine(comm_type, is_sequence_parallel):
+        return True
+    if has_routed_output_transform and not is_sequence_parallel and tp_or_ep_gt_one:
+        return True
+    return shared_dp_only
+
+
+# All three reductions below are custom ops for one reason: the predicate they
+# share reads _EXTRA_CTX.moe_comm_type, which changes from step to step (a
+# forward wider than mc2_tokens_capacity falls from MC2 to ALLGATHER, and only
+# ALLGATHER leaves the routed output un-reduced across TP). MoERunner.forward
+# evaluates that predicate once near its top and carries the result down as a
+# plain Python bool, which the compiled artifact bakes in -- measured on a long
+# prompt: comm=ALLGATHER while the value handed down still said "reduced", so
+# the collective was skipped and the MoE output stayed TP-partial. Inside a
+# custom op the read is opaque to the compiler and happens on every eager call.
+# torch._dynamo.disable would be the smaller change but vLLM compiles with
+# fullgraph=True, where a graph break raises instead of degrading.
+#
+# The shared and final reductions land in place, so the predicate saying
+# "already reduced" costs nothing at all -- see _all_reduce_in_place for why the
+# collective itself needs no second buffer, and the two call sites for why their
+# tensors are safe to overwrite. Only the pre-transform op still writes into a
+# separate `out`: its input is the kernel's own output, which the caller still
+# holds, and for a model with neither a latent transform nor a DP-only shared
+# expert the call site skips it outright, so there is nothing to win there.
+
+
+def _moe_pre_transform_all_reduce(
+    fused_output: torch.Tensor,
+    out: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    comm_type = _EXTRA_CTX.moe_comm_type
+    need = not _reduced_by_combine(comm_type, is_sequence_parallel) and (
+        (has_routed_output_transform and not is_sequence_parallel and tp_or_ep_gt_one) or shared_dp_only
+    )
+    out.copy_(tensor_model_parallel_all_reduce(fused_output) if need else fused_output)
+
+
+def _all_reduce_in_place(states: torch.Tensor) -> None:
+    """Reduce `states` over TP without a second buffer.
+
+    vLLM declares the collective out-of-place because a custom op may not both
+    mutate and return a tensor, but the communicator this platform uses reduces
+    in place and hands the same tensor back: NPUCommunicator inherits
+    DeviceCommunicatorBase.all_reduce, whose body is `dist.all_reduce(input_);
+    return input_`. So the returned tensor already *is* the input, and the copy
+    that used to follow moved every byte a second time for nothing. The identity
+    check keeps this correct if some communicator ever does allocate, paying the
+    copy only in that case.
+    """
+    reduced = tensor_model_parallel_all_reduce(states)
+    if reduced is not states:
+        states.copy_(reduced)
+
+
+def _moe_shared_all_reduce(
+    states: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    if _reduced_after_pre_transform(
+        _EXTRA_CTX.moe_comm_type,
+        is_sequence_parallel,
+        has_routed_output_transform,
+        tp_or_ep_gt_one,
+        shared_dp_only,
+    ):
+        _all_reduce_in_place(states)
+
+
+def _moe_final_all_reduce(
+    states: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    reduced = _reduced_after_pre_transform(
+        _EXTRA_CTX.moe_comm_type,
+        is_sequence_parallel,
+        has_routed_output_transform,
+        tp_or_ep_gt_one,
+        shared_dp_only,
+    )
+    # Sequence-parallel outputs are token shards, so reducing them
+    # position-wise would corrupt the result.
+    if not reduced and not is_sequence_parallel:
+        _all_reduce_in_place(states)
+
+
+def _moe_in_place_all_reduce_fake(
+    states: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    return
+
+
+def _moe_pre_transform_all_reduce_fake(
+    fused_output: torch.Tensor,
+    out: torch.Tensor,
+    is_sequence_parallel: bool,
+    has_routed_output_transform: bool,
+    tp_or_ep_gt_one: bool,
+    shared_dp_only: bool,
+) -> None:
+    return
+
+
+# CompositeExplicitAutograd (not PrivateUse1) on all three registrations: the op
+# bodies are pure Python over regular torch ops, so they run on every backend.
+# A PrivateUse1-only registration makes the ops unreachable on CPU, which
+# breaks the CPU unit-test gate. The alias key excludes Meta, so the fake impls
+# registered below stay the compile-time kernels.
+for _op_name, _op_func, _fake, _mutates in (
+    ("ascend_moe_shared_all_reduce", _moe_shared_all_reduce, _moe_in_place_all_reduce_fake, ["states"]),
+    ("ascend_moe_final_all_reduce", _moe_final_all_reduce, _moe_in_place_all_reduce_fake, ["states"]),
+    ("ascend_moe_pre_transform_all_reduce", _moe_pre_transform_all_reduce, _moe_pre_transform_all_reduce_fake, ["out"]),
+):
+    direct_register_custom_op(
+        op_name=_op_name,
+        op_func=_op_func,
+        fake_impl=_fake,
+        mutates_args=_mutates,
+        dispatch_key="CompositeExplicitAutograd",
+    )
+
+
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def __init__(
         self,
@@ -186,6 +346,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             MoECommType.FUSED_MC2,
         } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
 
+    @property
+    def _reduce_static_flags(self) -> tuple[bool, bool, bool, bool]:
+        """The four conditions the three reductions share, all process-constant.
+
+        Only moe_comm_type varies per step, which is why it is read inside the
+        ops instead of here. parallel_mode() derives from tp_group.world_size /
+        is_sequence_parallel / weights_replicated and routed_output_transform is
+        fixed at construction, so both are stable for the life of the layer.
+        """
+        return (
+            self.moe_config.is_sequence_parallel,
+            getattr(self, "routed_output_transform", None) is not None,
+            self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1,
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY,
+        )
+
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)
         if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
@@ -197,12 +373,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_output: torch.Tensor | None,
         fused_output_is_reduced: bool,
     ) -> torch.Tensor | None:
-        if (
-            shared_output is not None
-            and fused_output_is_reduced
-            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
-        ):
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        if shared_output is None:
+            return shared_output
+        if self._get_shared_expert_parallel_mode() is not SharedExpertParallelMode.TENSOR_PARALLEL:
+            return shared_output
+        # Reduced in place. forward() rebinds shared_output to this return
+        # value, and the very next thing upstream does to it is an in-place
+        # `*=` in _maybe_apply_routed_scale_to_output, so the tensor is already
+        # the runner's own to overwrite.
+        torch.ops.vllm.ascend_moe_shared_all_reduce(shared_output, *self._reduce_static_flags)
         return shared_output
 
     @property
@@ -234,18 +413,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output: torch.Tensor,
         fused_output_is_reduced: bool,
     ) -> tuple[torch.Tensor, bool]:
-        fused_output, fused_output_is_reduced = super()._maybe_reduce_routed_output_before_transform(
-            fused_output,
-            fused_output_is_reduced,
-        )
+        flags = self._reduce_static_flags
+        _, has_routed_output_transform, _, shared_dp_only = flags
+        if not (has_routed_output_transform or shared_dp_only):
+            # Neither top-up branch can fire for this layer, so the upstream
+            # body and the DP-only branch below are both no-ops. Skip the op
+            # rather than pay a copy for nothing.
+            return fused_output, fused_output_is_reduced
 
-        if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
-            and not fused_output_is_reduced
-        ):
-            fused_output = tensor_model_parallel_all_reduce(fused_output)
-            fused_output_is_reduced = True
-        return fused_output, fused_output_is_reduced
+        # Deliberately not calling super(): its own branch keys off the same
+        # value handed down from forward, which is the one that goes stale.
+        reduced = torch.empty_like(fused_output)
+        torch.ops.vllm.ascend_moe_pre_transform_all_reduce(fused_output, reduced, *flags)
+        # The returned flag is no longer read by anything: both remaining
+        # consumers recompute it from the current moe_comm_type inside their
+        # own op. Passed through unchanged to keep the upstream signature.
+        return reduced, fused_output_is_reduced
 
     # Ascend already handles reduction in its own dispatch path, so
     # the upstream kwarg is accepted for interface alignment only.
@@ -255,13 +438,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         trunc_size: int | None,
         output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
-        if output_is_reduced is None:
-            output_is_reduced = self._fused_output_is_reduced
-        if not output_is_reduced and not self.moe_config.is_sequence_parallel:
-            # Use the normal TP collective when the upstream reduction
-            # contract requires it. Sequence-parallel outputs are token
-            # shards, so reducing them position-wise would corrupt the result.
-            states = tensor_model_parallel_all_reduce(states)
+        # output_is_reduced is ignored on purpose: MoERunner.forward always
+        # supplies it, and it is exactly the value that goes stale. The op
+        # recomputes the predicate from the comm type in effect right now.
+        #
+        # Reduced in place. forward() rebinds its `result` to this return value
+        # and then only hands it to _maybe_add_zero_expert_output, so nothing
+        # reads the un-reduced contents afterwards.
+        torch.ops.vllm.ascend_moe_final_all_reduce(states, *self._reduce_static_flags)
         if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
         return states
