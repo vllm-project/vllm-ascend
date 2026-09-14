@@ -1,23 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
+from dataclasses import replace
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
+from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder, AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import expand_dcp_replicated_block_table
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, enable_pcp
+from vllm_ascend.core.kv_cache_interface import AscendDCPReplicatedDraftAttentionSpec
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.utils import is_kimi_k3_gqa_dspark
+from vllm_ascend.worker.device_metadata import DeviceMetadataTaskProvider
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -36,6 +45,12 @@ class AscendDSparkProposer(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
+        self.replicated_draft_kv = self._uses_dcp_replicated_draft_kv()
+        if self.replicated_draft_kv:
+            # The target uses DCP; the GQA draft keeps its TP-sharded heads
+            # and a complete context on every TP rank.
+            self.dcp_size = 1
+            self.dcp_rank = 0
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
@@ -69,10 +84,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 device=device,
             )
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        self.use_cuda_graph = False
-        # Max query tokens depend on whether sampling from anchor or not.
-        self.max_query_tokens = self.max_batch_size * self.num_query_per_req
+            if self.use_cuda_graph:
+                logger.warning(
+                    "DSpark dynamic verify length is incompatible with ACLGraph; "
+                    "the draft model will run in eager mode."
+                )
+                self.use_cuda_graph = False
+        # The inherited DFlash capacity uses the target verification width
+        # (1 + N). Anchor-first DSpark has N real query tokens per request, and
+        # uses the extra capacity for graph padding.
+        self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(
@@ -99,11 +120,138 @@ class AscendDSparkProposer(AscendDflashProposer):
         # one allocation, so kv_cache_spec.block_size is not interchangeable
         # with the attention kernel's block size.
         self._per_group_kernel_block_sizes: dict[int, int] = {}
+        self._per_group_manager_block_sizes: dict[int, int] = {}
+        self._per_group_replication_sizes: dict[int, int] = {}
 
         self._per_group_block_table_buffers: dict[int, torch.Tensor] = {}
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+        self._replicated_block_table_storage: dict[int, torch.Tensor] = {}
+        self._replicated_block_table_arange: dict[int, torch.Tensor] = {}
+
+    def _uses_dcp_replicated_draft_kv(self) -> bool:
+        return getattr(self, "runner", None) is not None and is_kimi_k3_gqa_dspark(self.vllm_config)
+
+    def _get_model(self):
+        if not self._uses_dcp_replicated_draft_kv():
+            return super()._get_model()
+
+        # enable_dcp() is cached process-wide. Refresh it while the parent
+        # loader installs the draft's DCP=1 config so the draft Attention
+        # layers construct the ordinary GQA implementation, then restore the
+        # target DCP setting for the rest of worker initialization.
+        enable_dcp.cache_clear()
+        try:
+            return super()._get_model()
+        finally:
+            enable_dcp.cache_clear()
+            with set_current_vllm_config(self.vllm_config):
+                enable_dcp()
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        base = super()._create_draft_vllm_config()
+        if not self._uses_dcp_replicated_draft_kv():
+            return base
+        spec_config = self.speculative_config
+        draft_parallel_config = copy.copy(base.parallel_config)
+        draft_parallel_config.tensor_parallel_size = spec_config.draft_parallel_config.tensor_parallel_size
+        draft_parallel_config.pipeline_parallel_size = spec_config.draft_parallel_config.pipeline_parallel_size
+        draft_parallel_config.decode_context_parallel_size = 1
+        # Keep the PD role and scheduler settings together when rebuilding
+        # the config. Only execution parallelism differs for the draft.
+        return replace(
+            base,
+            # DSpark reads its own model from speculative_config. Preserve
+            # the target-derived model config used by Ascend validation.
+            parallel_config=draft_parallel_config,
+            # GQA backend setup normalizes its cache block size to 128.
+            # Keep the parent hybrid model's page geometry unchanged.
+            cache_config=copy.copy(base.cache_config),
+        )
+
+    def _build_replicated_block_table(
+        self,
+        gid: int,
+        dcp_block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        replication_size = self._per_group_replication_sizes[gid]
+        manager_block_size = self._per_group_manager_block_sizes[gid]
+        kernel_block_size = self._per_group_kernel_block_sizes[gid]
+        if manager_block_size % kernel_block_size != 0:
+            raise RuntimeError(
+                "Replicated DSpark KV requires manager block size "
+                f"{manager_block_size} to be divisible by kernel block size "
+                f"{kernel_block_size}."
+            )
+        blocks_per_phys_block = manager_block_size // kernel_block_size
+        max_model_len = self.vllm_config.model_config.max_model_len
+        max_local_cols = (
+            (max_model_len + manager_block_size * replication_size - 1)
+            // (manager_block_size * replication_size)
+            * blocks_per_phys_block
+        )
+        local_cols = min(dcp_block_table.shape[1], max_local_cols)
+        replicated_cols = local_cols * replication_size
+        required_shape = (dcp_block_table.shape[0], replicated_cols)
+        capacity_rows = max(required_shape[0], getattr(self, "max_batch_size", required_shape[0] - 1) + 1)
+        storage = self._replicated_block_table_storage.get(gid)
+        if storage is None or storage.shape != (capacity_rows, replicated_cols):
+            storage = torch.empty(
+                (capacity_rows, replicated_cols),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._replicated_block_table_storage[gid] = storage
+        col_indices = self._replicated_block_table_arange.get(gid)
+        if col_indices is None or col_indices.numel() < replicated_cols:
+            col_indices = torch.arange(
+                replicated_cols,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._replicated_block_table_arange[gid] = col_indices
+        col_indices = col_indices[:replicated_cols]
+        replicated_blocks = expand_dcp_replicated_block_table(
+            dcp_block_table[:, :local_cols],
+            manager_block_size,
+            kernel_block_size,
+            replication_size,
+            col_indices,
+        )
+        valid_rows = (seq_lens[: dcp_block_table.shape[0]] > 0).view(-1, 1)
+        storage.zero_()
+        result = storage[: required_shape[0], : required_shape[1]]
+        result.copy_(torch.where(valid_rows, replicated_blocks, 0))
+        return result
+
+    def _build_replicated_context_slot_mapping(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        positions: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_reqs: int,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        result = self._per_group_context_slot_mapping_buffers[gid]
+        result.fill_(-1)
+        if num_tokens == 0:
+            return result
+        query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+        req_indices = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            query_lens.to(device=self.device),
+            output_size=num_tokens,
+        )
+        kernel_block_size = self._per_group_kernel_block_sizes[gid]
+        token_positions = positions[:num_tokens].to(torch.int32)
+        logical_block_indices = token_positions // kernel_block_size
+        flat_indices = (req_indices * block_table.shape[1] + logical_block_indices).to(torch.int64)
+        block_numbers = block_table.flatten()[flat_indices]
+        result[:num_tokens] = block_numbers * kernel_block_size + token_positions % kernel_block_size
+        return result
 
     def _compute_confidence(
         self,
@@ -138,7 +286,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         self._per_group_kernel_block_sizes = {}
+        self._per_group_manager_block_sizes = {}
+        self._per_group_replication_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
+        draft_vllm_config = (
+            self._create_draft_vllm_config() if getattr(self, "replicated_draft_kv", False) else self.vllm_config
+        )
 
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & self._draft_attn_layer_names
@@ -166,12 +319,26 @@ class AscendDSparkProposer(AscendDflashProposer):
                         layer_kv_cache_spec,
                         kv_cache_gid,
                     )
-                    attn_group.create_metadata_builders(
-                        self.vllm_config,
-                        self.device,
-                        kernel_block_size=kernel_block_size,
-                    )
+                    if getattr(self, "replicated_draft_kv", False):
+                        builder_spec = layer_kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+                        attn_group.metadata_builders = [
+                            AscendAttentionMetadataBuilder(
+                                builder_spec,
+                                attn_group.layer_names,
+                                draft_vllm_config,
+                                self.device,
+                            )
+                        ]
+                    else:
+                        attn_group.create_metadata_builders(
+                            draft_vllm_config,
+                            self.device,
+                            kernel_block_size=kernel_block_size,
+                        )
                     self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
+                    self._per_group_manager_block_sizes[kv_cache_gid] = layer_kv_cache_spec.block_size
+                    if isinstance(layer_kv_cache_spec, AscendDCPReplicatedDraftAttentionSpec):
+                        self._per_group_replication_sizes[kv_cache_gid] = layer_kv_cache_spec.dcp_replication_size
                     attention_groups[key] = attn_group
                 else:
                     attention_groups[key].layer_names.append(layer_name)
@@ -180,13 +347,16 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         if (
             getattr(self.runner, "device_metadata_executor", None) is not None
-            and self.dcp_size == 1
+            and (self.dcp_size == 1 or envs.VLLM_ASCEND_ENABLE_FLASH_MLA)
             and not enable_pcp()
         ):
             for attn_group in self.draft_attn_groups:
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
-                    builder.enable_dspark_device_metadata(self.max_query_tokens)
+                    if self.dcp_size == 1:
+                        builder.enable_dspark_device_metadata(self.max_query_tokens)
+                elif isinstance(builder, DeviceMetadataTaskProvider):
+                    builder.enable_device_metadata()
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -217,6 +387,22 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
+        if gid in self._per_group_replication_sizes:
+            # Allocate the expanded capacity before graph capture. Real
+            # lengths and block IDs are refreshed together in the first pass.
+            self._build_replicated_block_table(
+                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
+            )
+            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
+            return
+        buffer = self._per_group_block_table_buffers.get(gid)
+        buffer_shape = (self.max_batch_size + 1, *block_table.shape[1:])
+        if buffer is None or buffer.shape != buffer_shape:
+            buffer = block_table.new_zeros(buffer_shape)
+            self._per_group_block_table_buffers[gid] = buffer
+        num_rows = block_table.shape[0]
+        buffer[:num_rows].copy_(block_table)
+        buffer[num_rows:].zero_()
 
     def set_inputs_first_pass(
         self,
@@ -245,10 +431,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
         long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        self._per_group_block_table_buffers = {
-            attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
-            for attn_group in self.draft_attn_groups
-        }
+        for gid in getattr(self, "_per_group_replication_sizes", {}):
+            self._build_replicated_block_table(
+                gid,
+                self._per_group_block_tables[gid][:batch_size],
+                cad.seq_lens[:batch_size],
+            )
+            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
         self._context_slot_mapping_buffers = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
@@ -300,6 +489,15 @@ class AscendDSparkProposer(AscendDflashProposer):
                 DCP_RANK=dcp_rank,
                 CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
+            if gid in getattr(self, "_per_group_replication_sizes", {}):
+                self._build_replicated_context_slot_mapping(
+                    gid,
+                    gid_block_table,
+                    target_positions,
+                    cad.query_start_loc,
+                    batch_size,
+                    self._dflash_num_context,
+                )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
@@ -342,6 +540,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
+        if getattr(self, "replicated_draft_kv", False):
+            cad.context_parallel_metadata = None
+            cad.dcp_local_seq_lens = None
 
         if dcp_size > 1:
             if cad.is_prefilling is not None:
@@ -352,9 +553,33 @@ class AscendDSparkProposer(AscendDflashProposer):
             long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
                 common_attn_metadata=cad,
                 num_query_per_req=self.num_query_per_req,
+                use_device_seq_lens=bool(envs.VLLM_ASCEND_ENABLE_FLASH_MLA),
             )
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
+
+    def pad_query_start_loc_for_graph(
+        self,
+        query_start_loc,
+        num_input_tokens: int,
+        real_num_reqs: int,
+        graph_num_reqs: int,
+    ) -> int:
+        """Match DSpark's N-token queries to target (1 + N) graph buckets."""
+        last_loc = int(query_start_loc.np[real_num_reqs])
+        num_metadata_reqs = real_num_reqs
+
+        for req_idx in range(real_num_reqs, graph_num_reqs):
+            last_loc += self.num_query_per_req
+            query_start_loc.np[req_idx + 1] = last_loc
+            num_metadata_reqs += 1
+
+        if last_loc < num_input_tokens:
+            query_start_loc.np[num_metadata_reqs + 1] = num_input_tokens
+            num_metadata_reqs += 1
+
+        query_start_loc.copy_to_gpu()
+        return num_metadata_reqs
 
     @torch.inference_mode()
     def dummy_run(
@@ -369,7 +594,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         **kwargs,
     ) -> None:
         num_query_total = num_reqs * self.num_query_per_req
-        num_query_tokens = min(num_query_total if num_reqs > 0 else num_tokens, self.max_query_tokens)
+        num_query_tokens = num_query_total if num_reqs > 0 else num_tokens
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and batch_descriptor is not None:
+            num_query_tokens = batch_descriptor.num_tokens
+        num_query_tokens = min(num_query_tokens, self.max_query_tokens)
 
         (
             num_input_tokens,
@@ -383,20 +611,89 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
 
+        self._context_slot_mapping_buffers = None
         self.token_indices_to_sample.fill_(0)
-        self._pad_draft_buffers(num_query_total, num_input_tokens)
+        # Dummy/capture queries must never reuse a live request's cache slots.
+        self._dflash_num_context = 0
+        self._pad_draft_buffers(0, num_input_tokens)
+
+        multi_steps_attn_metadata = []
+        device_metadata_tasks = []
+        device_metadata_executor = getattr(self.runner, "device_metadata_executor", None)
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and self.draft_attn_groups:
+            query_start_loc_cpu = (
+                torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * self.num_query_per_req
+            )
+            if num_input_tokens > num_query_total:
+                query_start_loc_cpu = torch.cat(
+                    (query_start_loc_cpu, query_start_loc_cpu.new_tensor([num_input_tokens]))
+                )
+            num_metadata_reqs = query_start_loc_cpu.shape[0] - 1
+            query_start_loc = query_start_loc_cpu.to(self.device)
+            seq_lens_cpu = self._adjust_tensor(self.runner.optimistic_seq_lens_cpu, num_metadata_reqs)
+            seq_lens = self._adjust_tensor(self.runner.seq_lens, num_metadata_reqs)
+            causal = self.model.get_draft_attn_causal()[0]
+            per_layer_attn_metadata: dict[str, Any] = {}
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                common_attn_metadata = AscendCommonAttentionMetadata(
+                    query_start_loc=query_start_loc,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                    seq_lens_cpu=seq_lens_cpu,
+                    _seq_lens_cpu=seq_lens_cpu,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu,
+                    seq_lens=seq_lens,
+                    num_reqs=num_metadata_reqs,
+                    # Keep cache writes limited to real draft queries. The
+                    # graph still executes ``num_input_tokens`` rows; padding
+                    # rows have -1 slot mappings and are discarded.
+                    num_actual_tokens=num_query_total,
+                    num_input_tokens=num_input_tokens,
+                    max_query_len=self.num_query_per_req,
+                    max_seq_len=0,
+                    slot_mapping=self._per_group_query_slot_mapping_buffers[gid][:num_input_tokens],
+                    positions=self.positions,
+                    attn_state=AscendAttentionState.SpecDecoding,
+                    causal=causal,
+                    is_prefilling=torch.zeros(num_metadata_reqs, dtype=torch.bool),
+                    block_table_tensor=self._per_group_block_table_buffers[gid][:num_metadata_reqs],
+                )
+                if self.dcp_size > 1:
+                    self.runner.dcp_manager.prepare_dspark_first_pass_cp_metadata(
+                        common_attn_metadata=common_attn_metadata,
+                        num_query_per_req=self.num_query_per_req,
+                        use_device_seq_lens=bool(envs.VLLM_ASCEND_ENABLE_FLASH_MLA),
+                    )
+                builder = attn_group.get_metadata_builder()
+                metadata = builder.build_for_graph_capture(
+                    common_attn_metadata,
+                    AscendAttentionState.SpecDecoding,
+                )
+                if device_metadata_executor is not None and isinstance(builder, DeviceMetadataTaskProvider):
+                    device_metadata_tasks.extend(builder.take_device_metadata_tasks())
+                if hasattr(metadata, "attn_mask") and not causal:
+                    metadata.attn_mask = None
+                metadata.attn_state = AscendAttentionState.SpecDecoding
+                for layer_name in attn_group.layer_names:
+                    per_layer_attn_metadata[layer_name] = metadata
+            multi_steps_attn_metadata.append(per_layer_attn_metadata)
+
+        if device_metadata_executor is not None and device_metadata_tasks:
+            device_metadata_executor.submit(device_metadata_tasks)
+            for task in device_metadata_tasks:
+                device_metadata_executor.wait(task.stage, task.group_id)
 
         with set_ascend_forward_context(
-            None,
+            multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_input_tokens,
+            num_actual_tokens=num_query_total,
             in_profile_run=is_profile,
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            draft_attn_metadatas=[],
+            draft_attn_metadatas=multi_steps_attn_metadata,
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
@@ -417,6 +714,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                     token_indices_to_sample=self.token_indices_to_sample[: num_reqs * self.num_speculative_tokens],
                     target_positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
-                    multi_steps_attn_metadata=[],
+                    multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
                 )
+
+            forward_context = get_forward_context()
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if device_metadata_executor is not None and device_metadata_tasks:
+            device_metadata_executor.release()

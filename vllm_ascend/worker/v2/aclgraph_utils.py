@@ -41,6 +41,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import device_metadata_context
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -209,7 +210,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
+        with communicator_switch(), device_metadata_context(self.model_runner.device_metadata_executor):
             # vLLM #53869 added pcp_manager to ModelCudaGraphManager.capture on
             # main; v0.28.0 still uses the older signature without that kwarg.
             if not vllm_version_is("0.28.0"):

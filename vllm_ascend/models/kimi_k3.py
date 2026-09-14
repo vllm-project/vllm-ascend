@@ -371,6 +371,12 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
     def kv_cache(self):
         return self._attention_layer.kv_cache
 
+    @kv_cache.setter
+    def kv_cache(self, value):
+        # ModelRunner V2 detaches cache storage through every model module
+        # during shutdown. Forward that assignment to the owning MLA layer.
+        self._attention_layer.kv_cache = value
+
     @property
     def kv_cache_dtype(self):
         return self._attention_layer.kv_cache_dtype
@@ -765,6 +771,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.output_attn_res_norm,
             attn_res_block_num,
         )
+        # The loop captures layer inputs and excludes end_layer. Capture the
+        # final requested state after materializing the output residual.
+        if self.dspark_aux_capture_materialized and self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states)
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]

@@ -26,8 +26,20 @@ from vllm_ascend.attention.mla_v1 import (
 )
 
 
-def test_mla_dcp_extends_v1_backend() -> None:
+@pytest.mark.parametrize("dcp_size", [1, 2])
+@pytest.mark.parametrize("flash_enabled", [False, True])
+def test_mla_dcp_extends_v1_backend(dcp_size, flash_enabled) -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", return_value=None),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+        patch("vllm_ascend.attention.context_parallel.mla_cp.envs.VLLM_ASCEND_ENABLE_FLASH_MLA", flash_enabled),
+    ):
+        impl = AscendMlaDCPImpl()
+    assert impl.can_return_lse_for_decode
+    assert impl.need_to_return_lse_for_decode is (dcp_size > 1)
+    assert impl.supports_mtp_with_cp_non_trivial_interleave_size is flash_enabled
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
@@ -286,6 +298,7 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert call_args[0].shape == (1, 4, 96, 3)
     assert call_kwargs["query_rope"].shape == (1, 4, 96, 2)
     assert call_kwargs["num_heads"] == 96
+    assert call_kwargs["softmax_lse_flag"] is True
     assert merged["output_shape"] == (4, 96, 3)
     assert merged["softmax_lse_shape"] == (4, 96, 1)
 

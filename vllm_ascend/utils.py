@@ -1227,6 +1227,36 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     return _HAS_LAYER_IDX
 
 
+def is_kimi_k3_gqa_dspark(vllm_config) -> bool:
+    """Whether Kimi K3 uses the separate Qwen3 GQA DSpark drafter."""
+    spec_config = getattr(vllm_config, "speculative_config", None)
+    if spec_config is None or getattr(spec_config, "method", None) != "dspark":
+        return False
+    target = spec_config.target_model_config or vllm_config.model_config
+    draft = spec_config.draft_model_config
+    if target is None or draft is None:
+        return False
+    target_architectures = {
+        *(getattr(target, "architectures", ()) or ()),
+        *(getattr(target.hf_config, "architectures", ()) or ()),
+    }
+    architecture = getattr(target, "architecture", None)
+    if architecture:
+        target_architectures.add(architecture)
+    draft_architectures = {
+        *(getattr(draft, "architectures", ()) or ()),
+        *(getattr(draft.hf_config, "architectures", ()) or ()),
+    }
+    return (
+        (
+            getattr(target.hf_config, "model_type", None) == "kimi_k3"
+            or any("KimiK3" in architecture for architecture in target_architectures)
+        )
+        and getattr(draft.hf_config, "model_type", None) == "qwen3"
+        and bool(draft_architectures & {"DSparkDraftModel", "Qwen3DSparkModel"})
+    )
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1269,6 +1299,9 @@ def refresh_block_size(vllm_config):
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
         # logic rather than the generic platform default.
+        return
+
+    if cache_config.user_specified_block_size:
         return
 
     if cache_config.block_size != 128:

@@ -36,6 +36,12 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental A5 packed ND Flash MLA route (RFC 16464). Valid values:
+    # 0 (default, existing cache/backend), 1 (upstream shared cache views).
+    # Non-sensitive. Requires the imported reader, metadata, scatter and conv.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_FLASH_MLA"),
+    # Non-sensitive build-only CATLASS compatibility selection. Empty (default)
+    # leaves source unchanged; "9.2.0B035" enables the pinned, hash-checked fix.
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

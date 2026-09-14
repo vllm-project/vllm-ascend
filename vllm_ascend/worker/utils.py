@@ -32,6 +32,9 @@ def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
     block_ids_ptr,
     n_blocks,
+    seg_strides_ptr,
+    seg_sizes_ptr,
+    PAGE_STRIDED: tl.constexpr,
     N_SEGS: tl.constexpr,
     PAGE_SIZE_EL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -61,9 +64,20 @@ def _zero_kv_blocks_kernel(
         block_id = tl.load(block_ids_ptr + block_index)
         seg_addr = tl.load(seg_addrs_ptr + seg_index)
         ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
-        offset = block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
+        if PAGE_STRIDED:
+            page_stride = tl.load(seg_strides_ptr + seg_index)
+            payload_size = tl.load(seg_sizes_ptr + seg_index)
+        else:
+            page_stride = PAGE_SIZE_EL
+            payload_size = PAGE_SIZE_EL
+        chunk_offset = chunk_index.to(tl.int64) * BLOCK_SIZE
+        offset = block_id.to(tl.int64) * page_stride + chunk_offset
         cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
-        tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
+        tl.store(
+            ptr + offset + cols,
+            tl.zeros([BLOCK_SIZE], dtype=tl.int32),
+            mask=chunk_offset + cols < payload_size,
+        )
 
 
 class AscendKVBlockZeroer(KVBlockZeroer):
@@ -78,6 +92,9 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         self.device = device
         self.pin_memory = pin_memory
         self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._page_strided = False
+        self._seg_strides: torch.Tensor | None = None
+        self._seg_sizes: torch.Tensor | None = None
         self._id_cap: int = 0
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
@@ -89,6 +106,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
+        page_strided: bool = False,
     ) -> None:
         """One-time precomputation for zero_block_ids.
 
@@ -101,11 +119,19 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         PAGE_SIZE_EL accounts for this ratio so that
         ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
 
+        ``page_strided`` accepts FlashMLA [P,S,576] and GQA [P,2H,S,64]
+        views whose trailing dimensions are dense. Page pitch and owned payload
+        are separate, so gaps between layers are never cleared.
+
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None
+        seg_strides: list[int] = []
+        seg_sizes: list[int] = []
+        self._page_strided = page_strided
+        self._seg_strides = self._seg_sizes = None
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -121,6 +147,31 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                 if layer_name in runner_only_attn_layers:
                     continue
                 kv_tuple = static_forward_context[layer_name].kv_cache
+                if page_strided and isinstance(kv_tuple, torch.Tensor):
+                    kv = kv_tuple
+                    assert kv.ndim in (3, 4), "Expected page-major MLA or GQA cache"
+                    assert spec.block_size % kernel_bs == 0 and ratio > 0
+                    payload = 1
+                    for dim in range(kv.ndim - 1, 0, -1):
+                        assert kv.size(dim) == 1 or kv.stride(dim) == payload, "Cache payload must be dense"
+                        payload *= kv.size(dim)
+                    assert payload > 0 and kv.stride(0) >= payload
+                    dp = kv.data_ptr()
+                    payload_bytes = payload * kv.element_size()
+                    pitch_bytes = kv.stride(0) * kv.element_size()
+                    assert dp % 4 == 0 and payload_bytes % 4 == 0 and pitch_bytes % 4 == 0
+                    payload_el = payload_bytes // 4
+                    # A scheduler block can cover several physical kernel pages.
+                    # Replicated drafts store every DCP lane consecutively for
+                    # that same manager block, each with its own kernel pages.
+                    physical_ratio = ratio * getattr(spec, "dcp_replication_size", 1)
+                    # Keep each payload separate instead of zeroing across gaps.
+                    for sub_block in range(physical_ratio):
+                        seg_addrs.append(dp + sub_block * pitch_bytes)
+                        seg_strides.append(pitch_bytes // 4 * physical_ratio)
+                        seg_sizes.append(payload_el)
+                    page_size_el = max(page_size_el or 0, payload_el)
+                    continue
                 assert len(kv_tuple) == 2, "K and V are not stored separately"
                 for kv in kv_tuple:
                     block_dim = 0
@@ -134,8 +185,8 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                     assert cur_bytes % 4 == 0
                     kernel_block_el = cur_bytes // 4
                     cur_page_el = kernel_block_el * ratio
-                    if page_size_el is None:
-                        page_size_el = cur_page_el
+                    if page_size_el is None or page_strided:
+                        page_size_el = max(page_size_el or 0, cur_page_el)
                     else:
                         assert page_size_el == cur_page_el, f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
 
@@ -145,12 +196,18 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                     for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                         off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
                         seg_addrs.append(dp + off_bytes)
+                        seg_strides.append(cur_page_el)
+                        seg_sizes.append(cur_page_el)
 
         if not seg_addrs or page_size_el is None:
             self._meta = None
             return
 
-        # _zero_kv_blocks_kernel will use int64 zeros, to meet the UB size, we use blk_size=64B/8B=8192
+        if page_strided:
+            self._seg_strides = torch.tensor(seg_strides, dtype=torch.int64, device=self.device)
+            self._seg_sizes = torch.tensor(seg_sizes, dtype=torch.int64, device=self.device)
+
+        # Preserve the VA tile cap: 8192 int32 values occupy 32 KiB of UB.
         blk_size = min(largest_power_of_2_divisor(page_size_el), 8192)
         self._id_cap = 8192
         self._ids_pinned = torch.empty(
@@ -193,6 +250,9 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             seg_addrs,
             idx,
             n_blocks,
+            self._seg_strides,
+            self._seg_sizes,
+            PAGE_STRIDED=self._page_strided,
             N_SEGS=n_segs,
             PAGE_SIZE_EL=page_size_el,
             BLOCK_SIZE=blk_size,

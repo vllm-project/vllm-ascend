@@ -22,6 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
@@ -182,6 +183,13 @@ class AscendAttentionDCPMetadataBuilder(
 
 
 class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
+    can_return_lse_for_decode: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Both FIA and Flash GQA return LSE for the internal DCP merge.
+        self.need_to_return_lse_for_decode = self.dcp_size > 1
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -191,6 +199,9 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The executor refreshes Flash schedules outside the captured graph.
+            return
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas

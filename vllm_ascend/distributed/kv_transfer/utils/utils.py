@@ -392,6 +392,20 @@ def tensor_storage_key(tensor: torch.Tensor) -> int:
             return tensor.data_ptr()
 
 
+def split_kv_cache_head_slots(cache: torch.Tensor, num_kv_heads: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Expose standardized [pages, 2H, tokens, D] storage as HND K/V planes.
+
+    Only create aliases: model and connector must keep referring to the same
+    allocation, including its page stride and per-layer storage offset.
+    """
+    if cache.ndim != 4 or cache.shape[1] != 2 * num_kv_heads:
+        raise ValueError("KV head-slot cache must have shape [pages, 2H, tokens, D]")
+    _, heads, tokens, dim = cache.shape
+    if cache.stride()[1:] != (tokens * dim, dim, 1) or cache.stride(0) < heads * tokens * dim:
+        raise ValueError("KV head-slot cache must have contiguous, nonoverlapping pages")
+    return cache[:, :num_kv_heads], cache[:, num_kv_heads:]
+
+
 def collect_storage_merged_register_regions(
     kv_caches: dict[str, Any],
 ) -> RegisterRegions:
@@ -408,19 +422,15 @@ def collect_storage_merged_register_regions(
         if tensor is None or tensor.numel() == 0:
             continue
 
-        if not tensor.is_contiguous():
-            logger.warning(
-                "Mooncake register_buffer got a non-contiguous KV cache "
-                "tensor: shape=%s, dtype=%s, data_ptr=%s. "
-                "Registration will use logical numel * element_size.",
-                tuple(tensor.shape),
-                tensor.dtype,
-                hex(tensor.data_ptr()),
-            )
-
         nbytes = tensor.nbytes
         start = tensor.data_ptr()
-        end = start + nbytes
+        # A page-strided layer shares the gaps with other cache layers or
+        # Mamba state. Registration covers the physical span; transfer lengths
+        # remain the payload of one layer's block.
+        span = tensor.element_size() * (
+            1 + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()))
+        )
+        end = start + span
         storage_key = tensor_storage_key(tensor)
 
         logical_tensor_count += 1

@@ -5,6 +5,40 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
+namespace vllm_ascend {
+at::Tensor flash_mla_with_kvcache_metadata_meta(
+    const at::Tensor &cache_seqlens,
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t head_dim_qk,
+    int64_t head_dim_v,
+    int64_t mask_mode,
+    c10::string_view layout_q);
+
+std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
+    const at::Tensor &query,
+    const at::Tensor &k_cache,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &cache_seqlens,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t head_dim_v,
+    double softmax_scale,
+    int64_t mask_mode,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse);
+}
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -696,7 +730,8 @@ at::Tensor npu_causal_conv1d_custom_meta(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t max_query_len)
 {
     return output;
 }
@@ -2123,6 +2158,74 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
+    const at::Tensor &x, const c10::SymInt &n)
+{
+    constexpr int64_t MX_BLOCK_SPAN = 64;
+    constexpr int64_t MX_SCALE_ALIGN = 2;
+    auto m = x.sym_size(0);
+    c10::SymDimVector output_shape = {m, n / 2};
+    c10::SymDimVector scale_shape = {
+        m, (n / 2 + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN, MX_SCALE_ALIGN};
+    return {at::empty_symint(output_shape, x.options().dtype(at::kFloat8_e4m3fn)),
+            at::empty_symint(scale_shape, x.options().dtype(at::kFloat8_e8m0fnu))};
+}
+
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale,
+    const std::optional<at::Tensor> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    auto k = x.sym_size(1);
+    auto e = weight.sym_size(0);
+    auto n = weight.sym_numel() / (e * (k / 2));
+    (void)weight_scale;
+    (void)weight_assist_matrix;
+    (void)bias;
+    (void)x_scale;
+    (void)smooth_scale;
+    (void)group_list;
+    (void)dequant_mode;
+    (void)dequant_dtype;
+    (void)quant_mode;
+    (void)group_list_type;
+    (void)tuning_config;
+    (void)beta;
+    (void)linear_beta;
+    return make_grouped_matmul_situ_quant_meta_output(x, n);
+}
+
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
+    const at::Tensor &x, const std::vector<at::Tensor> &weight, const std::vector<at::Tensor> &weight_scale,
+    const std::optional<std::vector<at::Tensor>> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    auto k = x.sym_size(1);
+    auto n = weight[0].sym_numel() / (k / 2);
+    (void)weight_scale;
+    (void)weight_assist_matrix;
+    (void)bias;
+    (void)x_scale;
+    (void)smooth_scale;
+    (void)group_list;
+    (void)dequant_mode;
+    (void)dequant_dtype;
+    (void)quant_mode;
+    (void)group_list_type;
+    (void)tuning_config;
+    (void)beta;
+    (void)linear_beta;
+    return make_grouped_matmul_situ_quant_meta_output(x, n);
+}
+#endif
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -2159,6 +2262,14 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+    ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz.list",
+             &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+#endif
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
@@ -2212,6 +2323,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    ops.impl("flash_mla_with_kvcache_metadata", &vllm_ascend::flash_mla_with_kvcache_metadata_meta);
+    ops.impl("flash_mla_with_kvcache", &vllm_ascend::flash_mla_with_kvcache_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);

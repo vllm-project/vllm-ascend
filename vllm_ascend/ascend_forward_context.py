@@ -373,7 +373,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             mc2_tokens_capacity,
         )
     logger.debug(
-        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%s, mc2_capacity=%s",
         moe_comm_policy,
         moe_comm_type,
         num_tokens,

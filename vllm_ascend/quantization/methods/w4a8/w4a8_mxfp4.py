@@ -25,11 +25,12 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import FP8_METHOD, dispose_tensor
+from vllm_ascend.utils import FP8_METHOD, AscendDeviceType, dispose_tensor, get_ascend_device_type
 
 from ..base import (
     AscendLinearScheme,
@@ -186,8 +187,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
+        # GMM-SiTU consumes native FP4 metadata; ordinary GMM2 keeps its
+        # existing packed-byte weight representation.
+        w13 = layer.w13_weight.data
+        w13_input_dtype = torch_npu.float4_e2m1fn_x2
+        if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
+            w13 = w13.view(torch.float4_e2m1fn_x2)
+            w13_input_dtype = torch.float4_e2m1fn_x2
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            w13, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=w13_input_dtype
         )
         layer.w2_weight.data = torch_npu.npu_format_cast(
             layer.w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
@@ -204,6 +212,27 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
         layer = mlp_compute_input.layer
         assert layer is not None
+        if (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and mlp_compute_input.activation == MoEActivation.SITU
+            and mlp_compute_input.group_list_type in (0, 1)
+            and self.group_size == 32
+            and (mlp_compute_input.activation_situ_linear_beta or 0.0) > 0.0
+        ):
+            hidden_states, out_scale, _ = DeviceOperator.npu_grouped_matmul_situ_quant(
+                x=hidden_states,
+                weight=layer.w13_weight,
+                weight_scale=layer.w13_weight_scale,
+                x_scale=pertoken_scale,
+                group_list=mlp_compute_input.group_list,
+                group_list_type=mlp_compute_input.group_list_type,
+                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
+                linear_beta=mlp_compute_input.activation_situ_linear_beta,
+                mxfp_quant_dtype=self.quant_type,
+            )
+            dispose_tensor(mlp_compute_input.hidden_states)
+            return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
+
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=[layer.w13_weight],
@@ -331,11 +360,16 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         return param_dict
 
     def process_weights_after_loading(self, layer):
+        w13 = layer.w13_weight.data.view(torch.uint8)
+        w13_input_dtype = torch_npu.float4_e2m1fn_x2
+        if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
+            w13 = w13.view(torch.float4_e2m1fn_x2)
+            w13_input_dtype = torch.float4_e2m1fn_x2
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.uint8),
+            w13,
             29,
             customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
+            input_dtype=w13_input_dtype,
         )
         layer.w2_weight.data = torch_npu.npu_format_cast(
             layer.w2_weight.data.view(torch.uint8),

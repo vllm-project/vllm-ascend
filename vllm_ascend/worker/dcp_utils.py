@@ -517,6 +517,8 @@ class DCPManager:
         self,
         common_attn_metadata: Any,
         num_query_per_req: int,
+        *,
+        use_device_seq_lens: bool = False,
     ) -> tuple[None, None]:
         """Build DCP metadata for DSpark's parallel draft query block.
 
@@ -525,8 +527,34 @@ class DCPManager:
         context KV is stored separately, and attention reads the query block
         back from the paged cache. Retain the complete sequence length even
         when the originating target batch contains prefill requests.
+
+        The Flash device path publishes history lengths separately from the
+        complete local cache length used by noncausal draft attention.
         """
         from vllm_ascend.attention.utils import AscendDCPMetadata
+
+        if use_device_seq_lens:
+            num_reqs = common_attn_metadata.num_reqs
+            seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+            query_lens = (
+                common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
+            )
+            history_lens = (seq_lens - query_lens).clamp_min(0)
+            local_seq_lens = self._get_dcp_local_seq_lens(seq_lens)
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+            )
+            common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
+                # Keep computed/history separate from the complete noncausal
+                # DSpark cache, including zero-length graph padding rows.
+                num_computed_tokens_of_dcp=self._get_dcp_local_seq_lens(history_lens),
+                draft_cp_seq_len=local_seq_lens[:, self.dcp_world_rank],
+                query_lens_cpu=query_lens_cpu,
+                max_query_len=int(query_lens_cpu.max()) if num_reqs else 0,
+                dcp_mtp_attn_mask=None,
+            )
+            return None, None
 
         seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
         if seq_lens_cpu is None:
