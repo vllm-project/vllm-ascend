@@ -2941,9 +2941,15 @@ class MooncakeConnectorWorker:
             [] for _ in (self.kv_group2layeridx if use_transfer_group_block_ids else meta.remote_block_ids)
         ]
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec":
+            spec_type = group_spec["kv_cache_spec_type"]
+            if spec_type == "AscendSFAIndexerCacheSpec":
                 # The full indexer cache is transferred separately.
                 continue
+            if spec_type not in ("MLAAttentionSpec", "AscendMLAAttentionSpec"):
+                raise NotImplementedError(
+                    f"Decode-only DCP does not support cache type {spec_type} "
+                    f"in transfer group {group_idx} (layer indices {layer_indices})."
+                )
             group_id = self._get_kv_cache_group_id(group_idx, group_spec)
             local_blocks = (meta.local_full_block_ids or meta.local_block_ids)[group_id]
             remote_blocks = meta.remote_block_ids[group_id]

@@ -4043,6 +4043,37 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     self.assertEqual(local_ids, (list(range(20 * local_cp, 20 * local_cp + 8)),))
                     self.assertEqual(remote_ids, (list(range(10 * remote_cp, 10 * remote_cp + 8)),))
 
+    def test_decode_only_dcp_checks_each_cache_group_type(self):
+        for spec_type in ("MLAAttentionSpec", "AscendMLAAttentionSpec", "MambaSpec", "FullAttentionSpec"):
+            with self.subTest(spec_type=spec_type):
+                worker = self._build_non_cp_worker()
+                worker.dcp_size = 2
+                worker.dcp_rank = 0
+                worker.block_size_scale = [[1], [1]]
+                worker.kv_group2layeridx = {
+                    0: ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+                    1: ({"kv_cache_spec_type": spec_type, "kv_cache_group_id": 1}, [1]),
+                }
+                meta = types.SimpleNamespace(
+                    remote_pcp_size=1,
+                    remote_dcp_size=1,
+                    remote_ptp_size=1,
+                    remote_port=30000,
+                    remote_block_size=16,
+                    local_block_ids=([20], [30]),
+                    local_full_block_ids=([20], [30]),
+                    remote_block_ids=([100, 101], [200, 201]),
+                    num_prompt_blocks=2,
+                    num_computed_tokens=0,
+                )
+                if spec_type in ("MLAAttentionSpec", "AscendMLAAttentionSpec"):
+                    _, local_ids, remote_ids = worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+                    self.assertEqual(local_ids, [([20], [30])])
+                    self.assertEqual(remote_ids, [([100], [200])])
+                else:
+                    with self.assertRaisesRegex(NotImplementedError, f"{spec_type} in transfer group 1"):
+                        worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+
     def test_sfa_decode_only_dcp_maps_global_blocks_to_each_rank(self):
         for rank, remote_pcp_size in ((rank, pcp) for rank in range(8) for pcp in (1, 2)):
             for prompt_blocks, prefix_blocks in ((1, 0), (17, 0), (17, 9)):
