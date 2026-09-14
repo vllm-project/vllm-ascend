@@ -9,15 +9,57 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 
-@pytest.mark.skip(reason="Failure of an individual operator use case causes failures of other operators.")
+def _tensor_written(tensor: torch.Tensor) -> bool:
+    return bool((~torch.isnan(tensor)).any().item())
+
+
+def _build_mode_caches(
+    cache_mode: str,
+    block_num: int,
+    block_size: int,
+    kv_lora_rank: int,
+    rope_dim: int,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the ctkv/rope caches in the layout each cache_mode expects.
+
+    The host tiling reads blockSize and the rope head dim straight off these
+    shapes (GetKvCacheBlockSize / GetRopeHeadDim in
+    csrc/mla_preprocess/op_host/mla_preprocess.h), so the layout has to match
+    the mode: "krope_ctkv" is an ND mode with 3-D [block_num, block_size, dim]
+    caches, while "nzcache" is a physical NZ mode with 4-D
+    [block_num, dim // C0, block_size, C0] caches.
+    """
+    ctkv_shape: tuple[int, ...]
+    rope_shape: tuple[int, ...]
+    if cache_mode == "krope_ctkv":
+        ctkv_shape = (block_num, block_size, kv_lora_rank)
+        rope_shape = (block_num, block_size, rope_dim)
+    elif cache_mode == "nzcache":
+        ctkv_shape = (block_num, kv_lora_rank // 16, block_size, 16)
+        rope_shape = (block_num, rope_dim // 16, block_size, 16)
+    else:
+        raise ValueError(f"unsupported cache_mode: {cache_mode}")
+
+    kv_cache = torch.full(ctkv_shape, float("nan"), dtype=dtype, device="npu")
+    kv_cache_rope = torch.full(rope_shape, float("nan"), dtype=dtype, device="npu")
+    return kv_cache, kv_cache_rope
+
+
 @pytest.mark.parametrize("cache_mode", ["krope_ctkv", "nzcache"])
 @pytest.mark.parametrize("enable_rope", [True, False])
 @torch.inference_mode()
 def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
     """Exercise MLA QDown cache modes with RoPE enabled and disabled."""
+    torch.manual_seed(0)
     token_num = 1
     head_num = 2
     N_7168 = 7168
+    mm1_out = 2112
+    q_lora_rank = 1536
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    rope_dim = 64
     block_num = 1
     block_size = 128
     dtype = torch.bfloat16
@@ -26,57 +68,57 @@ def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
     quant_scale0 = torch.randn((1,), dtype=dtype).npu()
     quant_offset0 = torch.randint(0, 7, (1,), dtype=torch.int8).npu()
 
-    wdqkv = torch.randint(0, 7, (1, 224, 2112, 32), dtype=torch.int8).npu()
+    wdqkv = torch.randint(0, 7, (1, N_7168 // 32, mm1_out, 32), dtype=torch.int8).npu()
     wdqkv = torch_npu.npu_format_cast(wdqkv.contiguous(), 29)
 
-    de_scale0 = torch.rand((2112,), dtype=torch.float).npu()
-    bias0 = torch.randint(0, 7, (2112,), dtype=torch.int32).npu()
-    gamma1 = torch.randn((1536), dtype=dtype).npu()
-    beta1 = torch.randn((1536), dtype=dtype).npu()
+    de_scale0 = torch.rand((mm1_out,), dtype=torch.float).npu()
+    bias0 = torch.randint(0, 7, (mm1_out,), dtype=torch.int32).npu()
+    gamma1 = torch.randn((q_lora_rank), dtype=dtype).npu()
+    beta1 = torch.randn((q_lora_rank), dtype=dtype).npu()
     quant_scale1 = torch.randn((1,), dtype=dtype).npu()
     quant_offset1 = torch.randint(0, 7, (1,), dtype=torch.int8).npu()
 
-    wuq = torch.randint(0, 7, (1, 48, head_num * 192, 32), dtype=torch.int8).npu()
+    wuq = torch.randint(0, 7, (1, q_lora_rank // 32, head_num * 192, 32), dtype=torch.int8).npu()
     wuq = torch_npu.npu_format_cast(wuq.contiguous(), 29)
 
     de_scale1 = torch.rand((head_num * 192,), dtype=torch.float).npu()
     bias1 = torch.randint(0, 7, (head_num * 192,), dtype=torch.int32).npu()
 
-    gamma2 = torch.randn((512), dtype=dtype).npu()
+    gamma2 = torch.randn((kv_lora_rank), dtype=dtype).npu()
 
-    cos = torch.randn((token_num, 64), dtype=dtype).npu()
-    sin = torch.randn((token_num, 64), dtype=dtype).npu()
+    cos = torch.randn((token_num, rope_dim), dtype=dtype).npu()
+    sin = torch.randn((token_num, rope_dim), dtype=dtype).npu()
 
-    wuk = torch.randn((head_num, 128, 512), dtype=dtype).npu()
+    wuk = torch.randn((head_num, qk_nope_head_dim, kv_lora_rank), dtype=dtype).npu()
     wuk = torch_npu.npu_format_cast(wuk, 29)
-    kv_cache = torch.randint(0, 7, (block_num, head_num * 512 // 32, block_size, 32), dtype=dtype).npu()
-    kv_cache_rope = torch.randn((block_num, head_num * 64 // 16, block_size, 16), dtype=dtype).npu()
+    kv_cache, kv_cache_rope = _build_mode_caches(cache_mode, block_num, block_size, kv_lora_rank, rope_dim, dtype)
 
-    slotmapping = torch.randint(0, 7, (token_num,), dtype=torch.int32).npu()
+    slotmapping = torch.randint(0, block_size, (token_num,), dtype=torch.int32).npu()
 
     ctkv_scale = torch.randn((1,), dtype=dtype).npu()
     qnope_scale = torch.randn((head_num), dtype=dtype).npu()
 
-    q_nope_out = torch.empty(
-        (hidden_states.shape[0], wuk.shape[0], kv_cache.shape[-1]),
-        dtype=hidden_states.dtype,
+    # q_nope_out / q_rope_out are laid out per token as [head_num, dim]; the dim
+    # comes from wuk / the rope head dim, never from the cache's trailing axis,
+    # which is C0 (16) in the NZ modes.
+    q_nope_out = torch.full(
+        (token_num, head_num, kv_lora_rank),
+        float("nan"),
+        dtype=dtype,
         device=hidden_states.device,
     )
-    q_rope_out = torch.empty(
-        (hidden_states.shape[0], wuk.shape[0], kv_cache_rope.shape[-1]),
-        dtype=hidden_states.dtype,
+    q_rope_out = torch.full(
+        (token_num, head_num, rope_dim),
+        float("nan"),
+        dtype=dtype,
         device=hidden_states.device,
     )
-    q_down = torch.empty(
-        (hidden_states.shape[0], 1536),
-        dtype=hidden_states.dtype,
+    q_down = torch.full(
+        (token_num, q_lora_rank),
+        float("nan"),
+        dtype=dtype,
         device=hidden_states.device,
     )
-
-    q_nope_old = q_nope_out.clone()
-    q_rope_old = q_rope_out.clone()
-    kv_cache_rope_old = kv_cache_rope.clone()
-    q_down_old = q_down.clone()
 
     torch.ops._C_ascend.mla_preprocess(
         hidden_states,
@@ -110,10 +152,13 @@ def test_mla_preprocess_kernel(cache_mode: str, enable_rope: bool):
         kv_cache_out1=kv_cache_rope,
         inner_out=q_down,
     )
-    assert not torch.equal(q_nope_out, q_nope_old)
-    assert not torch.equal(q_rope_out, q_rope_old)
-    assert not torch.equal(kv_cache_rope, kv_cache_rope_old)
-    assert not torch.equal(q_down, q_down_old)
+    torch.npu.synchronize()
+
+    assert _tensor_written(q_nope_out), "q_nope was not written"
+    assert _tensor_written(q_rope_out), "q_rope was not written"
+    assert _tensor_written(kv_cache), "kv_cache was not written"
+    assert _tensor_written(kv_cache_rope), "kv_cache_rope was not written"
+    assert _tensor_written(q_down), "inner_out (q_down) was not written"
 
     gc.collect()
     torch.npu.empty_cache()
