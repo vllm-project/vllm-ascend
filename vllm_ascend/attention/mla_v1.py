@@ -2037,7 +2037,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -2054,6 +2054,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
         num_decode_tokens = attn_metadata.num_decode_tokens
+        # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
+        # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
+        fused_mla_cache = isinstance(kv_cache, torch.Tensor)
+        if fused_mla_cache:
+            kv_cache = (
+                kv_cache[..., : self.kv_lora_rank],
+                kv_cache[..., self.kv_lora_rank :],
+            )
+
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         o_proj_input_shape = (_EXTRA_CTX.num_tokens, self.num_heads * self.v_head_dim)
@@ -2070,6 +2079,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
+            and not fused_mla_cache
             and can_use_decode_prolog
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
