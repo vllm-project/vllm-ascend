@@ -4590,6 +4590,9 @@ class NPUModelRunner(GPUModelRunner):
         # backing allocation rather than the size of an individual layer.
         use_legacy_shared_by_layout = vllm_version_is("0.28.0")
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+        has_replicated_draft = any(
+            isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in layer_kv_cache_spec.values()
+        )
         is_dsv4_main = not use_legacy_shared_by_layout and any(
             getattr(spec, "model_version", None) == "deepseek_v4"
             for spec in layer_kv_cache_spec.values()
@@ -4716,14 +4719,17 @@ class NPUModelRunner(GPUModelRunner):
             and not uses_padded_page_layout
             and self.hybrid_with_attn_and_mamba
             and supports_shared_backing_with_kv_transfer
-            and not self.use_sparse
-            and not self.use_compress
+            and (has_replicated_draft or (not self.use_sparse and not self.use_compress))
             and kv_cache_config.kv_cache_tensors
         ):
             layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
             tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
             regions: list[tuple[str, int, int]] = []
-            if len(tensor_sizes) == 1 and layout.is_layer_compact and layout.is_block_compact:
+            # The K3 planner explicitly emits contiguous layer regions even
+            # when the generic layout selector prefers block-outermost packing.
+            if len(tensor_sizes) == 1 and (
+                has_replicated_draft or (layout.is_layer_compact and layout.is_block_compact)
+            ):
                 backing_size = next(iter(tensor_sizes))
                 for descriptor in kv_cache_config.kv_cache_tensors:
                     for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):

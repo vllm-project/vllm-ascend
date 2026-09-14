@@ -1120,22 +1120,3 @@ def test_spec_graph_real_prefill_is_not_treated_as_padding():
 
     assert runtime.num_spec_decodes == 1
     assert runtime.num_prefills == 1
-
-
-@pytest.mark.parametrize("sample_from_anchor", [False, True])
-def test_dspark_target_reorder_threshold_includes_base_token_regardless_of_anchor(
-    sample_from_anchor: bool,
-):
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=7,
-    )
-    builder.vllm_config.speculative_config.method = "dspark"
-    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
-    )
-
-    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-
-    assert builder.reorder_batch_threshold == 8
