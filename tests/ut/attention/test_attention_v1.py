@@ -19,6 +19,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
     using_paged_attention,
@@ -780,3 +781,123 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_fia,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
+
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        param: list[MagicMock | None] = [MagicMock()] * 22
+        param[16] = None  # sliding_window
+        param[17] = None  # c8_k_aq_scale
+        param[21] = None  # layer_name
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
+
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
+        self.assertEqual(mock_fia.out.call_count, 3)
+
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params_handles_captured_paged_attention_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_get_workspace,
+        mock_paged_attention,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        query = MagicMock()
+        key_cache = MagicMock()
+        value_cache = MagicMock()
+        block_table = MagicMock()
+        output = MagicMock()
+        captured_seq_lens = MagicMock()
+        current_seq_lens = MagicMock()
+        pa_param = PagedAttentionGraphParam(
+            (
+                query,
+                key_cache,
+                value_cache,
+                8,
+                8,
+                1.0,
+                block_table,
+                captured_seq_lens,
+                output,
+            ),
+            "model.layers.0.self_attn.attn",
+        )
+
+        mock_get_graph_params.return_value.attn_params = {1: [pa_param]}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()]}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()]}
+
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {
+            "model.layers.0.self_attn.attn": MagicMock(
+                seq_lens=current_seq_lens,
+                block_tables=block_table,
+                seq_lens_list=[10],
+            ),
+        }
+
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        mock_get_workspace.assert_called_once()
+        mock_paged_attention.assert_called_once()
+        self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
+        mock_graph_task_update_begin.assert_called_once()
+        mock_graph_task_update_end.assert_called_once()

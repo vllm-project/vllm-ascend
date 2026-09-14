@@ -9,6 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -20,6 +21,8 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
@@ -53,6 +56,8 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
     }
+    if not vllm_version_is("0.28.0"):
+        expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -130,6 +135,35 @@ def test_full_graph_non_uniform_queries_use_mixed_padding(
     assert num_reqs_padded == num_reqs + 1
     np.testing.assert_array_equal(padded_query_start_loc[: num_reqs_padded + 1], expected_query_start_loc)
     assert padded_query_start_loc[num_reqs_padded] == num_tokens_padded
+
+
+@pytest.mark.parametrize(
+    "query_lens,num_tokens_padded,num_reqs_padded,expected,expected_num_reqs",
+    [
+        ([3, 1], 8, 4, [0, 3, 4, 6, 8], 4),
+        ([2, 3], 8, 2, [0, 2, 5, 8], 3),
+        ([2, 3], 5, 2, [0, 2, 5], 2),
+    ],
+    ids=["spread-padding", "extra-padding-request", "no-padding"],
+)
+def test_adaptive_verification_pads_fia_query_boundaries(
+    query_lens, num_tokens_padded, num_reqs_padded, expected, expected_num_reqs
+):
+    """Device-reallocated DSpark queries still match the FULL graph shape."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    num_reqs = len(query_lens)
+    query_start_loc = np.full(max(num_reqs_padded + 2, 5), sum(query_lens), dtype=np.int32)
+    query_start_loc[: num_reqs + 1] = np.cumsum([0, *query_lens])
+
+    actual, actual_num_reqs = runner._pad_adaptive_query_start_loc_for_fia(
+        num_tokens_padded,
+        num_reqs_padded,
+        num_reqs,
+        query_start_loc,
+    )
+
+    assert actual_num_reqs == expected_num_reqs
+    np.testing.assert_array_equal(actual[: len(expected)], expected)
 
 
 def test_sample_tokens_restores_replicated_draft_hidden_states():
@@ -226,13 +260,15 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     runner.pcp_manager = manager
     manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
     manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
+    input_buffers = manager._input_buffers
+    assert input_buffers is not None
     captured = {
-        name: getattr(manager.input_buffers, name)
+        name: getattr(input_buffers, name)
         for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens")
     }
     for name, value in captured.items():
         value.fill_(False if name == "is_padding" else 99)
-    manager.input_buffers.seq_lens_np.fill(99)
+    input_buffers.seq_lens_np.fill(99)
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
@@ -241,7 +277,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     for name, value in captured.items():
         expected = getattr(dummy, name)
         torch.testing.assert_close(value[: len(expected)], expected)
-    np.testing.assert_array_equal(manager.input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    np.testing.assert_array_equal(input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
     assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
     assert torch.count_nonzero(block_tables[0]) == 0
     assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
@@ -255,4 +291,65 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    parent.assert_called_once_with(dummy)
+    if vllm_version_is("0.28.0"):
+        parent.assert_called_once_with(dummy)
+    else:
+        parent.assert_called_once_with(dummy, valid_state_slots=False)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "computed,dummy_run,is_profile,expected",
+    [
+        ([0, 0, 99, 99], False, False, False),
+        ([0, 4, 0, 0], False, False, True),
+        ([0, 4, 0, 0], True, False, False),
+        ([0, 4, 0, 0], False, True, False),
+    ],
+)
+def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
+    from vllm_ascend.worker.v2.model_states import default
+
+    runner = _make_runner(need_timing=False)
+    events: list[object] = []
+    runner.kvpp = SimpleNamespace(
+        scheduler=object() if enabled else None,
+        prepare_forward=lambda history: events.append(("prepare", history)),
+        complete_forward=lambda: events.append("complete"),
+    )
+    state = default.AscendModelState.__new__(default.AscendModelState)
+    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    state.max_model_len = 32
+    state.kvpp_runtime = runner.kvpp
+    runner.model_state = state
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=2,
+        num_tokens_after_padding=4,
+        num_computed_tokens_np=np.array(computed),
+        query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
+        num_scheduled_tokens=torch.tensor([1, 1]),
+        is_prefilling_np=np.array([True, False, False, False]),
+        seq_lens=torch.tensor([1, 5]),
+        seq_lens_np=np.array([1, 5]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(2),
+        attn_state=None,
+    )
+    if not enabled:
+        batch.num_computed_tokens_np = None  # Disabled KVPP must not inspect history.
+    metadata = object()
+    monkeypatch.setattr(default, "build_attn_metadata", lambda **_kwargs: metadata)
+
+    def forward(_self, _scheduler_output, **_kwargs):
+        assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
+        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
+        events.append("forward")
+        return metadata
+
+    monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
+    assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
+    assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
+    assert state.kvpp_is_dummy_run is False

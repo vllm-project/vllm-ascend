@@ -797,6 +797,9 @@ class DeepseekV4DecoderLayer(nn.Module):
 @support_torch_compile
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    # vLLM #50514 validates and relays the model's existing PP aux payload.
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1196,6 +1199,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 pass
             elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
+
+            # Hash-router layers route text tokens through ``tid2eid`` and keep
+            # ``e_score_correction_bias`` unset, but the checkpoint still ships
+            # a router bias for them. Skip it instead of raising a KeyError.
+            if name.endswith(".gate.e_score_correction_bias") and name not in params_dict:
+                continue
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):

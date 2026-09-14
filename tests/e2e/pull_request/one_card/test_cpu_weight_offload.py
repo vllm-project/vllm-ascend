@@ -34,12 +34,16 @@ def _compare_offload_logprobs(
     prompts: list[str],
     atol: float = 0.0689,
     decode_atol: float | None = None,
+    num_runs: int = 3,
 ) -> None:
     """Compare prefetch/offload run against a no-offload eager baseline.
 
     Unlike ``compare_logprobs``, this keeps ``additional_config`` (e.g.
     ``weight_nz_mode``) on both sides and strips offload-related kwargs from
     the baseline so accuracy of the offloader itself is exercised.
+
+    The offload runner generates ``num_runs`` times; each run must match
+    the same baseline outputs (stability across repeated inference).
     """
     if decode_atol is None:
         decode_atol = 2 * atol
@@ -55,35 +59,60 @@ def _compare_offload_logprobs(
             sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
         )
 
-    # enabled offload
+    # enabled offload: repeat generate and compare each run to baseline
     with VllmRunner(**runner_kwargs) as runner:
-        offload_outputs = runner.model.generate(
-            prompts=prompts,
-            sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
-        )
+        for run_idx in range(num_runs):
+            offload_outputs = runner.model.generate(
+                prompts=prompts,
+                sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
+            )
 
-    for prompt_idx, (base_out, offload_out) in enumerate(zip(baseline_outputs, offload_outputs)):
-        base_seq = base_out.outputs[0]
-        offload_seq = offload_out.outputs[0]
+            for prompt_idx, (base_out, offload_out) in enumerate(zip(baseline_outputs, offload_outputs)):
+                base_seq = base_out.outputs[0]
+                offload_seq = offload_out.outputs[0]
 
-        assert base_seq.logprobs is not None and offload_seq.logprobs is not None, (
-            f"logprobs not returned for prompt {prompt_idx}"
-        )
-        assert len(base_seq.token_ids) == len(offload_seq.token_ids) == 3, (
-            f"Expected 3 tokens for prompt {prompt_idx}, "
-            f"got baseline={len(base_seq.token_ids)}, offload={len(offload_seq.token_ids)}"
-        )
+                assert base_seq.logprobs is not None and offload_seq.logprobs is not None, (
+                    f"logprobs not returned for prompt {prompt_idx} (run {run_idx})"
+                )
+                assert len(base_seq.token_ids) == len(offload_seq.token_ids) == 3, (
+                    f"Expected 3 tokens for prompt {prompt_idx} (run {run_idx}), "
+                    f"got baseline={len(base_seq.token_ids)}, "
+                    f"offload={len(offload_seq.token_ids)}"
+                )
 
-        e2e_utils._check_prefill_token(base_seq, offload_seq, prompt_idx, atol)
-        for token_idx in range(1, 3):
-            e2e_utils._check_decode_token(base_seq, offload_seq, token_idx, prompt_idx, decode_atol)
+                e2e_utils._check_prefill_token(base_seq, offload_seq, prompt_idx, atol)
+                for token_idx in range(1, 3):
+                    e2e_utils._check_decode_token(base_seq, offload_seq, token_idx, prompt_idx, decode_atol)
 
 
 # -------------------- Prefetch backend tests --------------------
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
-@pytest.mark.parametrize("nz_mode", [0, 1], ids=["ND", "NZ"])
+@pytest.mark.parametrize(
+    "enforce_eager, nz_mode",
+    [
+        pytest.param(True, 0, id="ND-eager"),
+        pytest.param(False, 0, id="ND-graph"),
+        pytest.param(True, 2, id="NZ-eager"),
+        # TODO(wangfiox): nz+graph not supported yet
+        pytest.param(
+            False,
+            2,
+            id="NZ-graph",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "NZ static buffers make the prefetch H2D copy a "
+                    "cross-format (ND->NZ) conversion that is aclop-only on "
+                    "CANN 9.0.0 and rejected during ACL graph capture; "
+                    "AscendPrefetchOffloader fails fast with a clear error "
+                    "for this combo. Remove this marker and the offloader "
+                    "guard once the no-transdata prefetch path lands."
+                ),
+            ),
+        ),
+    ],
+)
 @wait_until_npu_memory_free()
 def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
     """Test prefetch CPU offloading across eager/graph × ND/NZ.
