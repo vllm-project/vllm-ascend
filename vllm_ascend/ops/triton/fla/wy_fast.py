@@ -37,6 +37,7 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    HEAD_FIRST_OUTPUT: tl.constexpr,   # 新增
 ):
     T_max = T
     i_t_o = tl.program_id(0)
@@ -78,8 +79,11 @@ def recompute_w_u_fwd_kernel(
 
             b_vb = b_v * b_beta[:, None]
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
-
-            ptr_u = u + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v * 1
+            if HEAD_FIRST_OUTPUT:
+                # [B,H,T,D] 布局：base = i_h*(T_max*D) + (bos+offs_t_2d)*D
+                ptr_u = u + i_h * (T_max * V) + (bos + offs_t_2d) * V + offs_v
+            else:
+                ptr_u = u + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v * 1
             tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
 
         for i_k in range(tl.cdiv(K, BK)):
@@ -90,8 +94,10 @@ def recompute_w_u_fwd_kernel(
 
             b_kb = b_k * b_beta[:, None] * b_g[:, None]
             b_w = tl.dot(b_A, b_kb)
-
-            ptr_w = w + (bos * H + i_h) * K + offs_t_2d * (H * K) + offs_k * 1
+            if HEAD_FIRST_OUTPUT:
+                ptr_w = w + i_h * (T_max * K) + (bos + offs_t_2d) * K + offs_k
+            else:
+                ptr_w = w + (bos * H + i_h) * K + offs_t_2d * (H * K) + offs_k * 1
             tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
 
 
@@ -103,6 +109,7 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.Tensor | None = None,
+    head_first_output: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
@@ -115,8 +122,12 @@ def recompute_w_u_fwd(
     BK = 64
     BV = 64
 
-    u = torch.empty_like(v)
-    w = k.new_empty(B, T, H, K)
+    if head_first_output:
+        u = v.new_empty(B, H, T, V)
+        w = k.new_empty(B, H, T, K)
+    else:
+        u = torch.empty_like(v)
+        w = k.new_empty(B, T, H, K)
     beta = beta.transpose(1, 2).contiguous()
     g_cumsum = g_cumsum.transpose(1, 2).contiguous()
     recompute_w_u_fwd_kernel[(NT, B)](
@@ -139,5 +150,6 @@ def recompute_w_u_fwd(
         BV=BV,
         num_warps=4,
         num_stages=3,
+        HEAD_FIRST_OUTPUT=head_first_output,
     )
     return w, u
