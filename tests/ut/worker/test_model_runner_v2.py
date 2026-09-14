@@ -323,8 +323,8 @@ def test_execute_model_skips_dump_when_no_tokens_scheduled():
     debugger.step.assert_not_called()
 
 
-def test_execute_model_closes_dummy_run_dump_without_writing():
-    debugger = Mock(spec=["start", "step"])
+def test_execute_model_skips_eager_dump_for_dummy_run():
+    debugger = Mock(spec=["start", "stop", "step"])
     runner = _make_dump_runner(debugger)
     scheduler_output = SimpleNamespace(
         disable_profiling_timing=False,
@@ -335,7 +335,25 @@ def test_execute_model_closes_dummy_run_dump_without_writing():
     with patch.object(GPUModelRunner, "execute_model", return_value=None):
         runner.execute_model(scheduler_output, dummy_run=True)
 
-    debugger.start.assert_called_once_with(runner.model, scheduled_tokens={})
+    debugger.start.assert_not_called()
+    debugger.step.assert_not_called()
+
+
+def test_execute_model_closes_graph_dummy_run_without_writing():
+    debugger = Mock(spec=["start", "step"])
+    runner = _make_dump_runner(debugger)
+    # Graph dumping starts in load_model() before capture/profile dummy runs.
+    runner._debugger_started = True
+    scheduler_output = SimpleNamespace(
+        disable_profiling_timing=False,
+        total_num_scheduled_tokens=0,
+        num_scheduled_tokens={},
+    )
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=None):
+        runner.execute_model(scheduler_output, dummy_run=True)
+
+    debugger.start.assert_not_called()
     debugger.step.assert_called_once_with(dump=False)
 
 

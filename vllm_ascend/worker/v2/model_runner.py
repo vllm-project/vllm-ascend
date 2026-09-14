@@ -318,7 +318,10 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
-        if dump_forward:
+        # Eager PrecisionDebugger is started only for real scheduler steps.
+        # Graph dumping is already active from load_model(), so dummy forwards
+        # only need to flush the graph dumper below without writing a step.
+        if dump_forward and not dummy_run:
             self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
