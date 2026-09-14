@@ -1,0 +1,93 @@
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  HCCL_BUFFSIZE: "512"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_ASCEND_ENABLE_NZ: "1"
+
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--no-enable-prefix-caching"
+  - "--enable-chunked-prefill"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--trust-remote-code"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--max-num-seqs"
+  - "8"
+  - "--max-model-len"
+  - "5000"
+  - "--compilation-config"
+  - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--tensor-parallel-size"
+  - "8"
+  - "--data-parallel-size"
+  - "2"
+  - "--seed"
+  - "42"
+  - "--async-scheduling"
+  - "--additional-config"
+  - '{"enable_shared_expert_dp": true}'
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1500
+    batch_size: 32
+    request_rate: 0
+    baseline: 90
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+# =======Eagle3 Speculative Reasoning Step Test_02 step=3===============
+test_cases:
+  - name: "Kimi-K2.5-W4A8_step_3"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative_config"
+      - '{
+        "method": "eagle3",
+        "model":"lightseekorg/kimi-k2.5-eagle3",
+        "num_speculative_tokens": 3}'
+    benchmarks:
+      <<: *benchmarks_perf
+# =======Eagle3 Speculative Reasoning Step Test_04 step=7===============
+  - name: "Kimi-K2.5-W4A8_step_7"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative_config"
+      - '{
+        "method": "eagle3",
+        "model":"lightseekorg/kimi-k2.5-eagle3",
+        "num_speculative_tokens": 7}'
+    benchmarks:
+      <<: *benchmarks_perf

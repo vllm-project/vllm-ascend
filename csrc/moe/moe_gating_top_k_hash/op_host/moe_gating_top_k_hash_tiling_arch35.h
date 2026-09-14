@@ -44,6 +44,7 @@ const static int64_t X_INPUT_INDEX = 0;
 const static int64_t BIAS_INPUT_INDEX = 1;
 const static int64_t INPUT_IDS_INPUT_INDEX = 2;
 const static int64_t TID_TO_EID_INPUT_INDEX = 3;
+const static int64_t BIAS_VL_INPUT_INDEX = 4;
 const static int64_t Y_OUTPUT_INDEX = 0;
 const static int64_t EXPERT_IDX_OUTPUT_INDEX = 1;
 const static int64_t OUT_OUTPUT_INDEX = 2;
@@ -117,6 +118,7 @@ private:
     const gert::Shape *outShape_ = nullptr;
     const gert::Shape *inputIdsShape_ = nullptr;
     const gert::Shape *tid2eidShape_ = nullptr;
+    const gert::Shape *biasVlShape_ = nullptr;
 
     ge::DataType inputIdsDtype;
     ge::DataType tid2eidDtype;
@@ -174,6 +176,13 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::CheckInputShape()
                     return ge::GRAPH_FAILED);
     }
     moeGatingTopKTilingData_.set_addBias(addBias_);
+    moeGatingTopKTilingData_.set_addBiasVl(0);
+    moeGatingTopKTilingData_.set_imageSentinelLo(129257);
+    moeGatingTopKTilingData_.set_imageSentinelCount(5);
+
+    OPS_ERR_IF(biasVlShape_ != nullptr,
+                OPS_LOG_E(context_, "bias_vl routing is not implemented for Ascend 950."),
+                return ge::GRAPH_FAILED);
 
     if (inputIdsShape_ != nullptr) {
         OPS_ERR_IF(
@@ -277,6 +286,8 @@ ge::graphStatus MoeGatingTopKHashTilingRegbase::GetShapeAttrsInfo()
     inputIdsShape_ = inputIdsShapePtr == nullptr ? nullptr : &inputIdsShapePtr->GetStorageShape();
     auto tid2eidShapePtr = context_->GetOptionalInputShape(TID_TO_EID_INPUT_INDEX);
     tid2eidShape_ = tid2eidShapePtr == nullptr ? nullptr : &tid2eidShapePtr->GetStorageShape();
+    auto biasVlShapePtr = context_->GetOptionalInputShape(BIAS_VL_INPUT_INDEX);
+    biasVlShape_ = biasVlShapePtr == nullptr ? nullptr : &biasVlShapePtr->GetStorageShape();
 
     // 获取输出shape
     auto yShapePtr = context_->GetOutputShape(Y_OUTPUT_INDEX);

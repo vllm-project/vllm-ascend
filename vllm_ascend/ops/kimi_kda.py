@@ -22,12 +22,12 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
 )
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -37,7 +37,6 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
 )
 from vllm_ascend.utils import npu_stream_switch
 
-_KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
 _KDA_BFG_STREAM: torch.npu.Stream | None = None
@@ -148,28 +147,6 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 f"expected {tuple(param_shard.shape)}, got {tuple(fused_weight.shape)}"
             )
         param_shard.copy_(fused_weight)
-
-
-def _zero_padded_output(
-    output: torch.Tensor,
-    num_live_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows using a device-side live-token count."""
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=num_live_tokens.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < num_live_tokens
-    return torch.where(valid_tokens.view(1, -1, 1, 1), output, 0.0)
-
-
-def _zero_padded_recurrent_output(
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows skipped by recurrent KDA."""
-    return _zero_padded_output(output, query_start_loc[-1])
 
 
 def _prepare_beta(
@@ -444,25 +421,19 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops._C_ascend.recurrent_kda(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
-            raw_gate.contiguous(),
-            beta.contiguous(),
+        return run_recurrent_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
             recurrent_state,
             cu_seqlens,
             state_indices,
-            self.A_log.reshape(-1).contiguous(),
-            self.dt_bias.contiguous(),
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
             num_accepted_tokens=num_accepted_tokens,
-            scale=self.head_dim**-0.5,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=False,
-            allow_neg_eigval=False,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=(self.gate_lower_bound if self.gate_lower_bound is not None else -5.0),
         )
 
     def _run_prefill(
@@ -492,32 +463,21 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         initial_state_vk = recurrent_state[state_indices].contiguous()
         clear_ssm_states(initial_state_vk, has_initial_state)
 
-        q = l2norm_fwd(q.contiguous())
-        k = l2norm_fwd(k.contiguous())
-        result = torch.ops._C_ascend.chunk_kda_fwd(
+        output, final_state = run_chunk_kda(
             q,
             k,
-            v.contiguous(),
-            raw_gate.contiguous(),
-            beta.contiguous(),
-            self.head_dim**-0.5,
-            _KDA_CHUNK_SIZE,
-            layout="BSND",
-            initial_state=initial_state_vk,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=prebuilt_metadata.chunk_indices_chunk64_host,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound if self.gate_lower_bound is not None else -5.0,
-            use_gate_in_kernel=True,
-            A_log=self.A_log.reshape(-1).contiguous(),
-            dt_bias=self.dt_bias.contiguous(),
-            disable_recompute=False,
-            return_intermediate_states=False,
-            state_v_first=True,
+            v,
+            raw_gate,
+            beta,
+            initial_state_vk,
+            cu_seqlens,
+            prebuilt_metadata.chunk_indices_chunk64_host,
+            self.A_log,
+            self.dt_bias,
+            lower_bound=self.gate_lower_bound,
         )
-        recurrent_state[state_indices] = result[1].to(recurrent_state.dtype)
-        return result[0]
+        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        return output
 
     @eager_break_during_capture
     def _forward(
@@ -610,10 +570,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
-            core_spec = _zero_padded_recurrent_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
-            )
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
@@ -705,28 +661,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.non_spec_state_indices_tensor,
                 )
 
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            core_non_spec = _zero_padded_recurrent_output(
-                core_non_spec,
-                attn_metadata.non_spec_query_start_loc,
-            )
-
         if core_spec is None and core_non_spec is None:
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
             # Do not feed a previous replay's output through the norm gate.
             core_attn_out.zero_()
             return
-
-        num_live_tokens = None
-        if core_spec is not None:
-            assert attn_metadata.spec_query_start_loc is not None
-            num_live_tokens = attn_metadata.spec_query_start_loc[-1]
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            num_non_spec_tokens = attn_metadata.non_spec_query_start_loc[-1]
-            num_live_tokens = num_non_spec_tokens if num_live_tokens is None else num_live_tokens + num_non_spec_tokens
-        assert num_live_tokens is not None
 
         # Reuse the caller-owned result buffer. FULL graphs can leave rows
         # outside the live spec/non-spec index sets, so define them before the
@@ -746,7 +685,5 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # The registered Ascend FusedRMSNormGated uses the fused norm-gate
         # kernel while preserving the upstream parameter/loading contract.
         normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        # Mask again after the norm gate: zero * sigmoid(NaN) is still NaN in
-        # static padding rows whose captured gate values are not live.
-        core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
+        core_attn_out[:, :num_actual_tokens].copy_(normalized)
         core_attn_out[:, num_actual_tokens:].zero_()

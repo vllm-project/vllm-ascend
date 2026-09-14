@@ -32,10 +32,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import (
-    AscendSFAIndexerBackend,
-    AscendSFAIndexerMetadata,
-)
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
 
 class IndexerWrapper(nn.Module):
@@ -60,7 +57,16 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
-        self.impl = AscendSFAIndexerBackend(vllm_indexer, qk_rope_head_dim)
+        # Preserve checkpoint-visible direct Parameters for every indexer
+        # family. Registering them here keeps paths at ``...indexer.<name>``
+        # rather than adding an implementation segment.
+        if isinstance(vllm_indexer, nn.Module):
+            for name, parameter in vllm_indexer.named_parameters(recurse=False):
+                self.register_parameter(name, parameter)
+
+        backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
+        backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
+        self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.
     @property
@@ -79,6 +85,14 @@ class IndexerWrapper(nn.Module):
     def num_cache_tensors(self) -> int:
         return self.impl.num_cache_tensors
 
+    @property
+    def topk_output_width(self) -> int:
+        return self.impl.topk_output_width
+
+    def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return model-defined visible index counts for attention planning."""
+        return self.impl.get_topk_lengths(positions)
+
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
@@ -89,7 +103,7 @@ class IndexerWrapper(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
-        indexer_metadata: AscendSFAIndexerMetadata,
+        indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
         return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)

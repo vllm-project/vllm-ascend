@@ -28,7 +28,6 @@ deployment:
         --seed 42
         --data-parallel-size 2
         --data-parallel-size-local 1
-        --data-parallel-start-rank 0
         --data-parallel-address $LOCAL_IP
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
@@ -50,6 +49,7 @@ deployment:
     server_cmd: >
       vllm serve Eco-Tech/Kimi-K2.5-W4A8
         --host 0.0.0.0
+        --headless
         --port $SERVER_PORT
         --quantization ascend
         --allowed-local-media-path /

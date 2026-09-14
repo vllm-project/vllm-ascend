@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -74,8 +75,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.get_mc2_comm_alg = MagicMock()
-        mock_ascend_config.get_mc2_comm_alg.return_value = ""
+        mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -1834,7 +1834,11 @@ class TestNPUPlatform(TestBase):
             use_pcp=True,
         )
 
-        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+        config = self.mock_vllm_config()
+        config.model_config.hf_text_config = SimpleNamespace(index_topk=2048)
+        config.model_config.hf_config = config.model_config.hf_text_config
+        with set_current_vllm_config(config):
+            result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
 
         self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
@@ -1848,7 +1852,11 @@ class TestNPUPlatform(TestBase):
             use_sparse=True,
             use_pcp=True,
         )
-        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+        config = self.mock_vllm_config()
+        config.model_config.hf_text_config = SimpleNamespace(index_topk=2048)
+        config.model_config.hf_config = config.model_config.hf_text_config
+        with set_current_vllm_config(config):
+            result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
         self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
     def test_get_attn_backend_cls_rejects_unsupported_pcp_backend(self):
