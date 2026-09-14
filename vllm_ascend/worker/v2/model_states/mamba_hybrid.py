@@ -58,7 +58,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                         group_ids.append(i)
                         specs.extend(mamba_specs)
             assert specs, "no mamba layers in the model"
-            assert all(specs[0] == s for s in specs)
+            assert all(specs[0] == s for s in specs), "Mamba specs are inconsistent across layers"
             self._mamba_group_ids = group_ids
             self._mamba_spec = specs[0]
         return self._mamba_group_ids, self._mamba_spec
