@@ -9,6 +9,9 @@ graph-mode specifics that the integration review called out:
 * capacity grid with max_num_reqs > active num_reqs (pad rows must be
   explicitly reset to -1/0 rather than left stale);
 * out-variant buffers whose extent exceeds the active rows;
+* non-contiguous (column-sliced) block tables: the kernel takes the row
+  pitch from ``stride(0)``, not ``shape[1]``;
+* int32 metadata inputs (query_start_loc / seq_lens / block_table);
 * the eager-vs-triton boundary on padded rows is asserted as an
   intentional difference, not a regression.
 """
@@ -521,6 +524,97 @@ def test_capacity_grid_exact_allocation_boundary():
     # row was rewritten (no sentinel survives anywhere).
     assert not torch.equal(slots_buf, torch.full_like(slots_buf, 12345))
     assert torch.equal(out_slots.view(T_active, index_width), slots_buf.view(T_active, index_width))
+
+
+def test_non_contiguous_block_table():
+    """A column-sliced block table must resolve rows via stride(0), not B.
+
+    Mirrors the production caller, which passes
+    ``block_table_tensor[:num_reqs]`` — a row slice of the padded
+    allocation whose stride(0) can differ from shape[1] when the
+    underlying tensor was allocated wider. The kernel must honor the
+    actual row pitch instead of assuming contiguous rows.
+    """
+
+    num_reqs, num_speculative_tokens = 8, 4
+    window_size, block_size, max_seq_len, max_num_blocks = 944, 128, 2000, 32
+    if not dspark_swa_indices_supported(block_size, max_num_blocks):
+        pytest.skip("triton fast path not supported in this environment")
+
+    query_start_loc, seq_lens, block_table = _make_inputs(
+        num_reqs, num_speculative_tokens, window_size, block_size, max_seq_len, max_num_blocks
+    )
+    query_start_loc = query_start_loc.to(DEVICE)
+    seq_lens = seq_lens.to(DEVICE)
+    # Allocate a table wider than the visible columns and hand the kernel a
+    # column slice: row pitch (32 + 16) != shape[1] (32), so a kernel that
+    # indexes ``bt_ptr + r * B`` would read the wrong rows.
+    wide_table = torch.zeros((num_reqs, max_num_blocks + 16), dtype=block_table.dtype, device=DEVICE)
+    wide_table[:, :max_num_blocks] = block_table
+    sliced_table = wide_table[:, :max_num_blocks]
+    assert sliced_table.stride(0) == max_num_blocks + 16 != sliced_table.shape[1]
+
+    ref_slots, ref_lens = eager_dspark_swa_indices(
+        sliced_table,
+        num_speculative_tokens,
+        window_size,
+        block_size,
+        query_start_loc,
+        seq_lens,
+    )
+    out_slots, out_lens = build_dspark_swa_indices_triton(
+        sliced_table,
+        num_speculative_tokens,
+        window_size,
+        block_size,
+        query_start_loc,
+        seq_lens,
+    )
+    torch.testing.assert_close(out_slots, ref_slots)
+    torch.testing.assert_close(out_lens, ref_lens)
+
+
+def test_int32_metadata_inputs():
+    """int32 query_start_loc / seq_lens / block_table must work end-to-end.
+
+    The kernel reads qsl/seq_lens/block_table through pointer casts, so the
+    JIT must specialize on whatever dtype the runtime metadata carries
+    (the warmup path compiles against the real tensors' dtypes).
+    """
+
+    num_reqs, num_speculative_tokens = 8, 4
+    window_size, block_size, max_seq_len, max_num_blocks = 944, 128, 2000, 32
+    if not dspark_swa_indices_supported(block_size, max_num_blocks):
+        pytest.skip("triton fast path not supported in this environment")
+
+    query_start_loc, seq_lens, block_table = _make_inputs(
+        num_reqs, num_speculative_tokens, window_size, block_size, max_seq_len, max_num_blocks
+    )
+    query_start_loc = query_start_loc.to(torch.int32).to(DEVICE)
+    seq_lens = seq_lens.to(torch.int32).to(DEVICE)
+    block_table = block_table.to(torch.int32).to(DEVICE)
+
+    ref_slots, ref_lens = eager_dspark_swa_indices(
+        block_table,
+        num_speculative_tokens,
+        window_size,
+        block_size,
+        query_start_loc,
+        seq_lens,
+    )
+    out_slots, out_lens = build_dspark_swa_indices_triton(
+        block_table,
+        num_speculative_tokens,
+        window_size,
+        block_size,
+        query_start_loc,
+        seq_lens,
+    )
+    torch.testing.assert_close(out_slots, ref_slots)
+    # The eager chain's lens dtype follows seq_lens (int32 here), while the
+    # triton wrapper always allocates int64 lens — a documented contract.
+    # Compare values through the canonical int64 dtype.
+    torch.testing.assert_close(out_lens, ref_lens.to(torch.int64))
 
 
 @pytest.mark.parametrize("bad_block_size", [100, 96, 0])
