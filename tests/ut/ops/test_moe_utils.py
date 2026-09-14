@@ -80,6 +80,7 @@ class TestMegaMoeActivationKwargs(unittest.TestCase):
 
         kwargs = select_mega_moe_activation_kwargs(
             mega_moe,
+            activation="silu",
             activation_clamp=7.0,
             swiglu_alpha=1.702,
             swiglu_beta=1.0,
@@ -92,6 +93,7 @@ class TestMegaMoeActivationKwargs(unittest.TestCase):
 
         kwargs = select_mega_moe_activation_kwargs(
             mega_moe,
+            activation="swigluoai_uninterleave",
             activation_clamp=7.0,
             swiglu_alpha=1.702,
             swiglu_beta=1.0,
@@ -100,6 +102,57 @@ class TestMegaMoeActivationKwargs(unittest.TestCase):
         self.assertEqual(kwargs["glu_alpha"], 1.702)
         self.assertEqual(kwargs["glu_bias"], 1.0)
         self.assertNotIn("swiglu_alpha", kwargs)
+
+    def test_select_mega_moe_activation_kwargs_binds_current_cann_api(self):
+        def mega_moe(*args, activation="swiglu", activation_clamp=None, activation_params=None, **kwargs):
+            return args, activation, activation_clamp, activation_params, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai_uninterleave",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(
+            kwargs,
+            {
+                "activation": "swigluoai",
+                "activation_clamp": 7.0,
+                "activation_params": {"alpha": 1.702, "beta": 1.0},
+            },
+        )
+
+    def test_select_mega_moe_activation_kwargs_reads_schema_fallback(self):
+        class CompiledMegaMoe:
+            __signature__ = "not inspectable"
+            _schema = "mega_moe(..., str activation='swiglu', Dict(str, float)? activation_params=None)"
+
+            def __call__(self, *args, **kwargs):
+                return args, kwargs
+
+        kwargs = select_mega_moe_activation_kwargs(
+            CompiledMegaMoe(),
+            activation="swigluoai_uninterleave",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs["activation"], "swigluoai")
+        self.assertEqual(kwargs["activation_params"], {"alpha": 1.702, "beta": 1.0})
+
+    def test_select_mega_moe_activation_kwargs_rejects_legacy_oai(self):
+        def mega_moe(*args, activation_clamp=None):
+            return args, activation_clamp
+
+        with self.assertRaisesRegex(RuntimeError, "does not expose SwiGLU-OAI"):
+            select_mega_moe_activation_kwargs(
+                mega_moe,
+                activation="swigluoai_uninterleave",
+                activation_clamp=7.0,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+            )
 
 
 if __name__ == "__main__":
