@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    SCHEDULER_LOOKUP_BACKENDS,
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
@@ -35,13 +36,19 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     PoolKey,
     ReqMeta,
     RequestTracker,
+    block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
+    get_kv_pool_lookup_tp_size,
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -72,6 +79,7 @@ class KVPoolScheduler:
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         self.use_compress = self.compress_ratios is not None
+        self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.kv_cache_group_ids = (
             list(range(len(kv_cache_config.kv_cache_groups)))
@@ -109,6 +117,7 @@ class KVPoolScheduler:
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         self.mamba_group_ids = self._infer_mamba_groups()
+        self.group_uses_align_state = self._infer_group_uses_align_state()
         self.num_speculative_blocks = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
@@ -163,12 +172,14 @@ class KVPoolScheduler:
             use_hybrid=self.use_hybrid,
         )
         self.tp_mismatch = tp_mismatch_info.enabled
+        self.effective_tp_size = tp_mismatch_info.effective_tp_size
 
         self.page_size_bytes = page_size_bytes
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_scheduler_client_for_lookup = not self.use_layerwise and self.backend_name in SCHEDULER_LOOKUP_BACKENDS
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -216,6 +227,7 @@ class KVPoolScheduler:
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                 ).has_layer_reuse
         self.model_name = model_config.model.split("/")[-1]
+        self.cache_coordinator = self._build_cache_coordinator()
 
         # Keep this in sync with pool_worker.py because it affects GVA allocation size.
         num_layer_keys = self.num_layers if self.use_gva_layerwise else 1
@@ -253,7 +265,7 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
+        head_or_tp_ranks = self.get_group_tp_size(kv_cache_group_id)
         cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
@@ -285,6 +297,35 @@ class KVPoolScheduler:
             keys_by_block.append(block_keys)
         return keys_by_block
 
+    def get_group_tp_size(self, group_id: int) -> int:
+        use_align_state = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        return get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            use_align_state,
+            self.effective_tp_size if self.tp_mismatch else None,
+        )
+
+    def _get_lookup_key_prefixes(self, group_id: int) -> list[str]:
+        cache_family = self._get_group_family(self.kv_cache_group_families, group_id)
+        return [
+            (
+                f"{self.model_name}"
+                f"@pcp{pcp_rank}@dcp{dcp_rank}"
+                f"@head_or_tp_rank:{head_or_tp_rank}"
+                f"@pp_rank:{pp_rank}"
+                f"@group:{group_id}"
+                f"@cache_role:kv"
+                f"@cache_family:{cache_family}@"
+            )
+            for pcp_rank in range(self.pcp_size)
+            for dcp_rank in range(self.dcp_size)
+            for head_or_tp_rank in range(self.get_group_tp_size(group_id))
+            for pp_rank in range(self.pp_size)
+        ]
+
     def _get_store_lookup_hit_tokens(
         self,
         request: "Request",
@@ -313,20 +354,107 @@ class KVPoolScheduler:
                 f"expected={len(query_keys)}, actual={len(exists_states)}"
             )
 
-        num_queried_hit_blocks = 0
+        block_hits: list[bool] = []
         offset = 0
         for block_keys in query_keys_by_block:
             block_states = exists_states[offset : offset + len(block_keys)]
             offset += len(block_keys)
             if all(exists == 1 for exists in block_states):
-                num_queried_hit_blocks += 1
+                block_hits.append(True)
                 continue
             if any(exists == 0 for exists in block_states):
-                break
+                block_hits.append(False)
+                continue
             raise RuntimeError(f"KV pool exists check failed for request {request.request_id}: states={exists_states}")
+
+        if self.group_uses_align_state[0]:
+            for index in range(len(block_hits) - 1, -1, -1):
+                hit_end = (query_start_block + index + 1) * self._block_size
+                if block_hits[index] and hit_end % self.cache_transfer_granularity == 0:
+                    return hit_end
+            return 0
+
+        num_queried_hit_blocks = 0
+        for is_hit in block_hits:
+            if not is_hit:
+                break
+            num_queried_hit_blocks += 1
 
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
+
+    def _get_coordinated_lookup_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        hbm_hit_tokens: int,
+    ) -> int:
+        assert self.cache_coordinator is not None
+        block_hashes = request.block_hashes
+        exists: set[tuple[int, bytes]] = set()
+        aligned_len = cdiv(token_len, self.cache_coordinator.lcm_block_size) * self.cache_coordinator.lcm_block_size
+        lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
+
+        for group_id in self.kv_cache_group_ids:
+            effective_block_size = self._get_effective_group_block_size(group_id)
+            grouped_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
+            num_chunks = min(len(grouped_hashes), cdiv(token_len, effective_block_size))
+            hbm_hit_chunks = min(hbm_hit_tokens // effective_block_size, num_chunks)
+            for chunk_index in range(hbm_hit_chunks):
+                exists.add((group_id, block_hash_to_bytes(grouped_hashes[chunk_index])))
+
+            prefixes = self._get_lookup_key_prefixes(group_id)
+            variant_count = len(prefixes)
+            lookup_mask = lookup_masks[group_id] if group_id < len(lookup_masks) else None
+            queried_hashes = []
+            query_keys = []
+            for chunk_index in range(hbm_hit_chunks, num_chunks):
+                if lookup_mask is not None and (chunk_index >= len(lookup_mask) or not lookup_mask[chunk_index]):
+                    continue
+                chunk_hash = grouped_hashes[chunk_index]
+                hash_string = block_hash_to_str(chunk_hash)
+                query_keys.extend(prefix + hash_string for prefix in prefixes)
+                queried_hashes.append(chunk_hash)
+
+            if not query_keys:
+                continue
+            exists_states = self.store_scheduler.batch_is_exist(query_keys)
+            if len(exists_states) != len(query_keys):
+                raise RuntimeError(
+                    "KV pool exists check returned unexpected number of states "
+                    f"for request {request.request_id}: expected={len(query_keys)}, actual={len(exists_states)}"
+                )
+            for chunk_index, chunk_hash in enumerate(queried_hashes):
+                offset = chunk_index * variant_count
+                if all(exists_states[index] == 1 for index in range(offset, offset + variant_count)):
+                    exists.add((group_id, block_hash_to_bytes(chunk_hash)))
+
+        _, hit_length = self.cache_coordinator.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists),
+            apply_eagle=False,
+        )
+        return hit_length
+
+    def _get_scheduler_lookup_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        hbm_hit_tokens: int,
+    ) -> int:
+        try:
+            if self.cache_coordinator is not None:
+                return self._get_coordinated_lookup_hit_tokens(request, token_len, hbm_hit_tokens)
+            return self._get_store_lookup_hit_tokens(request, token_len, hbm_hit_tokens)
+        except Exception as e:
+            logger.error(
+                "Remote connection failed in scheduler KV pool lookup. "
+                "type=%s, error=%s. Check network and remote store.",
+                type(e).__name__,
+                e,
+            )
+            return 0
 
     def _make_layerwise_gva_keys_for_hit_check(self, group_id: int, block_hash_hex: str) -> list[str]:
         """Generate all-rank GVA keys for scheduler-side hit check.
@@ -412,7 +540,25 @@ class KVPoolScheduler:
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
-        return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        return infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
+        )
+
+    def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
+        if self.use_layerwise or self.kv_cache_config is None or not self.use_hybrid:
+            return None
+        return AscendStoreCoordinator(
+            self.kv_cache_config.kv_cache_groups,
+            scheduler_block_size=self.cache_transfer_granularity,
+            hash_block_size=self.hash_block_size,
+            group_block_sizes=self.grouped_block_size,
+            group_cache_families=self.kv_cache_group_families,
+            use_eagle=self.use_eagle,
+            retention_interval=self.retention_interval,
+        )
 
     def _infer_group_block_sizes(
         self,
@@ -479,6 +625,23 @@ class KVPoolScheduler:
             if isinstance(kv_cache_spec, MambaSpec):
                 mamba_group_ids.append(group_id)
         return mamba_group_ids
+
+    def _infer_group_uses_align_state(self) -> list[bool]:
+        if self.kv_cache_config is None:
+            return [False]
+        group_uses_align_state = []
+        for group in self.kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                specs = [kv_cache_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names]
+            else:
+                specs = [kv_cache_spec]
+            group_uses_align_state.append(
+                any(
+                    isinstance(spec, MambaSpec) and getattr(spec, "mamba_cache_mode", None) == "align" for spec in specs
+                )
+            )
+        return group_uses_align_state
 
     def _infer_swa_blocks(self) -> list[int]:
         if self.kv_cache_config is None:
@@ -558,13 +721,20 @@ class KVPoolScheduler:
             if token_len < self.cache_transfer_granularity:
                 return 0, False
 
+            if not self.use_layerwise and num_computed_tokens >= token_len:
+                return 0, False
+
             if self.use_layerwise:
                 num_external_hit_tokens = self._get_store_lookup_hit_tokens(
                     request, token_len, num_computed_tokens, include_layers=True
                 )
+            elif self.use_scheduler_client_for_lookup:
+                num_external_hit_tokens = self._get_scheduler_lookup_hit_tokens(
+                    request,
+                    token_len,
+                    num_computed_tokens,
+                )
             else:
-                if num_computed_tokens >= token_len:
-                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
