@@ -18,6 +18,7 @@ env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   PYTHONHASHSEED: "0"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 routing:
   type: "disaggregated_prefill"

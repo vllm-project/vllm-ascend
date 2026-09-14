@@ -39,6 +39,7 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 env_prefill: &env_prefill
   <<: *env_common
