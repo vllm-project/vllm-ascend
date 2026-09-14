@@ -115,7 +115,30 @@ def _ascend_resolve_kv_cache_block_sizes(
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
 
-    return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    # DCP=1 also occurs on either side of an asymmetric PD deployment.
+    # Its aligned Mamba/attention groups still need a compatible hash unit.
+    resolved = _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    mamba_specs = [g.kv_cache_spec for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
+    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    if (
+        cache_config.enable_prefix_caching
+        and mamba_specs
+        and all(spec.mamba_cache_mode == "align" for spec in mamba_specs)
+        and any(bs % resolved[1] != 0 for bs in group_block_sizes)
+    ):
+        # Ascend can retain a larger aligned recurrent block after attention
+        # kernels select a smaller block. The upstream cache-config equality
+        # guard then falls back to LCM hashing, which cannot hash the smaller
+        # attention blocks. Keep scheduler alignment, but use a common divisor
+        # for hashing, as AscendHybridKVCacheCoordinator requires.
+        requested = cache_config.prefix_match_unit
+        hash_block_size = requested if requested is not None else math.gcd(*group_block_sizes)
+        if any(bs % hash_block_size != 0 for bs in group_block_sizes):
+            raise ValueError(
+                f"Invalid prefix_match_unit={hash_block_size}; KV cache group block sizes={group_block_sizes}."
+            )
+        resolved = resolved[0], hash_block_size
+    return resolved
 
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
@@ -174,7 +197,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     base_page_size = next(iter(base_page_sizes))
     for spec in draft_attention_specs.values():
         if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
-            if spec.page_size_bytes != (base_page_size * spec.dcp_replication_size):
+            if spec.page_size_padded is not None:
                 return None
         elif spec.page_size_bytes != base_page_size:
             return None
@@ -232,7 +255,7 @@ def _get_kv_cache_groups_uniform_page_size(
 def _unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
-    """Align each replicated draft lane, preserving non-rectangular pages."""
+    """Keep target layout and allocate only effective replicated draft K/V."""
     replicated_specs = {
         name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
     }
@@ -248,12 +271,11 @@ def _unify_kv_cache_spec_page_size(
             aligned_ordinary_specs = {}
         ordinary_page_sizes = {spec.page_size_bytes for spec in aligned_ordinary_specs.values()}
         if len(ordinary_page_sizes) == 1:
-            base_page_size = next(iter(ordinary_page_sizes))
             aligned_specs = {
                 name: (
                     replace(
                         kv_cache_spec[name],
-                        page_size_padded=base_page_size,
+                        page_size_padded=None,
                     )
                     if name in replicated_specs
                     else spec
@@ -647,8 +669,8 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
     """Plan the minimal K3 target-sharded / DSpark-replicated layout.
 
     Target attention pages keep aliasing the balanced Mamba groups. Each
-    replicated draft layer gets one independent DCP-sized tensor, avoiding a
-    rectangular allocation that would pad every target layer to draft size.
+    replicated draft layer gets an independent tensor containing its effective
+    K/V bytes. Target padding and the logical block size stay unchanged.
     """
     if not kv_cache_groups:
         return None
