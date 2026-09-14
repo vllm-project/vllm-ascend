@@ -12,6 +12,7 @@ import logging
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 import torch
@@ -20,7 +21,7 @@ import torch
 @pytest.fixture
 def reader(monkeypatch):
     root = Path(__file__).parents[3] / "vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h"
-    stubs = {
+    stubs: dict[str, dict[str, Any]] = {
         "vllm.logger": {"logger": logging.getLogger("sfa_cpu")},
         "vllm.utils.network_utils": {"get_ip": lambda: "127.0.0.1"},
         "vllm.distributed.kv_transfer.kv_connector.v1.base": {"KVConnectorMetadata": object},
@@ -32,6 +33,7 @@ def reader(monkeypatch):
 
     def load(name, filename):
         spec = importlib.util.spec_from_file_location(name, root / filename)
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)

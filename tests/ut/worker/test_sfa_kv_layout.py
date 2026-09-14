@@ -12,6 +12,7 @@ import torch
 _spec = importlib.util.spec_from_file_location(
     "sfa_kv_layout", Path(__file__).parents[3] / "vllm_ascend/worker/sfa_kv_layout.py"
 )
+assert _spec is not None and _spec.loader is not None
 _layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_layout)
 get_sfa_kv_parent = _layout.get_sfa_kv_parent
@@ -50,7 +51,8 @@ def test_parent_roundtrip_and_cross_page_writes(dtype, offset, shape):
 )
 def test_split_rejects_invalid_raw_or_geometry(kind):
     raw = torch.zeros(288, dtype=torch.int8)
-    shape, width, dtype = (3, 4, 1, 12), 8, torch.float16
+    shape: tuple[int, ...] = (3, 4, 1, 12)
+    width, dtype = 8, torch.float16
     if kind == "dtype":
         raw = raw.to(torch.uint8)
     if kind == "rank":

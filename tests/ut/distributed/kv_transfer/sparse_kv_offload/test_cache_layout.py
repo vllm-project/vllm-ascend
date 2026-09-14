@@ -9,6 +9,7 @@ import torch
 
 _path = Path(__file__).parents[5] / "vllm_ascend/distributed/kv_transfer/sparse_kv_offload/cache_layout.py"
 _spec = importlib.util.spec_from_file_location("sfa_offload_cache_layout", _path)
+assert _spec is not None and _spec.loader is not None
 _layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_layout)
 
