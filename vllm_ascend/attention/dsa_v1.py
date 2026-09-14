@@ -1142,9 +1142,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ``seq_lens`` reuse the runtime tensors' dtypes so the warmup compiles
         the exact pointer specializations the real call will launch.
         """
-        if build_dspark_swa_indices_triton is None:
+        if build_dspark_swa_indices_triton is None or self._dspark_index_width is None:
             return
-        key = (int(block_table.shape[1]), self._dspark_index_width)
+        index_width = self._dspark_index_width
+        key = (int(block_table.shape[1]), index_width)
         if key in self._dspark_warmup_keys:
             return
         warmup_dspark_swa_indices_triton(
@@ -1159,7 +1160,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ),
             torch.zeros(self.max_num_reqs_for_dspark(), dtype=seq_lens.dtype, device=self.device),
             num_decode_tokens,
-            self._dspark_index_width,
+            index_width,
             self.dspark_swa_indices_buffer,
             self.dspark_lens_scratch,
             self.max_num_reqs_for_dspark(),
@@ -1193,7 +1194,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 indices_output=buffer,
                 num_query_per_req=self.dspark_num_query_per_req(),
             )
-        return build_dspark_swa_indices(*dspark_swa_args, buffer=buffer)
+        return build_dspark_swa_indices(
+            block_table,
+            num_speculative_tokens,
+            window_size,
+            block_size,
+            query_start_loc,
+            seq_lens,
+            num_decode_tokens=num_decode_tokens,
+            buffer=buffer,
+        )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
