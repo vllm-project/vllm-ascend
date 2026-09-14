@@ -123,6 +123,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert query_start_loc_values == [
         "self.input_buffers.query_start_loc",
         "query_start_loc[:num_reqs_padded + 1]",
+        "self.input_buffers.query_start_loc",
     ]
     assert ast.unparse(assignments["seq_lens"]) == "self.input_buffers.seq_lens[:num_reqs_padded]"
 

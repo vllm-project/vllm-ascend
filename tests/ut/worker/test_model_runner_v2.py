@@ -137,6 +137,35 @@ def test_full_graph_non_uniform_queries_use_mixed_padding(
     assert padded_query_start_loc[num_reqs_padded] == num_tokens_padded
 
 
+@pytest.mark.parametrize(
+    "query_lens,num_tokens_padded,num_reqs_padded,expected,expected_num_reqs",
+    [
+        ([3, 1], 8, 4, [0, 3, 4, 6, 8], 4),
+        ([2, 3], 8, 2, [0, 2, 5, 8], 3),
+        ([2, 3], 5, 2, [0, 2, 5], 2),
+    ],
+    ids=["spread-padding", "extra-padding-request", "no-padding"],
+)
+def test_adaptive_verification_pads_fia_query_boundaries(
+    query_lens, num_tokens_padded, num_reqs_padded, expected, expected_num_reqs
+):
+    """Device-reallocated DSpark queries still match the FULL graph shape."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    num_reqs = len(query_lens)
+    query_start_loc = np.full(max(num_reqs_padded + 2, 5), sum(query_lens), dtype=np.int32)
+    query_start_loc[: num_reqs + 1] = np.cumsum([0, *query_lens])
+
+    actual, actual_num_reqs = runner._pad_adaptive_query_start_loc_for_fia(
+        num_tokens_padded,
+        num_reqs_padded,
+        num_reqs,
+        query_start_loc,
+    )
+
+    assert actual_num_reqs == expected_num_reqs
+    np.testing.assert_array_equal(actual[: len(expected)], expected)
+
+
 def test_sample_tokens_restores_replicated_draft_hidden_states():
     runner = _make_runner(need_timing=False)
     runner.is_last_pp_rank = True
