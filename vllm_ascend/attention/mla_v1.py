@@ -71,6 +71,7 @@ MLAPO_MAX_SUPPORTED_TOKENS = 1024
 # effective FIA batch close to the 32 A5 vector cores without exceeding it.
 MLA_FIA_SPLIT_TARGET_BATCH = 32
 MLA_FIA_SPLIT_MAX_INPUTS = 16
+_KV_CACHE_NZ_DIM = 16
 
 
 def _mla_fia_num_splits(batch_size: int) -> int:
@@ -1570,27 +1571,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
-        if self.enable_kv_nz:
-            _NZ_DIM = 16
-            torch_npu.npu_scatter_pa_kv_cache(
-                key=kv_c_normed.unsqueeze(1).contiguous(),
-                value=k_pe.unsqueeze(1).contiguous(),
-                key_cache=kv_cache[0].view(
-                    -1,
-                    self.kv_lora_rank // _NZ_DIM,
-                    kv_cache[0].shape[1],
-                    _NZ_DIM,
-                ),
-                value_cache=kv_cache[1].view(
-                    -1,
-                    self.qk_rope_head_dim // _NZ_DIM,
-                    kv_cache[1].shape[1],
-                    _NZ_DIM,
-                ),
-                slot_mapping=slots.contiguous(),
-            )
-        else:
-            DeviceOperator.reshape_and_cache(
+        DeviceOperator.reshape_and_cache(
                 key=kv_c_normed,
                 value=k_pe,
                 key_cache=kv_cache[0],
