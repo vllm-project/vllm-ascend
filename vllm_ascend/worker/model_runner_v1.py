@@ -4860,20 +4860,17 @@ class NPUModelRunner(GPUModelRunner):
                         and getattr(attn_module, "indexer", None) is None
                         and not getattr(attn_module.impl, "fa_quant_layer", False)
                     )
-                    # 纯MLA在这里分配single raw backing；hybrid MLA使用上方
-                    # standardized shared backing 生成的bare raw tensor。
+                    # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
+                    # 使用上方standardized shared backing生成的bare raw tensor。
+                    # is_fused_mla只基于当前layer判断，不能推广到shared_layers。
                     if is_fused_mla:
-                        for layer_name_inner in shared_layers:
-                            if "attn" not in layer_name_inner or "linear_attn" in layer_name_inner:
-                                continue
-                            # 独立计算raw size，避免复用k_tensor_size和v_tensor_size导致padding部分被越界
-                            fused_raw_size = (
-                                kv_cache_config.num_blocks
-                                * layer_kv_cache_spec[layer_name_inner].page_size_bytes
-                            )
-                            kv_cache_raw_tensors[layer_name_inner] = (
-                                self._allocate_int8_cache_tensor(fused_raw_size, alignment),
-                            )
+                        fused_raw_size = (
+                            kv_cache_config.num_blocks
+                            * current_kv_cache_spec.page_size_bytes
+                        )
+                        kv_cache_raw_tensors[layer_name] = (
+                            self._allocate_int8_cache_tensor(fused_raw_size, alignment),
+                        )
                         continue
 
                     # vLLM #51718 packs every layer of a group into a single
