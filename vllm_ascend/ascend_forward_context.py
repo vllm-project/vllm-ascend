@@ -397,7 +397,10 @@ def _extra_ctx_uses_additional_kwargs(ctx: Any) -> bool:
     if env is not None:
         return bool(env)
     vllm_config = getattr(ctx, "vllm_config", None)
-    return bool(getattr(vllm_config, "use_v2_model_runner", False))
+    # Require an actual bool. MagicMock forward-context fixtures auto-create a
+    # truthy use_v2_model_runner and would otherwise hide attrs like capturing
+    # behind additional_kwargs.get(), which is None.
+    return getattr(vllm_config, "use_v2_model_runner", False) is True
 
 
 class _ExtraForwardContextProxy:

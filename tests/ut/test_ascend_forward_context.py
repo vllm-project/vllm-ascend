@@ -558,6 +558,17 @@ def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
     assert "capturing" not in forward_context.additional_kwargs
 
 
+def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._extra_ctx_uses_additional_kwargs(forward_context) is False
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
 def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
     forward_context = SimpleNamespace(
