@@ -1585,10 +1585,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
 
         fused_type: PreprocessType = self.preprocess_type
-        if (
+        # PROLOG_V3 uses per-token cache indices for both single-token decode
+        # and multi-token verification. Do not gate it on the legacy attention
+        # state: KV consumers may already have disposed the native weights.
+        # Keep the legacy MLAPO phase and token-count restrictions.
+        if self.preprocess_type == PreprocessType.MLAPO and (
             attn_metadata.attn_state not in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
-            or self.preprocess_type == PreprocessType.MLAPO
-            and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS
+            or num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS
         ):
             fused_type = PreprocessType.NATIVE
 

@@ -17,7 +17,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
-from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler, _maybe_eager_context
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -71,8 +71,13 @@ class AscendDSparkProposer(AscendDflashProposer):
             )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
         self.use_cuda_graph = False
+        self.maybe_eager_context = _maybe_eager_context(vllm_config)
         # Max query tokens depend on whether sampling from anchor or not.
         self.max_query_tokens = self.max_batch_size * self.num_query_per_req
+        # A full draft batch can exceed the target scheduler's token budget.
+        # Keep token IDs large enough for the query positions and expansion kernel.
+        if self.max_query_tokens > self.input_ids.shape[0]:
+            self.input_ids = self.input_ids.new_zeros(self.max_query_tokens)
         # Position ids for the draft query block [max_query_tokens].
         # Overrides dflash:49; v2 uses input_buffers.positions.
         self.positions = torch.zeros(

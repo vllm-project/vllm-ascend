@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
@@ -276,6 +276,7 @@ class _DSparkProposerTestBase:
             proposer.num_speculative_tokens = block_size
             proposer.max_batch_size = num_reqs
             proposer.max_num_tokens = max_num_tokens
+            proposer.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
@@ -991,3 +992,79 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
         assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
         assert proposer._layer_group_idx == [0] * 5
+
+
+@pytest.mark.parametrize("sample_from_anchor", [True, False])
+@pytest.mark.parametrize("max_num_tokens", [256, 1024])
+def test_profile_query_inputs_cover_full_speculative_batch(sample_from_anchor, max_num_tokens):
+    """Draft queries can exceed the target token budget without truncating IDs."""
+    num_reqs, num_speculative_tokens = 64, 7
+    draft_config = SimpleNamespace(
+        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
+        get_hidden_size=lambda: _HIDDEN_SIZE,
+    )
+    target_compilation = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_capture_sizes=[8, 16, 32, 64, 128, 256],
+    )
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(draft_model_config=draft_config),
+        compilation_config=target_compilation,
+    )
+
+    def parent_init(self, vllm_config, device, runner=None):
+        self.draft_model_config = draft_config
+        self.num_speculative_tokens = num_speculative_tokens
+        self.max_batch_size = num_reqs
+        self.max_num_tokens = max_num_tokens
+        self.dtype = torch.float32
+        self.device = device
+        self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32)
+        self._context_positions_buffer = torch.zeros(max_num_tokens, dtype=torch.int32)
+        self.token_indices_to_sample = torch.zeros(num_reqs * num_speculative_tokens, dtype=torch.int32)
+        self.uses_mrope = False
+        self.uses_xdrope_dim = 0
+        self.runner = runner
+        self.vllm_config = config
+
+    runner = SimpleNamespace(
+        _sync_metadata_across_dp=lambda n, **kwargs: (n, None, None),
+        dynamic_eplb=False,
+    )
+    with (
+        patch.object(AscendDSparkProposer.__base__, "__init__", parent_init),
+        patch(
+            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+            return_value=SimpleNamespace(dynamic_spec_config=SimpleNamespace(method="", method_params={})),
+        ),
+    ):
+        proposer = AscendDSparkProposer(config, torch.device("cpu"), runner=runner)
+
+    # Model construction must disable draft compilation even without sequence parallelism.
+    with proposer.maybe_eager_context:
+        assert config.compilation_config.mode == CompilationMode.NONE
+        assert config.compilation_config.static_forward_context is target_compilation.static_forward_context
+        assert config.compilation_config.static_all_moe_layers is target_compilation.static_all_moe_layers
+    assert config.compilation_config is target_compilation
+    assert target_compilation.mode == CompilationMode.VLLM_COMPILE
+    assert target_compilation.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+
+    expected_queries = num_reqs * (num_speculative_tokens + (not sample_from_anchor))
+    assert proposer.input_ids.shape[0] >= max(max_num_tokens, expected_queries)
+    assert proposer.input_ids.dtype == torch.int32
+    model = MagicMock()
+
+    def check_query_shapes(*, input_ids, positions, inputs_embeds):
+        assert input_ids.shape == positions.shape == (expected_queries,)
+
+    model.side_effect = check_query_shapes
+    proposer.model = model
+
+    @contextmanager
+    def forward_context(*args, **kwargs):
+        yield
+
+    with patch("vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context", forward_context):
+        proposer.dummy_run(num_tokens=max_num_tokens, num_reqs=num_reqs, is_profile=True)
+    model.assert_called_once()
