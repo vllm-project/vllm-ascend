@@ -31,8 +31,8 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
     AscendDCPReplicatedDraftAttentionSpec,
+    AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
@@ -619,11 +619,31 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
 
     assert config is not None
     assert config.num_blocks == expected_num_blocks
-    assert len(config.kv_cache_tensors) == 29
-    assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
-    assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
-    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [draft_page_size * expected_num_blocks] * 5
-    assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
+    if vllm_version_is("0.28.0"):
+        assert len(config.kv_cache_tensors) == 29
+        assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
+        assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
+        assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [draft_page_size * expected_num_blocks] * 5
+        assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
+    else:
+        tensors = config.kv_cache_tensors
+        assert len(tensors) == 98
+        assert {tensor.size for tensor in tensors} == {bytes_per_block * expected_num_blocks}
+        assert all(len(tensor.layers) == 1 for tensor in tensors)
+        regions = {tensor.layers[0]: (tensor.offset, tensor.block_stride) for tensor in tensors}
+        for idx, name in enumerate(groups[0].layer_names[:24]):
+            assert regions[name] == (idx * page_size * expected_num_blocks, page_size)
+            for group in groups[1:]:
+                if idx < len(group.layer_names):
+                    assert regions[group.layer_names[idx]] == regions[name]
+        for idx, name in enumerate(groups[0].layer_names[24:]):
+            assert regions[name] == ((24 * page_size + idx * draft_page_size) * expected_num_blocks, draft_page_size)
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block(groups) == bytes_per_block
+    if not vllm_version_is("0.28.0"):
+        with patch.object(kv_cache_utils_patch, "_orig_get_packed_kv_cache_groups", side_effect=AssertionError):
+            packed_groups = kv_cache_utils_patch._ascend_get_packed_kv_cache_groups(SimpleNamespace(), specs)
+        assert packed_groups is not None
+        assert [group.layer_names for group in packed_groups] == [group.layer_names for group in groups]
 
 
 def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:

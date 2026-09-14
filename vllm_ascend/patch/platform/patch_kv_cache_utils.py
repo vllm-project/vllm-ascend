@@ -23,6 +23,9 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -32,10 +35,6 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.utils import vllm_version_is
-
-from vllm_ascend.core.kv_cache_interface import (
-    AscendDCPReplicatedDraftAttentionSpec,
-)
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -186,9 +185,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     attention_specs = [*target_attention_specs.values(), *draft_attention_specs.values()]
     # Only attention layers share a scheduler block table. Mamba keeps its
     # own groups and may use max_model_len as block_size when cache_mode=none.
-    if (
-        len({spec.block_size for spec in attention_specs}) != 1
-    ):
+    if len({spec.block_size for spec in attention_specs}) != 1:
         return None
 
     base_page_sizes = {spec.page_size_bytes for spec in [*target_attention_specs.values(), *mamba_specs.values()]}
@@ -433,6 +430,10 @@ def _ascend_get_packed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
     """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
+    if any(isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in kv_cache_spec.values()):
+        kimi_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_unify_kv_cache_spec_page_size(kv_cache_spec))
+        if kimi_groups is not None:
+            return kimi_groups
     grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
     if grouped_specs is None:
         assert _orig_get_packed_kv_cache_groups is not None
@@ -617,6 +618,12 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if kv_cache_groups:
+        first_spec = kv_cache_groups[0].kv_cache_spec
+        if isinstance(first_spec, UniformTypeKVCacheSpecs) and any(
+            isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in first_spec.kv_cache_specs.values()
+        ):
+            return sum(spec.page_size_bytes for spec in first_spec.kv_cache_specs.values())
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -711,26 +718,31 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
 
     recurrent_layers_by_group = [list(group.layer_names) for group in kv_cache_groups[1:]]
     kv_cache_tensors: list[KVCacheTensor] = []
-    for layer_idx, target_layer in enumerate(target_layers):
-        page_size = first_specs[target_layer].page_size_bytes
-        layers = [target_layer]
-        for recurrent_layers in recurrent_layers_by_group:
-            if layer_idx < len(recurrent_layers):
-                layers.append(recurrent_layers[layer_idx])
-        kv_cache_tensors.append(
-            KVCacheTensor(
-                size=page_size * num_blocks,
-                shared_by=layers,
-            )
-        )
-    for draft_layer in draft_layers:
-        page_size = first_specs[draft_layer].page_size_bytes
-        kv_cache_tensors.append(
-            KVCacheTensor(
-                size=page_size * num_blocks,
-                shared_by=[draft_layer],
-            )
-        )
+    offset = 0
+    for layer_idx, layer_name in enumerate([*target_layers, *draft_layers]):
+        page_size = first_specs[layer_name].page_size_bytes
+        layers = [layer_name]
+        if layer_idx < len(target_layers):
+            for recurrent_layers in recurrent_layers_by_group:
+                if layer_idx < len(recurrent_layers):
+                    layers.append(recurrent_layers[layer_idx])
+        if vllm_version_is("0.28.0"):
+            kv_cache_tensors.append(KVCacheTensor(size=page_size * num_blocks, shared_by=layers))
+        else:
+            # Main descriptors share one backing allocation. Keep descriptors
+            # within each scheduler group while overlaying recurrent state on
+            # target attention slots; draft storage occupies separate regions.
+            for name in layers:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=bytes_per_block * num_blocks,
+                        layers=[name],
+                        offset=offset,
+                        layer_stride=0,
+                        block_stride=page_size,
+                    )
+                )
+        offset += page_size * num_blocks
 
     logger.info(
         "Using Kimi K3 DCP-replicated DSpark KV layout: %d logical blocks, "

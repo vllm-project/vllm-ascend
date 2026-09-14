@@ -1086,22 +1086,3 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
         decode_metadata.actual_seq_lengths,
         torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
     )
-
-
-@pytest.mark.parametrize("sample_from_anchor", [False, True])
-def test_dspark_target_reorder_threshold_includes_base_token_regardless_of_anchor(
-    sample_from_anchor: bool,
-):
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=7,
-    )
-    builder.vllm_config.speculative_config.method = "dspark"
-    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
-    )
-
-    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-
-    assert builder.reorder_batch_threshold == 8

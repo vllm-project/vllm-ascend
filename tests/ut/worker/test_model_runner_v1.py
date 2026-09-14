@@ -28,8 +28,8 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
     AscendDCPReplicatedDraftAttentionSpec,
+    AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
@@ -1076,31 +1076,31 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         self.assertIsNotNone(mixed_spec)
         assert mixed_spec is not None
-        config = KVCacheConfig(
-            num_blocks=2,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=base_spec.page_size_bytes * 2,
-                    shared_by=["target_attn", "target_mamba"],
-                ),
-                KVCacheTensor(
-                    size=spec.page_size_bytes * 2,
-                    shared_by=["draft_attn"],
-                ),
-            ],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    layer_names=["target_attn", "draft_attn"],
-                    kv_cache_spec=mixed_spec,
-                ),
-                KVCacheGroupSpec(
-                    layer_names=["target_mamba"],
-                    kv_cache_spec=mamba_spec,
-                ),
-            ],
+        from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+            _get_kimi_k3_replicated_dspark_kv_cache_config,
         )
+
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=["target_attn", "draft_attn"],
+                kv_cache_spec=mixed_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["target_mamba"],
+                kv_cache_spec=mamba_spec,
+            ),
+        ]
+        with patch(
+            "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks", side_effect=lambda _, n: n
+        ):
+            config = _get_kimi_k3_replicated_dspark_kv_cache_config(
+                SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
+                groups,
+                (base_spec.page_size_bytes + spec.page_size_bytes) * 2,
+            )
+        assert config is not None
         raw = runner._allocate_kv_cache_tensors(config)
-        self.assertIs(raw["target_attn"], raw["target_mamba"])
+        self.assertEqual(raw["target_attn"].data_ptr(), raw["target_mamba"].data_ptr())
         self.assertIsInstance(raw["draft_attn"], torch.Tensor)
         self.assertEqual(raw["draft_attn"].numel(), spec.page_size_bytes * 2)
         runner._kv_cache_spec_attn_group_iterator = lambda: [
