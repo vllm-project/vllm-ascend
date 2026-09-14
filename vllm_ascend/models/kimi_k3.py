@@ -560,6 +560,11 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
+    # The Ascend forward path carries cumulative auxiliary states across PP.
+    # Use the same keys for MRV2 receive buffers and intermediate-stage relay.
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
+
     packed_modules_mapping = {
         name: list(shards) for name, shards in UpstreamPackedKimiLinearModel.packed_modules_mapping.items()
     }
@@ -628,6 +633,21 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            # MLA DSpark consumes the raw prefix sum, not the 3-D AttnRes bank.
+            value = hidden_states
+            if residual is not None and residual.ndim == 2:
+                value = value + residual
+            aux_hidden_states.append(value)
+        return aux_hidden_states
 
     def make_empty_intermediate_tensors(self, batch_size, dtype, device):
         tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)

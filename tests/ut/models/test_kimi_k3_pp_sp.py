@@ -213,7 +213,7 @@ def runtime():
         namespace,
         bases={"AscendKimiLinearModel": "BaseModel", "AscendKimiDecoderLayer": "BaseDecoder"},
         methods={
-            "AscendKimiLinearModel": {"forward", "make_empty_intermediate_tensors"},
+            "AscendKimiLinearModel": {"forward", "make_empty_intermediate_tensors", "_maybe_add_hidden_state"},
             "AscendKimiDecoderLayer": {"forward", "forward_attn_residual", "_run_self_attn", "_run_mlp"},
         },
     )
@@ -453,6 +453,25 @@ def test_mrv2_receive_restores_capacity(runtime, dummy_run, fail, tp, sp):
                 if not dummy_run:
                     torch.testing.assert_close(tensor, incoming[name])
         assert runner.intermediate_tensors is buffers
+
+
+@pytest.mark.parametrize("residual_kind", ["none", "ordinary", "attn_res_bank"])
+def test_mla_aux_capture_keeps_raw_prefix_sum(runtime, residual_kind):
+    namespace, _ = runtime
+    model = namespace["AscendKimiLinearModel"]()
+    model.aux_hidden_state_layers = (3,)
+    hidden = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    residual = None
+    expected = hidden
+    if residual_kind == "ordinary":
+        residual = torch.full_like(hidden, 2)
+        expected = hidden + residual
+    elif residual_kind == "attn_res_bank":
+        residual = torch.full((4, 2, 3), 99.0)
+    states = model._maybe_add_hidden_state([], 3, hidden, residual)
+    assert len(states) == 1
+    torch.testing.assert_close(states[0], expected)
+    assert model._maybe_add_hidden_state([], 2, hidden, residual) == []
 
 
 def graph_classes():
