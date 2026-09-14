@@ -99,13 +99,13 @@ class TestAscendAttentionBackend(TestBase):
             )
 
     def test_get_kv_cache_shape(self):
-        with patch.object(attn_module.envs, "VLLM_KV_CACHE_LAYOUT", None):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
             result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
 
     def test_get_kv_cache_shape_uses_bnsd_for_hnd_layouts(self):
         for layout in ("LBHNC", "HND"):
-            with self.subTest(layout=layout), patch.object(attn_module.envs, "VLLM_KV_CACHE_LAYOUT", layout):
+            with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
                 result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
             self.assertEqual(result, (2, 10, 30, 20, 40))
 
@@ -456,7 +456,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         )
 
     def test_hnd_layout_is_recorded_during_initialization(self):
-        with patch.object(attn_module.envs, "VLLM_KV_CACHE_LAYOUT", "HND"):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
             impl = AscendAttentionBackendImpl(
                 num_heads=8,
                 head_size=64,
