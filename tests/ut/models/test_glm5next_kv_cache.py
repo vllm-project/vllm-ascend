@@ -178,7 +178,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        **({"compress_ratio": pool_size} if vllm_version_is("0.28.0") else {"tokens_per_state": pool_size}),
+        tokens_per_state=pool_size,
         model_version="glm5_next",
     )
     builders = [
