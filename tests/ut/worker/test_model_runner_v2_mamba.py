@@ -445,7 +445,6 @@ def test_get_mamba_group_info_preserves_group_indices(wrapped_group_ids):
     state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
     state._mamba_spec = None
     state._mamba_group_ids = []
-
     with patch(
         "vllm.v1.worker.mamba_utils.get_mamba_groups",
         side_effect=AssertionError("MRV2 group lookup must not call the shared resolver"),

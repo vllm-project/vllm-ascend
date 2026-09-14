@@ -94,8 +94,29 @@ def test_qwen36_27b_eagle3_acceptance_tp2(
                 CompilationConfig(
                     cudagraph_mode="FULL_DECODE_ONLY",
                     cudagraph_capture_sizes=[
-                        8, 12, 16, 20, 24, 28, 30, 34, 36, 38, 40,
-                        52, 64, 72, 80, 88, 96, 100, 104, 108, 112, 116, 120,
+                        8,
+                        12,
+                        16,
+                        20,
+                        24,
+                        28,
+                        30,
+                        34,
+                        36,
+                        38,
+                        40,
+                        52,
+                        64,
+                        72,
+                        80,
+                        88,
+                        96,
+                        100,
+                        104,
+                        108,
+                        112,
+                        116,
+                        120,
                     ],
                 )
             ),
@@ -106,4 +127,3 @@ def test_qwen36_27b_eagle3_acceptance_tp2(
         is_moe=False,
         max_tokens=512,
     )
-
