@@ -41,7 +41,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     as_kv_cache_tensors,
     collect_configured_register_regions,
-    collect_kvpp_register_regions,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
@@ -299,11 +298,7 @@ class MooncakeBaseConnectorWorker:
         if unexpected_layers:
             raise ValueError(f"KV caches contain layers absent from kv_cache_tensors: {sorted(unexpected_layers)}.")
 
-        register_regions = (
-            collect_kvpp_register_regions({name: kv_caches[name] for name in layer_names})
-            if self.ascend_config.kvpp_config.size > 1
-            else collect_configured_register_regions(self.kv_cache_config, kv_caches)
-        )
+        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
         global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 

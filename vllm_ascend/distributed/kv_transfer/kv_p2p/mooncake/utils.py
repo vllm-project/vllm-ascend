@@ -82,20 +82,6 @@ def _get_tensor_span_nbytes(tensor: torch.Tensor) -> int:
     )
 
 
-def collect_kvpp_register_regions(kv_caches: dict[str, Any]) -> RegisterRegions:
-    """Register aligned persistent bundles once per backing allocation."""
-    regions: dict[int, tuple[int, int]] = {}
-    for caches in kv_caches.values():
-        for cache in as_kv_cache_tensors(caches):
-            storage = tensor_storage_key(cache)
-            start = (storage + KV_CACHE_BUFFER_ALIGNMENT - 1) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
-            end = (storage + _get_storage_nbytes(cache)) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
-            if not start <= cache.data_ptr() < end or cache.data_ptr() + _get_tensor_span_nbytes(cache) > end:
-                raise ValueError("KVPP transfer cache exceeds its aligned backing allocation.")
-            regions[storage] = (start, end - start)
-    return RegisterRegions(ptrs=[ptr for ptr, _ in regions.values()], lengths=[size for _, size in regions.values()])
-
-
 def collect_configured_register_regions(
     kv_cache_config: "KVCacheConfig",
     kv_caches: dict[str, Any],

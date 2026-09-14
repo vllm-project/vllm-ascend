@@ -4,17 +4,17 @@ from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_placement import (
-    KVPP_BUFFER_ALIGNMENT,
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
     create_kvpp_cache_allocation_plan,
-    get_kvpp_buffer_size,
 )
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
+KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
 
 def _allocate_kvpp_buffer(size: int, device: torch.device) -> torch.Tensor:
-    raw = torch.zeros(get_kvpp_buffer_size(size), dtype=torch.int8, device=device)
+    raw = torch.zeros(size + KVPP_BUFFER_ALIGNMENT, dtype=torch.int8, device=device)
     return raw.narrow(0, (-raw.data_ptr()) % KVPP_BUFFER_ALIGNMENT, size)
 
 

@@ -977,8 +977,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
-            if self.worker is not None and self.worker.use_kvpp and not self.token_database.group_block_len[group_id]:
-                continue
             group_block_size = self._get_block_size(group_id)
 
             group_store_mask = (
@@ -1187,12 +1185,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
-                if (
-                    self.worker is not None
-                    and self.worker.use_kvpp
-                    and not self.token_database.group_block_len[group_id]
-                ):
-                    continue
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size

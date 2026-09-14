@@ -18,13 +18,6 @@ from vllm_ascend.utils import calc_split_factor, enable_sfa
 
 # One buffer for the current layer and one for the next layer's prefetch.
 KVPP_SCRATCH_BUFFER_COUNT = 2
-KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
-
-
-def get_kvpp_buffer_size(size: int) -> int:
-    """Include aligned headroom and complete pages for KV transfer registration."""
-    aligned_size = (size + KVPP_BUFFER_ALIGNMENT - 1) // KVPP_BUFFER_ALIGNMENT * KVPP_BUFFER_ALIGNMENT
-    return aligned_size + KVPP_BUFFER_ALIGNMENT
 
 
 @dataclass(frozen=True)
@@ -38,31 +31,17 @@ class KVPPPhysicalCachePlan:
     kvpp_rank: int
 
     def get_num_blocks(self, available_bytes: int) -> int:
-        buffer_sizes = []
+        persistent_bytes = 0
         scratch_bytes = 0
         for name, bundle in self.layer_bundles.items():
             _, size = build_kvpp_layer_layout(bundle, self.tensor_sizes, num_blocks=1)
             owner = self.layer_owner_ranks.get(name)
             if owner is None or owner == self.kvpp_rank:
-                buffer_sizes.append(size)
+                persistent_bytes += size
             if owner is not None:
                 scratch_bytes = max(scratch_bytes, size)
-        if scratch_bytes:
-            buffer_sizes.extend([scratch_bytes] * KVPP_SCRATCH_BUFFER_COUNT)
-        bytes_per_block = sum(buffer_sizes)
-        if not bytes_per_block:
-            return 0
-
-        # Page rounding is per physical buffer, so its cost is not linear in blocks.
-        low, high = 0, max(available_bytes // bytes_per_block, 0)
-        while low < high:
-            num_blocks = (low + high + 1) // 2
-            required_bytes = sum(get_kvpp_buffer_size(size * num_blocks) for size in buffer_sizes)
-            if required_bytes <= available_bytes:
-                low = num_blocks
-            else:
-                high = num_blocks - 1
-        return low
+        bytes_per_block = persistent_bytes + KVPP_SCRATCH_BUFFER_COUNT * scratch_bytes
+        return available_bytes // bytes_per_block if bytes_per_block else 0
 
 
 def build_layer_cache_bundles(cache_spec: dict[str, KVCacheSpec]) -> dict[str, tuple[str, ...]]:
