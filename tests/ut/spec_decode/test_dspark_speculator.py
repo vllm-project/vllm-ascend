@@ -268,6 +268,9 @@ def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):
         # Main imports the helpers inside load_dspark_model.
         monkeypatch.setattr("vllm.model_executor.model_loader.get_model", lambda **kwargs: draft)
         monkeypatch.setattr(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group", lambda: SimpleNamespace(world_size=1)
+        )
+        monkeypatch.setattr(
             "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_target_lm_head", lambda *args: target.lm_head
         )
     monkeypatch.setattr("vllm.compilation.backends.set_model_tag", lambda *args: nullcontext())
