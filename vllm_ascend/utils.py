@@ -1501,6 +1501,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
+
+
 def get_compressed_pos_and_indices(
     num_computed_tokens: np.ndarray,
     num_scheduled_tokens: np.ndarray,

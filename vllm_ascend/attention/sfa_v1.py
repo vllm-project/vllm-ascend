@@ -58,8 +58,8 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
+    is_mtp_layer,
     maybe_trans_nz,
-    parse_layer_idx,
 )
 
 if TYPE_CHECKING:
@@ -263,19 +263,6 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
-
-
-def _is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
-    layer_name = layer_name or ""
-    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
-    if not isinstance(num_hidden_layers, int):
-        return False
-    if ".mtp." in f".{layer_name}.":
-        return True
-    layer_id = parse_layer_idx(layer_name)
-    if layer_id is None:
-        return False
-    return layer_id >= num_hidden_layers
 
 
 class AscendSFABackend(AttentionBackend):
@@ -708,7 +695,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or index_cache_enabled
-        self._is_mtp_layer = _is_mtp_layer(hf_config, self.layer_name)
+        self._is_mtp_layer = is_mtp_layer(hf_config, self.layer_name)
         self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
