@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
 
@@ -37,6 +38,8 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
     speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
     speculator.use_fp64_gumbel = False
+    if not vllm_version_is("0.28.0"):
+        speculator.draft_watermarker = None
     logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 1.0]])
     idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
     sample_pos = torch.tensor([8, 12])

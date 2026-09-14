@@ -42,6 +42,7 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
             OffloadingGroupConfig(
                 tokens_per_block=16,
                 layer_names=("model.layers.0.self_attn",),
+                **({} if vllm_version_is("0.28.0") else {"group_id": 0}),
             ),
         ),
         worker_kv_bytes_per_block=64,

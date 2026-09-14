@@ -338,6 +338,15 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
         def _slice_reqs(x):
             return x[:num_actual_reqs] if x is not None else None
 
+        if vllm_version_is("0.28.0"):
+            dcp_metadata = {"dcp_local_seq_lens_cpu": _slice_reqs(self.dcp_local_seq_lens_cpu)}
+        else:
+            # vLLM #56157 distinguishes the CPU upper bound from exact lengths.
+            dcp_metadata = {
+                "dcp_local_seq_lens_cpu_upper_bound": _slice_reqs(self.dcp_local_seq_lens_cpu_upper_bound),
+                "req_idx": _slice_reqs(self.req_idx),
+            }
+
         return AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
@@ -376,7 +385,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             _seq_lens_cpu=_slice_reqs(self._seq_lens_cpu),
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            **dcp_metadata,
             is_prefilling=_slice_reqs(self.is_prefilling),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),

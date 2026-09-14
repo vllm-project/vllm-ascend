@@ -1272,7 +1272,10 @@ class TestEagleProposerPropose:
         assert captured_common_attn_metadata.encoder_seq_lens is None
         assert captured_common_attn_metadata.encoder_seq_lens_cpu is None
         assert captured_common_attn_metadata.dcp_local_seq_lens is None
-        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu is None
+        if vllm_version_is("0.28.0"):
+            assert captured_common_attn_metadata.dcp_local_seq_lens_cpu is None
+        else:
+            assert captured_common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound is None
         assert captured_common_attn_metadata._num_computed_tokens_cpu is None
         assert captured_common_attn_metadata._num_computed_tokens_cache is None
         assert captured_common_attn_metadata.decode_token_per_req == 1
@@ -1480,11 +1483,12 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', \
             '_num_computed_tokens_cache'
         }
         if vllm_version_is("0.28.0"):
-            fields.update({'_seq_lens_cpu', '_num_computed_tokens_cpu'})
+            fields.update({'_seq_lens_cpu', '_num_computed_tokens_cpu', 'dcp_local_seq_lens_cpu'})
+        else:
+            fields.update({'dcp_local_seq_lens_cpu_upper_bound', 'req_idx'})
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)
         missing = fields - actual

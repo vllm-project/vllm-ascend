@@ -340,6 +340,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         quant_config=None,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
+    if not vllm_version_is("0.28.0"):
+        vllm_config.attention_config = SimpleNamespace(hisparse_config=None)
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
         deepseek_v4_indexer.AscendDeepseekV4IndexerCache

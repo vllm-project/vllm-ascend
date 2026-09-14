@@ -1758,6 +1758,8 @@ class MockVllmConfig:
         self.kv_transfer_config = MagicMock()
         self.scheduler_config = MagicMock(disable_hybrid_kv_cache_manager=True)
         self.speculative_config = None
+        if not vllm_version_is("0.28.0"):
+            self.attention_config = types.SimpleNamespace(hisparse_config=None)
         self.model_config.use_mla = False
         self.model_config.is_deepseek_mla = False
         self.model_config.hf_text_config = types.SimpleNamespace(
