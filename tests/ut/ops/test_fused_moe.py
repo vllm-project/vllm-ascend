@@ -1764,3 +1764,55 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     }
     assert result[0] is shared_out
     assert result[1] is routed_out
+
+
+@pytest.mark.parametrize("initial_comm", [MoECommType.ALLGATHER, MoECommType.MC2])
+def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner.layer_name = "test.runtime_reduction"
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    context = SimpleNamespace(moe_comm_type=initial_comm)
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", context)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={runner.layer_name: runner}),
+    )
+    monkeypatch.setattr(
+        fused_moe_module, "tensor_model_parallel_all_reduce", lambda states: states * 4
+    )
+
+    def upstream_forward(self, hidden_states, router_logits, **kwargs):
+        return self._maybe_reduce_final_output(hidden_states.clone(), None)
+
+    monkeypatch.setattr(fused_moe_module.MoERunner, "forward", upstream_forward)
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("ascend_moe_forward_complete", fused_moe_module._ascend_moe_forward_complete)
+    try:
+        states = torch.ones(2, 4)
+        graph = make_fx(lambda x: runner(x, x))(states)
+        # Reuse this exact graph as vLLM does, without retracing Python guards.
+        for comm in (MoECommType.ALLGATHER, MoECommType.MC2, MoECommType.ALLTOALL):
+            context.moe_comm_type = comm
+            expected = states * (4 if comm == MoECommType.ALLGATHER else 1)
+            torch.testing.assert_close(graph(states), expected)
+        assert any(
+            node.target == torch.ops.vllm.ascend_moe_forward_complete.default
+            for node in graph.graph.nodes
+        )
+    finally:
+        library._destroy()
+
+
+@pytest.mark.parametrize("shared_width", [None, 8])
+def test_complete_moe_fake_preserves_local_token_count(shared_width):
+    hidden = torch.empty(3, 4)
+    shared = torch.empty(12, shared_width) if shared_width is not None else None
+    result = fused_moe_module._ascend_moe_forward_complete_fake(
+        hidden, hidden, shared, None, "test"
+    )
+    assert result.shape == (3, shared_width or 4)
+    assert result.dtype == hidden.dtype
