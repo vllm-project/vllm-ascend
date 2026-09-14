@@ -5,14 +5,17 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dspark import mla
+from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 from vllm_ascend.worker.v2.spec_decode.dspark.mla import AscendMLADSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -38,10 +41,15 @@ def make_target():
     )
 
 
+def make_draft(config):
+    draft = kimi_k3_dspark.AscendK3DSparkForCausalLM.__new__(kimi_k3_dspark.AscendK3DSparkForCausalLM)
+    torch.nn.Module.__init__(draft)
+    draft.config = config
+    return draft
+
+
 @pytest.mark.parametrize("architecture", ["K3DSparkModel", "Qwen3DSparkModel", "DSparkDraftModel"])
 def test_routes_only_k3_mla_to_specialization(monkeypatch, architecture):
-    import vllm_ascend.worker.v2.spec_decode.dspark.speculator as shared
-
     mla_constructor = MagicMock()
     shared_constructor = MagicMock()
     monkeypatch.setattr(mla, "AscendMLADSparkSpeculator", mla_constructor)
@@ -59,32 +67,23 @@ def test_routes_only_k3_mla_to_specialization(monkeypatch, architecture):
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_raw_contract_and_rotation_preserved_during_loading(monkeypatch, wrapped):
+@pytest.mark.parametrize("rotation_path", [None, "/rotation"])
+def test_shared_loader_configures_mla_model(monkeypatch, wrapped, rotation_path):
     spec, target = make_speculator(), make_target()
     config = spec.draft_model_config.hf_config
-    monkeypatch.setattr(mla, "get_rotation_path", lambda _: "/rotation")
-    draft = object()
+    monkeypatch.setattr(shared, "get_rotation_path", lambda _: rotation_path)
+    draft = make_draft(config)
 
     def load(*args):
-        assert config._ascend_target_rotation_path == "/rotation"
+        assert config._ascend_target_rotation_path == rotation_path
         return draft
 
-    monkeypatch.setattr(AscendDSparkSpeculator, "load_draft_model", load)
+    # Keep the actual shared loader: only skip upstream weight construction.
+    # This exercises shared rotation injection and its model configuration hook.
+    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     outer = SimpleNamespace(get_language_model=lambda: target) if wrapped else target
     assert spec.load_draft_model(outer, set()) is draft
     target.set_dspark_aux_capture_materialized.assert_called_once_with(False)
-    assert not hasattr(config, "_ascend_target_rotation_path")
-
-
-def test_rotation_restored_after_loader_failure(monkeypatch):
-    spec = make_speculator()
-    config = spec.draft_model_config.hf_config
-    config._ascend_target_rotation_path = "original"
-    monkeypatch.setattr(mla, "get_rotation_path", lambda _: None)
-    monkeypatch.setattr(AscendDSparkSpeculator, "load_draft_model", MagicMock(side_effect=RuntimeError("load failed")))
-    with pytest.raises(RuntimeError, match="load failed"):
-        spec.load_draft_model(make_target(), set())
-    assert config._ascend_target_rotation_path == "original"
 
 
 @pytest.mark.parametrize(
@@ -99,13 +98,12 @@ def test_rotation_restored_after_loader_failure(monkeypatch):
         ("num_target_layers", 3, "num_target_layers"),
     ],
 )
-def test_rejects_invalid_raw_contract(monkeypatch, field, value, message):
+def test_rejects_invalid_raw_contract(field, value, message):
     spec = make_speculator()
     setattr(spec.draft_model_config.hf_config, field, value)
-    monkeypatch.setattr(mla, "get_rotation_path", lambda _: None)
-    monkeypatch.setattr(AscendDSparkSpeculator, "load_draft_model", lambda *args: object())
+    draft = make_draft(spec.draft_model_config.hf_config)
     with pytest.raises(ValueError, match=message):
-        spec.load_draft_model(make_target(), set())
+        draft.configure_target_aux_hidden_capture(make_target())
 
 
 def test_raw_prefix_capture_does_not_add_attnres_bank():
@@ -147,14 +145,18 @@ def test_capture_uses_descriptor_positions_and_restores_on_error(monkeypatch):
     assert mla.dflash_cudagraph.build_attn_metadata is original
 
 
-def test_reuses_shared_graph_initialization_and_propose():
-    assert AscendMLADSparkSpeculator.init_cudagraph_manager is AscendDSparkSpeculator.init_cudagraph_manager
-    assert AscendMLADSparkSpeculator.propose is AscendDSparkSpeculator.propose
+def test_shared_prefill_flags_keep_existing_behavior():
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    flags = np.array([True, False, True])
+    spec.input_batch = SimpleNamespace(is_prefilling_np=flags)
+    actual = spec._get_draft_is_prefilling(4)
+    assert actual.tolist() == flags.tolist()
+    assert np.shares_memory(actual.numpy(), flags)
 
 
 def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatch):
     spec = make_speculator()
-    spec.input_batch = SimpleNamespace(num_reqs=1)
+    spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
     spec._group_causal = {0: False}
     metadata = {"draft": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[5, 5]))}
     spec._build_draft_attn_metadata = MagicMock(return_value=metadata)
@@ -165,7 +167,7 @@ def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatc
         captured.update(pad=pad, is_prefilling=is_prefilling)
         yield
 
-    monkeypatch.setattr(mla, "build_draft_attn_metadata_factory", factory)
+    monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
     result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
     assert captured["pad"] == 10
     assert captured["is_prefilling"].tolist() == [False, False]
@@ -174,6 +176,7 @@ def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatc
     assert kwargs["num_reqs"] == 1
     assert kwargs["num_reqs_padded"] == 2
     assert kwargs["causal"] == {0: False}
+    assert spec.input_batch.is_prefilling_np.tolist() == [True, True]
 
 
 @pytest.mark.parametrize(
