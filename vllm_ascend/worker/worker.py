@@ -35,6 +35,8 @@ from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, i
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -856,6 +858,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if has_ec_transfer():
+            get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (

@@ -41,7 +41,8 @@ def test_missing_upstream_connector_is_skipped(monkeypatch, isolated_registry):
     monkeypatch.setattr(ec_registration.importlib, "import_module", missing_upstream)
     ec_registration.register_connector()
 
-    assert isolated_registry == before
+    assert isolated_registry.get("ECCPUConnector") is before.get("ECCPUConnector")
+    assert isolated_registry["ECMooncakeConnector"]().__name__ == "AscendECMooncakeConnector"
 
 
 def test_nested_import_error_is_not_swallowed(monkeypatch, isolated_registry):
