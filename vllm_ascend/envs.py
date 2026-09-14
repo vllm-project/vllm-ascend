@@ -36,6 +36,12 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental A5 FlashMLA route. 0 keeps existing MLA execution; 1
+    # consumes the token-fused [P, S, 1, 576] cache from the #16456 path.
+    # Non-sensitive. Requires the matching external CANN 9.2 operator package.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: _strict_binary_env(
+        "VLLM_ASCEND_ENABLE_FLASH_MLA"
+    ),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

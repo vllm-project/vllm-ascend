@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.flash_mla import flash_mla_with_kvcache_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -64,6 +65,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -73,6 +75,125 @@ else:
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+
+
+@dataclass
+class AscendFlashAttentionMetadata:
+    """Persistent device buffers consumed by the external FlashMLA package."""
+
+    query: torch.Tensor
+    schedule: torch.Tensor
+    cu: torch.Tensor
+    used_q: torch.Tensor
+    cache_lens: torch.Tensor
+    block_table: torch.Tensor
+    slots: torch.Tensor
+    live_boundaries: torch.Tensor
+    token_live: torch.Tensor
+    positions: torch.Tensor
+    attn_mask: torch.Tensor
+    max_query_len: int
+    max_seq_len: int
+    is_prefill: bool
+
+
+def _init_flash_attention_metadata(builder, impl) -> None:
+    """Allocate FlashMLA state only after the worker selected an NPU."""
+    builder.flash_num_heads = impl.num_heads
+    builder._flash_buffers = {}
+    builder._flash_attn_mask = torch.triu(
+        torch.ones((2048, 2048), dtype=torch.int8, device=builder.device), diagonal=1
+    )
+
+
+def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMetadata:
+    """Refresh batch-dependent FlashMLA inputs on the metadata stream.
+
+    The final zero-used row owns graph and sequence-parallel padding. Its
+    stable storage lets ACL Graph replay observe unchanged tensor addresses.
+    """
+    batch = common.num_reqs
+    tokens = max(common.num_actual_tokens, common.num_input_tokens)
+    table = common.block_table_tensor[:batch]
+    key = batch, tokens, table.shape[1]
+    if key not in builder._flash_buffers:
+        rows = batch + 1
+        int_args = {"dtype": torch.int32, "device": builder.device}
+        float_args = {"dtype": builder.kv_cache_spec.dtype, "device": builder.device}
+        words = ((36 + 72) * rows + 1) * 16
+        words = ((words + 4095) // 4096) * 4096
+        block_size = getattr(builder, "kernel_block_size", None) or builder.kv_cache_spec.block_size
+        builder._flash_buffers[key] = AscendFlashAttentionMetadata(
+            query=torch.empty((tokens, builder.flash_num_heads, 576), **float_args),
+            schedule=torch.empty(words, **int_args),
+            cu=torch.zeros(rows + 1, **int_args),
+            used_q=torch.zeros(rows, **int_args),
+            cache_lens=torch.zeros(rows, **int_args),
+            block_table=torch.zeros((rows, table.shape[1]), **int_args),
+            slots=torch.full((tokens,), -1, dtype=torch.int64, device=builder.device),
+            live_boundaries=torch.zeros(tokens + 1, **int_args),
+            token_live=torch.zeros(tokens, dtype=torch.bool, device=builder.device),
+            positions=torch.zeros(tokens, dtype=torch.int64, device=builder.device),
+            attn_mask=builder._flash_attn_mask,
+            max_query_len=tokens,
+            max_seq_len=table.shape[1] * block_size,
+            is_prefill=common.max_query_len > builder.decode_threshold,
+        )
+    flash = builder._flash_buffers[key]
+    flash.is_prefill = common.max_query_len > builder.decode_threshold
+
+    def build_metadata() -> None:
+        flash.cu[: batch + 1].copy_(common.query_start_loc[: batch + 1])
+        flash.cu[batch + 1].fill_(tokens)
+        flash.used_q[:batch].copy_(flash.cu[1 : batch + 1] - flash.cu[:batch])
+        flash.used_q[:batch].masked_fill_(common.seq_lens[:batch] <= 0, 0)
+        flash.used_q[batch:].zero_()
+        flash.cache_lens[:batch].copy_(common.seq_lens[:batch])
+        flash.cache_lens[batch:].zero_()
+        flash.block_table[:batch].copy_(table)
+        flash.block_table[batch:].zero_()
+        flash.slots.fill_(-1)
+        slots = common.slot_mapping[:tokens]
+        flash.slots[:slots.shape[0]].copy_(slots)
+        flash.live_boundaries.zero_()
+        live_rows = (flash.used_q > 0).to(torch.int32)
+        flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live_rows)
+        flash.live_boundaries.scatter_add_(
+            0, (flash.cu[:-1] + flash.used_q).long(), -live_rows
+        )
+        flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+        flash.slots.masked_fill_(~flash.token_live, -1)
+        flash.positions.zero_()
+        positions = common.positions[:tokens]
+        flash.positions[:positions.shape[0]].copy_(positions)
+        metadata = flash_mla_with_kvcache_metadata(
+            flash.cache_lens,
+            builder.flash_num_heads,
+            1,
+            cu_seqlens_q=flash.cu,
+            seqused_q=flash.used_q,
+            max_seqlen_q=flash.max_query_len,
+            max_seqlen_kv=flash.max_seq_len,
+            head_dim_qk=576,
+            head_dim_v=512,
+            mask_mode=3 if common.causal else 0,
+            layout_q="TND",
+        )
+        if metadata.dtype != torch.int32 or metadata.numel() != flash.schedule.numel():
+            raise RuntimeError(
+                "External FlashMLA metadata ABI does not match the persistent "
+                f"schedule buffer: expected {flash.schedule.numel()} int32 words, "
+                f"got {metadata.numel()} {metadata.dtype} words."
+            )
+        flash.schedule.copy_(metadata)
+
+    if builder._device_metadata_enabled:
+        builder._device_metadata_tasks = (
+            DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_metadata, id(flash.schedule)),
+        )
+    else:
+        build_metadata()
+    return flash
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")

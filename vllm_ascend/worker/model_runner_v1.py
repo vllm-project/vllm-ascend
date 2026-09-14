@@ -514,8 +514,10 @@ class NPUModelRunner(GPUModelRunner):
         # AscendMLABackend, and DSV4 compressed attention metadata) need
         # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
         # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+        self._needs_seq_lens_cpu_sync = not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and (
+            self.use_compress or issubclass(
+                self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+            )
         )
 
         # kv role
@@ -5544,6 +5546,14 @@ class NPUModelRunner(GPUModelRunner):
                     kv_manager_block_size, backends
                 )
                 self.kernel_block_sizes.append([selected_kernel_size])
+                if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+                    # Metadata builders are created before virtual splitting
+                    # selects the kernel page size.  FlashMLA's block table and
+                    # cache lengths must use this final unit, not the manager
+                    # page size that owns its non-contiguous stride.
+                    for attn_group in attn_groups:
+                        for builder in attn_group.metadata_builders:
+                            builder.set_kernel_block_size(selected_kernel_size)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
