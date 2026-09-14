@@ -30,6 +30,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.original_num_experts = 8
+        self.moe_config.skip_final_all_reduce = False
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
@@ -196,8 +197,12 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(final_result.shape[0], 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_allgather_prepare_finalize(self, mock_get_forward_context, mock_get_dp_group):
+    def test_allgather_prepare_finalize(
+        self, mock_get_forward_context, mock_tp_all_reduce, mock_get_dp_group
+    ):
+        mock_tp_all_reduce.side_effect = lambda tensor: tensor
         # Mock forward context
         mock_context = MagicMock()
         mock_context.max_tokens_across_dp = 6
@@ -244,6 +249,11 @@ class TestPrepareAndFinalize(unittest.TestCase):
         result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
 
         self.assertEqual(result.shape[0], 3)
+        # The late-AR contract keeps the routed output un-reduced.
+        mock_tp_all_reduce.assert_not_called()
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+        # reduce_results=True folds the TP all-reduce into finalize so every
+        # comm method leaves the MoE custom op with an already-reduced output.
+        mock_tp_all_reduce.assert_called_once()

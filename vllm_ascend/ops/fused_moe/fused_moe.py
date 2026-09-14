@@ -174,17 +174,24 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     @property
     def _fused_output_is_reduced(self) -> bool:
-        # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
-        # TP all-reduce for the routed output, and AscendSharedExperts.forward
-        # handles it for the shared output. Signal this to the upstream
-        # MoERunner.forward() so _maybe_reduce_final_output does not apply a
-        # second TP all-reduce (which would double-count the contributions).
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
-            MoECommType.ALLTOALL,
-            MoECommType.MC2,
-            MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
+        # Every Ascend MoE comm method now reduces the routed output inside
+        # the MoE custom op: MC2/ALLTOALL/FUSED_MC2 in token_combine, and
+        # ALLGATHER in PrepareAndFinalizeWithAllGather.finalize. The only
+        # exception is a layer that explicitly requested a downstream-fused
+        # all-reduce (FusedMoE(..., reduce_results=False)), which keeps the
+        # late-AR contract.
+        #
+        # This property is evaluated in MoERunner.forward(), OUTSIDE the MoE
+        # custom op, so torch.compile bakes its value into the compiled
+        # artifact during the profile run (compiled at max_num_batched_tokens)
+        # while the comm method inside the custom op follows the live
+        # per-batch context. Deriving it from the batch-size-dependent
+        # moe_comm_type therefore baked a contract that disagreed with the
+        # method actually executed (e.g. ALLGATHER from the profile run vs
+        # MC2 at decode capture), double-counting or skipping the final TP
+        # all-reduce. Depending only on static layer config keeps the traced
+        # region batch-invariant and consistent with the custom-op behavior.
+        return not self.moe_config.skip_final_all_reduce
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)

@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_pcp_group,
@@ -556,9 +557,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _finalize_with_dp_group(self, hidden_states: torch.Tensor, reduce_results: bool) -> torch.Tensor:
         """
         Finalization steps:
-          1. If DP > 1 and not shared expert, reduce-scatter output across DP group.
+          1. If DP > 1, reduce-scatter output across DP group.
           2. Slice to original local token count.
-          3. If `reduce_results=True` and TP/EP > 1, apply tensor_model_parallel_all_reduce.
+          3. If `reduce_results=True`, apply tensor_model_parallel_all_reduce
+             so the routed output leaves the MoE custom op already reduced.
+
+        The routed output is TP/EP-partial (each rank only computes its local
+        experts). Reducing it here (instead of leaving it to the runner's late
+        all-reduce) makes the reduction contract identical for every MoE comm
+        method, so `_fused_output_is_reduced` no longer depends on the
+        batch-size-dependent comm-method selection -- a value that
+        torch.compile bakes in during the profile run while the comm method
+        inside this custom op follows the live per-batch context.
 
         Returns:
             Tensor with shape [original_local_num_tokens, hidden_size]
@@ -570,4 +580,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self.moe_config.dp_size > 1:
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[: self.num_tokens]
+
+        # Keep the late-AR contract only for layers that explicitly requested
+        # a downstream-fused all-reduce (FusedMoE(..., reduce_results=False)).
+        if reduce_results and not self.moe_config.skip_final_all_reduce:
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+
         return hidden_states
