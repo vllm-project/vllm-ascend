@@ -628,7 +628,7 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
         patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
-        patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens", create=True),
         patch(
             "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
             return_value=torch.tensor([0, 1], dtype=torch.int32),
