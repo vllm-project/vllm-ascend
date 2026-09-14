@@ -371,6 +371,23 @@ class TestUtils(TestBase):
         utils.register_ascend_customop()
         self.assertEqual(mock_customop.register_oot.call_count, len(REGISTERED_ASCEND_OPS))
 
+    def test_registered_ascend_ops_keys_match_vllm_class_names(self):
+        """Regression test for https://github.com/vllm-project/vllm-ascend/issues/16500.
+
+        CustomOp.__new__ looks up op_registry_oot by the in-tree vLLM class
+        name (cls.__name__), so every REGISTERED_ASCEND_OPS key must equal
+        the name of the vLLM class the Ascend op replaces (i.e. one of its
+        base classes). A mismatched key silently disables the NPU fused op.
+        """
+        for name, op_cls in REGISTERED_ASCEND_OPS.items():
+            base_names = [base.__name__ for base in op_cls.__mro__]
+            self.assertIn(
+                name,
+                base_names,
+                f"Registered op key '{name}' does not match any vLLM class name of {op_cls.__name__}; "
+                "the OOT replacement would never take effect.",
+            )
+
     @mock.patch("torch_npu.npu_format_cast")
     def test_maybe_trans_nz(self, mock_npu_format_cast):
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
