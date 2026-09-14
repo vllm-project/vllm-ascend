@@ -77,39 +77,14 @@ class KVPPConfig:
 
     def validate(self, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size != 1 and not vllm_config.use_v2_model_runner:
-            raise ValueError("KVPP with PCP requires Model Runner V2.")
         if parallel_config.decode_context_parallel_size != 1:
             raise ValueError("KVPP and DCP cannot be enabled at the same time.")
         kv_transfer_config = vllm_config.kv_transfer_config
-        if kv_transfer_config is not None:
-            if parallel_config.prefill_context_parallel_size != 1:
-                raise ValueError("KVPP KV transfer with PCP is not supported yet.")
-            extra = kv_transfer_config.kv_connector_extra_config
-            if kv_transfer_config.kv_connector == "MooncakeConnectorV2":
-                if kv_transfer_config.kv_role != "kv_producer":
-                    raise ValueError("MooncakeConnectorV2 requires KVPP to be disabled on the decode node.")
-            elif (
-                kv_transfer_config.kv_connector != "AscendStoreConnector"
-                or kv_transfer_config.kv_role != "kv_producer"
-                or extra.get("backend", "mooncake").lower() != "memcache"
-                or extra.get("use_layerwise", False)
-                or not extra.get("load_async", False)
-                or not extra.get("discard_partial_chunks", True)
-                or extra.get("consumer_is_to_put", False)
-            ):
-                raise ValueError(
-                    "KVPP KV transfer supports only AscendStoreConnector with kv_role='kv_producer', "
-                    "backend='memcache', use_layerwise=False, load_async=True, "
-                    "discard_partial_chunks=True and consumer_is_to_put=False."
-                )
-            kv_events_config = vllm_config.kv_events_config
-            if (
-                kv_transfer_config.kv_connector == "AscendStoreConnector"
-                and kv_events_config is not None
-                and kv_events_config.enable_kv_cache_events
-            ):
-                raise ValueError("KVPP pooling does not support KV cache events yet.")
+        if kv_transfer_config is not None and kv_transfer_config.kv_connector != "AscendStoreConnector":
+            if kv_transfer_config.kv_connector != "MooncakeConnectorV2":
+                raise ValueError("KVPP PD disaggregation requires MooncakeConnectorV2.")
+            if kv_transfer_config.kv_role == "kv_consumer":
+                raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
