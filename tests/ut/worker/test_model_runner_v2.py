@@ -258,6 +258,7 @@ def _run_prepare_inputs_until_query_start_transfer(
     runner.pcp_manager = None
     runner.use_dcp = False
     runner.decode_query_len = 1
+    runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(
         query_start_loc=torch.empty(runner.max_num_reqs + 2, dtype=torch.int32),
         seq_lens_np=np.zeros(runner.max_num_reqs, dtype=np.int32),
