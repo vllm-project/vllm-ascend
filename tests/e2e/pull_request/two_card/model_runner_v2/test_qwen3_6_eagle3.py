@@ -66,7 +66,6 @@ _EAGER = os.environ.get("QWEN36_EAGLE3_EAGER") == "1"
         "HCCL_DETERMINISTIC": "true",
         "CLOSE_MATMUL_K_SHIFT": "1",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": "14,15",
     },
 )
 def test_qwen36_27b_eagle3_acceptance_tp2(
