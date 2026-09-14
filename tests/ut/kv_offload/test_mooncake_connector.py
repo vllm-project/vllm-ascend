@@ -4044,7 +4044,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     self.assertEqual(remote_ids, (list(range(10 * remote_cp, 10 * remote_cp + 8)),))
 
     def test_decode_only_dcp_checks_each_cache_group_type(self):
-        for spec_type in ("MLAAttentionSpec", "AscendMLAAttentionSpec", "MambaSpec", "FullAttentionSpec"):
+        for spec_type in ("MLAAttentionSpec", "AscendMLAAttentionSpec", "FullAttentionSpec"):
             with self.subTest(spec_type=spec_type):
                 worker = self._build_non_cp_worker()
                 worker.dcp_size = 2
@@ -4073,6 +4073,59 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(NotImplementedError, f"{spec_type} in transfer group 1"):
                         worker._get_kv_split_metadata("r", cast(ReqMeta, meta))
+
+    def test_decode_only_dcp_keeps_kda_state_and_tp_owners(self):
+        for state_first in (False, True):
+            for prefill_tp in (2, 4):
+                for rank in range(2):
+                    for prompt_blocks in (1, 5):
+                        with self.subTest(
+                            state_first=state_first, prefill_tp=prefill_tp, rank=rank, prompt_blocks=prompt_blocks
+                        ):
+                            worker = self._build_non_cp_worker()
+                            worker._is_hma_required = True
+                            worker.use_mla = True
+                            worker.dcp_size = worker.tp_size = 2
+                            worker.dcp_rank = worker.tp_rank = rank
+                            worker._prefill_tp_size = prefill_tp
+                            worker._prefill_pp_size = 1
+                            worker.block_size_scale = [[2], [1]]
+                            mla = (0, ({"kv_cache_spec_type": "MLAAttentionSpec", "kv_cache_group_id": 0}, [0]))
+                            state = (1, ({"kv_cache_spec_type": "MambaSpec", "kv_cache_group_id": 1}, [1]))
+                            worker.kv_group2layeridx = dict([state, mla] if state_first else [mla, state])
+                            meta = types.SimpleNamespace(
+                                remote_pcp_size=1,
+                                remote_dcp_size=1,
+                                remote_ptp_size=prefill_tp,
+                                remote_port=30000,
+                                remote_block_size=16,
+                                num_computed_tokens=0,
+                                num_prompt_blocks=prompt_blocks,
+                                remote_block_ids=(list(range(100, 100 + prompt_blocks)), [200]),
+                                local_block_ids=([20, 21, 22], [30]),
+                                # State uses its transfer IDs, not the attention prefix-cache view.
+                                local_full_block_ids=([20, 21, 22], [99]),
+                            )
+                            ports, local_ids, remote_ids = worker._get_kv_split_metadata("k3", cast(ReqMeta, meta))
+                            selected = range(rank, prompt_blocks, 2)
+                            self.assertEqual(
+                                local_ids[0][0], [2 * (20 + g // 2) + k for g in selected for k in range(2)]
+                            )
+                            self.assertEqual(remote_ids[0][0], [2 * (100 + g) + k for g in selected for k in range(2)])
+                            self.assertEqual(local_ids[0][1], [30])
+                            self.assertEqual(remote_ids[0][1], [200])
+                            _, owners = worker._get_hybrid_remote_rank_group_pulls("k3", prefill_tp)
+                            pulls = worker._get_group_pulls_metadata("k3", ports, prefill_tp, 30000, 1, 1)
+                            self.assertEqual(pulls, [[owners[port - 30000] for port in ports[0]]])
+                            state_ports = {
+                                port
+                                for port, groups in zip(ports[0], pulls[0])
+                                if any(group.group_id == 1 for group in groups)
+                            }
+                            self.assertEqual(
+                                state_ports,
+                                {30000 + rank * (prefill_tp // 2) + offset for offset in range(prefill_tp // 2)},
+                            )
 
     def test_sfa_decode_only_dcp_maps_global_blocks_to_each_rank(self):
         for rank, remote_pcp_size in ((rank, pcp) for rank in range(8) for pcp in (1, 2)):

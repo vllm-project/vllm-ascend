@@ -29,7 +29,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendDCPMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -111,6 +111,24 @@ class AscendMlaDCPMetadataBuilder(
             self.block_size,
             self.cp_virtual_block_size,
         )
+
+    def _require_dcp_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendDCPMetadata:
+        if common_attn_metadata.context_parallel_metadata is None:
+            # MRV2 supplies common lengths instead of the V1 DCP metadata.
+            # Decode reads the current token too; prefill reads prior context.
+            context_lens = self.seq_lens.clone()
+            context_lens[self.num_decodes :] -= self.query_lens[self.num_decodes :]
+            common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=get_dcp_local_seq_lens(
+                    context_lens, self.dcp_size, self.cp_local_block_size
+                ),
+                query_lens_cpu=self.query_lens,
+                max_query_len=common_attn_metadata.max_query_len,
+            )
+        return super()._require_dcp_metadata(common_attn_metadata)
 
     def build_chunked_metadata(
         self,
@@ -213,6 +231,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    can_return_lse_for_decode: bool = True
 
     @staticmethod
     def update_graph_params(

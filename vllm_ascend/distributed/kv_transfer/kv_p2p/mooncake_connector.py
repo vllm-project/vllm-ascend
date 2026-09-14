@@ -2942,6 +2942,14 @@ class MooncakeConnectorWorker:
         ]
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
             spec_type = group_spec["kv_cache_spec_type"]
+            group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+            block_id_idx = group_idx if use_transfer_group_block_ids else group_id
+            if spec_type == "MambaSpec":
+                # KDA keeps the full sequence state for this TP rank's heads.
+                local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_kernel_block_ids(
+                    layer_indices, meta, group_idx, group_spec
+                )
+                continue
             if spec_type == "AscendSFAIndexerCacheSpec":
                 # The full indexer cache is transferred separately.
                 continue
@@ -2950,7 +2958,6 @@ class MooncakeConnectorWorker:
                     f"Decode-only DCP does not support cache type {spec_type} "
                     f"in transfer group {group_idx} (layer indices {layer_indices})."
                 )
-            group_id = self._get_kv_cache_group_id(group_idx, group_spec)
             local_blocks = (meta.local_full_block_ids or meta.local_block_ids)[group_id]
             remote_blocks = meta.remote_block_ids[group_id]
             first_block = meta.num_computed_tokens // self.block_size
@@ -2958,7 +2965,6 @@ class MooncakeConnectorWorker:
             # P owns the full sequence; D rank r owns r, r + DCP, ... .
             global_blocks = range(first_block, min(meta.num_prompt_blocks, len(remote_blocks)), self.dcp_size)
             scale = self._get_kernel_block_scale(layer_indices)
-            block_id_idx = group_idx if use_transfer_group_block_ids else group_id
             local_block_ids[block_id_idx] = self._expand_block_ids(
                 [local_blocks[block // self.dcp_size] for block in global_blocks], scale
             )
@@ -3487,9 +3493,8 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
-        dcp_transfer = remote_dcp_size * self.dcp_size > 1
         if self._is_hma_required:
-            if not dcp_transfer:
+            if remote_dcp_size == 1:
                 # The table uses TP/PP ranks without PCP replica offsets.
                 # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
                 # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
