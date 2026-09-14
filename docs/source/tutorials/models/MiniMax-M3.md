@@ -928,27 +928,7 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | A3 Prefill memory | `--gpu-memory-utilization 0.92` | Use `0.85` so Prefill can donate FabricMem to the pool |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
-#### 5.4.1 Deployment Topology
-
-Keep the Section 5.3 layout. Prefill `gpu-memory-utilization` is lowered slightly on A3 so Prefill can donate FabricMem segments to the pool.
-
-| Role | Parallelism | Engine ports | GPU memory utilization |
-| ---- | ----------- | ------------ | ---------------------- |
-| Prefill (A3) | `DP2 TP4 PP2` | `31050-31051` | `0.85` |
-| Decode (A3) | `DP4 TP4 PP1` | `31060-31063` | `0.92` |
-| Prefill (950DT) | `DP2 TP4 PP1` | `31050-31051` | `0.92` |
-| Decode (950DT) | `DP2 TP4 PP1` | `31060-31061` | `0.92` |
-
-Shared MiniMax settings stay aligned with Section 5.3: `--max-model-len 133000`, Prefill `--max-num-seqs 32` (A3) / `128` (950DT), Decode `--max-num-seqs 64` (A3) / `256` (950DT), and EAGLE3 speculative decoding.
-
-Pool lookup RPC ports must be unique per DP rank:
-
-| Role | Formula | Example ports |
-| ---- | ------- | ------------- |
-| Prefill | `37000 + DP_RANK` | A3/950DT DP0–DP1 → `37000`/`37001` |
-| Decode | `37100 + DP_RANK` | A3 DP0–DP3 → `37100`–`37103`; 950DT DP0–DP1 → `37100`/`37101` |
-
-#### 5.4.2 Prerequisites
+#### 5.4.1 Prerequisites
 
 Mount the host HCCN config into every container that participates in pooling:
 
@@ -960,7 +940,7 @@ On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3 for Ascen
 
 Place `mooncake.json` next to `run_dp_template.sh` on each node. Prefill contributes pool memory; Decode does not. Replace `xxxx` with the Prefill node IP that runs Mooncake Master. A non-zero `global_segment_size` must be aligned to `1GB`.
 
-A3 Prefill `mooncake.json` (16 GB per card):
+A3 Prefill `mooncake.json`:
 
 ```json
 {
@@ -1008,7 +988,7 @@ Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donate
 }
 ```
 
-#### 5.4.3 Environment Variables
+#### 5.4.2 Environment Variables
 
 Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) according to your machine and link type.
 
@@ -1029,7 +1009,7 @@ fi
 | 800I/T A3 (RoCE) or 800I/T A2 | A2: HDK >= 25.5 recommended | `export HCCL_INTRA_ROCE_ENABLE=1`, plus `HCCL_IF_IP` / socket IFNAME, and `nr_hugepages=200000` | Use the RoCE path from the KV Cache Pool guide. |
 | 950PR/DT (A5, Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
 
-#### 5.4.4 Prefill / Decode Scripts
+#### 5.4.3 Prefill / Decode Scripts
 
 Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `$4` (DP rank) — do not hardcode the same values across ranks.
 
@@ -1150,7 +1130,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "950DT products"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.2 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
 
     1. Prefill node
 
@@ -1268,7 +1248,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
     Start order on 950DT: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 950DT (`DP2` on both roles, proxy on `8009`).
 
-#### 5.4.5 Start the Services
+#### 5.4.4 Start the Services
 
 Start in this order on every platform:
 
@@ -1300,7 +1280,7 @@ mooncake_master \
 
 4. Start the Section 5.3 proxy. The service is then accessible at `http://<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
 
-#### 5.4.6 Verification
+#### 5.4.5 Verification
 
 1. Confirm Mooncake Master port `50088` is reachable.
 2. Confirm every Decode engine port is ready, then every Prefill engine port.
@@ -1308,12 +1288,12 @@ mooncake_master \
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
 
-#### 5.4.7 Summary of Changes vs. Section 5.3
+#### 5.4.6 Summary of Changes vs. Section 5.3
 
 | Item | Where | What to set |
 | ---- | ----- | ----------- |
 | `PYTHONHASHSEED=0` | Prefill and Decode | Same value on every node so block hashes match. |
-| `MOONCAKE_CONFIG_PATH` | Prefill and Decode | Point to the local `./mooncake.json` from Section 5.4.2. |
+| `MOONCAKE_CONFIG_PATH` | Prefill and Decode | Point to the local `./mooncake.json` from Section 5.4.1. |
 | Mooncake `LD_LIBRARY_PATH` | Prefill and Decode | Add the Mooncake package directory. |
 | Pooling hardware env | Prefill and Decode | A3 HCCS: `ACL_OP_INIT_MODE=1` + `ASCEND_ENABLE_USE_FABRIC_MEM=1`. 950DT UB: `ASCEND_LOCAL_COMM_RES_PATH` + `ASCEND_LOCAL_COMM_RES`. Keep Section 5.3 `HCCL_*` / socket IFNAME exports. |
 | `--kv-transfer-config` | Prefill and Decode | Replace single `MooncakeConnectorV1` with `MultiConnector` + `AscendStoreConnector`. |
