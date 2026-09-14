@@ -606,6 +606,10 @@ class TestAscendSFAKPathFusion(TestBase):
         self.assertTrue(torch.equal(indexer_weights, kw[:, head_dim:]))
         self.assertEqual(wk_weights_proj.call_count, 1)
 
+        # forward runs forward_k internally; when the top-k stage is handed
+        # the same hidden states, it reuses the weights tail instead of
+        # re-running the wk_weights_proj GEMM.
+        wk_weights_proj.reset_mock()
         expected_topk = torch.zeros(num_tokens, 1, 4, dtype=torch.int32)
         mock_devop.return_value = expected_topk
         topk = indexer.forward(
@@ -619,12 +623,11 @@ class TestAscendSFAKPathFusion(TestBase):
         )
 
         self.assertIs(topk, expected_topk)
-        # forward consumed the forwarded weights instead of re-running
-        # the wk_weights_proj GEMM on the same hidden states.
         self.assertEqual(wk_weights_proj.call_count, 1)
-        self.assertIs(mock_devop.call_args.args[3], indexer_weights)
+        self.assertTrue(torch.equal(mock_devop.call_args.args[3], kw[:, head_dim:]))
 
-        # A distinct k-path input must fall back to recomputing the weights.
+        # A distinct top-k input must fall back to recomputing the weights:
+        # one GEMM inside forward_k plus one for the top-k stage.
         indexer.forward(
             torch.randn(num_tokens, head_dim + weights_dim),
             torch.randn(num_tokens, 64),
@@ -634,7 +637,7 @@ class TestAscendSFAKPathFusion(TestBase):
             indexer_metadata,
             compute_topk=True,
         )
-        self.assertEqual(wk_weights_proj.call_count, 2)
+        self.assertEqual(wk_weights_proj.call_count, 3)
 
 
 class TestAscendSFAMetadata(TestBase):
