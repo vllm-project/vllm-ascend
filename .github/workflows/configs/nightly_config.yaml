@@ -312,6 +312,15 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: Kimi-K2.6-w4a8-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Kimi-K2.6-w4a8-A3.yaml
+      - name: kimi-k2.5
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Kimi-K2.5.yaml
+      - name: deepseek-r1-0528-w8a8
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-R1-0528-W8A8.yaml
       - name: Minimax_m2.7_w8a8_A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
@@ -383,7 +392,18 @@ a3-560t:
       - name: Qwen3-30B-A3B-W4A8-llm-compressor
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-A3B-W4A8-llm-compressor.yaml
-
+      - name: qwen3-32b-int8-prefix-cache
+        os: linux-aarch64-a3-4-cn12-001
+        config_file_path: Prefix-Cache-Qwen3-32B-Int8.yaml
+      - name: qwen3-32b-int8
+        os: linux-aarch64-a3-4-cn12-001
+        config_file_path: Qwen3-32B-Int8.yaml
+      - name: Qwen3-32B-QuaRot
+        os: linux-aarch64-a3-2-cn12-001
+        config_file_path: Qwen3-32B-QuaRot-eagle3.yaml
+      - name: Qwen3-30B-QuaRot
+        os: linux-aarch64-a3-2-cn12-001
+        config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
 310p:
   single_node:
     test_config:
