@@ -12,14 +12,16 @@ import torch
 
 def _load_update_seq_lens_cpu():
     source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
     runner_cls = next(
         node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name == "NPUModelRunner"
     )
     update_method = next(
         node for node in runner_cls.body if isinstance(node, ast.FunctionDef) and node.name == "_update_seq_lens_cpu"
     )
-    method_source = ast.get_source_segment(source_path.read_text(encoding="utf-8"), update_method)
+    method_source = ast.get_source_segment(source_text, update_method)
+    assert method_source is not None
     namespace: dict[str, object] = {}
     exec(
         "from __future__ import annotations\n" + textwrap.dedent(method_source),
