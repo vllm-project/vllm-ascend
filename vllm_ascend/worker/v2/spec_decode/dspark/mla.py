@@ -50,5 +50,7 @@ class AscendMLADSparkSpeculator(AscendDSparkSpeculator):
             decode = getattr(metadata, "decode", None)
             if decode is None or not hasattr(decode, "actual_seq_lengths_q"):
                 raise TypeError(f"K3 MLA draft layer {name} has no decode query-length metadata.")
+            # Match capture: a parallel draft block is TND speculative decode.
+            metadata.attn_state = AscendAttentionState.SpecDecoding
             decode.actual_seq_lengths_q = query_lengths
         return attn_metadata
