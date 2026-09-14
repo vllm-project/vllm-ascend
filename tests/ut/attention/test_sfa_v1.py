@@ -957,10 +957,13 @@ class TestAscendSFAImpl(TestBase):
             topk_num_tokens=2,
         )
         cases = (
-            (PreprocessType.NATIVE, True),
-            (PreprocessType.NATIVE, False),
-            (PreprocessType.PROLOG_V3, True),
-            (PreprocessType.MLAPO, True),
+            (PreprocessType.NATIVE, True, AscendAttentionState.DecodeOnly),
+            (PreprocessType.NATIVE, False, AscendAttentionState.ChunkedPrefill),
+            (PreprocessType.PROLOG_V3, True, AscendAttentionState.DecodeOnly),
+            (PreprocessType.PROLOG_V3, True, AscendAttentionState.ChunkedPrefill),
+            (PreprocessType.PROLOG_V3, False, AscendAttentionState.ChunkedPrefill),
+            (PreprocessType.PROLOG_V3, True, AscendAttentionState.PrefillCacheHit),
+            (PreprocessType.MLAPO, True, AscendAttentionState.DecodeOnly),
         )
         events: list[object] = []
 
@@ -969,8 +972,9 @@ class TestAscendSFAImpl(TestBase):
             return result
 
         width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
-        for preprocess_type, has_indexer in cases:
-            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer):
+        for preprocess_type, has_indexer, attn_state in cases:
+            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer, attn_state=attn_state):
+                metadata.attn_state = attn_state
                 events.clear()
                 self.impl.preprocess_type = preprocess_type
                 self.impl.has_indexer = has_indexer
@@ -982,6 +986,12 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._get_parallel_forward_context = lambda *_args: context
                 self.impl._prepare_native_hidden_states = lambda x, _: x
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
+                if preprocess_type == PreprocessType.PROLOG_V3:
+                    # Consumer native weights may have been disposed after
+                    # preparing the fused weights. Never re-enter that path.
+                    self.impl.fused_qkv_a_proj = MagicMock(
+                        side_effect=AssertionError("native projection weights were released")
+                    )
                 self.impl.q_a_layernorm = torch.nn.Identity()
                 self.impl.indexer = lambda *_args, **_kwargs: record_event(
                     "indexer_cache", torch.zeros(2, 1, dtype=torch.int64)
