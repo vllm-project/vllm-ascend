@@ -68,7 +68,7 @@ class Ascend310PStagedWriteTensor:
 
 
 class Ascend310PRequestState(AscendRequestState):
-    """MRV2 request state using the same CPU-owner model as MRV1 310P."""
+    """MRV2 request state with CPU-owned bookkeeping for Ascend 310P."""
 
     # TODO: Refactor staged writes to use Triton Dispatcher after vLLM RFC
     # #45133 lands while retaining the 310P implementation.

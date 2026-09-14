@@ -43,6 +43,7 @@ from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
+from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
     combine_sampled_and_draft_tokens_cpu,
@@ -53,7 +54,6 @@ from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -119,12 +119,19 @@ class NPUModelRunner310V2(NPUModelRunner):
             device=self.device,
         )
         pin_memory = is_pin_memory_available()
+        self.input_buffers.seq_lens_cpu = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        self.input_buffers.seq_lens_np = self.input_buffers.seq_lens_cpu.numpy()
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu", pin_memory=pin_memory)
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu", pin_memory=pin_memory)
         self.next_prefill_tokens_cpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
-        # Persistent MRV1-style CPU/GPU metadata buffers.
+        # Persistent CPU/GPU metadata buffers avoid hot-path allocations.
         make_buffer = self._make_metadata_buffer
         self._decode_req_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
         self._decode_input_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
@@ -137,7 +144,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._num_sampled_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         self._num_rejected_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         # PrefillCacheHit / ChunkedPrefill must not replay FULL mixed ACLGraphs
-        # (same as MRv1 `_determine_batch_execution_and_padding`). FULL_DECODE_ONLY
+        # FULL_DECODE_ONLY
         # already keeps those batches eager via mixed_mode=NONE.
         self._force_eager_pc_batch = False
         self._force_eager_spec_batch = False
@@ -171,7 +178,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 
         parallel_config = vllm_config.parallel_config
-        # TODO: Restore MRV1 data parallel support in the next 310P MRV2 iteration.
+        # TODO: Restore data parallel support in the next 310P MRV2 iteration.
         # Pipeline and context parallelism remain unsupported on 310P.
         unsupported_parallel = {
             "pipeline_parallel_size": getattr(parallel_config, "pipeline_parallel_size", 1),
@@ -206,7 +213,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self,
         scheduler_output: SchedulerOutput,
         batch_desc: BatchExecutionDescriptor,
-    ) -> AscendInputBatch:
+    ) -> Ascend310PInputBatch:
         # TODO: Refactor this Triton-free input preparation through Triton
         # Dispatcher after vLLM RFC #45133 lands.
         num_tokens = scheduler_output.total_num_scheduled_tokens
@@ -254,7 +261,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         idx_mapping = self._idx_mapping.gpu[:num_reqs]
         self._idx_mapping.copy_to_gpu(num_reqs)
-        # Postprocess owns request bookkeeping on CPU, like MRV1. Preserve the
+        # Postprocess owns request bookkeeping on CPU. Preserve the
         # exact batch order so it never has to copy indices/query lengths back.
         self._postprocess_idx_mapping_np = idx_mapping_np
 
@@ -399,7 +406,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             logits_indices_np=logits_indices_np,
         )
         input_batch_kwargs["has_prefill"] = batch_has_prefill
-        input_batch = AscendInputBatch(**input_batch_kwargs)
+        input_batch = Ascend310PInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
         if not self.model_config.uses_mrope:
@@ -460,7 +467,7 @@ class NPUModelRunner310V2(NPUModelRunner):
     def _scheduler_output_needs_spec_eager(self, scheduler_output: SchedulerOutput) -> bool:
         """Force eager when MTP verify batch is not uniform SpecDecoding.
 
-        Step 2 (FULL_DECODE_ONLY): mirror MRv1 ``_determine_batch_execution_and_padding``.
+        Step 2 (FULL_DECODE_ONLY): apply decode-only padding constraints.
         Uniform decode with ``q_len == decode_query_len`` (1+K) may replay SpecDecoding
         FULL graphs; mixed / prefill / non-uniform MTP schedules stay eager.
         """
@@ -518,7 +525,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not np.all(num_valid_tokens == 1):
             return True
 
-        # Allow concurrent uniform SpecDecoding FULL (MRv1 contract). Accuracy
+        # Allow concurrent uniform SpecDecoding FULL. Accuracy
         # regressions are caught by E2E; do not blanket-eager on num_reqs.
         seq_lens = np.fromiter(
             (computed_by_req[req_id] + num_tokens_per_req[req_id] for req_id in req_ids),
@@ -604,14 +611,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
-    ) -> AscendInputBatch:
+    ) -> Ascend310PInputBatch:
         del batch_req_state
         return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)
         if scheduler_output.finished_req_ids:
-            # Same barrier as 310P MRv1 ``_update_states``: ACLGraph may still
+            # ACLGraph may still
             # be reading the previous block-table layout while finish_requests
             # rewrites CPU NumPy tables for a reused slot. Upstream GPU/MRv2
             # does not need this because it does not use that CPU gather path.
@@ -674,7 +681,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if copies:
             pending_copies = self._dedupe_kv_cache_block_copies(copies)
         # Main derives this field from KVCacheConfig.has_mamba_layers, which is
-        # broader than the MRV1 310P requirement. Filter at the actual consumer
+        # broader than the 310P requirement. Filter at the actual consumer
         # before GPUModelRunner.update_requests invokes the zeroer.
         if scheduler_output.new_block_ids_to_zero and not self._needs_kv_cache_zeroing_310p(
             self.kv_cache_config
@@ -798,7 +805,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._install_pc_eager_cudagraph_dispatch()
 
     def _needs_kv_cache_zeroing_310p(self, kv_cache_config: KVCacheConfig) -> bool:
-        """Match the MRV1 zeroing gate instead of main's broad Mamba gate."""
+        """Use the narrow 310P Mamba speculative-decoding zeroing gate."""
         spec_config = self.speculative_config
         if spec_config is None:
             return False
@@ -1221,7 +1228,7 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     def prepare_attn(
         self,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         # TODO: Refactor block-table preparation to use Triton Dispatcher after
         # vLLM RFC #45133 lands.
@@ -1254,13 +1261,13 @@ class NPUModelRunner310V2(NPUModelRunner):
     def sample(
         self,
         hidden_states: torch.Tensor,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
         grammar_output: GrammarOutput | None,
     ):
         # TODO: Refactor 310P sampling to use Triton Dispatcher after vLLM RFC
         # #45133 lands.
         if grammar_output is not None:
-            # TODO: Restore MRV1 structured output support in the next 310P MRV2 iteration.
+            # TODO: Restore structured output support in the next 310P MRV2 iteration.
             raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
@@ -1315,7 +1322,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self._num_rejected_cpu,
             update_tokens=sampled_tokens_cpu is not None,
         )
-        # MRV1 ownership: sampled tokens remain device-resident. Chunked
+        # Sampled tokens remain device-resident. Chunked
         # prefill rows have num_sampled=0 and must not overwrite prior state.
         valid_batch_np = np.flatnonzero(self._num_sampled_cpu.numpy() > 0)
         if valid_batch_np.size:
@@ -1381,6 +1388,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.input_buffers.seq_lens_np[i] = self.input_buffers.seq_lens_cpu[i]
         return changed_req_indices
 
-    def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
+    def postprocess_num_computed_tokens(self, input_batch: Ascend310PInputBatch) -> None:
         # ``postprocess_sampled`` already advances CPU-owned request state.
         del input_batch

@@ -22,9 +22,9 @@ from vllm.v1.worker.mamba_utils import get_mamba_groups
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
+from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
@@ -60,7 +60,7 @@ class _Ascend310PModelStateMixin:
             self.max_model_len,
             self.device,
         )
-        # Clear any parent-created EVS pruner: 310P MRv1 has no EVS path, and
+        # Clear any parent-created EVS pruner: 310P has no EVS path, and
         # Ascend310PRopeState lacks the read/update_prefill_positions EVS needs.
         self.mm_pruner = None
 
@@ -81,7 +81,7 @@ class _Ascend310PModelStateMixin:
 
     def prepare_attn(
         self,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
         cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
@@ -109,7 +109,7 @@ class _Ascend310PModelStateMixin:
             ubatch_idx=ubatch_idx,
         )
 
-    def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
+    def prepare_inputs(self, input_batch: Ascend310PInputBatch, req_states):
         if self.rope_state is None:
             return super().prepare_inputs(input_batch, req_states)  # type: ignore[misc]
 
@@ -270,7 +270,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
 
     def prepare_attn(
         self,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
         cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
@@ -286,7 +286,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         Pad rows also get ``draft_tokens=-1``, which turns a uniform SpecDecoding
         FULL batch into mixed Spec+Prefill — diverging from the captured uniform
         graph. Mirror AscendModelState's actual/padded split and keep pad rows on
-        the SpecDecoding path (draft=K, accepted=1), matching MRv1 pad accepted=1.
+        the SpecDecoding path (draft=K, accepted=1), with pad accepted=1.
         """
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if for_capture:
@@ -329,7 +329,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                 # Align with upstream #15707: only promote pad rows to Spec when
                 # every real request is SpecDecoding and pad query lens == 1+K.
                 # Also keep pad rows Spec when attn_state is already SpecDecoding
-                # (310P target FULL capture / concurrent pad), matching MRv1.
+                # (310P target FULL capture / concurrent pad).
                 if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > num_actual_reqs:
                     expected_query_len = int(self.vllm_config.num_speculative_tokens) + 1
                     padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[num_actual_reqs:]
@@ -377,7 +377,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
 
     def preprocess_state(
         self,
-        input_batch: AscendInputBatch,
+        input_batch: Ascend310PInputBatch,
         block_tables: tuple[torch.Tensor, ...],
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,

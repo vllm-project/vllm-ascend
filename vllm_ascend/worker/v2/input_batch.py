@@ -20,7 +20,6 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -57,7 +56,6 @@ class AscendInputBuffers(InputBuffers):
             max_num_reqs,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=is_pin_memory_available(),
         )
         # seq_len_np and seq_lens_cpu share the same memory.
         # define seq_lens_np for easier calculation with numpy.
@@ -76,13 +74,6 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
-    # 310P CPU-first preparation keeps gathered block tables for Mamba state
-    # decisions. Forward still consumes the device tensors returned separately.
-    block_tables_np: tuple[np.ndarray, ...] | None = None
-    # 310P sampler reuses host-prepared token rows and indices. This avoids
-    # copying draft tokens back from NPU during greedy MTP verification.
-    input_ids_cpu: torch.Tensor | None = None
-    logits_indices_np: np.ndarray | None = None
 
     @classmethod
     def make_dummy(
