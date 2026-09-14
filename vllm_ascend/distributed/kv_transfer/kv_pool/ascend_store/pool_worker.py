@@ -23,7 +23,6 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -126,13 +125,8 @@ class KVPoolWorker:
         self.vllm_config = vllm_config
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kvpp_shard_ranks: dict[tuple[int, int], tuple[int, ...]] = {}
-        if self.use_kvpp:
-            if kv_cache_config is None or len(kv_cache_config.kv_cache_groups) != 1:
-                raise ValueError("KVPP pooling requires one logical full-attention cache group.")
-            spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-            if any(not isinstance(part, FullAttentionSpec) for part in specs):
-                raise ValueError("KVPP pooling requires one logical full-attention cache group.")
+        if self.use_kvpp and (kv_cache_config is None or len(kv_cache_config.kv_cache_groups) != 1):
+            raise ValueError("KVPP pooling requires one logical full-attention cache group.")
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -2846,22 +2840,18 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        if self.use_kvpp:
-            expanded = []
-            for pp_rank in range(self.pp_size):
-                for owner in self.kvpp_shard_ranks[(pp_rank, group_id)]:
-                    for key in keys:
-                        rank_key = self._replace_key_field(key, "head_or_tp_rank", owner)
-                        expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
-            return expanded
         # All-rank KV pool lookup currently assumes PCP=1.
         expanded: list[str] = []
-        num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
         for pp_rank in range(self.pp_size):
+            head_or_tp_ranks = (
+                self.kvpp_shard_ranks[(pp_rank, group_id)]
+                if self.use_kvpp
+                else range(self.get_group_tp_size(group_id))
+            )
             for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in range(num_head_or_tp_ranks):
+                for head_or_tp_rank in head_or_tp_ranks:
                     for key in keys:
                         rank_key = self._replace_key_field(key, "dcp", dcp_rank)
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)

@@ -54,9 +54,10 @@ class ByteStore:
 
 class TestKVPPPool(unittest.TestCase):
     def test_unsupported_groups_are_rejected_before_backend_initialization(self):
-        for groups in ([], [SimpleNamespace(kv_cache_spec=object())], [object(), object()]):
+        for groups in (None, [], [object(), object()]):
+            kv_cache_config = None if groups is None else SimpleNamespace(kv_cache_groups=groups)
             with self.subTest(groups=groups), self.assertRaisesRegex(ValueError, "one logical full-attention"):
-                make_worker(self, tp_size=2, kvpp=True, kv_cache_config=SimpleNamespace(kv_cache_groups=groups))
+                make_worker(self, tp_size=2, kvpp=True, kv_cache_config=kv_cache_config)
 
     def make_registered_worker(self, rank=0, tp=2, targets=3, mtp=True, blocks=3, reverse=False):
         specs = {
