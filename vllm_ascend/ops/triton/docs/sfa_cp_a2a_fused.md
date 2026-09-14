@@ -86,3 +86,26 @@ end for both scatter dimensions.
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sfa_cp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_sfa_cp_a2a.py
 ```
+
+
+## Split MLA history/current attention
+
+The split MLA path calls `sfa_dcp_a2a_fused(..., defer_combine=True)` on the
+communication stream. This returns the packed receive buffer after exchange,
+with shape `[source ranks, local heads, tokens, packed D]` for head scatter.
+Packing and communication overlap current-token FIA on the main stream.
+
+After the main stream waits for the communication event,
+`fused_sfa_dcp_lse_combine(..., local_output=current_output,
+local_lse=current_lse)` reads both raw FIA tensors using their strides. A single
+kernel finds the maximum LSE over all history ranks and the local contribution,
+accumulates their FP32 weighted outputs, and normalizes once. Current KV is
+counted exactly once. Invalid LSE contributions are masked before multiplication;
+fully invalid rows return zero output and, if requested, negative-infinite LSE.
+The output dtype follows the receive buffer (FP32 for split MLA).
+
+The default custom-op path still returns the merged output. Deferred mode and
+`return_lse=True` are mutually exclusive. The single-card test covers direct
+local contributions at DCP sizes 1/2/8, D=96/256/512, both scatter dimensions,
+FP32/BF16/FP16 local output, strided inputs and invalid rows. The MLA unit test
+checks stream ordering, one final combine, and current-KV multiplicity.
