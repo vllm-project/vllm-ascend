@@ -2065,6 +2065,39 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
     runner.ascend_shared_experts.forward.assert_called_once()
 
 
+def test_complete_moe_forward_uses_registered_layer(monkeypatch):
+    layer = object()
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    shared_experts_input = torch.randn(2, 4)
+    input_ids = torch.tensor([11, 22])
+    expected = torch.randn(2, 4)
+    upstream_forward = MagicMock(return_value=expected)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={"test.layer": layer}),
+    )
+    monkeypatch.setattr(fused_moe_module.MoERunner, "forward", upstream_forward)
+
+    result = fused_moe_module._ascend_moe_forward_complete(
+        hidden_states,
+        router_logits,
+        shared_experts_input,
+        input_ids,
+        "test.layer",
+    )
+
+    assert result is expected
+    upstream_forward.assert_called_once_with(
+        layer,
+        hidden_states,
+        router_logits,
+        input_ids=input_ids,
+        shared_experts_input=shared_experts_input,
+    )
+
+
 @pytest.mark.parametrize("initial_comm", [MoECommType.ALLGATHER, MoECommType.MC2])
 def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm):
     from torch.fx.experimental.proxy_tensor import make_fx
