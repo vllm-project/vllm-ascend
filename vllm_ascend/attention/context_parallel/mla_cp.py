@@ -574,18 +574,18 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         history_lse.record_stream(comm_stream)
         with torch.npu.stream(comm_stream):
             comm_stream.wait_event(history_ready)
-            history_attn_out_lse = torch.ops.vllm.sfa_dcp_a2a_fused(
+            history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
                 history_output.float(),
                 history_lse.float(),
                 self.dcp_size,
                 1,
                 self.dcp_group.unique_name if self.dcp_size > 1 else "",
-                return_lse=True,
+                defer_combine=True,
             )
             history_comm_done = comm_stream.record_event()
         # The result is allocated on the communication stream and consumed
         # on the main stream; keep its storage alive through the merge.
-        history_attn_out_lse.record_stream(main_stream)
+        history_recv.record_stream(main_stream)
 
         # Current K/V is replicated on every CP rank. Each DCP rank computes
         # only the Q heads it owns after history all-to-all. Merge this chunk
@@ -606,13 +606,14 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
         # Join the history communication only when both branches are ready.
         main_stream.wait_event(history_comm_done)
-        # Merge two local contributions; this helper performs no collective.
-        # Its FP32 kernel ignores invalid LSE, including FIA's +inf sentinel.
-        current_attn_out_lse = torch.cat((current_output.float(), current_lse.float()), dim=-1)
+        # Reduce all history shards and the replicated current chunk exactly
+        # once, reading current FIA tensors directly without packing them.
         attn_output = fused_sfa_dcp_lse_combine(
-            torch.stack((history_attn_out_lse, current_attn_out_lse)),
+            history_recv,
             self.kv_lora_rank,
-            scatter_dim=0,
+            scatter_dim=1,
+            local_output=current_output,
+            local_lse=current_lse,
         )
         return self._v_up_proj_batch_major(attn_output)
 
