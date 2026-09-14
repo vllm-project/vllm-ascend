@@ -100,17 +100,21 @@ a2:
 a3:
   multi_node:
     test_config:
-      - name: multi-node-deepseek-v3.2-W8A8-EP
-        config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: QWEN3_235B_PD
+        config_file_path: QWEN3_235B_PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 3
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
-      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
-        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
-        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+      - name: multi-node-deepseek-v3.2-W8A8-EP
+        config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 4
       - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
@@ -120,13 +124,13 @@ a3:
         config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 3
-      - name: QWEN3_235B_PD
-        config_file_path: QWEN3_235B_PD.yaml
-        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
-        size: 3
 
   double_node:
     test_config:
+      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
+        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
       - name: multi-node-qwen3-dp
         config_file_path: Qwen3-235B-A22B.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
@@ -173,10 +177,6 @@ a3:
         size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
-        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
-        size: 2
-      - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
-        config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
   single_node:
