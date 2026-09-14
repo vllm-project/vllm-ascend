@@ -419,6 +419,117 @@ def test_sampler_greedy_call_returns_argmax() -> None:
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
 
 
+def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        expanded_idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
+        idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        num_reqs=1,
+        seq_lens=torch.ones(1, dtype=torch.int32),
+    )
+
+
+def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
+    """Align with MRV1 ``tests/ut/sample/test_sampler.py`` mask checks.
+
+    310P MRV2 calls the same Triton-free ``apply_top_k_top_p`` path; assert
+    discarded logits become ``-inf`` and the kept set size matches top-k / top-p.
+    """
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+
+    # token0 > token1 >> rest
+    logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
+    k = torch.tensor([2], dtype=torch.int32)
+    p = torch.tensor([0.5], dtype=torch.float32)
+
+    top_k_only = apply_top_k_top_p(logits.clone(), k, None)
+    finite_k = (top_k_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
+    assert finite_k.tolist() == [0, 1]
+    assert top_k_only[0, 0] == pytest.approx(5.0)
+    assert top_k_only[0, 1] == pytest.approx(4.0)
+    assert not torch.isfinite(top_k_only[0, 2:]).any()
+
+    # Mirror MRV1: combined filter keeps finite values and original shape.
+    filtered = apply_top_k_top_p(logits.clone(), k, p)
+    assert filtered.shape == logits.shape
+    assert torch.isfinite(filtered).any()
+    assert 0 in (filtered[0] > float("-inf")).nonzero(as_tuple=False).view(-1).tolist()
+
+    top_p_only = apply_top_k_top_p(logits.clone(), None, p)
+    finite_p = (top_p_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
+    assert 0 in finite_p.tolist()
+    assert finite_p.numel() >= 1
+    assert finite_p.numel() < logits.shape[-1]
+
+
+def test_sampler_top_k_restricts_softmax_mass() -> None:
+    """With temp>0, top-k must zero-out discarded tokens before inverse-CDF.
+
+    vLLM clears top_k/top_p when temperature==0, so exercise the random path
+    with ``_random_sample_310p`` mocked (CPU-safe; mirrors MRV1 CDF unit style).
+    """
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    # max at idx1, second at idx2; top_k=2 must keep only {1,2}
+    logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_and_argmax(probs: torch.Tensor, generators):
+        del generators
+        captured["probs"] = probs.detach().cpu().clone()
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+        out = sampler(logits, _make_sampler_batch())
+
+    probs = captured["probs"][0]
+    assert probs[3:].sum().item() == pytest.approx(0.0, abs=1e-6)
+    assert probs[0].item() == pytest.approx(0.0, abs=1e-6)
+    assert probs[1:3].sum().item() == pytest.approx(1.0, abs=1e-5)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
+
+
+def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
+    """top_k=1 leaves one candidate; sampled token equals global argmax."""
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
+
+    def _argmax_sample(probs: torch.Tensor, generators):
+        del generators
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_argmax_sample):
+        out = sampler(logits, _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == int(logits.argmax(dim=-1).item())
+
+
+def test_sampler_top_p_restricts_softmax_mass() -> None:
+    """top_p must drop the long tail before sampling (MRV1-style mask contract)."""
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_and_argmax(probs: torch.Tensor, generators):
+        del generators
+        captured["probs"] = probs.detach().cpu().clone()
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+        out = sampler(logits, _make_sampler_batch())
+
+    probs = captured["probs"][0]
+    assert probs[0].item() == pytest.approx(1.0, abs=1e-5) or probs[:2].sum().item() == pytest.approx(1.0, abs=1e-5)
+    assert probs[2:].sum().item() == pytest.approx(0.0, abs=1e-5)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
+
+
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4],
