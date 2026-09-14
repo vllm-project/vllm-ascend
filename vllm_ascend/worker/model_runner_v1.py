@@ -1715,6 +1715,8 @@ class NPUModelRunner(GPUModelRunner):
                     else None
                 ),
             )
+            if isinstance(self.drafter, AscendDSparkProposer):
+                draft_token_ids = self.drafter.mask_invalid_draft_output(draft_token_ids)
             if get_pp_group().world_size > 1 and hasattr(
                 self.drafter, "take_last_draft_probs"
             ):
