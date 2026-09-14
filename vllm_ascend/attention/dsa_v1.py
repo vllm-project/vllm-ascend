@@ -2097,7 +2097,15 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
-            o_proj_input[:decode_tokens] = output_decode
+            if (
+                not has_prefill
+                and o_proj_input.shape == output_decode.shape
+                and o_proj_input.dtype == output_decode.dtype
+                and o_proj_input.device == output_decode.device
+            ):
+                o_proj_input = output_decode
+            else:
+                o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
 
