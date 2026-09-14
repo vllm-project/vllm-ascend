@@ -61,7 +61,9 @@ def _get_target_rotation_path(vllm_config):
     if rotation_path is not None:
         return rotation_path
     # MRV2 clears target quantization before constructing a BF16 draft.
-    # Its MLA speculator preserves this path for model-owned loading.
+    # The shared DSpark speculator preserves this path for model-owned loading.
+    # TODO: Pass target rotation metadata through an upstream draft-loading
+    # interface instead of a temporary field on the draft HF config.
     config = vllm_config.speculative_config.draft_model_config.hf_config
     return getattr(config, "_ascend_target_rotation_path", None)
 
