@@ -503,6 +503,9 @@ def test_mrv2_pp_refreshes_host_positions(owns_speculator, use_spec_pp, prefill_
     events = []
 
     class BaseStateRunner:
+        req_states: Any
+        num_computed_tokens_cpu: torch.Tensor
+
         def postprocess_sampled(self, *args):
             events.append("reject")
             self.req_states.num_computed_tokens.gpu[0] = 11
@@ -515,7 +518,7 @@ def test_mrv2_pp_refreshes_host_positions(owns_speculator, use_spec_pp, prefill_
             events.append("copy")
             self.num_computed_tokens_cpu.copy_(self.req_states.num_computed_tokens.gpu)
 
-    namespace = {"BaseStateRunner": BaseStateRunner}
+    namespace: dict[str, Any] = {"BaseStateRunner": BaseStateRunner}
     load_definitions(
         "vllm_ascend/worker/v2/model_runner.py",
         {"NPUModelRunner"},

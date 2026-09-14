@@ -35,8 +35,29 @@ paths. Model Runner V1 uses the same local token count for PP receives,
 profiling and graph-capture buffers. Model Runner V2 uses local-sized receive
 views and graph input/output views while retaining persistent buffer storage
 across batches and graph gears.
-Existing context-parallel and speculative-decoding compatibility constraints
-still apply.
+Memory profiling and graph preparation also slice PP receive views before
+model execution; ordinary input preparation is not called on those paths.
+
+### Combining PP, SP and DSpark on Model Runner V2
+
+Model Runner V2 supports Kimi-K3 DSpark with PP, including sequence-sharded
+PP execution. The draft model runs on the last PP stage, using that stage's
+TP size for `draft_tensor_parallel_size`. K3 MLA and legacy GQA draft
+architectures are accepted by the rank-local draft check.
+
+Target stages carry cumulative auxiliary states using the existing PP
+transport keys. MLA drafts receive raw prefix sums, without adding the
+three-dimensional attention-residual bank. Legacy GQA drafts retain their
+materialized auxiliary-state path.
+
+Every speculative PP stage keeps the CPU attention lengths synchronized with
+device token positions. This includes rejection corrections on stages without
+a local draft model and non-final prefill chunks that advance without a
+sampled-token broadcast. The next attention-metadata preparation waits for
+that copy before consuming the host positions.
+
+Existing context-parallel compatibility constraints still apply. Model
+Runner V1 PP+SP support does not imply MRV1 DSpark+PP support.
 
 ## 3 Prerequisites
 
