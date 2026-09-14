@@ -9,20 +9,20 @@ output gate (``use_output_gate=False``, no ``g_proj``).
 
 Execution shape (v1 ``AscendDSparkProposer``):
   * ``combine_hidden_states`` projects the target's concatenated aux hidden
-    states (5 x 7168) into the draft width (``context_proj`` + ``context_norm``).
+    states into the draft width (``context_proj`` + ``context_norm``).
   * ``precompute_and_store_context_kv`` writes the projected context straight
     into each draft layer's latent KV cache through the Ascend impl's
     ``exec_kv_prefill`` (fused kv_a_layernorm + YaRN RoPE + paged-cache
     insert). No attention is computed for context tokens.
-  * The (per request) 7-token draft block then runs one bidirectional forward:
-    the draft attention metadata's ``causal=False`` drives ``sparse_mode=0``
-    in ``mla_v1.py``, and the draft attention-group metadata builders are
-    flipped to ``use_mla_rope=True`` so the block's q_pe/k_pe receive the same
-    YaRN rotations as the precomputed context KV.
+  * The per-request draft block then runs one forward. Attention causality is
+    read from the checkpoint (older checkpoints default to bidirectional), and
+    the draft attention-group metadata builders are flipped to
+    ``use_mla_rope=True`` so the block's q_pe/k_pe receive the same YaRN
+    rotations as the precomputed context KV.
 """
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import torch
 import torch.nn as nn
@@ -456,9 +456,25 @@ class K3DSparkModel(nn.Module):
         return [layer.self_attn.attn.layer_name for layer in self.layers]
 
     def get_draft_attn_causal(self) -> list[bool]:
-        # K3 MLA drafts verify the speculative block bidirectionally. Keep the
-        # per-layer contract aligned with get_draft_kv_cache_layer_names().
-        return [False] * len(self.layers)
+        """Return per-layer causality from the draft checkpoint.
+
+        The first K3 MLA DSpark checkpoint used bidirectional draft attention
+        and did not serialize a causality flag. Newer checkpoints such as
+        ``Inferact/Kimi-K3-DSpark-Block5`` are trained with full causal
+        attention and serialize ``dflash_config.causal=true`` (as well as the
+        training-side ``full_attention_causal`` mirror). Follow the same
+        precedence as vLLM's DFlash models: the runtime ``dflash_config`` value
+        wins, then the full-attention field, with ``False`` preserving legacy
+        checkpoint behavior.
+        """
+        dflash_config = getattr(self.config, "dflash_config", None) or {}
+        if isinstance(dflash_config, Mapping):
+            causal = dflash_config.get("causal")
+        else:
+            causal = getattr(dflash_config, "causal", None)
+        if causal is None:
+            causal = getattr(self.config, "full_attention_causal", False)
+        return [bool(causal)] * len(self.layers)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_head.embed(token_ids)
