@@ -12,43 +12,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from tests.ut.kvpp_utils import layer_name, make_cache_config, make_kvpp_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
-
-
-@pytest.mark.parametrize("rank", [0, 1, 3])
-def test_kvpp_publishes_persistent_layers_and_replicated_mtp(monkeypatch, rank):
-    config = make_kvpp_config(tp=4)
-    config.model_config.hf_config.num_hidden_layers = 2
-    names = [layer_name(index) for index in range(3)]
-    spec = MLAAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
-    caches = {}
-    alignment = KV_CACHE_BUFFER_ALIGNMENT
-    for name in names:
-        raw = torch.zeros(2 * alignment, dtype=torch.int8)
-        caches[name] = raw.narrow(0, (-raw.data_ptr()) % alignment, 64).view(torch.float16).view(2, 2, 8)
-    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.vllm_config = config
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=4))
-    worker.tp_rank = rank
-    worker.kv_cache_config = make_cache_config(dict.fromkeys(names, spec), num_blocks=2)
-    worker.engine_id = "producer"
-    worker.te_rpc_port = 9000
-    worker.block_size = 2
-    worker.side_channel_host = "127.0.0.1"
-    worker.handshake_port = 37000 + rank
-    monkeypatch.setattr(base_worker, "global_te", MagicMock())
-    worker.register_kv_caches(dict(reversed(list(caches.items()))))
-    expected = ([names[rank]] if rank < 2 else []) + [names[2]]
-    assert worker.transfer_metadata.layer_names == expected
-    assert worker.transfer_metadata.kv_caches_base_addr == [[caches[name].data_ptr()] for name in expected]
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
@@ -87,7 +57,6 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -137,7 +106,6 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -193,7 +161,6 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -236,7 +203,6 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     worker.kv_cache_config = config
     worker.engine_id = "engine"
     worker.te_rpc_port = 9000

@@ -7,6 +7,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
 MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
+TP_SIZE = 2
 BLOCK_SIZE = 128
 NUM_BLOCKS = 64
 TOKEN_BUDGET = BLOCK_SIZE
@@ -26,26 +27,22 @@ def token_prompt(tokenizer, text, length):
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,chunked_prefill,prefix_caching,mtp",
-    parallel="TP,PCP,EP",
+    parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
     graph_mode="eager",
 )
-@pytest.mark.parametrize("tp_size,pcp_size", [(2, 1), (1, 2)])
 @wait_until_npu_memory_free()
-def test_kvpp_combined_features(monkeypatch, tp_size, pcp_size):
-    """Compare KVPP off/on with TP or V2 PCP, EP, chunk, prefix and MTP."""
-    if pcp_size > 1:
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+def test_kvpp_combined_features():
+    """Compare KVPP off/on outputs with TP, EP, chunk, prefix and MTP."""
     results = []
     for enabled in (False, True):
         with VllmRunner(
             maybe_model_redirect(MODEL),
             dtype="auto",
             quantization="ascend",
-            tensor_parallel_size=tp_size,
-            prefill_context_parallel_size=pcp_size,
+            tensor_parallel_size=TP_SIZE,
             enable_expert_parallel=True,
             enforce_eager=True,
             async_scheduling=True,

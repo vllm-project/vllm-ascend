@@ -5,31 +5,7 @@ import pytest
 import torch
 
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_cache_config, make_kvpp_config, make_kvpp_specs
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import collect_kvpp_register_regions
 from vllm_ascend.worker import kvpp_cache
-
-
-def test_mooncake_registers_aligned_persistent_bundles(monkeypatch):
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
-    config = make_kvpp_config()
-    config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorV2")
-    caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(make_kvpp_specs()), torch.device("cpu"))
-    persistent = {layer_name(index): caches[layer_name(index)] for index in (12, 13, 14, 17)}
-    regions = collect_kvpp_register_regions(persistent)
-    assert len(regions.ptrs) == 4
-    alignment = kvpp_cache.KVPP_PD_ALIGNMENT
-    for ptr, size in zip(regions.ptrs, regions.lengths):
-        assert ptr % alignment == size % alignment == 0
-    for parts in persistent.values():
-        assert parts[0].data_ptr() in regions.ptrs
-        for part in parts:
-            storage = part.untyped_storage()
-            assert any(
-                storage.data_ptr() <= ptr <= part.data_ptr()
-                and part.data_ptr() + part.numel() <= ptr + size <= storage.data_ptr() + storage.nbytes()
-                for ptr, size in zip(regions.ptrs, regions.lengths)
-            )
-    assert caches[layer_name(9)][0].untyped_storage().nbytes() == 76 * 3
 
 
 @pytest.mark.parametrize("num_blocks,total_bytes", [(3, 1176), (2, 784)])

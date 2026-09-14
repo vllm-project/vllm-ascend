@@ -622,30 +622,6 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertNotIn("r1", scheduler._request_trackers)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def test_cancelled_load_keeps_completion_until_receiving_finishes(self, mock_client_cls):
-        scheduler = KVPoolScheduler(self._make_config(extra_config={"load_async": True}), use_layerwise=False)
-        scheduler._loading_req_ids = {"cancelled", "still_loading"}
-        output = MagicMock(
-            finished_req_ids={"cancelled"},
-            preempted_req_ids=set(),
-            scheduled_new_reqs=[],
-            num_scheduled_tokens={},
-        )
-        output.scheduled_cached_reqs.req_ids = []
-
-        metadata = scheduler.build_connector_meta(output)
-
-        self.assertEqual(metadata.loading_req_ids, {"cancelled", "still_loading"})
-        scheduler.update_connector_output(
-            MagicMock(finished_sending=None, finished_recving={"cancelled"}, kv_connector_worker_meta=None)
-        )
-        self.assertEqual(scheduler._loading_req_ids, {"still_loading"})
-        scheduler.update_connector_output(
-            MagicMock(finished_sending=None, finished_recving={"cancelled"}, kv_connector_worker_meta=None)
-        )
-        self.assertEqual(scheduler._loading_req_ids, {"still_loading"})
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_preempted(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)

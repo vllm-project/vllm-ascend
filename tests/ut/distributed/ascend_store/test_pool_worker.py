@@ -53,8 +53,6 @@ def make_worker(
     use_mla=False,
     enable_kv_events=False,
     num_hidden_layers=None,
-    kvpp=False,
-    kv_cache_config=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -67,16 +65,6 @@ def make_worker(
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
-    config.additional_config = {}
-    if kvpp:
-        config.additional_config = {"enable_kvpp": True}
-    config.parallel_config.tensor_parallel_size = tp_size
-    config.parallel_config.prefill_context_parallel_size = 1
-    config.model_config.dtype = "bfloat16"
-    config.model_config.quantization = None
-    config.model_config.hf_config = SimpleNamespace(num_hidden_layers=num_hidden_layers or num_layers)
-    config.cache_config.cache_dtype = "auto"
-    config.speculative_config = None
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = use_mla
     config.model_config.hf_text_config = MagicMock(spec=[])
@@ -99,7 +87,7 @@ def make_worker(
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+    return KVPoolWorker(config, use_layerwise=use_layerwise)
 
 
 class _SparseSWAHitManager:
@@ -410,7 +398,6 @@ class TestKVPoolWorkerInit(unittest.TestCase):
 
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         config = MagicMock()
-        config.additional_config = {}
         config.model_config.model = "org/llama-7b"
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
@@ -660,7 +647,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         config = MagicMock()
-        config.additional_config = {}
         config.model_config.model = "org/llama-7b"
         config.model_config.use_mla = False
         config.model_config.hf_text_config = MagicMock(spec=[])
@@ -1625,7 +1611,6 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
     def _make_vllm_config(self, kv_role="kv_consumer", extra_config=None, num_kv_heads=8, use_sparse=False):
         config = MagicMock()
-        config.additional_config = {}
         config.model_config.model = "qwen/qwen3-8b"
         config.model_config.use_mla = False
         if use_sparse:
