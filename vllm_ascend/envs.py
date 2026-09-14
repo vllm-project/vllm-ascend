@@ -36,6 +36,7 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # FLASHMLA[REF-16468]: opt in before worker/backend construction.
     # Experimental A5 FlashMLA route. 0 keeps existing MLA execution; 1
     # consumes the token-fused [P, S, 1, 576] cache from the #16456 path.
     # Non-sensitive. Requires the matching external CANN 9.2 operator package.

@@ -77,6 +77,9 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+# FLASHMLA[REF-16468]: MLA subset of the reference's shared FA/MLA buffers.
+# Only AscendMLAMetadataBuilder uses these helpers in this draft; the generic
+# AscendAttentionBackend below still follows its existing attention path.
 @dataclass
 class AscendFlashAttentionMetadata:
     """Persistent device buffers consumed by the external FlashMLA package."""
@@ -115,11 +118,18 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
     batch = common.num_reqs
     tokens = max(common.num_actual_tokens, common.num_input_tokens)
     table = common.block_table_tensor[:batch]
+    # FLASHMLA[REF-16468]: cache allocations by batch/token/table capacity.
+    # Contents (including physical block IDs) are refreshed on every step;
+    # stable addresses let captured attention consume the updated inputs.
     key = batch, tokens, table.shape[1]
     if key not in builder._flash_buffers:
+        # The extra row owns padded tokens, with seqused_q=cache_seqlens=0.
         rows = batch + 1
         int_args = {"dtype": torch.int32, "device": builder.device}
         float_args = {"dtype": builder.kv_cache_spec.dtype, "device": builder.device}
+        # FLASHMLA[EXTERNAL]: retained A5 capacity formula from #16468.
+        # This allocates storage, not a synthetic schedule: the real metadata
+        # op generates its contents. The package result is checked below.
         words = ((36 + 72) * rows + 1) * 16
         words = ((words + 4095) // 4096) * 4096
         block_size = getattr(builder, "kernel_block_size", None) or builder.kv_cache_spec.block_size
@@ -135,6 +145,8 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
             token_live=torch.zeros(tokens, dtype=torch.bool, device=builder.device),
             positions=torch.zeros(tokens, dtype=torch.int64, device=builder.device),
             attn_mask=builder._flash_attn_mask,
+            # Capacity bounds remain fixed for graph replay. Actual request
+            # lengths are carried by cu/used_q/cache_lens in token units.
             max_query_len=tokens,
             max_seq_len=table.shape[1] * block_size,
             is_prefill=common.max_query_len > builder.decode_threshold,
@@ -143,6 +155,9 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
     flash.is_prefill = common.max_query_len > builder.decode_threshold
 
     def build_metadata() -> None:
+        # FLASHMLA[REF-16468]: read current device tensors when the executor
+        # submits this closure, after asynchronous acceptance corrections.
+        # cu is cumulative; used_q/cache_lens are per-request token counts.
         flash.cu[: batch + 1].copy_(common.query_start_loc[: batch + 1])
         flash.cu[batch + 1].fill_(tokens)
         flash.used_q[:batch].copy_(flash.cu[1 : batch + 1] - flash.cu[:batch])
@@ -155,6 +170,8 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
         flash.slots.fill_(-1)
         slots = common.slot_mapping[:tokens]
         flash.slots[:slots.shape[0]].copy_(slots)
+        # Mark live query intervals with a prefix sum. Setting inactive slots
+        # to -1 prevents graph/request padding from writing into real KV pages.
         flash.live_boundaries.zero_()
         live_rows = (flash.used_q > 0).to(torch.int32)
         flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live_rows)
@@ -166,6 +183,9 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
         flash.positions.zero_()
         positions = common.positions[:tokens]
         flash.positions[:positions.shape[0]].copy_(positions)
+        # FLASHMLA[EXTERNAL]: replace #16468's _C_ascend metadata dispatcher.
+        # Heads, lengths, dimensions, mask_mode and layout_q must agree with
+        # _forward_flash; the two operators cannot check that pair for us.
         metadata = flash_mla_with_kvcache_metadata(
             flash.cache_lens,
             builder.flash_num_heads,
@@ -185,9 +205,13 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
                 f"schedule buffer: expected {flash.schedule.numel()} int32 words, "
                 f"got {metadata.numel()} {metadata.dtype} words."
             )
+        # Preserve the schedule address captured by the main attention op.
+        # copy_ transfers the real producer output on the metadata stream.
         flash.schedule.copy_(metadata)
 
     if builder._device_metadata_enabled:
+        # FLASHMLA[REF-16468]: the existing worker executor owns the stream,
+        # events and reuse fence. _forward_flash waits on this same group ID.
         builder._device_metadata_tasks = (
             DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_metadata, id(flash.schedule)),
         )

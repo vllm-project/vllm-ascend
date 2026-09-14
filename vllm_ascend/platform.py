@@ -231,6 +231,8 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
+        # FLASHMLA[REF-16468]: select the existing dense MLA backend before
+        # FA3 auto-selection. This draft does not transplant the GQA Flash path.
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             if use_sparse or use_compress or attn_selector_config.use_pcp:
                 raise ValueError(
@@ -468,6 +470,9 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        # FLASHMLA[REF-16468]: retain the A5/dense/unquantized/PCP=DCP=1
+        # constraints relevant to this MLA consumer. These checks do not
+        # qualify #16468's separate KDA/Mamba or DSpark integrations.
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             from vllm_ascend.device.device_config import is_950
 

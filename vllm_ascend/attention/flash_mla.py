@@ -9,6 +9,9 @@ from typing import Any
 import torch
 
 
+# FLASHMLA[EXTERNAL]: the Python integration follows #16468, but operator
+# registration comes from the installed wheel rather than _C_ascend. The
+# matching CANN/custom runtime environment must already be active in the worker.
 @lru_cache
 def _get_flash_mla_ops() -> tuple[Callable, Callable]:
     """Load packaged CANN 9.2 FlashMLA operators after device selection.

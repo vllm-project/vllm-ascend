@@ -118,6 +118,8 @@ class AscendMLABackend(AttentionBackend):
         head_size: int,
         cache_type: str = "",
     ) -> tuple[int, ...]:
+        # FLASHMLA[ADAPT-16456]: preserve the allocator's [P, S, N, D] ABI.
+        # #16468 instead used [P, N, S, D] for its FlashMLA backend shape.
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             return num_blocks, block_size, num_kv_heads, head_size
         return num_blocks, block_size, num_kv_heads, head_size
@@ -133,6 +135,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
+        # FLASHMLA[REF-16468]: allow the paged operator's 16-token multiples;
+        # the runner still selects one size shared by each attention group.
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             return list(range(16, 1025, 16))
         return [128]
@@ -335,6 +339,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        # FLASHMLA[REF-16468]: implement the existing task-provider protocol.
+        # The runner discovers this builder and enables its metadata stream.
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
@@ -362,6 +368,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        # FLASHMLA[REF-16468]: advertise the reference's variable-query graph
+        # path. This capability declaration is not a completed runtime test.
         return (
             AttentionCGSupport.ALWAYS
             if envs.VLLM_ASCEND_ENABLE_FLASH_MLA
@@ -495,6 +503,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # FLASHMLA[REF-16468]: one flash descriptor covers prefill, decode
+            # and mixed batches. Zero legacy split counts are placeholders;
+            # actual query/KV lengths are in flash.cu/used_q/cache_lens.
             common = common_attn_metadata
             return self.metadata_cls(
                 num_input_tokens=common.num_input_tokens,
@@ -912,6 +923,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # FLASHMLA[REF-16468]: implementation scope is BF16 latent MLA.
+            # Quantized model weights may still be handled by projection layers;
+            # fa_quant_layer here concerns the attention/KV representation.
             if (self.kv_lora_rank, self.qk_rope_head_dim, self.num_kv_heads) != (
                 512,
                 64,
@@ -941,8 +955,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         draft_attn_metadatas=None,
     ):
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
-            # FlashMLA inputs are refreshed by DeviceMetadataExecutor before
-            # replay. There is no FIA graph-task handle to update here.
+            # FLASHMLA[REF-16468]: the old FIA graph-task update is bypassed.
+            # Per-step changes live in stable device buffers refreshed before
+            # replay by DeviceMetadataExecutor; they are not frozen at capture.
             return
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
@@ -1574,6 +1589,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
+        # FLASHMLA[TODO]: #16468 also adapts this context-only KV writer for
+        # MLA DSpark. That branch has not been ported to the BBND cache here;
+        # ordinary FlashMLA prefill writes KV inside _forward_flash instead.
         if not self.use_mla_rope:
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
 
@@ -2167,6 +2185,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         contiguous here.  Its first stride encodes the manager-page geometry
         supplied by the allocator; the external kernel uses the same view.
         """
+        # FLASHMLA[ADAPT-16456]: fused_cache is allocated in
+        # NPUModelRunner._reshape_kv_cache_tensors, stored by layer name, and
+        # bound by bind_kv_cache. This is that same Tensor, including its
+        # storage offset and padded page stride; no tuple recovery is needed.
         flash = attn_metadata.flash
         if flash is None:
             raise RuntimeError("FlashMLA metadata is absent from the attention call.")
@@ -2181,11 +2203,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                 f"got {tuple(kv_cache.shape)}."
             )
 
+        # FLASHMLA[REF-16468]: wait for scheduling and input-buffer refresh.
+        # The existing executor uses an Event or a FULL-graph ExternalEvent.
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(flash.schedule))
         num_tokens = flash.query.shape[0]
         if num_tokens == 0:
             return output.zero_()
 
+        # FLASHMLA[REF-16468]: projection + normalization + per-layer RoPE
+        # produce Q[T,H,576], cKV[T,1,512] and kPE[T,1,64].
         x = hidden_states[:num_tokens]
         if self.fused_qkv_a_proj is not None:
             qkv_lora = self.fused_qkv_a_proj(x)[0]
@@ -2205,8 +2231,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         flash.query[..., :512].copy_(q_abs)
         flash.query[..., 512:].copy_(q_pe)
 
-        # Keep the existing paged-cache writer. Only the consumer changes:
-        # FlashMLA reads the unified [cKV(512) | kPE(64)] storage directly.
+        # FLASHMLA[ADAPT-16456]: these slices alias the single fused storage.
+        # They are already [P,S,1,D], so #16468's unsqueeze(2) is omitted.
+        # Only current-token inputs are contiguous; the cache retains stride.
         torch_npu.npu_scatter_pa_kv_cache(
             key=c_kv.contiguous(),
             value=k_pe.contiguous(),
@@ -2217,6 +2244,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         notify_kv_cache_written(layer_name)
 
+        # FLASHMLA[EXTERNAL]: preserve #16468's two-stage call contract while
+        # replacing its _C_ascend dispatcher with the installed package.
+        # FLASHMLA[ADAPT-16456]: pass [P,S,1,576] directly as PA_BBND, instead
+        # of #16468's [P,S,576].unsqueeze(1) with PA_BNBD.
         latent, _ = flash_mla_with_kvcache(
             flash.query,
             kv_cache,
@@ -2236,6 +2267,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             layout_out="NTD",
             return_softmax_lse=False,
         )
+        # FLASHMLA[REF-16468]: NTD output [H,T,512] matches _v_up_proj's
+        # head-major input. Then apply the optional gate and output projection.
+        # Choosing TND output here would also require changing this projection.
         projected = self._v_up_proj(latent)
         if self.use_output_gate:
             projected.mul_(torch.sigmoid(self.g_proj(x.contiguous())[0]))
@@ -2258,6 +2292,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Profiling run.
             return output.fill_(0)
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # FLASHMLA[REF-16468]: route BEFORE legacy decode/prefill splitting.
+            # This branch handles both phases and mixed batches, not decode only.
             return self._forward_flash(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
         num_actual_tokens = self.get_num_actual_tokens(attn_metadata)

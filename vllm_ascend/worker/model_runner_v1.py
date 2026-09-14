@@ -514,6 +514,10 @@ class NPUModelRunner(GPUModelRunner):
         # AscendMLABackend, and DSV4 compressed attention metadata) need
         # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
         # in async spec decode mode; others (SFA, GDN, etc.) do not.
+        # FLASHMLA[REF-16468]: its metadata consumes corrected device seq_lens,
+        # so _prepare_inputs can skip the optimistic CPU-mirror correction.
+        # FLASHMLA[TODO]: this global guard also covers non-MLA backends; scope
+        # it per consumer before enabling a mixed MLA/legacy-attention runner.
         self._needs_seq_lens_cpu_sync = not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and (
             self.use_compress or issubclass(
                 self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
@@ -5235,6 +5239,9 @@ class NPUModelRunner(GPUModelRunner):
                             ),
                             storage_offset=typed_raw.storage_offset(),
                         )
+                        # FLASHMLA[ADAPT-16456]: inherited allocation/binding.
+                        # bind_kv_cache passes this whole [P,S,1,576] view to
+                        # attention; _forward_flash consumes it as PA_BBND.
                         kv_caches[layer_name] = fused_cache
                         continue
                     raw_kv_is_combined = False
@@ -5547,10 +5554,10 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 self.kernel_block_sizes.append([selected_kernel_size])
                 if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
-                    # Metadata builders are created before virtual splitting
-                    # selects the kernel page size.  FlashMLA's block table and
-                    # cache lengths must use this final unit, not the manager
-                    # page size that owns its non-contiguous stride.
+                    # FLASHMLA[REF-16468]: builders precede kernel-page selection.
+                    # Propagate the chosen size for max_seq_len = table_width
+                    # * kernel_size. Block IDs index kernel pages; cache_lens
+                    # itself remains a token count, not a page count.
                     for attn_group in attn_groups:
                         for builder in attn_group.metadata_builders:
                             builder.set_kernel_block_size(selected_kernel_size)
@@ -5664,6 +5671,9 @@ class NPUModelRunner(GPUModelRunner):
                     if issubclass(attn_backend, AscendMLABackend)
                     else None
                 )
+                # FLASHMLA[TODO]: #16468 adds num_heads_q to this grouping key.
+                # The current key must be extended before layers with different
+                # Q head counts can safely share FlashMLA metadata builders.
                 key = (full_cls_name, layer_kv_cache_spec, use_mla_rope)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend,
@@ -5714,6 +5724,9 @@ class NPUModelRunner(GPUModelRunner):
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
+        # FLASHMLA[REF-16468]: reuse this provider/executor machinery already
+        # present in the #16456 base. AscendMLAMetadataBuilder now participates;
+        # worker/device_metadata.py itself is unchanged by this integration.
         device_metadata_providers = {
             id(builder): builder
             for attn_groups in self.attn_groups
