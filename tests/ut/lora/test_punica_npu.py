@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.lora import lora_ops
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
@@ -57,14 +58,25 @@ def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
 )
 def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_torch_ops) -> None:
     with (
-        patch("vllm_ascend.lora.punica_npu.get_ascend_device_type", return_value=device_type),
+        patch(
+            "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
+            return_value=get_hardware_profile(device_type),
+        ),
+        patch(
+            "vllm_ascend.lora.punica_npu.get_ascend_device_type",
+            return_value=device_type,
+        ),
         patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes") as refresh,
     ):
         wrapper = PunicaWrapperNPU(
             8,
             2,
             torch.device("cpu"),
-            lora_config=SimpleNamespace(max_lora_rank=max_lora_rank),
+            lora_config=SimpleNamespace(
+                max_lora_rank=max_lora_rank,
+                max_loras=2,
+                fully_sharded_loras=False,
+            ),
         )
     refresh.assert_called_once()
     if expect_torch_ops:
@@ -142,15 +154,17 @@ def test_add_lora_embedding_prefill_uses_sgmv_expand() -> None:
     wrapper.bgmv_expand.assert_not_called()
 
 
-def test_add_lora_linear_allocates_fp32_buffer_when_missing() -> None:
+def test_lora_linear_kernel_allocates_fp32_buffer_when_missing() -> None:
     wrapper = _make_wrapper()
+    wrapper._lora_shrink_buffers = {}
+    wrapper._max_num_batched_tokens = 8
     wrapper.add_shrink = Mock()
     wrapper.add_expand = Mock()
     x = torch.ones(3, 8)
     y = torch.zeros(3, 16)
     a = (torch.ones(2, 4, 8),)
     b = (torch.ones(2, 16, 4),)
-    wrapper.add_lora_linear(y, x, a, b, 1.0, (16,))
+    wrapper._lora_linear_kernel(y, x, a, b, 1.0, (16,))
     buffer = wrapper.add_shrink.call_args.args[0]
     assert len(buffer) == 1
     assert buffer[0].shape == (3, 4)

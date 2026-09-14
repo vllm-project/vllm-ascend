@@ -10,25 +10,22 @@ import psutil
 import regex as re
 from vllm.logger import logger
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import (
+    CPUBindingMode,
+    DeviceAddressingMode,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 
 MASK_BIT = 32  # Number of bits in a CPU affinity mask group
 MIN_CPUS_PER_NPU = 5  # 2(IRQ) + 1(main, at least 1 CPU) + 1(acl) + 1(release) = 5 CPUs per NPU
 MIN_CPUS_PER_NPU_WITHOUT_IRQ = 3  # 1(main, at least 1 CPU) + 1(acl) + 1(release)
-ASCEND_950_PHYSICAL_CPUS_PER_CLUSTER = 8
+PHYSICAL_CPUS_PER_CLUSTER = 8
 ALLOWED_CPUS_PATH = "/proc/self/status"
 ASCEND_RT_VISIBLE_DEVICES = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
 
-TOPO_AFFINITY_MODE = "topo_affinity"
-GLOBAL_SLICE_MODE = "global_slice"
-
-DEVICE_BINDING_MODE: dict["AscendDeviceType", str] = {
-    AscendDeviceType.A2: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A3: GLOBAL_SLICE_MODE,
-    AscendDeviceType._310P: TOPO_AFFINITY_MODE,
-    AscendDeviceType.A5: TOPO_AFFINITY_MODE,
-}
-NO_IRQ_BINDING_DEVICE_TYPES = {AscendDeviceType.A5}
+TOPO_AFFINITY_MODE = CPUBindingMode.TOPO_AFFINITY.value
+GLOBAL_SLICE_MODE = CPUBindingMode.GLOBAL_SLICE.value
 
 
 def is_arm_cpu() -> bool:
@@ -205,9 +202,10 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-    def __init__(self, rank_id: int):
+    def __init__(self, rank_id: int, npu_id: int):
         self.rank_id = rank_id
         self.device_info: DeviceInfo = DeviceInfo()
+        self.current_npu = npu_id
         self.cpu_node: dict[int, int] = {}
         self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
         self.npu_cpu_pool: dict[int, list[int]] = {}
@@ -325,7 +323,7 @@ class CpuAlloc:
                 threads_per_core,
             )
             return None
-        return ASCEND_950_PHYSICAL_CPUS_PER_CLUSTER * threads_per_core
+        return PHYSICAL_CPUS_PER_CLUSTER * threads_per_core
 
     def get_single_numa_node(self, cpu_list: list[int]) -> int | None:
         if not cpu_list:
@@ -518,16 +516,15 @@ class CpuAlloc:
 
     @staticmethod
     def _binding_mode() -> str:
-        device_type = get_ascend_device_type()
-        return DEVICE_BINDING_MODE.get(device_type, TOPO_AFFINITY_MODE)
+        return get_current_hardware_profile().cpu_binding_mode.value
 
     @staticmethod
-    def _is_ascend_950() -> bool:
-        return get_ascend_device_type() == AscendDeviceType.A5
+    def _uses_cluster_cpu_topology() -> bool:
+        return get_current_hardware_profile().supports(HardwareCapability.CLUSTER_CPU_TOPOLOGY)
 
     @staticmethod
     def _reserve_irq_cpus() -> bool:
-        return get_ascend_device_type() not in NO_IRQ_BINDING_DEVICE_TYPES
+        return get_current_hardware_profile().supports(HardwareCapability.IRQ_CPU_RESERVATION)
 
     @staticmethod
     def _min_cpus_per_npu() -> int:
@@ -542,7 +539,7 @@ class CpuAlloc:
         logger.info(
             "[cpu_bind_mode] mode=%s rank=%s visible_npus=%s", mode, self.rank_id, self.device_info.running_npu_list
         )
-        if self._is_ascend_950():
+        if self._uses_cluster_cpu_topology():
             self.bind_uvb_poll_window_threads()
             return self.build_ascend_950_cpu_pools()
 
@@ -593,7 +590,7 @@ class CpuAlloc:
         self.npu_cpu_pool = {npu: final[npu] for npu in self.device_info.running_npu_list}
 
     def allocate(self) -> None:
-        if self._is_ascend_950():
+        if self._uses_cluster_cpu_topology():
             self._allocate_ascend_950_roles()
             return
         self._allocate_default_roles()
@@ -624,11 +621,10 @@ class CpuAlloc:
 
     def print_plan(self) -> None:
         logger.info("The CPU allocation plan is as follows:")
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        if self._is_ascend_950():
-            self._print_ascend_950_plan(current_npu)
+        if self._uses_cluster_cpu_topology():
+            self._print_ascend_950_plan(self.current_npu)
             return
-        self._print_default_plan(current_npu)
+        self._print_default_plan(self.current_npu)
 
     def _print_ascend_950_plan(self, current_npu: int) -> None:
         main = " ".join(map(str, self.assign_main[current_npu]))
@@ -675,7 +671,7 @@ class CpuAlloc:
         )
 
     def bind_threads(self) -> None:
-        if self._is_ascend_950():
+        if self._uses_cluster_cpu_topology():
             self.bind_ascend_950_threads()
             return
         self._bind_default_threads()
@@ -684,20 +680,18 @@ class CpuAlloc:
         thread_message, _ = execute_command(["ps", "-Te"])
         threads_map = self.get_threads_map(thread_message)
         main_pid = str(psutil.Process().pid)
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        self.bind(main_pid, self.assign_main[current_npu], True)
+        self.bind(main_pid, self.assign_main[self.current_npu], True)
         for thread_id in threads_map.get(main_pid, {}).get("acl_thread", []):
-            self.bind(thread_id, self.assign_acl[current_npu], False)
+            self.bind(thread_id, self.assign_acl[self.current_npu], False)
         for thread_id in threads_map.get(main_pid, {}).get("release_thread", []):
-            self.bind(thread_id, self.assign_rel[current_npu], False)
+            self.bind(thread_id, self.assign_rel[self.current_npu], False)
         # Migrate memory once for the whole process, after all threads are pinned.
-        self.bind_memory(main_pid, current_npu)
+        self.bind_memory(main_pid, self.current_npu)
 
     def bind_ascend_950_threads(self) -> None:
         main_pid = str(psutil.Process().pid)
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        self.bind(main_pid, self.assign_main[current_npu], True)
-        self.bind_memory(main_pid, current_npu)
+        self.bind(main_pid, self.assign_main[self.current_npu], True)
+        self.bind_memory(main_pid, self.current_npu)
 
     def bind_npu_irq(self) -> None:
         if not self._reserve_irq_cpus():
@@ -711,9 +705,8 @@ class CpuAlloc:
             return
 
         # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        if current_npu not in self.npu_cpu_pool:
-            logger.warning("[irq] NPU has no CPU pool. rank=%s, npu=%s. ", self.rank_id, current_npu)
+        if self.current_npu not in self.npu_cpu_pool:
+            logger.warning("[irq] NPU has no CPU pool. rank=%s, npu=%s. ", self.rank_id, self.current_npu)
             return
 
         if shutil.which("systemctl"):
@@ -734,7 +727,7 @@ class CpuAlloc:
                     irq = line.split(":")[0].strip()
                     sq_irqs.append(irq)
 
-        npu = current_npu
+        npu = self.current_npu
         cpus = self.npu_cpu_pool[npu]
         if len(cpus) < 2:
             logger.warning("[irq] CPU pool too small. npu=%s, cpu_count=%d, min_required=2. ", npu, len(cpus))
@@ -743,14 +736,13 @@ class CpuAlloc:
         sq_cpu, cq_cpu = cpus[0], cpus[1]  # Reserved for IRQ binding
         pci_addr = ""
 
-        device_type = get_ascend_device_type()
-        if device_type == AscendDeviceType.A3:
-            # A3: logical npu_id = card_id*2 + chip_id
+        if get_current_hardware_profile().device_addressing_mode is DeviceAddressingMode.DUAL_CHIP_CARD:
+            # Dual-chip cards address each logical NPU by card and chip id.
             card_id = npu // 2
             chip_id = npu % 2
             info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
         else:
-            # A2 / others: logical npu_id is card id
+            # Direct addressing uses the logical NPU id as the card id.
             info, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(npu)])
 
         for line in info.splitlines():
@@ -801,9 +793,9 @@ class CpuAlloc:
         self.bind_npu_irq()
 
 
-def bind_cpus(rank_id: int) -> None:
+def bind_cpus(rank_id: int, npu_id: int) -> None:
     if not is_arm_cpu():
         logger.info("CPU binding skipped: non-ARM CPU detected.")
         return
-    binder = CpuAlloc(rank_id)
+    binder = CpuAlloc(rank_id, npu_id=npu_id)
     binder.run_all()

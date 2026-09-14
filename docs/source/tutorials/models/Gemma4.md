@@ -31,7 +31,7 @@ The examples below assume a single node with visible NPUs. The commands use 4 vi
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -105,7 +105,7 @@ vllm serve ${MODEL_PATH} \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 #### Key Parameters
 
@@ -263,7 +263,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Gemma4.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Gemma4.
 
 ### Q1: Which execution mode should be used first?
 

@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata 
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -67,7 +68,7 @@ class RecomputeCPUOffloadWorker:
 
         scheduler_gpu_kv_cache_tensors = []
         for t in self.kv_cache_config.kv_cache_tensors:
-            if t.shared_by:
+            if get_kv_cache_tensor_layers(t):
                 scheduler_gpu_kv_cache_tensors.append(t)
         scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
         scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)

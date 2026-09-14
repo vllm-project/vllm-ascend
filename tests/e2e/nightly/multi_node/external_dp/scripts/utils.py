@@ -182,9 +182,11 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
         if additional_config.get("enable_fused_mc2") and "fused_mc2" not in features:
             features.append("fused_mc2")
 
+        if additional_config.get("enable_mlapo") and "mlapo" not in features:
+            features.append("mlapo")
+
     feature_envs = {
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-        "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
     }
     for env_key, feature_name in feature_envs.items():
         values = [str(command.env.get(env_key, "0")) for command in commands]

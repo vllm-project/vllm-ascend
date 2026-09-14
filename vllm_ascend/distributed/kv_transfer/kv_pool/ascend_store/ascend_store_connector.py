@@ -16,6 +16,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -27,8 +33,18 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
+from vllm.v1.worker import mamba_utils
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
+    is_block_key_layerwise,
+    is_kv_save_role,
+    validate_mooncake_layerwise_topology,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+    AscendStorePromMetrics,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -89,6 +105,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.backend_name = extra_config.get("backend", "mooncake").lower()
+        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
+        validate_mooncake_layerwise_topology(
+            vllm_config.parallel_config,
+            self.backend_name,
+            self.use_layerwise,
+        )
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -100,6 +123,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
+        self._mamba_copy_bufs = None
+        self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+
+        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_worker: KVPoolWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -196,10 +224,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+        """Pure forwarder: the layerwise transfer gate is evaluated by the worker.
+
+        The connector must not derive the gate itself — the copy here was
+        dropped by #14465 while this method still read it (crashing
+        MultiConnector init), and restored by #15291. Gating at the
+        data-plane consumer, where the flag is already derived, makes that
+        class of regression structurally impossible and supersedes the
+        connector-side flag entirely.
+        """
+        if self.connector_worker is None:
             return False
-        self.connector_worker.set_external_slot_release_waiter(waiter)
-        return True
+        return self.connector_worker.set_external_slot_release_waiter(waiter)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
@@ -207,6 +243,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
+        self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
@@ -227,7 +264,28 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
+        if self._mamba_copy_bufs is not None:
+            mamba_utils.do_mamba_copy_block_for_layer(
+                self._mamba_copy_bufs,
+                layer_name,
+            )
+
+    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
+        self._mamba_copy_bufs = copy_bufs
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        if self._mamba_copy_bufs is None:
+            return
+        try:
+            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+        finally:
+            self._mamba_copy_bufs = None
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
@@ -235,19 +293,21 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
 
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             # A load-only consumer does not publish KV.
             return
+        assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+        if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             # Don't do save if the role is kv_consumer
             return
 
         if self.use_layerwise:
             return
 
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -271,6 +331,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
@@ -286,6 +347,32 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:
+        return AscendStoreKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return AscendStorePromMetrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+        )
 
 
 class LookupKeyServer:

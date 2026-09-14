@@ -64,7 +64,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1800"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
 
 templates:
   - node_index: 0
@@ -181,7 +180,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}'
       - --speculative-config
       - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config
@@ -223,7 +222,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,8,16,32,48,64,80,96,112,128,144,160]}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}'
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}'
       - --speculative-config
       - '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}'
       - --kv-transfer-config

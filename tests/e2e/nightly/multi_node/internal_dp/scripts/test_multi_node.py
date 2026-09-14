@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
 }
 
-_FEATURE_CONFIGS: dict[str, str] = {"enable_fused_mc2": "fused_mc2"}
+_FEATURE_CONFIGS: dict[str, str] = {
+    "enable_fused_mc2": "fused_mc2",
+    "enable_mlapo": "mlapo",
+}
 
 
 def _extract_dtype(config: MultiNodeConfig) -> str:

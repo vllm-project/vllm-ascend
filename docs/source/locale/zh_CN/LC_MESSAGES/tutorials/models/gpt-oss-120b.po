@@ -47,11 +47,6 @@ msgid ""
 "also build all from source:"
 msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
 
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
-
 msgid "## Deployment"
 msgstr "## 部署"
 
@@ -248,3 +243,9 @@ msgid ""
 "Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
 " feature's configuration."
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该特性的配置。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr ""
+"- 从源码安装 `vllm-ascend`，请参考[安装指南](../../getting_started/installation.md)。"

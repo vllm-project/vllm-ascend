@@ -17,7 +17,7 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -30,6 +30,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerBlockRange,
     LayerLoadTask,
     LayerBatchReqMeta,
+    LayerPoolKey,
     LayerTransferTask,
     LoadSpec,
     ReqMeta,
@@ -38,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
@@ -49,6 +51,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
 
 class FakeStore:
     def __init__(self, exists_result=None):
+        self.requires_exists_before_put = True
         self.exists_result = exists_result or []
         self.put_calls = []
         self.get_calls = []
@@ -164,6 +167,16 @@ class TestKVTransferThread(unittest.TestCase):
         store.exists = MagicMock(side_effect=Exception("conn fail"))
         self.assertEqual(t.lookup(["k1"]), [False])
 
+    def test_get_missing_indices_skips_lookup_when_not_required(self):
+        t, store = self._make_thread([1, 1])
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(side_effect=AssertionError("exists should not be called"))
+
+        result = t._get_missing_indices(["k1", "k2"])
+
+        self.assertEqual(result, [0, 1])
+        store.exists.assert_not_called()
+
     def test_update_and_get_kv_events(self):
         t, _ = self._make_thread()
         event1 = BlockStored(
@@ -219,8 +232,10 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         store.batch_write_finish.return_value = [0]
         builder = MagicMock()
         builder.build_addrs.return_value = LayerBatchReqMeta(
@@ -283,8 +298,10 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
         sync_events = [MagicMock(), MagicMock()]
@@ -470,6 +487,49 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 if put_count:
                     self.assertEqual(len(store.put_calls[0][0]), key_count)
 
+    def test_handle_request_puts_all_keys_without_exists_check(self):
+        t, store = self._make_thread([1, 1])
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(side_effect=AssertionError("exists should not be called"))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        store.exists.assert_not_called()
+
+    def test_handle_request_keeps_exists_check_for_kv_events(self):
+        t, store = self._make_thread([1, 0], enable_kv_event=True)
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(return_value=[1, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            current_event=None,
+            token_ids=list(range(32)),
+            original_block_size=16,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(t.get_kv_events()), 1)
+        store.exists.assert_called_once()
+
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
@@ -604,6 +664,53 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(t.request_queue.unfinished_tasks, 0)
         self.assertNotIn("r1", t.stored_requests)
+
+
+class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
+    def test_handle_request_puts_all_keys_without_exists_check(self):
+        store = FakeStore([1, 1])
+        store.requires_exists_before_put = False
+        sync_event = MagicMock()
+        thread = KVCacheStoreKeyLayerSendingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[threading.Event()],
+            sync_save_events=[sync_event],
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            is_last_chunk=False,
+        )
+        metadata = KeyMetadata("m", 0, 0, 0, 0)
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],
+            cached_process_tokens={
+                0: [
+                    (0, 16, [LayerPoolKey(metadata, "h0", 0)]),
+                    (16, 32, [LayerPoolKey(metadata, "h1", 0)]),
+                ]
+            },
+        )
+        thread.request_queue.put([task])
+
+        with patch.object(store, "exists", side_effect=AssertionError("exists should not be called")) as mock_exists:
+            thread._handle_request([task])
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        mock_exists.assert_not_called()
+        sync_event.synchronize.assert_called_once()
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):

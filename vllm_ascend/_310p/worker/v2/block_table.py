@@ -28,6 +28,7 @@ class Ascend310PBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ) -> None:
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -45,6 +46,11 @@ class Ascend310PBlockTables(BlockTables):
         self.cp_rank = cp_rank
         self.cp_interleave = cp_interleave
         self.num_kv_cache_groups = len(block_sizes)
+        if slot_mapping_enabled is None:
+            slot_mapping_enabled = [True] * self.num_kv_cache_groups
+        if len(slot_mapping_enabled) != self.num_kv_cache_groups:
+            raise ValueError("slot_mapping_enabled must match the number of KV cache groups.")
+        self._slot_mapping_enabled = slot_mapping_enabled
         self.blocks_per_kv_block = [
             block_size // kernel_block_size for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]
@@ -146,6 +152,8 @@ class Ascend310PBlockTables(BlockTables):
 
         self.slot_mappings_cpu.fill(PAD_SLOT_ID)
         for group_id, (block_table, block_size) in enumerate(zip(self.block_tables_cpu, self.kernel_block_sizes)):
+            if not self._slot_mapping_enabled[group_id]:
+                continue
             for batch_idx, req_idx in enumerate(idx_mapping_np):
                 start = int(query_start_loc_np[batch_idx])
                 end = int(query_start_loc_np[batch_idx + 1])

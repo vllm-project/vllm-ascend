@@ -37,6 +37,10 @@ QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get
 # MTP ACL graph padding replay fixes provided by gdn_attn_builder_310.py.
 QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
 
+# Vision pos-embed: 310P images do not install Triton, so upstream
+# ``HAS_TRITON=False`` already selects ``pos_embed_interpolate_native``.
+# No ``fast_pos_embed_interpolate`` rewrite is required.
+
 if is_rc_device():
     from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend

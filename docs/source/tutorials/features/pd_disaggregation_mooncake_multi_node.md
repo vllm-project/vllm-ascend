@@ -216,6 +216,64 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
+### QoS Configuration
+
+Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
+This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
+and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
+are integers in **[0, 4]** (booleans are not accepted).
+
+With the HIXL Client/Server transport, the endpoint initiating the connection
+supplies the channel QoS. The peer creates its corresponding channel using
+that received value:
+
+| Transfer mode | Initiator | Operation | QoS configuration used |
+| :--- | :--- | :--- | :--- |
+| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos_priority` |
+| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos_priority` |
+
+Although KV data flows from P to D in both modes, pull uses D's QoS and push
+uses P's QoS. Configuring only the passive endpoint does not override the
+initiator's channel QoS. Both endpoints support the option, but the effective
+value for a connection comes from its initiator.
+
+For example, add `"qos_priority": 1` alongside your existing parallelism settings:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "qos_priority": 1,
+    "prefill": {"dp_size": 1, "tp_size": 2},
+    "decode": {"dp_size": 1, "tp_size": 2}
+  }
+}
+```
+
+Use `kv_producer` for the prefiller and retain the other deployment-specific
+fields in your `--kv-transfer-config`.
+
+No manual QoS environment export is required. Before initializing the transfer
+engine, the connector merges its QoS into the literal top-level JSON key
+`"comm_resource_config.qos"` in `ASCEND_GLOBAL_RESOURCE_CONFIG`, creating the
+environment variable if absent. Other resource settings and the `store`
+configuration are preserved. An explicit QoS value, or the default **1** when
+omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
+resource JSON fail before the environment is modified.
+
+The `Injected comm_resource_config.qos=...` log confirms that the local
+environment configuration was written successfully. It does not by itself
+prove that this value was used for a transfer channel. In pull mode, a passive
+P-side HIXL server may not print a local QoS parsing log; in push mode, the
+same applies to the passive D side. Check the initiator's configuration and
+HIXL channel logs to verify the channel QoS.
+
+With `MultiConnector`, set `qos_priority` in the Mooncake P/D child connector's
+`kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
+it does not configure or validate pooling backends or modify their `store`
+settings. Restart the serving processes after changing P/D QoS.
+
 ### kv_port Configuration Guide
 
 On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:

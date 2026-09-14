@@ -1,0 +1,87 @@
+{
+  "op_type": "SituMxQuant",
+  "op_list": [
+    {
+      "bin_filename": "SituMxQuant_bf16_e4m3fn",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "bfloat16",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float8_e4m3fn",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "mxscale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {"name": "beta", "dtype": "float", "value": null},
+        {"name": "linear_beta", "dtype": "float", "value": null},
+        {"name": "activate_left", "dtype": "bool", "value": null},
+        {"name": "axis", "dtype": "int", "value": null},
+        {"name": "dst_type", "dtype": "int", "value": null}
+      ]
+    },
+    {
+      "bin_filename": "SituMxQuant_bf16_e5m2",
+      "inputs": [
+        {
+          "name": "x",
+          "index": 0,
+          "dtype": "bfloat16",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "index": 0,
+          "dtype": "float8_e5m2",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "mxscale",
+          "index": 1,
+          "dtype": "float8_e8m0",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [
+        {"name": "beta", "dtype": "float", "value": null},
+        {"name": "linear_beta", "dtype": "float", "value": null},
+        {"name": "activate_left", "dtype": "bool", "value": null},
+        {"name": "axis", "dtype": "int", "value": null},
+        {"name": "dst_type", "dtype": "int", "value": null}
+      ]
+    }
+  ]
+}

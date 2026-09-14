@@ -42,6 +42,12 @@ def _iter_tensors_in_value(prefix: str, value: Any, visited_object_ids: set[int]
     if isinstance(value, (Module, str, bytes)) or callable(value):
         return
 
+    if isinstance(value, (list, tuple, dict)):
+        value_id = id(value)
+        if value_id in visited_object_ids:
+            return
+        visited_object_ids.add(value_id)
+
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             yield from _iter_tensors_in_value(f"{prefix}.{index}", item, visited_object_ids, scan_objects)
@@ -52,11 +58,13 @@ def _iter_tensors_in_value(prefix: str, value: Any, visited_object_ids: set[int]
             yield from _iter_tensors_in_value(f"{prefix}.{key}", item, visited_object_ids, scan_objects)
         return
 
-    if not scan_objects or not hasattr(value, "__dict__"):
+    if not scan_objects:
         return
 
     value_id = id(value)
     if value_id in visited_object_ids:
+        return
+    if not hasattr(value, "__dict__"):
         return
     visited_object_ids.add(value_id)
     for attr_name, attr_value in vars(value).items():
@@ -85,6 +93,7 @@ def _try_collect_transferable_tensor(
 def _collect_processed_layout_tensors(model: Module) -> list[tuple[str, torch.Tensor]]:
     """Collect live inference tensors for int8_cache=no processed-weight transfer."""
     seen_data_ptrs: set[int] = set()
+    visited_object_ids: set[int] = set()
     collected_tensors: list[tuple[str, torch.Tensor]] = []
 
     for name, tensor in model.named_parameters():
@@ -102,9 +111,16 @@ def _collect_processed_layout_tensors(model: Module) -> list[tuple[str, torch.Te
 
             # Attention impl objects store derived tensors (e.g. W_UV/W_UK_T) on plain Python
             # attributes; only "impl" needs deep scan. Other attrs are direct tensors,
-            # list/dict containers, or nn.Module children already covered above.
+            # list/dict containers, or nn.Module children already covered above. Keep
+            # one visited set for the entire model because every attention impl can
+            # reference the same large vllm_config object graph.
             scan_objects = attr_name == "impl"
-            for tensor_name, tensor in _iter_tensors_in_value(attr_name, attr_value, set(), scan_objects):
+            for tensor_name, tensor in _iter_tensors_in_value(
+                attr_name,
+                attr_value,
+                visited_object_ids,
+                scan_objects,
+            ):
                 full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
                 _try_collect_transferable_tensor(full_name, tensor, seen_data_ptrs, collected_tensors)
 

@@ -83,7 +83,7 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 ### 4.2 Source Code Installation
 
-f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 !!! note
 
@@ -138,7 +138,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
         - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -193,7 +193,7 @@ For general parameter tuning, refer to the [Public Performance Tuning Documentat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
+For common environment, installation, and general parameter issues, see the [Public FAQs](../../faqs.md). This section covers model- and hardware-specific guidance.
 
 ### Atlas 300I DUO runs out of memory during startup
 

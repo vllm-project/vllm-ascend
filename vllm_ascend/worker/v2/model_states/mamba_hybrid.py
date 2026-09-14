@@ -50,7 +50,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        # Match the upstream Mamba contract without enabling DBO.
+        assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -77,6 +80,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     num_draft_tokens_per_req,
                     -1,
                 )
+                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
+                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
+                    expected_query_len = self.vllm_config.num_speculative_tokens + 1
+                    if np.all(padded_query_lens == expected_query_len):
+                        # Full graph capture represents every padded request as
+                        # a speculative decode request. Keep replay on the same
+                        # pure-spec GDN path so its persistent state metadata is
+                        # refreshed before graph replay.
+                        num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         model_specific_metadata = MambaHybridAttnMetadata(

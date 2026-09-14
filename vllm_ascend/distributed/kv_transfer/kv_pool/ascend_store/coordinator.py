@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from importlib import import_module
 from typing import Any, cast
@@ -18,10 +19,16 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
+    get_block_hashes,
 )
 
 _CACHE_MISSING = object()
 _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
+
+# Per-group pool query used by the shared reachable hit lookup: returns the
+# subset of ``group_block_hashes`` present in the pool (all replicas valid).
+# A None ``lookup_mask`` means the group has no reachability limits.
+GroupHitQuery = Callable[[int, Sequence[BlockHash | str], Sequence[bool] | None], Iterable[BlockHash | str]]
 
 
 class ExternalCachedBlockPool:
@@ -205,6 +212,50 @@ class AscendStoreCoordinator:
             if mask is not None:
                 assert len(mask) == num_chunks
         return tuple(None if mask is None or all(mask) else mask for _, mask in masks)
+
+    def find_reachable_hit_tokens(
+        self,
+        block_hashes: list[BlockHash],
+        token_len: int,
+        query_group_hits: GroupHitQuery,
+        *,
+        log_context: str = "reachable_lookup",
+    ) -> int:
+        """Reachability-aware external hit lookup shared by both transfer paths.
+
+        Queries, per group, only the blocks the group's lookup mask allows —
+        the subset the save paths persist for reachability-limited groups —
+        and derives the hit length via find_longest_cache_hit so sparsely
+        stored pools still yield correct prefix hits. Both the scheduler-side
+        layerwise lookup and the worker-side non-layerwise lookup delegate
+        here so the hit semantics cannot drift between them.
+
+        ``query_group_hits(group_id, group_block_hashes, lookup_mask)`` must
+        return the subset of ``group_block_hashes`` present in the pool for
+        that group, using whichever key layout and query backend the caller
+        owns.
+        """
+        aligned_len = cdiv(token_len, self.lcm_block_size) * self.lcm_block_size
+        lookup_masks = self.lookup_mask(aligned_len)
+        exists: set[tuple[int, bytes]] = set()
+        block_hashes_to_check = block_hashes[: token_len // self.hash_block_size]
+
+        for group_id, group_block_size in enumerate(self.group_effective_block_sizes):
+            group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
+            hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
+            exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)
+
+        if not exists:
+            logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
+            return 0
+        _, hit_length = self.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists),
+            apply_eagle=False,
+        )
+        logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
+        return hit_length
 
     def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
         return block_hashes

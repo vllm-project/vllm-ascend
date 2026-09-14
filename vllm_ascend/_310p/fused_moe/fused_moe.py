@@ -15,12 +15,14 @@
 # limitations under the License.
 #
 import torch
+import torch_npu
 from vllm.model_executor.layers.fused_moe import SharedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
@@ -31,6 +33,16 @@ from .moe_comm_method import AllGatherCommImpl310
 
 
 class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
+    """Unquantized MoE method with 310P-specific kernels.
+
+    The MLP stage is orchestrated by ``apply_moe_mlp`` through the same
+    gmm1 / act_quant / gmm2 hooks as the quantized schemes. This class
+    duck-types the hook interface instead of inheriting ``AscendMoEScheme``
+    because it must extend the upstream ``UnquantizedFusedMoEMethod``.
+    """
+
+    quant_type = QuantType.NONE
+
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
 
@@ -54,6 +66,46 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         w2_data = maybe_trans_nz(w2_data)
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
+    def supports_fused_activation(self, activation) -> bool:
+        """310P MoE only supports the swiglu (silu) activation."""
+        return getattr(activation, "value", activation) in ("silu", "swiglu")
+
+    def get_mlp_weights(self, layer):
+        """Standard MLP-layout weights, returned as a ``(w1, w2)`` tuple."""
+        return layer.w13_weight, layer.w2_weight
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        """Fused gmm1 (gate/up projection) + swiglu, no activation quant."""
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        w1, _ = self.get_mlp_weights(layer)
+        # 310P weights are pre-transposed to (E, hidden, inter) + NZ in
+        # ``process_weights_after_loading``, so no ``need_trans`` handling is
+        # required here (310P never sets ``need_trans``).
+        gate_up_out = torch_npu.npu_grouped_matmul(
+            x=[mlp_compute_input.hidden_states],
+            weight=[w1],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+        )[0]
+        return torch_npu.npu_swiglu(gate_up_out), None
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        """down projection (gmm2)."""
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        _, w2 = self.get_mlp_weights(layer)
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w2],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+        )[0]
+
     def apply(
         self,
         layer: "AscendRoutedExperts",
@@ -71,8 +123,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                layer=layer,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=False,
                 expert_map=layer.ascend_expert_map,
@@ -82,6 +133,7 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
             ),
+            quant_method=self,
         )
         return final_hidden_states
 
@@ -137,4 +189,8 @@ class AscendMoERunner310(AscendMoERunner):
         ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
         if ascend_shared_experts is not None:
             ascend_shared_experts.multistream_overlap = False
+            # The parent may have selected the SP-multistream custom op before
+            # 310P disables the unsupported feature. Restore the upstream entry
+            # so its fake output contract matches the single-stream execution.
+            self._forward_entry = self._select_forward()
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)

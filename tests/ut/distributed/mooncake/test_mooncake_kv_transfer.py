@@ -18,6 +18,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class _FakeStore:
+    requires_exists_before_put = True
+
     def __init__(self, exists_result: list[int]):
         self.exists_result = exists_result
         self.put_calls: list[tuple[list[str], list[list[int]], list[list[int]]]] = []

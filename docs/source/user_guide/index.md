@@ -13,6 +13,7 @@ This section provides comprehensive documentation for using vLLM Ascend in produ
 - **[Environment Variables](configuration/env_vars.md)** — Configure vLLM Ascend via environment variables
 - **[Additional Configuration](configuration/additional_config.md)** — Additional configuration options
 - **[MS Service Metric](ms_service_metric.md)** — Enable metrics and add vLLM Ascend metric points
+- **[Score Encoder Cache Manager](configuration/encoder_cache_manager.md)** — Configure score-based encoder caching for online and offline inference
 
 ## Feature Guide
 

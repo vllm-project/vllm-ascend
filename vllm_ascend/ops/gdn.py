@@ -28,8 +28,12 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
@@ -273,6 +277,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # V1 profile run
             return
 
+        # Layerwise KV pool hooks must stay inside the custom op body: the
+        # forward() caller region is traced by Dynamo in fullgraph mode, and
+        # these side effects (thread locks, connector waits) would break the
+        # graph. Waiting here still orders the deferred mamba state copy and
+        # the layer load before conv/attention kernels touch mamba state.
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
@@ -471,10 +483,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
         if split_non_spec:
-            assert mixed_qkv_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
+            query_decode = query_non_spec[:, :num_decode_tokens]
+            key_decode = key_non_spec[:, :num_decode_tokens]
+            value_decode = value_non_spec[:, :num_decode_tokens]
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode)
             key_decode = l2norm_fwd(key_decode)

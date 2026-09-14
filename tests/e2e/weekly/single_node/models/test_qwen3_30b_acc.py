@@ -85,7 +85,6 @@ async def test_models(model: str, tp_size: int) -> None:
         "HCCL_BUFFSIZE": "1024",
         "OMP_NUM_THREADS": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_NZ": "2",
         "MOONCAKE_CONFIG_PATH": "mooncake.json",
     }
     kv_transfer_config = {

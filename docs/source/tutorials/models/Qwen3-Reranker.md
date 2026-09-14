@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-Reranker` model directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -107,7 +107,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -147,7 +147,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -288,4 +288,4 @@ After about several minutes, you can get the performance evaluation result.
 
 ## 9 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

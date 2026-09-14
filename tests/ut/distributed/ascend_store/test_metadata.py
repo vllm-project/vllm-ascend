@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
+    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 
@@ -78,6 +79,25 @@ class TestCacheLayoutHelpers(unittest.TestCase):
         self.assertEqual(infer_cache_transfer_granularity([16, 32], 32, [0, 1]), 32)
 
 
+class TestMaskedBlockRuns(unittest.TestCase):
+    def test_none_mask_returns_single_run(self):
+        self.assertEqual(masked_block_runs(None, 1, 5), [(1, 5)])
+
+    def test_sparse_mask_splits_into_runs(self):
+        mask = [False, True, False, True, True]
+        self.assertEqual(masked_block_runs(mask, 0, 5), [(1, 2), (3, 5)])
+
+    def test_empty_range_returns_no_runs(self):
+        self.assertEqual(masked_block_runs([True, True], 2, 2), [])
+        self.assertEqual(masked_block_runs(None, 3, 1), [])
+
+    def test_blocks_beyond_mask_length_are_allowed(self):
+        self.assertEqual(masked_block_runs([False, True], 0, 4), [(1, 4)])
+
+    def test_all_disallowed_mask_returns_no_runs(self):
+        self.assertEqual(masked_block_runs([False, False], 0, 2), [])
+
+
 class TestKeyMetadata(unittest.TestCase):
     def test_fields(self):
         meta = KeyMetadata(
@@ -111,12 +131,10 @@ class TestPoolKey(unittest.TestCase):
     def test_to_string(self):
         k = PoolKey(self.meta, "hash1")
         s = k.to_string()
-        self.assertIn("llama", s)
-        self.assertIn("@pcp2", s)
-        self.assertIn("@dcp3", s)
-        self.assertIn("@head_or_tp_rank:1", s)
-        self.assertIn("@pp_rank:0", s)
-        self.assertIn("hash1", s)
+        self.assertEqual(
+            s,
+            "llama@pcp:2@dcp:3@head_or_tp_rank:1@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash1",
+        )
 
     def test_pp_ranks_use_distinct_keys(self):
         other_pp_meta = KeyMetadata("llama", 1, 2, 3, 1)
@@ -148,6 +166,7 @@ class TestLayerPoolKey(unittest.TestCase):
         meta = KeyMetadata("model", 0, 0, 0, 0)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
+        self.assertIn("@pcp:0@dcp:0", s)
         self.assertIn("@layer_id:5", s)
         self.assertIn("model", s)
         self.assertTrue(s.endswith("@h1"))
@@ -542,6 +561,24 @@ class TestReqMeta(unittest.TestCase):
         # but skip_save+load_spec input is not None, so meta is still created
         self.assertIsNotNone(meta)
         self.assertIsNone(meta.load_spec)
+        self.assertFalse(meta.can_save)
+
+    def test_from_request_tracker_can_load_suppresses_save(self):
+        # Port of vllm-project/vllm#43371: a ReqMeta must never carry both a
+        # save AND a load. When the request can load from the KV pool, force
+        # skip_save so the same req_id is not queued into both the send and
+        # recv threads (which double delayed-free and can crash the scheduler
+        # with `assert req_id in self.requests`).
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, load_spec=load_spec)
+        self.assertIsNotNone(meta)
+        self.assertIsNotNone(meta.load_spec)
         self.assertFalse(meta.can_save)
 
     def test_from_request_tracker_partial_tokens_discarded(self):
