@@ -544,9 +544,12 @@ class NPUPlatform(Platform):
         """
         # NOTE(Ronald1995): avoid circular import.
         from vllm_ascend.ascend_forward_context import (
+            _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            _MRV2_MODEL,
             select_moe_comm_method,
+            use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -604,6 +607,9 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            model_instance=_MRV2_MODEL.get(),
+            is_pure_prefill=bool(attn_metadata)
+            and all(meta.num_prefills > 0 and meta.num_decodes == 0 for meta in attn_metadata.values()),
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -621,6 +627,8 @@ class NPUPlatform(Platform):
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
+            "is_decode_only_node": _is_decode_only_node(vllm_config),
+            "use_mega_moe": use_cann_megamoe(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,

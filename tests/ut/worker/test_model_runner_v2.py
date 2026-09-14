@@ -9,6 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_forward_context import _MRV2_MODEL
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -18,6 +19,7 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
+    runner.model = torch.nn.Module()
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
@@ -176,3 +178,27 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
     assert padded_num_tokens.value.id == "batch_desc"
+
+
+@pytest.mark.parametrize("dummy_run,is_profile", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("raises", [False, True])
+def test_execute_model_scopes_target_model(dummy_run, is_profile, raises):
+    runner = _make_runner(need_timing=False)
+    outer_model = torch.nn.Module()
+    token = _MRV2_MODEL.set(outer_model)
+
+    def forward(*args, **kwargs):
+        assert _MRV2_MODEL.get() is (None if dummy_run or is_profile else runner.model)
+        if raises:
+            raise RuntimeError("forward failed")
+
+    try:
+        with patch.object(GPUModelRunner, "execute_model", side_effect=forward):
+            if raises:
+                with pytest.raises(RuntimeError, match="forward failed"):
+                    runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile)
+            else:
+                runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile)
+        assert _MRV2_MODEL.get() is outer_model
+    finally:
+        _MRV2_MODEL.reset(token)

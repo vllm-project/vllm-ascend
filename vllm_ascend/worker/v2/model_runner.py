@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.model_runner import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
+    _MRV2_MODEL,
     MoECommType,
     get_mc2_tokens_capacity,
     override_mrv2_in_profile_run,
@@ -268,14 +269,18 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-        )
+        model_token = _MRV2_MODEL.set(None if dummy_run or is_profile else self.model)
+        try:
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+            )
+        finally:
+            _MRV2_MODEL.reset(model_token)
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,

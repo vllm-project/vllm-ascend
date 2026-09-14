@@ -695,6 +695,7 @@ class TestNPUPlatform(TestBase):
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
             patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
             patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=dummy_comm_method),
         ):
             kwargs = self.platform.set_additional_forward_context(
@@ -709,6 +710,48 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
+
+    def test_v2_prefill_selector_receives_target_capability_scope(self):
+        from vllm_ascend.ascend_forward_context import _MRV2_MODEL
+
+        config = self.mock_vllm_config()
+        config.use_v2_model_runner = True
+        model = torch.nn.Module()
+        cases = [
+            (None, False),
+            ({}, False),
+            ({"a": SimpleNamespace(num_prefills=1, num_decodes=0)}, True),
+            ({"a": SimpleNamespace(num_prefills=0, num_decodes=1)}, False),
+            ({"a": SimpleNamespace(num_prefills=1, num_decodes=1)}, False),
+            (
+                {
+                    "a": SimpleNamespace(num_prefills=1, num_decodes=0),
+                    "b": SimpleNamespace(num_prefills=0, num_decodes=1),
+                },
+                False,
+            ),
+        ]
+        with (
+            patch("vllm_ascend.platform.is_moe_model", return_value=True),
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=8),
+            patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
+            patch(
+                "vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLTOALL
+            ) as select,
+            patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
+        ):
+            model_token = _MRV2_MODEL.set(model)
+            try:
+                for metadata, expected in cases:
+                    with self.subTest(metadata=metadata):
+                        self.platform.set_additional_forward_context(metadata, config, None, num_tokens=16)
+                        self.assertIs(select.call_args.kwargs["model_instance"], model)
+                        self.assertIs(select.call_args.kwargs["is_pure_prefill"], expected)
+            finally:
+                _MRV2_MODEL.reset(model_token)
 
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -739,6 +782,7 @@ class TestNPUPlatform(TestBase):
             patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
             patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.ALLGATHER),
             patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ascend_forward_context.use_cann_megamoe", return_value=False),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=object()),
             override_mrv2_in_profile_run(True),
         ):

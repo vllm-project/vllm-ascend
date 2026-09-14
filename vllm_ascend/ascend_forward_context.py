@@ -33,6 +33,7 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_MRV2_MODEL: ContextVar[torch.nn.Module | None] = ContextVar("_MRV2_MODEL", default=None)
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
