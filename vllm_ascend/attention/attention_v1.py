@@ -49,11 +49,13 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_dcp,
+    maybe_save_kv_layer_to_connector,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
     using_paged_attention,
+    wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
@@ -1983,6 +1985,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(flash.schedule))
         key_cache, value_cache = split_gqa_cache(kv_cache, self.num_kv_heads)
         flash.query.copy_(query[:tokens])
+        if attn_metadata.num_prefills > 0:
+            wait_for_kv_layer_from_connector(layer.layer_name)
         if key is not None and value is not None:
             torch_npu.npu_scatter_pa_kv_cache(
                 key=key[:tokens].contiguous(),
@@ -1992,7 +1996,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 slot_mapping=flash.slots,
                 cache_mode="Norm",
             )
-        notify_kv_cache_written()
+        notify_kv_cache_written(layer.layer_name)
         result, _ = flash_attn(
             flash.query,
             key_cache,
@@ -2015,6 +2019,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output.zero_()
         output[:tokens].copy_(result)
         output[:tokens].masked_fill_(~flash.token_live[:, None, None], 0)
+        maybe_save_kv_layer_to_connector(layer.layer_name, [kv_cache])
         return output
 
     def forward(

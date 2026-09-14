@@ -2172,6 +2172,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         b.query[..., :512].copy_(q_abs)
         b.query[..., 512:].copy_(q_pe)
 
+        if meta.num_prefills > 0:
+            # Keep the Flash MLA path on the common KV connector lifecycle.
+            # Mooncake completes a full-cache load before forward today; this
+            # also preserves the synchronization point for layerwise peers.
+            wait_for_kv_layer_from_connector(layer_name)
         torch_npu.npu_scatter_pa_kv_cache(
             key=c_kv.contiguous(),
             value=k_pe.contiguous(),
@@ -2208,6 +2213,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         output.zero_()
         output[:t].copy_(result)
         output[:t].masked_fill_(~b.token_live.unsqueeze(1), 0)
+        maybe_save_kv_layer_to_connector(layer_name, [kv_cache])
         return output
 
     def forward(

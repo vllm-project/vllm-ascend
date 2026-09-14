@@ -472,6 +472,7 @@ class KVCacheRecvingThread(threading.Thread):
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_len_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
@@ -816,6 +817,9 @@ class KVCacheRecvingThread(threading.Thread):
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            remote_block_len_per_addr = self.remote_block_len_per_addr.get(remote_engine_id, {}).get(
+                remote_handshake_port
+            )
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
             remote_kv_group2layeridx = self.remote_kv_group2layeridx.get(remote_engine_id, {}).get(
                 remote_handshake_port,
@@ -947,6 +951,13 @@ class KVCacheRecvingThread(threading.Thread):
                         group_spec,
                         raw_layer_indices,
                     )
+                    if remote_block_len_per_addr is not None:
+                        validate_kv_transfer_layout(
+                            self.block_len_per_addr[layer_idx],
+                            remote_block_len_per_addr[remote_layer_idx],
+                            tp_num_need_pulls,
+                            layer_idx,
+                        )
                     start_meta_idx = len(src_list)
                     self._append_mamba_transfer_meta(
                         src_list,
@@ -988,6 +999,13 @@ class KVCacheRecvingThread(threading.Thread):
                     group_spec,
                     raw_layer_indices,
                 )
+                if remote_block_len_per_addr is not None:
+                    validate_kv_transfer_layout(
+                        self.block_len_per_addr[layer_idx],
+                        remote_block_len_per_addr[remote_layer_idx],
+                        tp_num_need_pulls,
+                        layer_idx,
+                    )
                 for cache_idx in range(len(local_kv_caches_base_addrs[layer_idx])):
                     src_layer_base_addr = local_kv_caches_base_addrs[layer_idx][cache_idx]
                     dst_layer_base_addr = remote_kv_caches_base_addrs[remote_layer_idx][cache_idx]
@@ -1488,6 +1506,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
+                self.remote_block_len_per_addr[engine_id][remote_handshake_port] = agent_meta.block_lens
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
@@ -2468,9 +2487,14 @@ class MooncakeConnectorWorker:
         return candidates.pop() if candidates else None
 
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
-        ptrs: list[int] = []
-        lengths: list[int] = []
+        # Flash MLA descriptors are separate logical views of one packed raw
+        # allocation. Register each physical region once even when several
+        # descriptors recover the same aligned backing address.
+        registered_regions: OrderedDict[int, int] = OrderedDict()
         private_layer_tensors: list[torch.Tensor] = []
+
+        def add_region(base_addr: int, length: int) -> None:
+            registered_regions[base_addr] = max(registered_regions.get(base_addr, 0), length)
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_tensors: list[torch.Tensor] = []
@@ -2500,8 +2524,7 @@ class MooncakeConnectorWorker:
                 continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
                 raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
-            ptrs.append(base_addr)
-            lengths.append(kv_cache_tensor.size)
+            add_region(base_addr, kv_cache_tensor.size)
 
         if private_layer_tensors:
             regions_by_storage: OrderedDict[int, tuple[int, int]] = OrderedDict()
@@ -2532,10 +2555,10 @@ class MooncakeConnectorWorker:
                     max(previous[1] if previous is not None else aligned_base, tensor_end),
                 )
 
-            ptrs.extend(base for base, _ in regions_by_storage.values())
-            lengths.extend(end - base for base, end in regions_by_storage.values())
+            for base, end in regions_by_storage.values():
+                add_region(base, end - base)
 
-        return ptrs, lengths
+        return list(registered_regions), list(registered_regions.values())
 
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
@@ -4036,6 +4059,38 @@ def split_if_not_byte_contiguous(
         dst_block_stride=dst_block_stride,
         block_len=block_len,
     )
+
+
+def validate_kv_transfer_layout(
+    local_block_lens: list[int],
+    remote_block_lens: list[int],
+    tp_num_need_pulls: int,
+    layer_idx: int,
+) -> None:
+    """Reject peers whose physical cache payload ABI is incompatible."""
+    if tp_num_need_pulls <= 0:
+        raise RuntimeError(f"Invalid Mooncake TP pull count {tp_num_need_pulls} for layer {layer_idx}.")
+
+    if len(local_block_lens) != len(remote_block_lens):
+        raise RuntimeError(
+            "Mooncake KV cache tensor count mismatch for "
+            f"layer {layer_idx}: local={len(local_block_lens)}, remote={len(remote_block_lens)}. "
+            "Ensure VLLM_ASCEND_ENABLE_FLASH_MLA is configured consistently on P and D."
+        )
+
+    for cache_idx, (local_len, remote_len) in enumerate(zip(local_block_lens, remote_block_lens)):
+        if local_len % tp_num_need_pulls != 0:
+            raise RuntimeError(
+                f"Mooncake local block payload {local_len} for layer {layer_idx}, cache {cache_idx} "
+                f"is not divisible by TP pull count {tp_num_need_pulls}."
+            )
+        expected_remote_len = local_len // tp_num_need_pulls
+        if remote_len != expected_remote_len:
+            raise RuntimeError(
+                "Mooncake KV block payload mismatch for "
+                f"layer {layer_idx}, cache {cache_idx}: local={local_len}, remote={remote_len}, "
+                f"expected_remote={expected_remote_len}. Ensure P and D use the same Flash MLA cache layout."
+            )
 
 
 def string_to_int64_hash(input_str):

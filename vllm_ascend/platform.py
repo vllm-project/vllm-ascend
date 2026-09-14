@@ -494,8 +494,11 @@ class NPUPlatform(Platform):
                 raise ValueError("Flash MLA requires PCP=DCP=1")
             if cache.cache_dtype not in ("auto", "bfloat16", "float16"):
                 raise ValueError("Flash MLA requires unquantized KV cache")
-            if vllm_config.kv_transfer_config is not None or getattr(cache, "use_kda_recoverssm", False):
-                raise ValueError("Flash MLA does not support KV transfer or KDA recoverSSM")
+            kv_transfer = vllm_config.kv_transfer_config
+            if kv_transfer is not None and getattr(kv_transfer, "kv_connector", None) != "MooncakeConnectorV1":
+                raise ValueError("Flash MLA KV transfer currently supports MooncakeConnectorV1 only")
+            if getattr(cache, "use_kda_recoverssm", False):
+                raise ValueError("Flash MLA does not support KDA recoverSSM")
             if cache.mamba_cache_mode not in ("none", "align"):
                 raise ValueError("Flash MLA supports Mamba cache modes none/align")
             if vllm_config.model_config.is_hybrid:
