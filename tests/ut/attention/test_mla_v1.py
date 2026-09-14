@@ -1430,6 +1430,36 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
+    @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", create=True)
+    def test_q_proj_and_k_up_proj_transpose_fused_matches_legacy_bmm(self, mock_tbmm):
+        """The transpose-fused path must match the legacy split + bmm result."""
+        batch_size = 4
+        q = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
+        self.impl.q_proj.return_value = (q,)
+        w_uk_t = torch.randn(self.impl.num_heads, self.impl.qk_nope_head_dim, self.impl.kv_lora_rank)
+        self.impl.W_UK_T = w_uk_t
+        self.impl.W_UK_T_padded = torch.cat(
+            [w_uk_t, torch.zeros(self.impl.num_heads, self.impl.qk_rope_head_dim, self.impl.kv_lora_rank)],
+            dim=1,
+        )
+        # Emulate the CANN op: (B, N, P) x (N, P, L) -> (B, N, L).
+        mock_tbmm.side_effect = lambda x, w, perm_x1, perm_x2, perm_y: torch.einsum("bnp,npl->bnl", x, w)
+
+        ql_nope, q_pe = self.impl._q_proj_and_k_up_proj(torch.randn(batch_size, 7))
+
+        mock_tbmm.assert_called_once()
+        call_args = mock_tbmm.call_args
+        self.assertIs(call_args.args[1], self.impl.W_UK_T_padded)
+        self.assertEqual(call_args.kwargs["perm_x1"], (1, 0, 2))
+        self.assertEqual(call_args.kwargs["perm_x2"], (0, 1, 2))
+        self.assertEqual(call_args.kwargs["perm_y"], (1, 0, 2))
+
+        # Reference: the legacy split + transpose + bmm path on the same q.
+        q_nope_ref, q_pe_ref = q.split([self.impl.qk_nope_head_dim, self.impl.qk_rope_head_dim], dim=-1)
+        ql_nope_ref = torch.bmm(q_nope_ref.transpose(0, 1), w_uk_t).transpose(0, 1)
+        self.assertTrue(torch.allclose(ql_nope, ql_nope_ref, atol=1e-4))
+        self.assertTrue(torch.equal(q_pe, q_pe_ref))
+
     @patch("torch_npu.npu_interleave_rope")
     def test_rope_single(self, mock_npu_interleave_rope):
         batch_size = 2
