@@ -4329,11 +4329,12 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
 
     def test_run_merge_draft_mtp_skip_topk(self):
-        """Test the set_skip_topk calling logic in step 0 and step 1 of run_merge_draft."""
+        """Test the set_skip_topk / compact_topk_indices calling logic in step 0
+        and step 1 of run_merge_draft."""
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
         proposer._share_mtp_indices = True
 
-        # Mock Draft Model and its set_skip_topk method
+        # Mock Draft Model and its set_skip_topk / compact_topk_indices methods
         draft_model_mock = MagicMock()
         proposer.model = MagicMock()
         proposer.model.model = draft_model_mock
@@ -4342,9 +4343,11 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer.model_returns_tuple = MagicMock(return_value=False)
         proposer.model.return_value = MagicMock()
 
+        token_indices_to_sample = torch.arange(8, dtype=torch.int32)
+
         # Mock the run_merge_draft logic from your PR
         # (Since this is a class method, we use an inner function to simulate and verify the core logic)
-        def mock_run_merge_draft(**model_kwargs):
+        def mock_run_merge_draft(token_indices_to_sample, **model_kwargs):
             # Step 0
             draft_model = getattr(proposer.model, "model", None)
             if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
@@ -4356,9 +4359,11 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
             # Step 1
             if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
                 draft_model.set_skip_topk(True)
+                if hasattr(draft_model, "compact_topk_indices"):
+                    draft_model.compact_topk_indices(token_indices_to_sample)
 
         # Run the test
-        mock_run_merge_draft(input_ids=torch.tensor([1, 2, 3]))
+        mock_run_merge_draft(token_indices_to_sample, input_ids=torch.tensor([1, 2, 3]))
 
         # Assert calling conditions
         self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
@@ -4368,3 +4373,50 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(len(calls), 2, "set_skip_topk should be called exactly twice.")
         self.assertEqual(calls[0][0][0], False, "Step 0 should call set_skip_topk(False).")
         self.assertEqual(calls[1][0][0], True, "Step 1 should call set_skip_topk(True).")
+
+        # Compact must run exactly once, right after step 0, with the
+        # step-0 sampling indices.
+        self.assertTrue(
+            draft_model_mock.compact_topk_indices.called,
+            "compact_topk_indices should be called.",
+        )
+        compact_calls = draft_model_mock.compact_topk_indices.call_args_list
+        self.assertEqual(len(compact_calls), 1, "compact_topk_indices should be called exactly once.")
+        self.assertTrue(
+            torch.equal(compact_calls[0][0][0], token_indices_to_sample),
+            "compact_topk_indices must receive token_indices_to_sample.",
+        )
+
+    def test_run_merge_draft_mtp_skip_topk_without_compact(self):
+        """Draft predictors without compact_topk_indices (e.g. the
+        vllm-ascend DeepSeekV4MTP predictor) must be left untouched."""
+        proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+        proposer._share_mtp_indices = True
+
+        # Mock Draft Model without the compact method
+        draft_model_mock = MagicMock()
+        del draft_model_mock.compact_topk_indices
+        proposer.model = MagicMock()
+        proposer.model.model = draft_model_mock
+
+        proposer.model_returns_tuple = MagicMock(return_value=False)
+        proposer.model.return_value = MagicMock()
+
+        token_indices_to_sample = torch.arange(4, dtype=torch.int32)
+
+        def mock_run_merge_draft(token_indices_to_sample, **model_kwargs):
+            draft_model = getattr(proposer.model, "model", None)
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(False)
+            proposer.model(**model_kwargs)
+            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
+                draft_model.set_skip_topk(True)
+                if hasattr(draft_model, "compact_topk_indices"):
+                    draft_model.compact_topk_indices(token_indices_to_sample)
+
+        mock_run_merge_draft(token_indices_to_sample, input_ids=torch.tensor([1, 2, 3]))
+
+        # set_skip_topk still toggles, but compact is skipped entirely.
+        self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
+        self.assertEqual(len(draft_model_mock.set_skip_topk.call_args_list), 2)
+        self.assertFalse(hasattr(draft_model_mock, "compact_topk_indices"))
