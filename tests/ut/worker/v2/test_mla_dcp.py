@@ -140,41 +140,52 @@ def test_padded_dspark_queries_are_decodes_even_after_target_prefill(monkeypatch
     assert common.context_parallel_metadata.num_computed_tokens_of_dcp.tolist() == [[7, 4], [0, 0]]
 
 
-def test_full_graph_steps_start_from_rewound_gpu_lengths(monkeypatch):
-    # GPU lengths already include rejection and the first decode input.
-    # The target upper bound must not be used or decremented again.
-    builder = _builder(monkeypatch)
-    decode = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
-    target = SimpleNamespace(decode=decode)
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("interleave", [1, 128])
+@pytest.mark.parametrize("advance", [False, True])
+def test_full_graph_steps_start_from_rewound_gpu_lengths(rank, interleave, advance):
+    base = AscendMLAMetadata.__new__(AscendMLAMetadata)
+    base.decode = AscendMLADCPDecodeMetadata.__new__(AscendMLADCPDecodeMetadata)
+    base.decode.block_table = torch.zeros(3, 2, dtype=torch.int32)
+    base.decode.actual_seq_lengths_q = [1, 2, 3]
+    base.query_lens = [1, 1, 1]
+    base.seq_lens = torch.tensor([129, 255, 0])
     seen = []
 
     def build(**kwargs):
-        lengths = kwargs["seq_lens_cpu"]
-        common = attn_utils.build_attn_metadata(**_kwargs(builder, [1, 1, 1], lengths.tolist(), [False] * 3))["mla"]
-        seen.append(common)
-        return {"draft": common}
+        seen.append(kwargs["seq_lens_cpu"].clone())
+        return {"draft": base, "draft2": base}
 
     spec = SimpleNamespace(
-        model_state=SimpleNamespace(attn_metadata={"draft": target}),
+        model_state=SimpleNamespace(attn_metadata={"draft": base}),
         draft_attn_layer_names={"draft"},
         attn_architecture="MLA",
-        block_tables=SimpleNamespace(cp_size=2),
+        block_tables=SimpleNamespace(cp_size=2, cp_rank=rank, cp_interleave=interleave),
         input_batch=SimpleNamespace(num_reqs=2),
-        input_buffers=SimpleNamespace(seq_lens=torch.tensor([7, 8, 999])),
+        input_buffers=SimpleNamespace(seq_lens=torch.tensor([129, 255, 999])),
         num_speculative_steps=4,
-        max_model_len=100,
-        advance_draft_positions=True,
+        max_model_len=256,
+        advance_draft_positions=advance,
         _build_draft_attn_metadata=build,
     )
     result = AscendAutoRegressiveSpeculator.build_draft_attn_metadatas(spec, 3, 3, False)
-    assert len(result) == 3
-    assert [m.seq_lens_cpu.tolist() for m in seen] == [[7, 8, 0], [8, 9, 0], [9, 10, 0]]
-    assert [m.context_parallel_metadata.num_computed_tokens_of_dcp.tolist() for m in seen] == [
-        [[4, 3], [4, 4], [0, 0]],
-        [[4, 4], [5, 4], [0, 0]],
-        [[5, 4], [6, 4], [0, 0]],
-    ]
-    assert seen[0].seq_lens_cpu.data_ptr() != seen[1].seq_lens_cpu.data_ptr()
+    assert len(seen) == 1
+    assert seen[0].tolist() == [129, 255, 0]
+    owned = lambda n: sum((pos // interleave) % 2 == rank for pos in range(n))
+    for step, groups in enumerate(result):
+        metadata = groups["draft"]
+        lengths = [129 + step if advance else 129, min(255 + step, 256) if advance else 255, 0]
+        assert metadata is groups["draft2"]
+        assert metadata is not base
+        assert metadata.decode is not base.decode
+        assert metadata.seq_lens_cpu.tolist() == lengths
+        assert metadata.decode.cp_seq_len == [owned(n) for n in lengths]
+        assert metadata.decode.cp_history_seq_len == [owned(max(n - 1, 0)) for n in lengths]
+        assert metadata.decode.block_table is base.decode.block_table
+        assert metadata.decode.actual_seq_lengths_q is base.decode.actual_seq_lengths_q
+        assert metadata.seq_lens is base.seq_lens
+    assert result[0]["draft"].decode is not result[1]["draft"].decode
+    assert result[0]["draft"].seq_lens_cpu.data_ptr() != result[1]["draft"].seq_lens_cpu.data_ptr()
 
 
 def test_dspark_updates_nested_mla_query_metadata():

@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from enum import Enum
 from typing import NamedTuple
@@ -111,6 +112,33 @@ class AscendMlaDCPMetadataBuilder(
             self.block_size,
             self.cp_virtual_block_size,
         )
+
+    @staticmethod
+    def build_decode_graph_step(
+        metadata: AscendMLAMetadata,
+        seq_lens_cpu: torch.Tensor,
+        dcp_size: int,
+        dcp_rank: int,
+        interleave: int,
+    ) -> AscendMLAMetadata:
+        """Refresh host lengths for one draft graph step, sharing captured buffers.
+
+        Graph input kernels own device lengths/positions. Task updates consume
+        the independent CPU lists below; block tables and query layout stay fixed.
+        """
+        result = copy(metadata)
+        result.decode = copy(metadata.decode)
+        assert isinstance(result.decode, AscendMLADCPDecodeMetadata)
+        result.seq_lens_cpu = seq_lens_cpu
+        result.decode.seq_lens_list = seq_lens_cpu.tolist()
+        result.decode.max_seq_lens = int(seq_lens_cpu.max()) if seq_lens_cpu.numel() else 0
+        query_lens = torch.tensor(metadata.query_lens, dtype=seq_lens_cpu.dtype)
+        history_lens = (seq_lens_cpu - query_lens).clamp(min=0)
+        result.decode.cp_seq_len = get_dcp_local_seq_lens(seq_lens_cpu, dcp_size, interleave)[:, dcp_rank].tolist()
+        result.decode.cp_history_seq_len = get_dcp_local_seq_lens(history_lens, dcp_size, interleave)[
+            :, dcp_rank
+        ].tolist()
+        return result
 
     def build_chunked_metadata(
         self,

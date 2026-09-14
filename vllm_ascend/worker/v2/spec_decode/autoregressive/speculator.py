@@ -36,7 +36,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegress
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMLADCPDecodeMetadata, AscendMlaDCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -527,21 +527,38 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             # and advanced to the first single-token draft query. Copy once
             # before replay; each step owns its history/current split lengths.
             first_seq_lens = self.input_buffers.seq_lens[:num_reqs].to("cpu")
+            base_seq_lens = torch.zeros(num_reqs_padded, dtype=torch.int32)
+            base_seq_lens[:num_reqs] = first_seq_lens
+            base_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                num_tokens_padded=num_reqs_padded,
+                seq_lens_cpu_upper_bound=base_seq_lens,
+                step=1,
+                seq_lens_cpu=base_seq_lens,
+            )
+            assert base_metadata is not None
             draft_attn_metadatas = []
             for step in range(1, self.num_speculative_steps):
                 seq_lens_cpu = torch.zeros(num_reqs_padded, dtype=torch.int32)
                 advance = step - 1 if getattr(self, "advance_draft_positions", True) else 0
                 seq_lens_cpu[:num_reqs] = (first_seq_lens + advance).clamp(max=self.max_model_len)
-                draft_attn_metadatas.append(
-                    self._build_draft_attn_metadata(
-                        num_reqs=num_reqs,
-                        num_reqs_padded=num_reqs_padded,
-                        num_tokens_padded=num_reqs_padded,
-                        seq_lens_cpu_upper_bound=seq_lens_cpu,
-                        step=step,
-                        seq_lens_cpu=seq_lens_cpu,
-                    )
-                )
+                # Layers in one attention group share the same metadata. Keep
+                # that sharing within a step, but isolate mutable step lengths.
+                step_groups = {}
+                per_step_metadata = {}
+                for name, metadata in base_metadata.items():
+                    group_key = id(metadata)
+                    if group_key not in step_groups:
+                        step_groups[group_key] = AscendMlaDCPMetadataBuilder.build_decode_graph_step(
+                            metadata,
+                            seq_lens_cpu,
+                            self.block_tables.cp_size,
+                            self.block_tables.cp_rank,
+                            self.block_tables.cp_interleave,
+                        )
+                    per_step_metadata[name] = step_groups[group_key]
+                draft_attn_metadatas.append(per_step_metadata)
             return draft_attn_metadatas
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
