@@ -120,6 +120,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             model_config=self.draft_model_config,
             parallel_config=parallel_config,
+            cache_config=replace(self.vllm_config.cache_config),
         )
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an

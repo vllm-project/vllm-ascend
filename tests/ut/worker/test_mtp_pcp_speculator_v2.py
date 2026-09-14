@@ -67,6 +67,9 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         data_parallel_size=2,
         data_parallel_rank=1,
     )
+    target_cache_config = SimpleNamespace(
+        block_size=128,
+    )
     target_config = SimpleNamespace(
         parallel_config=target_parallel_config,
         speculative_config=SimpleNamespace(
@@ -75,6 +78,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: None),
         ),
+        cache_config=target_cache_config,
     )
     draft_model_config = object()
     captured: dict[str, SimpleNamespace] = {}
