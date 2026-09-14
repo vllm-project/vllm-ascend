@@ -112,7 +112,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     vllm serve ${WEIGHT_PATH} \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 43008 \
+      --max-model-len 65920 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
       --max-num-seqs 16 \
@@ -242,7 +242,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --host 0.0.0.0 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 40960 \
+      --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 8 \
@@ -279,7 +279,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
-      --max-model-len 40960 \
+      --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --max-num-seqs 8 \
@@ -560,7 +560,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
         --trust-remote-code \
-        --gpu-memory-utilization 0.85 \
+        --gpu-memory-utilization 0.92 \
         --reasoning-parser minimax_m3 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
