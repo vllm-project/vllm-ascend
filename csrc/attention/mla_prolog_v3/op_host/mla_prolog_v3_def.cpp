@@ -161,6 +161,18 @@ public:
         this->Attr("qc_qr_scale").AttrType(OPTIONAL).Float(1.0f);
         this->Attr("kc_scale").AttrType(OPTIONAL).Float(1.0f);
 
+        // A2/A3：使用上方默认 dtype 组合（不含 MXFP8/FP8/HIF8）
+        OpAICoreConfig aicore_config;
+        aicore_config.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .PrecisionReduceFlag(true)
+            .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
+        this->AICore().AddConfig("ascend910b", aicore_config);
+        this->AICore().AddConfig("ascend910_93", aicore_config);
+
         OpAICoreConfig aicore_config_95;
         aicore_config_95.Input("token_x")
             .ParamType(REQUIRED)
