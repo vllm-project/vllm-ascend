@@ -50,12 +50,36 @@ def bind_kv_cache(
             runner_kv_caches.append(kv_caches[layer_name])
             ordered_layer_names.append(layer_name)
 
-    # Bind kv_caches to forward context
+    bind_kv_cache_to_layers(
+        kv_caches,
+        forward_context,
+        num_attn_module,
+        kv_cache_groups,
+        ordered_layer_names=ordered_layer_names,
+    )
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    *,
+    ordered_layer_names: list[str] | None = None,
+) -> None:
+    """Bind Ascend cache views through vLLM main's layer-only entry point."""
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
 
     if not vllm_version_is("0.28.0"):
+        if ordered_layer_names is None:
+            ordered_layer_names = sorted(
+                kv_caches,
+                key=lambda name: extract_layer_index(name, num_attn_module),
+            )
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.28.0"):
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
