@@ -1125,14 +1125,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_decode_reqs <= self.max_num_reqs_for_dspark()
         )
 
-    def _dspark_swa_indices_warmup(self, block_table: torch.Tensor, num_decode_tokens: int) -> None:
+    def _dspark_swa_indices_warmup(
+        self,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_decode_tokens: int,
+    ) -> None:
         """JIT-warm the triton kernel once per (B, W) combination.
 
         A post-capture JIT would block the replay path (the executor stream
         must never hit the compiler), so the first eager build for a given
         block-table width pays the compile and later steps reuse the cache;
         B changes remap physical pages and land in a different ROW_POW2
-        bucket, each warmed on first sight.
+        bucket, each warmed on first sight. The dummy ``query_start_loc`` /
+        ``seq_lens`` reuse the runtime tensors' dtypes so the warmup compiles
+        the exact pointer specializations the real call will launch.
         """
         if build_dspark_swa_indices_triton is None:
             return
@@ -1146,10 +1154,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.storage_block_size,
             torch.zeros(
                 self.max_num_reqs_for_dspark() + 1,
-                dtype=torch.int32,
+                dtype=query_start_loc.dtype,
                 device=self.device,
             ),
-            torch.zeros(self.max_num_reqs_for_dspark(), dtype=torch.int32, device=self.device),
+            torch.zeros(self.max_num_reqs_for_dspark(), dtype=seq_lens.dtype, device=self.device),
             num_decode_tokens,
             self._dspark_index_width,
             self.dspark_swa_indices_buffer,
@@ -1530,7 +1538,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 # buffer so the pad-row cleanup ([T_active, T_padded)) fires
                 # and a captured graph never replays stale rows.
                 if self._dspark_swa_indices_fast_path_eligible(num_reqs):
-                    self._dspark_swa_indices_warmup(self.block_table, self.num_decode_tokens)
+                    self._dspark_swa_indices_warmup(
+                        self.block_table,
+                        dspark_swa_args[4],
+                        dspark_swa_args[5],
+                        self.num_decode_tokens,
+                    )
                     num_query_per_req = self.dspark_num_query_per_req()
                     num_actual_tokens = self.num_actual_tokens
                     max_num_reqs = self.max_num_reqs_for_dspark()
