@@ -286,7 +286,9 @@ def get_a5_mega_moe_buffer_tokens_per_rank(
     kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_role = getattr(kv_transfer_config, "kv_role", None)
     is_kv_producer = bool(getattr(kv_transfer_config, "is_kv_producer", False))
-    if kv_role in ("kv_producer", "kv_both") or (kv_role is None and is_kv_producer):
+    if kv_transfer_config is None or kv_role in ("kv_producer", "kv_both") or (
+        kv_role is None and is_kv_producer
+    ):
         execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
     else:
         if mc2_tokens_capacity is None:
