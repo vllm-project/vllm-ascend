@@ -92,6 +92,8 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.kvpp = KVPPRuntime()
+        # Adaptive verification uses this flag to apply FIA-specific query
+        # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
@@ -252,9 +254,14 @@ class NPUModelRunner(GPUModelRunner):
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
 
-        attn_backends = tuple(group.backend for groups in self.attn_groups for group in groups)
+        # Only target-model layers determine whether FIA is in use. This flag
+        # is used for adaptive verification handling.
+        draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            backend is AscendAttentionBackend or backend is AscendMLABackend for backend in attn_backends
+            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            for groups in self.attn_groups
+            for group in groups
         )
 
         if self.model_config.enable_return_routed_experts:
