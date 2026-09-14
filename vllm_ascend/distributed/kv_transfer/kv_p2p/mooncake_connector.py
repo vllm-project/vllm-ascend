@@ -2916,14 +2916,14 @@ class MooncakeConnectorWorker:
         r_blk = self.block_size // remote_block_size if self.block_size > remote_block_size else 1
         return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
 
-    def _get_sfa_decode_only_dcp_metadata(
+    def _get_decode_only_dcp_metadata(
         self,
         req_id: str,
         meta: ReqMeta,
         prefill_tp_size: int,
     ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds]]:
         assert (meta.remote_block_size or self.block_size) == self.block_size, (
-            "SFA decode-only DCP requires equal P/D block sizes."
+            "Decode-only DCP requires equal P/D block sizes."
         )
         if self._is_hma_required:
             chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
@@ -2993,9 +2993,9 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        is_sfa_decode_only_dcp = self.use_sfa_sparse and self.dcp_size > 1 and meta.remote_dcp_size == 1
-        if is_sfa_decode_only_dcp:
-            return self._get_sfa_decode_only_dcp_metadata(req_id, meta, prefill_tp_size)
+        is_decode_only_dcp = self.dcp_size > 1 and meta.remote_dcp_size == 1
+        if is_decode_only_dcp:
+            return self._get_decode_only_dcp_metadata(req_id, meta, prefill_tp_size)
 
         if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
