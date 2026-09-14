@@ -10,6 +10,7 @@ from vllm.v1.worker import mamba_utils
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -197,3 +198,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
+        """Collect worker-side KV cache events from all child connectors."""
+        combined = None
+        for connector in self._connectors:
+            events = connector.get_kv_connector_kv_cache_events()
+            if events is None:
+                continue
+            if combined is None:
+                combined = events
+            else:
+                combined.add_events(events.get_all_events())
+                combined.increment_workers(events.get_number_of_workers())
+        return combined
