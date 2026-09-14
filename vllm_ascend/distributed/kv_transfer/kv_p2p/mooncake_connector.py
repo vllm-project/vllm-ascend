@@ -195,10 +195,11 @@ class KVCacheTaskTracker:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
 
-    def update_done_task_count(self, request_id: str):
+    def update_done_task_count(self, request_id: str, report_finished: bool = True):
         with self.done_task_lock:
             if request_id in self.reqs_to_process:
-                self.finished_requests.add(request_id)
+                if report_finished:
+                    self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
                 self.delayed_free_requests.pop(request_id, None)
             else:
@@ -582,6 +583,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        report_finished: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -602,6 +604,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "report_finished": report_finished,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -758,7 +761,10 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
-                self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(
+                    request_id,
+                    report_finished=req_meta.get("report_finished", True),
+                )
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
                 self._clear_failed_recv_request(request_id)
@@ -1631,6 +1637,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
+    def on_new_request(self, request: "Request") -> None:
+        """Apply Mamba P-side truncation before hashing and allocation."""
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
@@ -1764,6 +1775,7 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+        self._partial_tail_offloads: dict[str, list[tuple[int, int, int]]] = {}
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -1839,7 +1851,8 @@ class MooncakeConnectorScheduler:
                         f"prompt_len={prompt_len}, tokens_per_block={group_info.tokens_per_block}, "
                         f"required_block_count={num_prompt_state_blocks}, available_block_count={len(blocks)}."
                     )
-                transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
+                transfer_block_idx = num_prompt_state_blocks - 1
+                transfer_block_ids.append(blocks[transfer_block_idx : transfer_block_idx + 1])
             else:
                 # Each scheduler-visible block id is a DCP-grouped virtual
                 # block shared by all DCP ranks.
@@ -1896,6 +1909,12 @@ class MooncakeConnectorScheduler:
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
+    def on_new_request(self, request: "Request") -> None:
+        """Truncate Mamba remote-decode requests before scheduler admission."""
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self.need_truncate:
+            self._truncate_request_for_prefill(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1923,13 +1942,13 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             actual = self._state_prefill_token_count(len(token_ids))
+            remote_state_boundary_tokens = params.get("remote_state_boundary_tokens")
+            if remote_state_boundary_tokens is not None:
+                actual = min(actual, int(remote_state_boundary_tokens))
             params["num_computed_tokens"] = num_computed_tokens
             count = max(actual - num_computed_tokens, 0)
             if count > 0:
                 return count, True
-
-        if params is not None and params.get("do_remote_decode") and self.need_truncate:
-            self._truncate_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -1947,7 +1966,11 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
-                    local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                    local_block_ids = (
+                        blocks.get_unhashed_block_ids_all_groups()
+                        if num_external_tokens > 0
+                        else tuple([] for _ in self.kv_cache_groups)
+                    )
                     local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
@@ -1968,6 +1991,11 @@ class MooncakeConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
+
+        partial_tail_offloads = getattr(scheduler_output, "partial_tail_offloads", None)
+        if partial_tail_offloads:
+            for req_id, offloads in partial_tail_offloads.items():
+                self._partial_tail_offloads.setdefault(req_id, []).extend(offloads)
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids, full_block_ids, num_external_tokens) in self._reqs_need_recv.items():
@@ -2033,13 +2061,41 @@ class MooncakeConnectorScheduler:
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
+        remote_state_boundary_tokens = None
+        partial_tail_offloads = self._partial_tail_offloads.pop(request.request_id, [])
+        if partial_tail_offloads:
+            state_group_ids = {
+                group_idx
+                for group_idx, group_info in enumerate(self.group_transfer_info)
+                if group_info.is_state_group
+            }
+            boundary_tokens = {boundary for _, _, boundary in partial_tail_offloads}
+            offload_by_group = {
+                group_id: block_id
+                for group_id, block_id, _ in partial_tail_offloads
+                if group_id in state_group_ids
+            }
+            if len(boundary_tokens) == 1 and state_group_ids <= offload_by_group.keys():
+                remote_state_boundary_tokens = boundary_tokens.pop()
+                normalized_block_ids = [list(group) for group in computed_block_ids]
+                for group_id in state_group_ids:
+                    normalized_block_ids[group_id] = [offload_by_group[group_id]]
+                computed_block_ids = tuple(normalized_block_ids)
+            else:
+                logger.warning(
+                    "Ignoring incomplete Mooncake Mamba partial-tail handoff: "
+                    "request_id=%s state_group_ids=%s offloads=%s",
+                    request.request_id,
+                    state_group_ids,
+                    partial_tail_offloads,
+                )
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
         delay_free_blocks = sum(computed_block_lens) > 0
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
-        return delay_free_blocks, dict(
+        transfer_params = dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -2055,6 +2111,9 @@ class MooncakeConnectorScheduler:
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.block_size,
         )
+        if remote_state_boundary_tokens is not None:
+            transfer_params["remote_state_boundary_tokens"] = remote_state_boundary_tokens
+        return delay_free_blocks, transfer_params
 
     def _port_offset_from_handshake_metadata(
         self,
@@ -3791,6 +3850,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        report_finished=(getattr(meta, "num_external_tokens", 1) > 0),
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:

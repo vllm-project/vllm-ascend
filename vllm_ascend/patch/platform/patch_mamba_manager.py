@@ -21,6 +21,51 @@ class AscendMambaManager(MambaManager):
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.block_size = kv_cache_spec.block_size
+        # Set by AscendHybridKVCacheCoordinator from the effective
+        # --kv-transfer-config role.  Keep this scheduler-owned rather than
+        # relying on a process environment variable that can disagree with
+        # the connector role.
+        self.is_kv_producer = False
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        """Expose an exact Mamba state boundary after a producer-local hit.
+
+        Upstream records a partial-tail offload when the boundary is produced
+        by the current request.  A hot APC hit instead starts from an existing
+        partial state block; preserve that source block for the PD connector
+        before the request's CoW allocation redirects subsequent writes.
+        """
+        partial_source = None
+        if (
+            self.is_kv_producer
+            and num_local_computed_tokens > 0
+            and num_local_computed_tokens % self.block_size != 0
+            and new_computed_blocks
+        ):
+            partial_source = new_computed_blocks[-1]
+
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+
+        if partial_source is not None and not partial_source.is_null:
+            self._pending_partial_tail_offloads.append(
+                (
+                    request_id,
+                    self.kv_cache_group_id,
+                    partial_source,
+                    num_local_computed_tokens,
+                )
+            )
 
     @classmethod
     def find_longest_cache_hit(

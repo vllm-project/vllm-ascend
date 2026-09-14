@@ -182,6 +182,28 @@ def test_coordinator_defaults_non_producer_without_tag(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("max_length", "expected"),
+    [
+        (145, 144),
+        (144, 128),
+        (17, 16),
+        (16, 0),
+    ],
+)
+def test_producer_hit_cap_leaves_recompute_token(monkeypatch, max_length, expected):
+    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=True)
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == expected
+
+
+@pytest.mark.parametrize("max_length", [16, 17, 144, 145])
+def test_producer_hit_cap_is_transparent_on_consumer(monkeypatch, max_length):
+    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=False)
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == max_length
+
+
+@pytest.mark.parametrize(
     ("vllm_config", "expected"),
     [
         (_vllm_config(is_kv_producer=True, is_kv_consumer=False), True),
