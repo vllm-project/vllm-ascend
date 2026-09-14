@@ -106,13 +106,26 @@ def test_rejects_invalid_raw_contract(field, value, message):
         draft.configure_target_aux_hidden_capture(make_target())
 
 
-def test_raw_prefix_capture_does_not_add_attnres_bank():
+@pytest.mark.parametrize("layer_idx", [1, 2, 3])
+@pytest.mark.parametrize("has_residual", [False, True])
+def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
     state = torch.arange(8).view(2, 4)
-    target = SimpleNamespace(aux_hidden_state_layers=(1, 3))
-    captured = AscendKimiLinearModel._capture_raw_dspark_aux_hidden_state(target, [], 1, state)
-    assert captured[0] is state
-    assert captured[0].ndim == 2
-    assert AscendKimiLinearModel._capture_raw_dspark_aux_hidden_state(target, [], 2, state) == []
+    residual = torch.ones(2, 3, 4) if has_residual else None
+    target = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    torch.nn.Module.__init__(target)
+    target.config = SimpleNamespace(attn_res_block_size=2)
+    target.aux_hidden_state_layers = (1, 3)
+
+    # Exercise the inherited Kimi implementation, including its AttnRes guard.
+    captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
+    if layer_idx in target.aux_hidden_state_layers:
+        assert len(captured) == 1
+        assert captured[0] is state
+        assert captured[0].ndim == 2
+    else:
+        assert captured == []
+    if residual is not None:
+        torch.testing.assert_close(residual, torch.ones(2, 3, 4))
 
 
 def test_padded_mla_query_lengths_are_nested():
