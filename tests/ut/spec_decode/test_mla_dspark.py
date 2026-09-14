@@ -172,6 +172,7 @@ def test_replay_metadata_clears_prefill_flags_and_preserves_causality(monkeypatc
     assert captured["pad"] == 10
     assert captured["is_prefilling"].tolist() == [False, False]
     assert result[0]["draft"].decode.actual_seq_lengths_q == [5, 10]
+    assert result[0]["draft"].attn_state == AscendAttentionState.SpecDecoding
     kwargs = spec._build_draft_attn_metadata.call_args.kwargs
     assert kwargs["num_reqs"] == 1
     assert kwargs["num_reqs_padded"] == 2
