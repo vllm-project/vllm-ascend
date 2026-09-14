@@ -322,6 +322,31 @@ The following code configures vLLM Ascend to use speculative decoding where prop
       --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "enforce_eager": true}'
     ```
 
+### Adaptive verification
+
+Adaptive verification lets DSpark choose how many draft tokens to verify for
+each request at every decode step. Requests with higher confidence can keep a
+longer draft, while low-confidence drafts are shortened to avoid unnecessary
+target-model computation. It is disabled by default and requires a DSpark
+model with a confidence head.
+
+Enable it in `speculative_config`:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{
+    "method": "dspark",
+    "model": "deepseek-ai/dspark_qwen3_8b_block7",
+    "num_speculative_tokens": 7,
+    "enable_adaptive_verification": true
+  }'
+```
+
+Adaptive verification takes effect only with model runner V2.
+
+For more details, see the
+[vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
+
 ## Draft KV Sliding Window {: #draft-kv-sliding-window }
 
 Draft models are often trained on short contexts (e.g. 4-8k tokens). When the

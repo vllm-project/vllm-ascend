@@ -73,7 +73,7 @@ def test_glm5_2_mtp_full_decode_only() -> None:
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="eager",
+    graph_mode="eager,full_decode_only",
 )
 @patch.dict(
     os.environ,
@@ -82,27 +82,37 @@ def test_glm5_2_mtp_full_decode_only() -> None:
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "HCCL_BUFFSIZE": "1024",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
     },
 )
 @wait_until_npu_memory_free()
-def test_glm5_2_dspark_eager() -> None:
+@pytest.mark.parametrize("enable_adaptive_verification", [False, True], ids=["fixed", "adaptive"])
+def test_glm5_2_dspark_eager(enable_adaptive_verification: bool) -> None:
     _run_speculative_decoding(
         model_name=MODEL,
         speculative_config={
             "method": "dspark",
             "model": DRAFT_MODEL,
             "num_speculative_tokens": 7,
-            "enforce_eager": True,
+            "enforce_eager": not enable_adaptive_verification,
+            **({"enable_adaptive_verification": True} if enable_adaptive_verification else {}),
         },
-        expected_acceptance_length=DSPARK_EXPECTED_ACCEPTANCE_LENGTH,
+        # The adaptive case is a functional smoke test, not an acceptance-length
+        # regression test, so it allows the full valid range [1, K + 1].
+        expected_acceptance_length=4.5 if enable_adaptive_verification else DSPARK_EXPECTED_ACCEPTANCE_LENGTH,
         runner_kwargs={
             "quantization": "ascend",
             "tensor_parallel_size": 8,
             "max_model_len": 4096,
             "max_num_batched_tokens": 2048,
-            "enforce_eager": True,
+            "enforce_eager": not enable_adaptive_verification,
             "enable_prefix_caching": False,
             "async_scheduling": False,
+            **(
+                {"compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY")}
+                if enable_adaptive_verification
+                else {}
+            ),
         },
-        acceptance_length_rtol=0.1,
+        acceptance_length_rtol=0.78 if enable_adaptive_verification else 0.1,
     )
