@@ -118,7 +118,7 @@ def test_normalize_preserves_distinct_mamba_layouts():
         "mamba.0": _mamba_spec(),
         "mamba.1": MambaSpec(
             block_size=16,
-            shapes=((4, 3), (2, 2)),
+            shapes=((3, 2), (1, 4)),
             dtypes=(torch.float16, torch.float32),
         ),
     }
