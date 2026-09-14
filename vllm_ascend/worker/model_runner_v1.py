@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict, deque
@@ -2009,6 +2010,14 @@ class NPUModelRunner(GPUModelRunner):
             # vLLM's ``propose(num_speculative_tokens=...)``. ``_propose`` sets
             # ``self.num_speculative_tokens`` from it, so the model runner no
             # longer mutates the drafter's state here.
+            if (
+                os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV"
+                and self.valid_sampled_token_count_event is not None
+            ):
+                # Do not overlap the valid-count D2H with the MTP forward when
+                # AIV collectives are enabled. Synchronize only this tiny copy,
+                # rather than inserting a device-wide barrier.
+                self.valid_sampled_token_count_event.synchronize()
             draft_token_ids = self.drafter._propose(
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
