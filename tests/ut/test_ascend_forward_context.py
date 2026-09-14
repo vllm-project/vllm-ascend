@@ -511,3 +511,64 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+
+
+def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False
+
+
+def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        vllm_config=SimpleNamespace(use_v2_model_runner=False),
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert afc._EXTRA_CTX.capturing is True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        vllm_config=SimpleNamespace(use_v2_model_runner=False),
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False

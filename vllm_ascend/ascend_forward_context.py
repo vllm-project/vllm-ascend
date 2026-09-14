@@ -382,6 +382,24 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     return moe_comm_type
 
 
+def _extra_ctx_uses_additional_kwargs(ctx: Any) -> bool:
+    """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
+
+    GPU V2 stores its own ``capturing`` flag on the forward-context object.
+    Ascend FIA treats ``_EXTRA_CTX.capturing`` as "this stream is in ACL graph
+    capture, so call ``graph_task_group_begin``". Those meanings must not mix.
+
+    ``VLLM_USE_V2_MODEL_RUNNER=1`` already isolated extras in
+    ``additional_kwargs``. The Ascend whitelist can enable V2 with the env
+    unset, so also follow ``VllmConfig.use_v2_model_runner``.
+    """
+    env = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+    if env is not None:
+        return bool(env)
+    vllm_config = getattr(ctx, "vllm_config", None)
+    return bool(getattr(vllm_config, "use_v2_model_runner", False))
+
+
 class _ExtraForwardContextProxy:
     """Unified forward-context access for v1/v2 model runners."""
 
@@ -425,17 +443,24 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
+        if _extra_ctx_uses_additional_kwargs(ctx):
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
+            additional_kwargs = getattr(ctx, "additional_kwargs", None)
+            if additional_kwargs is None:
+                return None
+            return additional_kwargs.get(name)
         return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            ctx.additional_kwargs[name] = value
+        if _extra_ctx_uses_additional_kwargs(ctx):
+            additional_kwargs = getattr(ctx, "additional_kwargs", None)
+            if additional_kwargs is None:
+                additional_kwargs = {}
+                ctx.additional_kwargs = additional_kwargs
+            additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)
 
