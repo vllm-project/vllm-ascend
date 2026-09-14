@@ -1295,15 +1295,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _get_kv_cache_view(self, key: torch.Tensor, value: torch.Tensor):
         if not self.use_bnsd_kv_cache:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            num_block, block_size, _, _ = key.shape
+            key = key.view(num_block, block_size, -1)
+            value = value.view(num_block, block_size, -1)
         else:
-            num_block, num_head, block_size, _ = self.key_cache.shape
+            _, _, block_size, _ = key.shape
         return key, value, block_size
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
@@ -1321,9 +1317,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-            if self.key_cache is None:
+            if self.key_cache is None or self.value_cache is None:
                 raise RuntimeError(
-                    f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
+                    "key_cache or value_cache is None in _get_fia_params for "
+                    f"mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
