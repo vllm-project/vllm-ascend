@@ -221,9 +221,10 @@ def vision_qkv_rope_pad(
     if any(provided) and not all(provided):
         raise ValueError("q_out, k_out and v_out must be provided together")
     if not any(provided):
-        q_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
-        k_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
-        v_out = torch.empty(out_shape, dtype=qkv_proj.dtype, device=qkv_proj.device)
+        # Keep Q/K/V as contiguous non-overlapping views of one allocation.
+        # This reduces allocator calls on the hot eager path.
+        fused_out = torch.empty((3, *out_shape), dtype=qkv_proj.dtype, device=qkv_proj.device)
+        q_out, k_out, v_out = fused_out.unbind(0)
     else:
         for name, out in (("q_out", q_out), ("k_out", k_out), ("v_out", v_out)):
             if out.shape != out_shape:
