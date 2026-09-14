@@ -55,6 +55,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _minimax_m3_index_score,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
+    minimax_m3_index_decode_a5,
     minimax_m3_index_prefill,
     minimax_m3_index_tp_block_parallel_decode,
 )
@@ -950,6 +951,75 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     assert kwargs["atten_mask"] is causal_mask
     assert "init_blocks" not in kwargs
     assert "local_blocks" not in kwargs
+
+
+def test_ascendc_index_score_forwards_block_forcing_when_enabled() -> None:
+    expected = torch.zeros(2, 1, 4)
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
+        return_value=expected,
+        create=True,
+    ) as mock_index_score:
+        actual = _minimax_m3_index_score(
+            torch.zeros(1, 2, 128),
+            torch.zeros(4, 128, 128),
+            torch.tensor([[0, 1, 2, 3]], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([129], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            torch.zeros(2048, 2048, dtype=torch.int8),
+            init_blocks=2,
+            local_blocks=3,
+            force_blocks_in_kernel=True,
+        )
+
+    assert actual is expected
+    kwargs = mock_index_score.call_args.kwargs
+    assert kwargs["init_blocks"] == 2
+    assert kwargs["local_blocks"] == 3
+
+
+def test_a5_index_decode_uses_full_table_score_and_existing_topk_cleanup() -> None:
+    score = torch.tensor([[[4.0, 3.0, 2.0, 1.0]]])
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=MagicMock(return_value=True)),
+        ),
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._index_topk_postprocess_kernel",
+            create=True,
+        ) as mock_postprocess,
+    ):
+        topk_indices, select_num_idx = minimax_m3_index_decode_a5(
+            torch.zeros(1, 1, 128),
+            torch.zeros(4, 128, 128),
+            torch.tensor([[0, 1, 2, 3]], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([129], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            torch.zeros(2048, 2048, dtype=torch.int8),
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+            decode_query_len=1,
+        )
+
+    assert topk_indices.shape == (1, 1, 2)
+    assert topk_indices.dtype == torch.int32
+    assert select_num_idx.shape == (1, 1)
+    assert select_num_idx.dtype == torch.int32
+    assert mock_score.call_args.kwargs == {
+        "init_blocks": 1,
+        "local_blocks": 1,
+        "force_blocks_in_kernel": True,
+    }
+    mock_postprocess.__getitem__.assert_called_once_with((1, 1))
+    mock_postprocess.__getitem__.return_value.assert_called_once()
 
 
 def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
