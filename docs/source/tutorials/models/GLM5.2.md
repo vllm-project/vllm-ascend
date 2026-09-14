@@ -12,7 +12,9 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Model Weight
+## 3 Prerequisites
+
+### 3.1 Model Weight
 
 - `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
 - `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
@@ -21,6 +23,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -121,7 +127,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
---port 8077 \
+--port 8000 \
 --api-server-count 1 \
 --data-parallel-size 2 \
 --enable-expert-parallel \
@@ -150,8 +156,6 @@ The parameters are explained as follows:
 
 #### 5.1.2 Multi-node Deployment
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
-
 === "A3 series"
 
     - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
@@ -178,7 +182,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --api-server-count 1 \
     --data-parallel-size 4 \
     --data-parallel-start-rank 0 \
@@ -223,7 +227,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 4 \
     --data-parallel-start-rank 2 \
@@ -285,7 +289,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --quantization ascend \
-    --port 7000 \
+    --port 8000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
@@ -327,7 +331,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --quantization ascend \
-    --port 7000 \
+    --port 8000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
@@ -1003,7 +1007,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
-  --port 9000 \
+  --port 8000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
@@ -1049,7 +1053,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
-  --port 9000 \
+  --port 8000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
@@ -1130,7 +1134,7 @@ prepare the script `launch_online_dp.py` on each node (used by the prefill and d
         parser.add_argument(
             "--vllm-start-port",
             type=int,
-            default=9000,
+            default=8000,
             help="Starting port for the engine."
         )
         return parser.parse_args()

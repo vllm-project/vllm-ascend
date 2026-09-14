@@ -749,7 +749,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
     For example:
@@ -773,7 +773,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
 Common Issues Tip: If requests reach the proxy but no output is returned, check that the proxy host list includes all healthy prefill and decode endpoints, and verify that the service verification request in Section 6 succeeds through the proxy port.

@@ -24,6 +24,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -160,7 +164,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
-      --port 8011 \
+      --port 8000 \
       --data-parallel-size 1 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -194,7 +198,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
       --host 0.0.0.0 \
-      --port 8077 \
+      --port 8000 \
       --max-model-len 133120  \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
@@ -260,7 +264,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
@@ -309,7 +313,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --headless \
         --max-model-len 133120 \
         --data-parallel-size 2 \

@@ -261,7 +261,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
@@ -332,7 +332,7 @@ For dataset preparation, please refer to the [AISBench Datasets Guide](https://g
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 For setup details, please refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
 
@@ -395,7 +395,7 @@ ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --d
 
 > The `--models` value should match the `abbr` in your model config file. Use `--num-prompts` to limit the number of test requests.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
