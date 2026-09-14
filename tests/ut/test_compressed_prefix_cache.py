@@ -69,7 +69,7 @@ def _make_full_manager(
         head_size=1,
         dtype=torch.float32,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        **ratio_kwargs,  # type: ignore[arg-type]
     )
     block_pool = BlockPool(
         num_gpu_blocks=8,
@@ -166,7 +166,7 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
     manager.cache_blocks(
         request_a,
         num_tokens=logical_block_size,
-        **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+        **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
     )
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
@@ -214,7 +214,7 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
     manager.cache_blocks(
         request,
         num_tokens=logical_block_size,
-        **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+        **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
     )
 
     logical_hashes = BlockHashListWithBlockSize(
@@ -289,7 +289,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         manager.cache_blocks(
             request_a,
             num_tokens=logical_block_size,
-            **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+            **({} if vllm_version_is("0.28.0") else {"replay_boundaries": (logical_block_size,)}),
         )
 
     per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
@@ -304,7 +304,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    hit_blocks, hit_length, _ = hit_result
+    hit_blocks, hit_length, _ = hit_result  # type: ignore[misc]
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
@@ -385,7 +385,7 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         block_size=block_size,
     )
 
-    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(  # type: ignore[misc]
         request.block_hashes,
         max_cache_hit_length=len(request.prompt_token_ids),
     )

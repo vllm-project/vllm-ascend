@@ -407,11 +407,11 @@ def test_dyntra_lb_v026_waits_for_paused_in_flight_output():
     )
 
     assert DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
+        scheduler,  # type: ignore[arg-type]
         paused_request,
     )
     assert not DyntraLBPolicyMixin._has_pending_deliverable_output(
-        scheduler,
+        scheduler,  # type: ignore[arg-type]
         normally_preempted_request,
     )
 
@@ -581,7 +581,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         assert "kv_connector_block_state" not in vars(scheduler_output)
     else:
         assert block_states[0].boundary_state_offloads is boundary_state_offloads
-        assert block_states[0].block_ids == {}
+        assert block_states[0].req_ids == set()
         assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata

@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.tiering.spec import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 class _NPUWorkerMixin:
@@ -51,10 +52,11 @@ class NPUOffloadingSpec(_NPUWorkerMixin, _CPUOffloadingSpec):
         # mmap buffer, and the pinned tensor path has the best proven H2D/D2H
         # performance. Consequently replicated_layout remains safely disabled
         # for this spec by the upstream _uses_shared_region() gate.
+        cpu_chunk_count = self.num_blocks if vllm_version_is("0.28.0") else self.num_chunks
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=cpu_chunk_count,
         )
 
 
@@ -82,16 +84,29 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
             # physical device index into that replica's mmap slot range.
             rank = int(torch.npu.current_device()) % world_size
 
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_blocks=self.num_blocks,
-            rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
-        )
+        if vllm_version_is("0.28.0"):
+            # vLLM main renamed the offload block counter to num_chunks and the
+            # SharedOffloadRegion kwargs accordingly (#52615).
+            cpu_chunk_count = self.num_blocks
+            worker_mmap = SharedOffloadRegion(
+                engine_id=self._engine_id,
+                num_blocks=cpu_chunk_count,
+                rank=rank,
+                kv_bytes_per_block=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+            )
+        else:
+            cpu_chunk_count = self.num_chunks
+            worker_mmap = SharedOffloadRegion(
+                engine_id=self._engine_id,
+                num_chunks=cpu_chunk_count,
+                rank=rank,
+                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+            )
         return NPUOffloadingWorker(
             kv_caches=kv_caches,
             blocks_per_chunk=self.blocks_per_chunk,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=cpu_chunk_count,
             mmap_region=worker_mmap,
         )

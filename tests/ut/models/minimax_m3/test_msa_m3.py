@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
@@ -77,7 +77,7 @@ def _create_common_attn_metadata(
     batch_spec: BatchSpec,
     block_size: int,
     device: torch.device,
-) -> CommonAttentionMetadata:
+) -> AscendCommonAttentionMetadata:
     query_start_loc = torch.zeros(
         batch_spec.batch_size + 1,
         dtype=torch.int32,
@@ -104,7 +104,7 @@ def _create_common_attn_metadata(
     ).view(batch_spec.batch_size, max_blocks)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
 
-    return CommonAttentionMetadata(
+    return AscendCommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
@@ -380,7 +380,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
 
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
-    assert metadata.causal_mask.shape == (2048, 2048)
+    assert metadata.causal_mask.shape == (2048, 2048)  # type: ignore[union-attr]
     if batch_spec.name == "decode_only":
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
@@ -413,7 +413,7 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
     padded_query_start_loc[batch_size + 1] = common.query_start_loc[batch_size]
     padded_query_start_loc_cpu = padded_query_start_loc.cpu()
 
-    padded_common = CommonAttentionMetadata(
+    padded_common = AscendCommonAttentionMetadata(
         query_start_loc=padded_query_start_loc,
         query_start_loc_cpu=padded_query_start_loc_cpu,
         seq_lens=common.seq_lens,
@@ -474,8 +474,8 @@ def test_indexer_metadata_builder_trims_graph_padded_spec_decode() -> None:
     assert first.num_decode_tokens == 60
     assert first.decode is not None
     assert first.decode.tp_score is not None
-    assert first.decode.cu_seqlens_q.shape == (16,)
-    assert first.decode.cu_seqlens_q[-1] == 60
+    assert first.decode.cu_seqlens_q.shape == (16,)  # type: ignore[union-attr]
+    assert first.decode.cu_seqlens_q[-1] == 60  # type: ignore[index]
     assert first.decode.block_table.shape[0] == 15
     assert first.decode.tp_score.context_lens.shape == (15,)
     assert second.decode is not None
@@ -582,7 +582,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )
@@ -661,7 +661,7 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.scale = 0.5
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )
@@ -1497,7 +1497,7 @@ def test_indexer_speculative_decode_uses_tp_block_parallel_path(
     impl.topk_blocks = 2
     impl.init_blocks = 1
     impl.local_blocks = 1
-    impl.index_cache = SimpleNamespace(
+    impl.index_cache = SimpleNamespace(  # type: ignore[assignment]
         prefix="layer.attn.index_cache",
         kv_cache=torch.zeros(4, 128, 4),
     )

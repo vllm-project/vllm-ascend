@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -293,6 +294,19 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # vLLM main removed the base class's deprecated CPU mirrors (#55353). Own
+    # them here so the existing backend reads and ``unpadded()`` stay valid on
+    # both trees; backends already fall back to ``seq_lens_cpu`` when unset.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
+    # vLLM main renamed the base ``dcp_local_seq_lens_cpu`` field to
+    # ``dcp_local_seq_lens_cpu_upper_bound`` and added ``req_idx`` (#56157).
+    # Own the new names so ``unpadded()`` stays valid on both trees; Ascend
+    # backends keep reading ``dcp_local_seq_lens`` itself.
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    req_idx: np.ndarray | None = None
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
@@ -363,14 +377,15 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # faithful sub-batch of the original. Missing any of these
             # would silently break downstream consumers (e.g. NPU
             # backends preferring ``_seq_lens_cpu`` over ``seq_lens_cpu``,
-            # DCP backends needing ``dcp_local_seq_lens(_cpu)``,
+            # DCP backends needing ``dcp_local_seq_lens(_cpu_upper_bound)``,
             # encoder-decoder layers needing ``encoder_seq_lens``, the
             # mamba ``is_prefilling`` flag, and FastPrefill's
             # ``logits_indices_padded`` / ``num_logits_indices``).
             _seq_lens_cpu=_slice_reqs(self._seq_lens_cpu),
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            dcp_local_seq_lens_cpu_upper_bound=_slice_reqs(self.dcp_local_seq_lens_cpu_upper_bound),
+            req_idx=_slice_reqs(self.req_idx),
             is_prefilling=_slice_reqs(self.is_prefilling),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),

@@ -22,6 +22,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vll
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -126,14 +127,28 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 torch.from_numpy(self.input_batch.is_prefilling_np),
             ),
         ):
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-            )
+            if vllm_version_is("0.28.0"):
+                attn_metadata = self._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_tokens_padded,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
+            else:
+                attn_metadata = self._build_uniform_attn_metadata(  # type: ignore[attr-defined]
+                    batch_desc=BatchExecutionDescriptor(
+                        cg_mode=CUDAGraphMode.FULL,
+                        num_tokens=num_tokens_padded,
+                        num_reqs=num_reqs_padded,
+                    ),
+                    num_reqs=self.input_batch.num_reqs,
+                    num_query_per_req=self.num_query_per_req,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=self.num_query_per_req,
+                    causal=self._group_causal,
+                )
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 
+from vllm_ascend.distributed.parallel_state import GroupCoordinator
 from vllm_ascend.ops.vocab_parallel_embedding import AscendParallelLMHead, AscendVocabParallelEmbedding
 from vllm_ascend.utils import maybe_trans_nz
 
@@ -50,9 +51,18 @@ class AscendVocabParallelEmbedding310(AscendVocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        parallel_group: GroupCoordinator | None = None,
     ):
         super().__init__(
-            num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+            parallel_group=parallel_group,
         )
         if quant_config is None:
             self.quant_method = AscendUnquantizedEmbeddingMethod310()

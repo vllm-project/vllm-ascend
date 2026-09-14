@@ -62,7 +62,7 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0)
 def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttentionSpec:
     """Build a DSV4 AscendMLAAttentionSpec; #51718 moved compress_ratio ->
     tokens_per_state on main."""
-    ratio_kwargs = (
+    ratio_kwargs: dict[str, Any] = (
         {"compress_ratio": compress_ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": compress_ratio}
     )
     return AscendMLAAttentionSpec(
@@ -335,6 +335,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 model_type="deepseek_v4",
             ),
         ),
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=cache_config,
         kv_transfer_config=None,
         quant_config=None,
@@ -456,24 +457,23 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 kv_cache_config=_kv_cache_config,
             )
 
-        def _ascend_bind_kv_cache(
+        def _ascend_bind_kv_cache_to_layers(
             kv_caches: dict[str, Any],
             forward_context: dict[str, Any],
-            runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
             kv_cache_groups: Any = None,
         ) -> None:
             del num_attn_module, kv_cache_groups
-            assert len(runner_kv_caches_) == 0
-            for kv_cache in kv_caches.values():
-                runner_kv_caches_.append(kv_cache)
             for layer_name_, kv_cache in kv_caches.items():
                 forward_context[layer_name_].kv_cache = kv_cache
 
         monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        monkeypatch.setattr(
+            upstream_attn_utils,
+            "bind_kv_cache_to_layers",
+            _ascend_bind_kv_cache_to_layers,
+        )
         kv_caches = upstream_attn_utils.init_kv_cache(
-            runner_kv_caches=runner_kv_caches,
             forward_context={layer_name: cache_layer},
             kv_cache_config=kv_cache_config,
             device=torch.device("cpu"),
@@ -482,10 +482,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         )
 
     cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
     if vllm_version_is("0.28.0"):
+        assert len(runner_kv_caches) == 1
+        assert runner_kv_caches[0] is cache_components
         # The v0.28.0 patch binds the pre-set layer tensor in place.
+        assert cache_layer.kv_cache is cache_components
+    else:
+        # vLLM main binds the freshly allocated views directly on the layer.
         assert cache_layer.kv_cache is cache_components
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
@@ -708,7 +711,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
                 prefill_context_parallel_size=pcp_size,
             ),
         )
-        model_state.pcp_manager = pcp_manager
+        model_state.pcp_manager = pcp_manager  # type: ignore[assignment]
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -725,7 +728,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             attn_state=None,
         )
         metadata = model_state.prepare_attn(
-            input_batch=input_batch,
+            input_batch=input_batch,  # type: ignore[arg-type]
             cudagraph_mode=cudagraph_mode,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
@@ -809,7 +812,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
     assert isinstance(raw[layer_name], torch.Tensor)
-    assert raw[layer_name].numel() == tensor_size
+    assert raw[layer_name].numel() == tensor_size  # type: ignore[union-attr]
 
     attn_groups = [
         AttentionGroup(
@@ -879,7 +882,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
         slot_mappings=(torch.zeros(1, dtype=torch.int64),),
         kv_cache_config=kv_cache_config,
         is_prefilling=is_prefilling,
-        pcp_context=pcp_context,
+        pcp_context=pcp_context,  # type: ignore[arg-type]
         seq_lens_np=np.array([1], dtype=np.int32),
         positions=torch.tensor([0], dtype=torch.int64),
         for_cudagraph_capture=for_cudagraph_capture,
@@ -892,6 +895,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     }
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only changed the main allocation entry point")
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
 def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner

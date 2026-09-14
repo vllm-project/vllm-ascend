@@ -78,11 +78,16 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
         if vllm_version_is("0.28.0"):
             assert seen_states == [None, None]
         else:
-            assert seen_states[0].block_ids == {"cached": ([1, 9],), "boundary": ([42],)}
+            assert seen_states[0].req_ids == {"cached", "boundary"}
             assert seen_states[0].boundary_state_offloads is offers
-            assert seen_states[1].block_ids == {"cached": ([1, 9],)}
+            assert seen_states[1].req_ids == {"cached"}
             assert seen_states[1].boundary_state_offloads == {}
-            assert get_blocks.call_count == 3
+            # Block tables resolve lazily, only for the requests offered.
+            assert get_blocks.call_count == 0
+            assert seen_states[0].get_block_ids("cached") == ([1, 9],)
+            assert seen_states[0].get_block_ids("boundary") == ([42],)
+            assert seen_states[0].get_block_ids("unchanged") is None
+            assert get_blocks.call_count == 2
     else:
         assert seen_states == []
         get_blocks.assert_not_called()

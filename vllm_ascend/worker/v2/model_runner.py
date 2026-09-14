@@ -29,7 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -74,6 +73,14 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+# vLLM main renamed prepare_dcp_local_seq_lens to
+# maybe_prepare_dcp_local_seq_lens (#55212); import only the name that exists
+# on the active tree.
+if not vllm_version_is("0.28.0"):
+    from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens  # type: ignore[import-not-found]
+else:
+    from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -443,15 +450,29 @@ class NPUModelRunner(GPUModelRunner):
 
         dcp_local_seq_lens = None
         if self.use_dcp:
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.dcp_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+            # vLLM main renamed this helper and made it return the padded view
+            # (upstream #55212); keep populating here because the Ascend
+            # execute_model path builds the batch through this method.
+            if vllm_version_is("0.28.0"):
+                prepare_dcp_local_seq_lens(
+                    self.input_buffers.dcp_local_seq_lens,
+                    self.input_buffers.seq_lens,
+                    num_reqs,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                )
+                dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+            else:
+                dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+                    self.input_buffers.dcp_local_seq_lens,
+                    self.input_buffers.seq_lens,
+                    num_reqs,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                    num_reqs_padded=num_reqs_padded,
+                )
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
