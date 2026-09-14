@@ -32,10 +32,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import (
-    AscendSFAIndexerBackend,
-    AscendSFAIndexerMetadata,
-)
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
 
 class IndexerWrapper(nn.Module):
@@ -60,7 +57,16 @@ class IndexerWrapper(nn.Module):
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
-        self.impl = AscendSFAIndexerBackend(vllm_indexer, qk_rope_head_dim)
+        # Preserve checkpoint-visible direct Parameters for every indexer
+        # family. Registering them here keeps paths at ``...indexer.<name>``
+        # rather than adding an implementation segment.
+        if isinstance(vllm_indexer, nn.Module):
+            for name, parameter in vllm_indexer.named_parameters(recurse=False):
+                self.register_parameter(name, parameter)
+
+        backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
+        backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
+        self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.
     @property
@@ -79,6 +85,14 @@ class IndexerWrapper(nn.Module):
     def num_cache_tensors(self) -> int:
         return self.impl.num_cache_tensors
 
+    @property
+    def topk_output_width(self) -> int:
+        return self.impl.topk_output_width
+
+    def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return model-defined visible index counts for attention planning."""
+        return self.impl.get_topk_lengths(positions)
+
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
@@ -89,13 +103,44 @@ class IndexerWrapper(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
-        indexer_metadata: AscendSFAIndexerMetadata,
+        indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
         return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
+    # IndexCache (index_share_for_mtp_iteration): the spec-decode proposer
+    # toggles ``skip_topk`` on this wrapper at runtime (set_skip_topk) and
+    # compacts the shared top-k buffer (compact_topk_indices). The actual
+    # indexer gate and buffer live in the inner impl (e.g. AscendSFAImpl),
+    # which is not an nn.Module and is therefore invisible to
+    # named_modules(). Expose both as properties forwarding to the impl so
+    # the upstream DeepSeekMultiTokenPredictor hooks keep working on Ascend.
+    @property
+    def skip_topk(self) -> bool:
+        return self.__dict__.get("_skip_topk", False)
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self.__dict__["_skip_topk"] = bool(value)
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "skip_topk"):
+            impl.skip_topk = self.__dict__["_skip_topk"]
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is None:
+            return None
+        return getattr(impl, "topk_indices_buffer", None)
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, value: torch.Tensor | None) -> None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "topk_indices_buffer"):
+            impl.topk_indices_buffer = value
+
     def __init__(
         self,
         hidden_size: int,
@@ -128,6 +173,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
+        # Goes through the property setter above; mla_attn is not created yet,
+        # so only the backing value is stored here. MLAAttention below receives
+        # the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
         # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
         # constructor compatibility, but its indexer does not consume it.

@@ -53,6 +53,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -221,7 +222,7 @@ class MooncakeBaseConnectorWorker:
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in tensor_config.layers:
+            for layer_name in get_kv_cache_tensor_layers(tensor_config):
                 if layer_name in configured_layer_names:
                     raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
                 if layer_name not in self.layer_name_to_group_index:

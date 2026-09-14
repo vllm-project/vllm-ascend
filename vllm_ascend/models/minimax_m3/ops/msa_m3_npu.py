@@ -20,7 +20,11 @@ _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
 _FP8_E4M3_MAX = 448.0
 
-if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
+    )
+else:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
@@ -175,6 +179,8 @@ def _minimax_m3_index_score(
     scoring interface; candidate forcing is applied by the TopK stage.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
+        idx_q = _to_fp8_e4m3(idx_q)
     return torch.ops._C_ascend.npu_msa_index_score(
         idx_q,
         index_kv_cache,

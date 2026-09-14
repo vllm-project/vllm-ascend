@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -15,6 +17,8 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_s
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import kv_cache_interface
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -32,15 +36,21 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
 from vllm.v1.worker.gpu.model_runner import BatchReqState, sort_batch_req_ids
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
+from vllm_ascend._310p.worker.v2.spec_utils import (
+    combine_sampled_and_draft_tokens_cpu,
+    expand_idx_mapping_cpu,
+)
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -77,6 +87,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         # (same as MRv1 `_determine_batch_execution_and_padding`). FULL_DECODE_ONLY
         # already keeps those batches eager via mixed_mode=NONE.
         self._force_eager_pc_batch = False
+        self._force_eager_spec_batch = False
+        self._spec_dummy_capture = False
+        # Populated in initialize_kv_cache; also set here so UT can call
+        # ``_allocate_kv_cache_tensors`` without going through that path.
+        self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
+        self._attn_kv_storage_ptrs: set[int] = set()
 
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
@@ -104,9 +120,14 @@ class NPUModelRunner310V2(NPUModelRunner):
             )
         if getattr(parallel_config, "enable_expert_parallel", False):
             raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
-        # TODO: Support speculative decoding in the next 310P MRV2 iteration.
         if vllm_config.speculative_config is not None:
-            raise NotImplementedError("Speculative decoding is not supported by model runner v2 on 310P.")
+            spec = vllm_config.speculative_config
+            # Bare objects (UT fixtures) and non-MTP methods are out of scope.
+            method = getattr(spec, "method", None)
+            if method != "mtp":
+                raise NotImplementedError(
+                    f"Speculative decoding is only supported via MTP on 310P model runner v2, got {method!r}."
+                )
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
         # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
@@ -122,11 +143,6 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> AscendInputBatch:
         # TODO: Refactor this Triton-free input preparation through Triton
         # Dispatcher after vLLM RFC #45133 lands.
-        # ``super().execute_model`` has already run finish/add/update_requests and
-        # ``apply_staged_writes``; sync GPU counts now so mamba preprocess matches
-        # the CPU/np values used for positions and slot mappings.
-        self._sync_num_computed_tokens_gpu_from_np()
-
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -138,19 +154,36 @@ class NPUModelRunner310V2(NPUModelRunner):
             scheduler_output.scheduled_spec_decode_tokens,
             self.decode_query_len,
         )
+        # MTP: prior step async-D2Hs GPU→``num_computed_tokens_cpu``. Refresh np
+        # from that buffer BEFORE mirroring np→GPU, otherwise hybrid GDN
+        # preprocess_state sees stale counts and poisons SpecDecoding state.
         self._update_seq_lens_cpu(scheduler_output, req_ids)
+        # ``super().execute_model`` already ran finish/add/update_requests and
+        # ``apply_staged_writes``; sync GPU counts so mamba preprocess matches
+        # the CPU/np values used for positions and slot mappings.
+        self._sync_num_computed_tokens_gpu_from_np()
 
         num_scheduled_tokens = np.fromiter(
             map(num_tokens_per_req.get, req_ids),
             dtype=np.int32,
             count=num_reqs,
         )
+        num_valid_tokens = num_scheduled_tokens
+        draft_tokens_map = scheduler_output.scheduled_spec_decode_tokens
+        if draft_tokens_map:
+            num_valid_tokens = np.array(
+                [
+                    num_tokens - len(draft_tokens_map.get(req_id, ()))
+                    for num_tokens, req_id in zip(num_scheduled_tokens, req_ids)
+                ],
+                dtype=np.int32,
+            )
         attn_state = build_attn_state(
             self.vllm_config,
             self.input_buffers.seq_lens_np,
             num_reqs,
             num_scheduled_tokens,
-            num_scheduled_tokens,
+            num_valid_tokens,
         )
         idx_mapping_np = np.fromiter(
             map(self.req_states.req_id_to_index.get, req_ids),
@@ -158,6 +191,33 @@ class NPUModelRunner310V2(NPUModelRunner):
             count=num_reqs,
         )
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+
+        num_draft_tokens_per_req = None
+        if not draft_tokens_map:
+            total_num_draft_tokens = 0
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+            expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+        else:
+            num_draft_tokens_per_req = np.fromiter(
+                (len(draft_tokens_map.get(req_id, ())) for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+            num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            num_logits_per_req = num_draft_tokens_per_req + num_bonus_tokens
+            cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(num_logits_per_req, out=cu_num_logits_np[1:])
+            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            total_num_logits = int(cu_num_logits_np[-1])
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping_cpu(
+                idx_mapping,
+                total_num_logits,
+                cu_num_logits_np,
+            )
 
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
@@ -206,9 +266,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_scheduled_tokens=num_scheduled_tokens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        # Pad rows must not carry stale host seq_lens into GDN/attention metadata.
+        self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = 0
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
-        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+        total_num_logits = num_reqs if not draft_tokens_map else int(cu_num_logits_np[-1])
         logits_indices = self._combine_sampled_and_draft_tokens(
             self.input_buffers.input_ids,
             idx_mapping,
@@ -218,7 +279,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.req_states.prefill_len.gpu,
             self.req_states.draft_tokens,
             cu_num_logits,
-            num_reqs,
+            total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
             idx_mapping_np=idx_mapping_np,
             query_start_loc_np=query_start_loc_np,
@@ -238,13 +299,13 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs_after_padding=num_reqs_padded,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
-            expanded_idx_mapping=idx_mapping,
-            expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=self.device),
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
-            num_draft_tokens=0,
-            num_draft_tokens_per_req=None,
+            num_draft_tokens=total_num_draft_tokens if draft_tokens_map else 0,
+            num_draft_tokens_per_req=num_draft_tokens_per_req,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
@@ -254,7 +315,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            max_seq_len_np=None,
+            **({"max_seq_len_np": None} if vllm_version_is("0.28.0") else {}),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -325,6 +386,85 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Avoid importing AscendAttentionState at module top (heavy attention_v1).
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
 
+    def _scheduler_output_needs_spec_eager(self, scheduler_output: SchedulerOutput) -> bool:
+        """Force eager when MTP verify batch is not uniform SpecDecoding.
+
+        Step 2 (FULL_DECODE_ONLY): mirror MRv1 ``_determine_batch_execution_and_padding``.
+        Uniform decode with ``q_len == decode_query_len`` (1+K) may replay SpecDecoding
+        FULL graphs; mixed / prefill / non-uniform MTP schedules stay eager.
+        """
+        if self.speculative_config is None:
+            return False
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        if not cudagraph_mode.has_full_cudagraphs():
+            return False
+
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+        if num_reqs == 0:
+            return False
+
+        # Prefer stable req order (same as prepare_inputs) for draft counts.
+        req_ids = sort_batch_req_ids(
+            num_tokens_per_req,
+            scheduler_output.scheduled_spec_decode_tokens,
+            self.decode_query_len,
+        )
+        num_scheduled = np.fromiter(
+            (num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        if not np.all(num_scheduled == self.decode_query_len):
+            return True
+        if scheduler_output.total_num_scheduled_tokens != int(num_scheduled.sum()):
+            return True
+
+        computed_by_req: dict[str, int] = {}
+        for req in scheduler_output.scheduled_new_reqs:
+            computed_by_req[req.req_id] = int(req.num_computed_tokens)
+        cached = scheduler_output.scheduled_cached_reqs
+        if cached is not None:
+            for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
+                computed_by_req[req_id] = int(num_computed)
+        for req_id in req_ids:
+            if req_id in computed_by_req:
+                continue
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is not None:
+                computed_by_req[req_id] = int(self.req_states.num_computed_tokens_np[req_idx])
+
+        if any(computed_by_req.get(req_id, 0) == 0 for req_id in req_ids):
+            return True
+
+        draft_tokens_map = scheduler_output.scheduled_spec_decode_tokens or {}
+        # SpecDecoding requires bonus/valid token count == 1 (rest are drafts).
+        num_valid_tokens = np.fromiter(
+            (int(num_tokens_per_req[req_id]) - len(draft_tokens_map.get(req_id, ())) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        if not np.all(num_valid_tokens == 1):
+            return True
+
+        # Allow concurrent uniform SpecDecoding FULL (MRv1 contract). Accuracy
+        # regressions are caught by E2E; do not blanket-eager on num_reqs.
+        seq_lens = np.fromiter(
+            (computed_by_req[req_id] + num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            seq_lens,
+            num_reqs,
+            num_scheduled,
+            num_valid_tokens,
+        )
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        return attn_state != AscendAttentionState.SpecDecoding
+
     def _install_pc_eager_cudagraph_dispatch(self) -> None:
         """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
         manager = self.cudagraph_manager
@@ -340,7 +480,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_active_loras: int,
             max_query_len: int | None = None,
         ) -> BatchExecutionDescriptor:
-            if runner._force_eager_pc_batch:
+            if runner._force_eager_pc_batch or runner._force_eager_spec_batch:
                 return BatchExecutionDescriptor(
                     cg_mode=CUDAGraphMode.NONE,
                     num_tokens=num_tokens,
@@ -369,10 +509,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         early in ``execute_model`` leaves stale counts and corrupts recurrent state.
         """
         np_vals = self.req_states.num_computed_tokens_np
+        # Copy host buffer so non-blocking H2D cannot race later np mutations.
+        host = torch.tensor(np_vals, dtype=torch.int32)
         gpu = self.req_states.num_computed_tokens.gpu
-        gpu.copy_(torch.from_numpy(np_vals).to(device=gpu.device, dtype=gpu.dtype))
-        self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
-        self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
+        if host.dtype != gpu.dtype:
+            host = host.to(dtype=gpu.dtype)
+        gpu.copy_(host, non_blocking=True)
+        self.req_states.num_computed_tokens_cpu.copy_(host)
+        self.req_states.num_computed_tokens.cpu.copy_(host)
 
     def _advance_num_computed_tokens(self, valid_indices: torch.Tensor, query_lens: torch.Tensor) -> None:
         """Advance per-request computed counts on both CPU mirror and GPU tensor."""
@@ -396,10 +540,13 @@ class NPUModelRunner310V2(NPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._force_eager_pc_batch = False
+        self._force_eager_spec_batch = False
         if not dummy_run:
             self._force_eager_pc_batch = self._scheduler_output_needs_pc_eager(scheduler_output)
+            self._force_eager_spec_batch = self._scheduler_output_needs_spec_eager(scheduler_output)
         try:
             return super().execute_model(
                 scheduler_output,
@@ -408,9 +555,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
                 context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
             )
         finally:
             self._force_eager_pc_batch = False
+            self._force_eager_spec_batch = False
 
     def prepare_inputs(  # type: ignore[misc, override]
         self,
@@ -429,6 +578,68 @@ class NPUModelRunner310V2(NPUModelRunner):
             # rewrites CPU NumPy tables for a reused slot. Upstream GPU/MRv2
             # does not need this because it does not use that CPU gather path.
             torch.npu.current_stream().synchronize()
+
+    @staticmethod
+    def _dedupe_kv_cache_block_copies(
+        kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    ) -> list[KVCacheBlockCopy]:
+        """Drop duplicate CoW pairs from hybrid multi-manager prefix-cache hits."""
+        seen: set[tuple[int, int]] = set()
+        deduped: list[KVCacheBlockCopy] = []
+        for copy in kv_cache_block_copies:
+            key = (copy.src_block_id, copy.dst_block_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(copy)
+        return deduped
+
+    def _copy_kv_cache_blocks_310p(self, kv_cache_block_copies: Sequence[KVCacheBlockCopy]) -> None:
+        """Copy-on-write for hybrid prefix cache on 310P NZ attention + ND Mamba."""
+        if not kv_cache_block_copies:
+            return
+
+        indices_np = np.array(
+            [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
+            dtype=np.int64,
+        )
+        seen_attn_storage: set[int] = set()
+        for k_cache, v_cache, blocks_per_kv_block in self._attn_kv_copy_params:
+            storage_ptr = k_cache.untyped_storage().data_ptr()
+            if storage_ptr in seen_attn_storage:
+                continue
+            seen_attn_storage.add(storage_ptr)
+            for src_block_id, dst_block_id in indices_np:
+                src_start = int(src_block_id) * blocks_per_kv_block
+                src_end = src_start + blocks_per_kv_block
+                dst_start = int(dst_block_id) * blocks_per_kv_block
+                dst_end = dst_start + blocks_per_kv_block
+                k_cache[dst_start:dst_end].copy_(k_cache[src_start:src_end])
+                v_cache[dst_start:dst_end].copy_(v_cache[src_start:src_end])
+
+        # Mamba layers store a list[Tensor] per layer (conv/ssm views). Upstream
+        # copy_kv_cache_blocks_inplace expects Iterable[Tensor], not nested lists.
+        mamba_tensors: list[torch.Tensor] = []
+        for entry in self.kv_caches:
+            if isinstance(entry, list):
+                mamba_tensors.extend(t for t in entry if isinstance(t, torch.Tensor))
+        if mamba_tensors:
+            copy_kv_cache_blocks_inplace(
+                mamba_tensors,
+                self.kv_cache_config.num_blocks,
+                kv_cache_block_copies,
+            )
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        copies = scheduler_output.kv_cache_block_copies
+        pending_copies: list[KVCacheBlockCopy] | None = None
+        if copies:
+            pending_copies = self._dedupe_kv_cache_block_copies(copies)
+        # Skip upstream copy (mishandles 310P NZ attention storages).
+        scheduler_output.kv_cache_block_copies = None
+        super().update_requests(scheduler_output)
+        if pending_copies:
+            self._copy_kv_cache_blocks_310p(pending_copies)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Restore linear-attention specs omitted by some upstream V2 versions."""
@@ -451,9 +662,15 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         block_sizes = []
         max_num_blocks_per_group = []
+        slot_mapping_enabled = []
+        circular_buffer_spec = None if vllm_version_is("0.28.0") else kv_cache_interface.CircularBufferSpec
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            slot_mapping_enabled.append(
+                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
+            )
             max_num_blocks = cdiv(self.max_model_len, spec.block_size)
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size
@@ -480,6 +697,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            slot_mapping_enabled=slot_mapping_enabled,
         )
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
@@ -492,7 +710,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
         )
-        self.cudagraph_manager = ModelAclGraphManager(
+        self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
             self.device,
             cudagraph_mode,
@@ -501,8 +719,20 @@ class NPUModelRunner310V2(NPUModelRunner):
             lora_capture_cases=self.lora_capture_cases,
         )
         check_attention_cp_compatibility(self.vllm_config)
+        if isinstance(self.speculator, DraftModelSpeculator):
+            self.speculator.set_attn(
+                self.model_state,
+                self.kv_cache_config,
+                self.block_tables,
+                self.input_buffers,
+                self.attn_groups,
+            )
+        if self.speculator is not None:
+            self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         shared_layers = get_shared_kv_cache_layers(self.vllm_config)
+        self._attn_kv_copy_params = []
+        self._attn_kv_storage_ptrs = set()
         kv_caches_dict = self._allocate_kv_cache_tensors(kv_cache_config, shared_layers)
         self.kv_caches: list[Any] = []
         bind_kv_cache(
@@ -557,6 +787,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         shared_layers: dict[str, str],
     ) -> dict[str, Any]:
         """Allocate attention caches as NZ and hybrid Mamba state as ND."""
+        # UT fixtures may construct via ``object.__new__`` without ``__init__``.
+        if not hasattr(self, "_attn_kv_copy_params"):
+            self._attn_kv_copy_params = []
+        if not hasattr(self, "_attn_kv_storage_ptrs"):
+            self._attn_kv_storage_ptrs = set()
         layer_specs: dict[str, KVCacheSpec] = {}
         layer_group_ids: dict[str, int] = {}
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -586,7 +821,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = layer_backends[layer_name]
                     group_id = layer_group_ids[layer_name]
-                    storage_block_size = getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+                    storage_block_size = get_storage_block_size(kv_cache_spec)
                     kernel_block_size = (
                         storage_block_size
                         if storage_block_size != kv_cache_spec.block_size
@@ -632,41 +867,47 @@ class NPUModelRunner310V2(NPUModelRunner):
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
                     if legacy_shared_by:
-                        cache: Any = (
-                            torch_npu.empty_with_format(
-                                size=kv_view_shape,
-                                dtype=kv_cache_spec.dtype,
-                                device=self.device,
-                                acl_format=ACL_FORMAT_FRACTAL_NZ,
-                            ),
-                            torch_npu.empty_with_format(
-                                size=kv_view_shape,
-                                dtype=kv_cache_spec.dtype,
-                                device=self.device,
-                                acl_format=ACL_FORMAT_FRACTAL_NZ,
-                            ),
+                        k_cache = torch_npu.empty_with_format(
+                            size=kv_view_shape,
+                            dtype=kv_cache_spec.dtype,
+                            device=self.device,
+                            acl_format=ACL_FORMAT_FRACTAL_NZ,
                         )
+                        v_cache = torch_npu.empty_with_format(
+                            size=kv_view_shape,
+                            dtype=kv_cache_spec.dtype,
+                            device=self.device,
+                            acl_format=ACL_FORMAT_FRACTAL_NZ,
+                        )
+                        cache: Any = (k_cache, v_cache)
                         for name in cache_layer_names:
                             kv_caches[name] = cache
+                        storage_ptr = k_cache.untyped_storage().data_ptr()
+                        if storage_ptr not in self._attn_kv_storage_ptrs:
+                            self._attn_kv_storage_ptrs.add(storage_ptr)
+                            self._attn_kv_copy_params.append((k_cache, v_cache, blocks_per_kv_block))
                     else:
                         # Standardized descriptors list distinct layer
                         # regions. Allocate one private NZ K/V pair per layer;
                         # only explicit shared_layers below may alias.
                         for name in cache_layer_names:
-                            kv_caches[name] = (
-                                torch_npu.empty_with_format(
-                                    size=kv_view_shape,
-                                    dtype=kv_cache_spec.dtype,
-                                    device=self.device,
-                                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                                ),
-                                torch_npu.empty_with_format(
-                                    size=kv_view_shape,
-                                    dtype=kv_cache_spec.dtype,
-                                    device=self.device,
-                                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                                ),
+                            k_cache = torch_npu.empty_with_format(
+                                size=kv_view_shape,
+                                dtype=kv_cache_spec.dtype,
+                                device=self.device,
+                                acl_format=ACL_FORMAT_FRACTAL_NZ,
                             )
+                            v_cache = torch_npu.empty_with_format(
+                                size=kv_view_shape,
+                                dtype=kv_cache_spec.dtype,
+                                device=self.device,
+                                acl_format=ACL_FORMAT_FRACTAL_NZ,
+                            )
+                            kv_caches[name] = (k_cache, v_cache)
+                            storage_ptr = k_cache.untyped_storage().data_ptr()
+                            if storage_ptr not in self._attn_kv_storage_ptrs:
+                                self._attn_kv_storage_ptrs.add(storage_ptr)
+                                self._attn_kv_copy_params.append((k_cache, v_cache, blocks_per_kv_block))
                 elif isinstance(kv_cache_spec, MambaSpec):
                     # Hybrid recurrent state stays ND (int8 raw plus views).
                     # Main's descriptor.size is the entire virtual backing;
@@ -802,20 +1043,20 @@ class NPUModelRunner310V2(NPUModelRunner):
         seq_lens_np: np.ndarray,
         prefill_len_np: np.ndarray,
     ) -> torch.Tensor:
-        # TODO: Refactor this CPU fallback to use Triton Dispatcher after vLLM
-        # RFC #45133 lands.
-        del idx_mapping, query_start_loc, seq_lens, prefill_len
-        del draft_tokens, cu_num_logits, num_bonus_tokens
-        if num_logits != len(idx_mapping_np):
-            # TODO: Support draft tokens in the next 310P MRV2 iteration.
-            raise NotImplementedError("310P MRV2 does not support draft tokens.")
-        logits_indices_np = np.empty(num_logits, dtype=np.int64)
-        for batch_idx, req_idx in enumerate(idx_mapping_np):
-            query_end = int(query_start_loc_np[batch_idx + 1])
-            logits_indices_np[batch_idx] = query_end - 1
-            if seq_lens_np[batch_idx] > prefill_len_np[batch_idx]:
-                input_ids[query_end - 1 : query_end].copy_(last_sampled_tokens[req_idx])
-        return async_copy_to_gpu(logits_indices_np, device=self.device)
+        cu_num_logits_np = cu_num_logits.detach().cpu().numpy().astype(np.int32, copy=False)
+        return combine_sampled_and_draft_tokens_cpu(
+            input_ids,
+            idx_mapping_np,
+            last_sampled_tokens,
+            query_start_loc_np,
+            seq_lens_np,
+            prefill_len_np,
+            draft_tokens,
+            cu_num_logits_np,
+            num_logits,
+            num_bonus_tokens,
+            device=self.device,
+        )
 
     def prepare_attn(
         self,
@@ -858,13 +1099,22 @@ class NPUModelRunner310V2(NPUModelRunner):
             # TODO: Restore MRV1 structured output support in the next 310P MRV2 iteration.
             raise NotImplementedError("Structured output is not supported by model runner v2 on 310P.")
         logits = self.model.compute_logits(hidden_states[input_batch.logits_indices])
-        sampler_output = self.sampler(logits, input_batch)
-        can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
-        num_sampled = async_copy_to_gpu(can_sample_np.astype(np.int32), device=self.device)
-        num_rejected = torch.zeros_like(num_sampled)
-        sampler_output.num_sampled = num_sampled
-        sampler_output.num_rejected = num_rejected
-        return sampler_output, num_sampled, num_rejected
+        if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
+            sampler_output = self.sampler(logits, input_batch)
+            can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
+            num_sampled = async_copy_to_gpu(can_sample_np.astype(np.int32), device=self.device)
+            num_rejected = torch.zeros_like(num_sampled)
+            sampler_output.num_sampled = num_sampled
+            sampler_output.num_rejected = num_rejected
+            return sampler_output, num_sampled, num_rejected
+
+        assert self.speculator is not None
+        sampler_output = self.rejection_sampler(
+            logits,
+            input_batch,
+            self.speculator.draft_logits,
+        )
+        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     def postprocess_sampled(
         self,
@@ -874,35 +1124,109 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
-        # TODO: Refactor this 310P state update to use Triton Dispatcher after
-        # vLLM RFC #45133 lands.
-        del num_rejected
         num_entries = min(idx_mapping.shape[0], sampled_tokens.shape[0], num_sampled.shape[0])
         idx_mapping = idx_mapping[:num_entries]
         sampled_tokens = sampled_tokens[:num_entries]
         num_sampled = num_sampled[:num_entries]
         valid_mask = idx_mapping >= 0
         valid_indices = idx_mapping.masked_select(valid_mask)
-        sampled = sampled_tokens[:, 0].masked_select(valid_mask).to(self.req_states.last_sampled_tokens.dtype)
         valid_num_sampled = num_sampled.masked_select(valid_mask)
         has_sample = valid_num_sampled > 0
 
-        token_positions = self.req_states.total_len.gpu[valid_indices].to(torch.int64)
-        old_tokens = self.req_states.all_token_ids.gpu[valid_indices, token_positions]
-        stored_tokens = torch.where(has_sample, sampled.to(torch.int32), old_tokens)
-        self.req_states.all_token_ids.gpu.index_put_((valid_indices, token_positions), stored_tokens)
-        old_last = self.req_states.last_sampled_tokens[valid_indices, 0]
-        self.req_states.last_sampled_tokens.index_copy_(
-            0,
-            valid_indices,
-            torch.where(has_sample, sampled, old_last).unsqueeze(-1),
-        )
-        self.req_states.total_len.gpu.index_add_(0, valid_indices, valid_num_sampled)
+        if self.speculator is not None and sampled_tokens.ndim == 2:
+            # MTP writeback: contiguous per-req slices only (avoid UVA scatter /
+            # index_copy_ corruption under concurrency on 310P).
+            valid_batch = torch.nonzero(valid_mask, as_tuple=False).flatten()
+            if valid_batch.numel() > 0:
+                req_idx_t = idx_mapping[valid_batch].to(torch.long)
+                count_t = num_sampled[valid_batch].to(torch.long)
+                start_t = self.req_states.total_len.gpu[req_idx_t].to(torch.long)
+                counts_host = count_t.detach().cpu().tolist()
+                reqs_host = req_idx_t.detach().cpu().tolist()
+                starts_host = start_t.detach().cpu().tolist()
+                batch_host = valid_batch.detach().cpu().tolist()
+                for i, count in enumerate(counts_host):
+                    count = int(count)
+                    if count <= 0:
+                        continue
+                    req_idx = int(reqs_host[i])
+                    start_pos = int(starts_host[i])
+                    row = sampled_tokens[int(batch_host[i]), :count].to(dtype=self.req_states.all_token_ids.gpu.dtype)
+                    self.req_states.all_token_ids.gpu[req_idx, start_pos : start_pos + count] = row
+                    self.req_states.last_sampled_tokens[req_idx, 0] = row[-1].to(
+                        dtype=self.req_states.last_sampled_tokens.dtype
+                    )
+                    self.req_states.total_len.gpu[req_idx] = start_pos + count
+        else:
+            sampled = sampled_tokens[:, 0].masked_select(valid_mask).to(self.req_states.last_sampled_tokens.dtype)
+            token_positions = self.req_states.total_len.gpu[valid_indices].to(torch.int64)
+            old_tokens = self.req_states.all_token_ids.gpu[valid_indices, token_positions]
+            stored_tokens = torch.where(has_sample, sampled.to(torch.int32), old_tokens)
+            self.req_states.all_token_ids.gpu.index_put_((valid_indices, token_positions), stored_tokens)
+            old_last = self.req_states.last_sampled_tokens[valid_indices, 0]
+            self.req_states.last_sampled_tokens.index_copy_(
+                0,
+                valid_indices,
+                torch.where(has_sample, sampled, old_last).unsqueeze(-1),
+            )
+            self.req_states.total_len.gpu.index_add_(0, valid_indices, valid_num_sampled)
 
         if query_start_loc is not None:
             query_lens = self._get_valid_query_lens(idx_mapping, query_start_loc)
-            self._advance_num_computed_tokens(valid_indices, query_lens)
-        self.model_state.postprocess_state(idx_mapping, num_sampled)
+            if self.speculator is not None:
+                num_rejected_valid = num_rejected.masked_select(valid_mask)
+                advance_lens = query_lens - num_rejected_valid.to(query_lens.dtype)
+                self._advance_num_computed_tokens(valid_indices, advance_lens)
+            else:
+                self._advance_num_computed_tokens(valid_indices, query_lens)
+
+        self.model_state.postprocess_state(
+            idx_mapping,
+            num_sampled,
+            self.req_states.num_computed_tokens.gpu,
+        )
+
+        if self.speculator is not None:
+            self._copy_num_computed_tokens_to_cpu()
+
+    def _copy_num_computed_tokens_to_cpu(self) -> None:
+        default_stream = torch.npu.current_stream()
+        assert self.num_computed_tokens_stream is not None
+        assert self.num_computed_tokens_cpu is not None
+        with torch.npu.stream(self.num_computed_tokens_stream):
+            self.num_computed_tokens_stream.wait_stream(default_stream)
+            self.num_computed_tokens_cpu.copy_(
+                self.req_states.num_computed_tokens.gpu,
+                non_blocking=True,
+            )
+            self.num_computed_tokens_event.record()
+
+    def _update_seq_lens_cpu(
+        self,
+        scheduler_output: SchedulerOutput,
+        req_ids: list[str],
+    ) -> None:
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+        if self.speculator is not None:
+            self.num_computed_tokens_event.synchronize()
+            cached_ids = scheduler_output.scheduled_cached_reqs.req_ids
+            if cached_ids:
+                req_indices = [self.req_states.req_id_to_index[req_id] for req_id in cached_ids]
+                vals = self.num_computed_tokens_cpu[req_indices].tolist()
+                for req_index, val in zip(req_indices, vals):
+                    self.req_states.num_computed_tokens_cpu[req_index] = val
+                    self.req_states.num_computed_tokens_np[req_index] = int(val)
+        else:
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req_index = self.req_states.req_id_to_index[req_id]
+                self.req_states.num_computed_tokens_cpu[req_index] = self.req_states.num_computed_tokens_np[req_index]
+
+        for i, req_id in enumerate(req_ids):
+            req_index = self.req_states.req_id_to_index[req_id]
+            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
+            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+            self.input_buffers.seq_lens_np[i] = self.input_buffers.seq_lens_cpu[i]
 
     @staticmethod
     def _get_valid_query_lens(

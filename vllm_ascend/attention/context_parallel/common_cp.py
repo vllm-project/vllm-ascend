@@ -85,6 +85,9 @@ class DCPMetadataBuilderMixin:
 class DCPImplMixin:
     """Shared DCP group lifecycle and collectives for attention backends."""
 
+    # vLLM #55780 defaults implementations to no DCP; these implement it.
+    supports_dcp = True
+
     dcp_size: int
     dcp_rank: int
 

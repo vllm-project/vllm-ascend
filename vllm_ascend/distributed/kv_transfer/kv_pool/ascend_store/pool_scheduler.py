@@ -645,13 +645,6 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
-        if (
-            self.retention_interval is not None
-            and not self.use_layerwise
-            and prompt_token_len < 2 * self.retention_interval
-        ):
-            return 0, False
-
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:

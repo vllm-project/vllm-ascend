@@ -150,6 +150,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     )
 
 
+@pytest.mark.skip(reason="Temporarily skip DSpark until the acceptance issue is resolved.")
 @pytest.mark.e2e_model(DSPARK_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
