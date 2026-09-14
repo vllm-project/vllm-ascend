@@ -97,7 +97,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
 
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_sk"
-        "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
@@ -116,6 +115,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -138,6 +139,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "fused_sparse_attention_overlap"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -164,7 +166,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
-        "moe_grouped_matmul"
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
@@ -172,6 +173,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -194,6 +197,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "fused_sparse_attention_overlap"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -233,6 +237,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "k2q_csr"
         "sparse_attention_score"
         "mla_prolog_v3"
+        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

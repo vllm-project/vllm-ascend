@@ -1,0 +1,118 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  OMP_PROC_BIND: "false"
+  HCCL_BUFFSIZE: "512"
+  HCCL_CONNECT_TIMEOUT: "600"
+  HCCL_EXEC_TIMEOUT: "600"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+  VLLM_ASCEND_ENABLE_NZ: "1"
+
+
+
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--quantization"
+  - "ascend"
+  - "--no-enable-prefix-caching"
+  - "--enable-chunked-prefill"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--trust-remote-code"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "2"
+  - "--enable-expert-parallel"
+  - "--seed"
+  - "42"
+  - "--max-model-len"
+  - "5000"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "8"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+  - "--compilation-config"
+  - '{"cudagraph_capture_sizes":[48,64,80,96,112,128],"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--additional-config"
+  - '{"enable_shared_expert_dp":true}'
+
+
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "KimiK26_A5_Single_EAgle3_Step_01"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+          - "--speculative-config"
+          - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg//kimi-k2.6-eagle3","num_speculative_tokens":1}'
+    server_cmd: *server_cmd
+
+  - name: "KimiK26_A5_Single_EAgle3_Step_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+        - "--speculative-config"
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3","num_speculative_tokens":1}'
+    server_cmd: *server_cmd
+
+  - name: "KimiK26_A5_Single_Eagle3_mla_Step_01"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+        - "--speculative-config"
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
+    server_cmd: *server_cmd
+
+  - name: "KimiK26_A5_Single_Eagle3_mla_Step_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+        - "--speculative-config"
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/lightseekorg/kimi-k2.6-eagle3-mla","num_speculative_tokens":1}'
+    server_cmd: *server_cmd
+
+  - name: "KimiK26_A5_Single_Dflash_Step_01"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+        - "--speculative-config"
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/z-lab/kimi-k2.5-Dflash","num_speculative_tokens":1}'
+    server_cmd: *server_cmd
+
+  - name: "KimiK26_A5_Single_Dflash_Step_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Kimi-K2.6-w4a4c8-0605-dv3"
+    envs:
+      <<: *envs
+      server_cmd_extra:
+        - "--speculative-config"
+        - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/z-lab/kimi-k2.5-Dflash","num_speculative_tokens":1}'
+    server_cmd: *server_cmd

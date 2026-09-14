@@ -16,6 +16,7 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
@@ -239,6 +240,7 @@ class TestAscendSFACacheComposition(TestBase):
                 enable_li_c8=enable_li_c8,
             ):
                 impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 64
                 impl.layer_name = "model.layers.0.self_attn.attn"
                 impl.has_indexer = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
@@ -246,7 +248,10 @@ class TestAscendSFACacheComposition(TestBase):
 
                 main_cache = tuple(torch.empty(1) for _ in range(1 if enable_sfa_c8 else 2))
                 indexer_cache = tuple(torch.empty(1) for _ in range(2 if enable_li_c8 else 1))
-                impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(kv_cache=indexer_cache))
+                impl.indexer = SimpleNamespace(
+                    k_cache=SimpleNamespace(kv_cache=indexer_cache),
+                    num_cache_tensors=2 if enable_li_c8 else 1,
+                )
 
                 composed = impl._compose_sfa_kv_cache(main_cache)
 
@@ -257,25 +262,86 @@ class TestAscendSFACacheComposition(TestBase):
                 for actual_tensor, expected_tensor in zip(composed, expected):
                     self.assertIs(actual_tensor, expected_tensor)
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_li_c8_reshape_optim_uses_initialized_config(self, mock_get_ascend_config):
-        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    @patch("vllm_ascend.attention.indexer.get_ascend_config")
+    def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
+        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
 
-        impl.enable_sparse_li_c8 = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        indexer.enable_sparse_li_c8 = False
+        self.assertFalse(indexer._use_c8_reshape_optim())
 
-        impl.enable_sparse_li_c8 = True
-        self.assertTrue(impl._use_li_c8_reshape_optim())
+        indexer.enable_sparse_li_c8 = True
+        self.assertTrue(indexer._use_c8_reshape_optim())
 
         mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        self.assertFalse(indexer._use_c8_reshape_optim())
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_fetches_by_k_cache_prefix(self, mock_get_forward_context):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        own_metadata = SimpleNamespace(slot_mapping=torch.tensor([1, 2]))
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.0.indexer": own_metadata}
+
+        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_missing_raises(self, mock_get_forward_context):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {}
+
+        with self.assertRaises(RuntimeError):
+            impl._get_indexer_attn_metadata()
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_falls_back_to_main_metadata(self, mock_get_forward_context):
+        # A KV-sharing layer (e.g. an MTP draft layer) owns no indexer cache,
+        # so no metadata is built under its own prefix; the indexer shares
+        # this layer's SFA attention metadata instead.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
+
+        self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
+        # During draft propose the forward context is the main runner's, which
+        # only keys main-layer prefixes; a KV-sharing draft layer resolves its
+        # indexer metadata via the sharing target's indexer cache prefix.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        target_metadata = SimpleNamespace(slot_mapping=torch.tensor([5, 6]))
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.77.self_attn.indexer.k_cache": target_metadata
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
-    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_indexer):
+    def test_li_c8_indexer_uses_own_cache_tuple_slots(self, mock_indexer):
         expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
         mock_indexer.return_value = expected_topk
         q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
@@ -283,45 +349,34 @@ class TestAscendSFACacheComposition(TestBase):
         weights = torch.ones(2, 1, dtype=torch.bfloat16)
         attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
 
-        for enable_sfa_c8 in (False, True):
-            with self.subTest(enable_sfa_c8=enable_sfa_c8):
-                main_cache = (
-                    (torch.empty(2, 16, 1, 656, dtype=torch.int8),)
-                    if enable_sfa_c8
-                    else (
-                        torch.empty(2, 16, 1, 512, dtype=torch.bfloat16),
-                        torch.empty(2, 16, 1, 64, dtype=torch.bfloat16),
-                    )
-                )
-                indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
-                indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
-                kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
-                impl = AscendSFAImpl.__new__(AscendSFAImpl)
-                impl.enable_sparse_sfa_c8 = enable_sfa_c8
-                impl.use_torch_npu_lightning_indexer = False
-                mock_indexer.reset_mock()
+        # The wrapper receives the indexer's own cache tuple (k + scale) at
+        # the fixed slots; the main SFA cache is no longer part of it.
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
+        indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
+        kv_cache = (indexer_k_cache, indexer_scale_cache)
 
-                result = BaseDeviceAdaptor.indexer_select_post_process(
-                    impl,
-                    q_li,
-                    q_li_scale,
-                    q_li.shape,
-                    weights,
-                    kv_cache,
-                    attn_metadata,
-                    torch.tensor([2], dtype=torch.int32),
-                    torch.tensor([2], dtype=torch.int32),
-                    True,
-                    False,
-                )
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            q_li_scale,
+            q_li.shape,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            True,
+            False,
+        )
 
-                self.assertIs(result, expected_topk)
-                call_kwargs = mock_indexer.call_args.kwargs
-                self.assertIs(call_kwargs["key"], indexer_k_cache)
-                self.assertEqual(
-                    call_kwargs["key_dequant_scale"].data_ptr(),
-                    indexer_scale_cache.data_ptr(),
-                )
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(
+            call_kwargs["key_dequant_scale"].data_ptr(),
+            indexer_scale_cache.data_ptr(),
+        )
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
@@ -882,6 +937,91 @@ class TestAscendSFAImpl(TestBase):
             **kwargs,
         )
 
+    def test_kvpp_waits_before_native_and_fused_cache_access(self):
+        from vllm_ascend.attention import sfa_v1
+
+        hidden = torch.zeros(2, 4)
+        metadata = SimpleNamespace(
+            cos=None,
+            sin=None,
+            slot_mapping=torch.arange(2),
+            num_input_tokens=2,
+            num_decode_tokens=2,
+            attn_state=AscendAttentionState.DecodeOnly,
+        )
+        context = SimpleNamespace(
+            actual_seq_lengths_query=[1, 2],
+            actual_seq_lengths_key=[1, 2],
+            kv_slot_mapping=metadata.slot_mapping,
+            gather_full_o_proj=False,
+            topk_num_tokens=2,
+        )
+        cases = (
+            (PreprocessType.NATIVE, True),
+            (PreprocessType.NATIVE, False),
+            (PreprocessType.PROLOG_V3, True),
+            (PreprocessType.MLAPO, True),
+        )
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
+        width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        for preprocess_type, has_indexer in cases:
+            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer):
+                events.clear()
+                self.impl.preprocess_type = preprocess_type
+                self.impl.has_indexer = has_indexer
+                self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
+                self.impl.skip_topk = True
+                self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
+                self.impl._compose_sfa_kv_cache = lambda cache: cache
+                self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
+                self.impl._get_parallel_forward_context = lambda *_args: context
+                self.impl._prepare_native_hidden_states = lambda x, _: x
+                self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
+                self.impl.q_a_layernorm = torch.nn.Identity()
+                self.impl.indexer = lambda *_args, **_kwargs: record_event(
+                    "indexer_cache", torch.zeros(2, 1, dtype=torch.int64)
+                )
+                self.impl.layerwise_kv_cache_hook = SimpleNamespace(
+                    wait_for_layer=lambda name: events.append(("wait", name))
+                )
+                self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
+                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
+                self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
+                self.impl.rope_single = lambda x, *_args: x
+                self.impl._record_query_gather_context = lambda *_args: None
+                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
+                self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
+                    "cache", (hidden, hidden, hidden, hidden)
+                )
+                self.impl._sfa_preprocess_mlapo = self.impl._sfa_preprocess_prolog_v3
+                self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
+                self.impl._execute_sparse_flash_attention_process = lambda *_args: torch.ones(2, 4)
+                self.impl._v_up_proj = lambda x: x
+                self.impl._finalize_o_proj = lambda x, output, _: output.copy_(x)
+                output = torch.empty_like(hidden)
+                with (
+                    patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
+                    patch.object(sfa_v1, "notify_kv_cache_written"),
+                    patch.object(sfa_v1, "record_attention_compute_start"),
+                    patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),
+                ):
+                    self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
+                    self.assertTrue(torch.all(output == 1))
+                    expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
+                    expected.extend([("wait", "layer"), "cache"])
+                    if has_indexer:
+                        expected.append("indexer_cache")
+                    self.assertEqual(events, expected)
+                    events.clear()
+                    self.impl.forward("layer", hidden, (), None, output)
+                self.assertEqual(events, [])
+                self.assertEqual(torch.count_nonzero(output).item(), 0)
+
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
@@ -1130,7 +1270,6 @@ class TestAscendSFAImpl(TestBase):
         impl.kv_a_layernorm.weight.data = torch.ones(32)
         impl.kv_a_layernorm.variance_epsilon = 1e-5
         impl.has_indexer = True
-        impl.wq_b = None
         impl.weight_dq = torch.empty(1)
         impl.weight_uq_qr = torch.empty(1)
         impl.W_UK_T = torch.randn(2, 64, 32)

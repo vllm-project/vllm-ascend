@@ -73,8 +73,14 @@ public:
             .DataTypeList({ge::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("candidate_topk_index")
+            .ParamType(OPTIONAL)
+            .DataTypeList({ge::DT_INT32})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
         this->Output("sparse_indices").ParamType(REQUIRED).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Output("sparse_values").ParamType(REQUIRED).DataTypeList({ge::DT_BF16}).FormatList({ge::FORMAT_ND});
+        this->Output("candidate_topk_index_out").ParamType(OPTIONAL).DataTypeList({ge::DT_INT32}).FormatList({ge::FORMAT_ND});
         this->Attr("topk").AttrType(REQUIRED).Int(2048);       // 2048: 筛选前2048个作为输出index
         this->Attr("quant_mode").AttrType(REQUIRED).Int(1);    // 1: per-token-head
         this->Attr("max_seqlen_q").AttrType(OPTIONAL).Int(-1); // -1: 默认值，表示任意可能长度
@@ -83,6 +89,11 @@ public:
         this->Attr("mask_mode").AttrType(OPTIONAL).Int(0); // 0: 默认值，无mask
         this->Attr("cmp_ratio").AttrType(OPTIONAL).Int(1);
         this->Attr("return_value").AttrType(OPTIONAL).Int(0); //  0: 默认值
+        this->Attr("candidate_mode").AttrType(OPTIONAL).Int(3);              // 3: 默认关闭candidate
+        this->Attr("candidate_topk_blocks").AttrType(OPTIONAL).Int(2048);    // 块级topk个数, 当前仅支持2048
+        this->Attr("candidate_block_size").AttrType(OPTIONAL).Int(8);        // 候选块大小(位置数)
+        this->Attr("key_stride0").AttrType(OPTIONAL).Int(0);                 // A11: key 第0维 stride (0=紧凑; aclnn 动态调用下 tiling 拿不到 tensor stride, 由 csrc 自动传入)
+        this->Attr("key_dequant_scale_stride0").AttrType(OPTIONAL).Int(0);   // A11: k_scale 第0维 stride
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)

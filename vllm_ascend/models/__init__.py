@@ -53,6 +53,10 @@ def register_model():
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
     ModelRegistry.register_model(
+        "Qwen3OmniDSparkModel",
+        "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM",
+    )
+    ModelRegistry.register_model(
         "DFlash2DraftModel",
         "vllm_ascend.models.qwen3_dflash2:DFlash2Qwen3ForCausalLM",
     )
@@ -73,4 +77,7 @@ def register_model():
     ModelRegistry.register_model(
         "Glm5NextMTPModel",
         "vllm_ascend.models.glm5next.mtp:Glm5NextMTP",
+    )
+    ModelRegistry.register_model(
+        "LlamaForCausalLMEagle3", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )

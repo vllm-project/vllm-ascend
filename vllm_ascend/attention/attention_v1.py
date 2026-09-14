@@ -65,7 +65,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
     from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]

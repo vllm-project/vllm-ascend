@@ -28,9 +28,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_protocol,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend as mooncake_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    parse_qos_from_extra_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
     MemcacheBackend,
+    _inject_device_ub_qos,
     _validate_device_ub_qos,
     extract_layout_config,
     make_full_key,
@@ -42,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     MooncakeBackend,
     MooncakeStoreConfig,
     _convert_to_bytes,
+    _inject_store_qos,
     _parse_global_segment_size,
     _ssd_setup_kwargs,
     _validate_store_qos,
@@ -63,6 +71,74 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+class TestBackendDeviceBinding(unittest.TestCase):
+    def test_memcache_scheduler_factory_does_not_create_npu_context(self):
+        npu = MagicMock()
+        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
+        store = MagicMock()
+        store.init.return_value = 0
+        with (
+            patch.object(memcache_module.torch, "npu", npu),
+            patch.object(backend_base, "set_assigned_physical_gpu_ids"),
+            patch.object(
+                backend_base.current_platform,
+                "logical_device_id_to_visible_device_id",
+                return_value=2,
+            ),
+            patch.object(memcache_module, "_validate_device_ub_qos"),
+            patch.object(sys.modules["memcache_hybrid"], "DistributedObjectStore", return_value=store, create=True),
+            patch.object(memcache_module.time, "sleep"),
+        ):
+            backend = MemcacheBackend.create_scheduler_client(parallel_config)
+
+        self.assertEqual(backend.device_id, 2)
+        self.assertIs(backend.store, store)
+        store.init.assert_called_once_with(2, init_bm=False)
+        npu.current_device.assert_not_called()
+        npu.set_device.assert_not_called()
+
+    def test_scheduler_device_id_does_not_bind_assigned_device(self):
+        npu = MagicMock()
+        parallel_config = SimpleNamespace(assigned_physical_gpu_ids=[5])
+        with (
+            patch.object(backend_base.torch, "npu", npu),
+            patch.object(backend_base, "set_assigned_physical_gpu_ids") as set_ids,
+            patch.object(
+                backend_base.current_platform,
+                "logical_device_id_to_visible_device_id",
+                return_value=2,
+            ),
+        ):
+            device_id = backend_base.get_scheduler_device_id(parallel_config)  # type: ignore[arg-type]
+
+        self.assertEqual(device_id, 2)
+        set_ids.assert_called_once_with([5])
+        npu.current_device.assert_not_called()
+        npu.set_device.assert_not_called()
+
+    def test_scheduler_device(self):
+        for assigned_ids, expected in (([5], 2), (None, 3)):
+            with self.subTest(assigned_ids=assigned_ids):
+                npu = MagicMock()
+                npu.current_device.return_value = 3
+                parallel_config = SimpleNamespace(assigned_physical_gpu_ids=assigned_ids)
+                with (
+                    patch.object(backend_base.torch, "npu", npu),
+                    patch.object(backend_base, "set_assigned_physical_gpu_ids") as set_ids,
+                    patch.object(
+                        backend_base.current_platform,
+                        "logical_device_id_to_visible_device_id",
+                        return_value=2,
+                    ),
+                ):
+                    backend_base.set_scheduler_device(parallel_config)  # type: ignore[arg-type]
+
+                npu.set_device.assert_called_once_with(expected)
+                if assigned_ids is not None:
+                    set_ids.assert_called_once_with(assigned_ids)
+                    npu.current_device.assert_not_called()
 
 
 # =========================================================================
@@ -293,6 +369,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         contribute_memory: bool = True,
     ) -> MooncakeBackend:
         backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.device_id = 0
         backend.parallel_config = MagicMock()
         backend.config = config
         backend.local_seg = None
@@ -330,13 +407,16 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                     config=_make_mooncake_store_config(),
                     use_fabric_mem=use_fabric_mem,
                 )
+                backend.device_id = 3
                 store = MagicMock()
                 store.setup.return_value = 0
 
-                result = self._setup_store(backend, store)
+                with patch(f"{self._MODULE_PATH}.torch.npu.set_device") as set_device:
+                    result = self._setup_store(backend, store)
 
                 self.assertIs(result, store)
                 self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
+                set_device.assert_called_once_with(3)
 
     def test_setup_forwards_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
@@ -416,6 +496,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             patch.object(MooncakeBackend, "__init__", lambda self, pc: None),
         ):
             backend = MooncakeBackend.__new__(MooncakeBackend)
+            backend.device_id = 0
             backend.store = MagicMock()
             backend.config = MagicMock()
             backend.local_seg = "127.0.0.1:1234"
@@ -463,6 +544,40 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         ):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
+
+    def test_layerwise_put_start_passes_replicate_config(self):
+        b = self._make_backend()
+        b.config.preferred_segment = True
+        b.config.prefer_alloc_in_same_node = False
+        b.local_seg = "segment-0"
+        b.store.batch_put_session_start.return_value = [0]
+        replicate_config = MagicMock()
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.ReplicateConfig",
+            return_value=replicate_config,
+        ):
+            result = b.batch_put_start(["k0"], [1024])
+
+        self.assertEqual(result, [0])
+        self.assertEqual(replicate_config.preferred_segment, "segment-0")
+        self.assertFalse(replicate_config.prefer_alloc_in_same_node)
+        b.store.batch_put_session_start.assert_called_once_with(["k0"], [1024], replicate_config)
+
+    def test_layerwise_range_methods_are_aligned(self):
+        b = self._make_backend()
+        b.store.batch_put_from_multi_buffer_ranges.return_value = [0]
+        b.store.batch_get_into_multi_buffer_ranges.return_value = [0]
+
+        self.assertEqual(b.batch_copy_put(["k"], [[100]], [[16]], [[32]]), [0])
+        self.assertEqual(b.batch_copy_get(["k"], [[200]], [[16]], [[32]]), [0])
+        b.store.batch_put_from_multi_buffer_ranges.assert_called_once_with(["k"], [[100]], [[16]], [[32]])
+        b.store.batch_get_into_multi_buffer_ranges.assert_called_once_with(["k"], [[200]], [[16]], [[32]])
+
+    def test_layerwise_batch_result_shape_is_rejected(self):
+        b = self._make_backend()
+        b.store.batch_get_session_start.return_value = []
+        with self.assertRaisesRegex(RuntimeError, "returned 0 results for 1 keys"):
+            b.batch_get_start(["k"])
 
     def test_register_buffer_with_store_independent_te(self):
         b = self._make_backend()
@@ -590,6 +705,182 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
                 MooncakeBackend(MagicMock())
         finally:
             os.unlink(path)
+
+
+# =========================================================================
+# QoS injection from kv_connector_extra_config
+# =========================================================================
+class TestExtraConfigQos(unittest.TestCase):
+    def test_parse_qos_from_extra_config(self):
+        self.assertIsNone(parse_qos_from_extra_config(None))
+        self.assertIsNone(parse_qos_from_extra_config({}))
+        self.assertIsNone(parse_qos_from_extra_config({"backend": "mooncake"}))
+        for qos in (0, 1, 2, 3, 4):
+            with self.subTest(qos=qos):
+                self.assertEqual(parse_qos_from_extra_config({"qos_priority": qos}), qos)
+
+    def test_parse_qos_from_extra_config_rejects_invalid(self):
+        for qos in (5, -1, "3", 2.5, True, None, [3]):
+            with (
+                self.subTest(qos=qos),
+                self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
+            ):
+                parse_qos_from_extra_config({"qos_priority": qos})
+
+
+def _qos_config(qos) -> dict | None:
+    return None if qos is None else {"qos_priority": qos}
+
+
+class TestMooncakeStoreQosInjection(unittest.TestCase):
+    _ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+
+    def test_inject_creates_config_when_unset(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_store_qos(_qos_config(3))
+            self.assertEqual(
+                json.loads(os.environ[self._ENV]),
+                {"store": {"comm_resource_config": {"qos": 3}}},
+            )
+
+    def test_inject_noop_without_qos(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_store_qos(_qos_config(None))
+            self.assertNotIn(self._ENV, os.environ)
+
+    def test_inject_merges_into_existing_config(self):
+        existing = {
+            "comm_resource_config": {"protocol_desc": ["hccs:device"]},
+            "store": {"comm_resource_config": {"protocol_desc": ["roce:device"]}},
+            "fabric_memory": {"max_capacity": 32},
+        }
+        with patch.dict(os.environ, {self._ENV: json.dumps(existing)}):
+            _inject_store_qos(_qos_config(2))
+            merged = json.loads(os.environ[self._ENV])
+            self.assertEqual(merged["store"]["comm_resource_config"]["qos"], 2)
+            # Other HIXL fields are preserved.
+            self.assertEqual(merged["store"]["comm_resource_config"]["protocol_desc"], ["roce:device"])
+            self.assertEqual(merged["comm_resource_config"], {"protocol_desc": ["hccs:device"]})
+            self.assertEqual(merged["fabric_memory"], {"max_capacity": 32})
+
+    def test_inject_overrides_existing_qos(self):
+        with (
+            patch.dict(os.environ, self._store_qos_env(1)),
+            patch.object(mooncake_module, "logger") as mock_logger,
+        ):
+            _inject_store_qos(_qos_config(4))
+            self.assertEqual(json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"], 4)
+            mock_logger.warning.assert_called_once()
+
+    def test_inject_same_qos_does_not_warn(self):
+        with (
+            patch.dict(os.environ, self._store_qos_env(3)),
+            patch.object(mooncake_module, "logger") as mock_logger,
+        ):
+            _inject_store_qos(_qos_config(3))
+            mock_logger.warning.assert_not_called()
+
+    def test_inject_rejects_malformed_json(self):
+        with (
+            patch.dict(os.environ, {self._ENV: "not-json"}),
+            self.assertRaisesRegex(ValueError, "not valid JSON"),
+        ):
+            _inject_store_qos(_qos_config(3))
+
+    def test_inject_rejects_non_object_json(self):
+        for bad in ("[]", '"str"', "3"):
+            with (
+                self.subTest(bad=bad),
+                patch.dict(os.environ, {self._ENV: bad}),
+                self.assertRaisesRegex(ValueError, "must be a JSON object"),
+            ):
+                _inject_store_qos(_qos_config(3))
+
+    def test_inject_rejects_non_object_store_fields(self):
+        for bad in ('{"store": 1}', '{"store": {"comm_resource_config": 2}}'):
+            with (
+                self.subTest(bad=bad),
+                patch.dict(os.environ, {self._ENV: bad}),
+                self.assertRaisesRegex(ValueError, "must be a JSON object"),
+            ):
+                _inject_store_qos(_qos_config(3))
+
+    def test_init_injects_qos_before_validation(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"metadata_server": "192.168.0.1:2379"}, f)
+            path = f.name
+        try:
+            with (
+                patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
+                patch.object(MooncakeBackend, "_setup_store"),
+            ):
+                MooncakeBackend(MagicMock(), extra_config={"qos_priority": 3})
+                self.assertEqual(
+                    json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"],
+                    3,
+                )
+        finally:
+            os.unlink(path)
+
+    def test_init_without_extra_config_does_not_inject(self):
+        # The scheduler client is created without an extra_config; it must not
+        # touch ASCEND_GLOBAL_RESOURCE_CONFIG (only the worker process owns
+        # the environment the HIXL store reads).
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"metadata_server": "192.168.0.1:2379"}, f)
+            path = f.name
+        try:
+            with (
+                patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
+                patch.object(MooncakeBackend, "_setup_store"),
+            ):
+                MooncakeBackend(MagicMock(), contribute_memory=False)
+                self.assertNotIn(self._ENV, os.environ)
+        finally:
+            os.unlink(path)
+
+    @staticmethod
+    def _store_qos_env(qos) -> dict:
+        return {"ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": qos}}})}
+
+
+class TestMemcacheQosInjection(unittest.TestCase):
+    _ENV = "MF_DEVICE_UB_QOS"
+
+    def test_inject_sets_env(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_device_ub_qos(_qos_config(3))
+            self.assertEqual(os.environ[self._ENV], "3")
+
+    def test_inject_noop_without_qos(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_device_ub_qos(_qos_config(None))
+            self.assertNotIn(self._ENV, os.environ)
+
+    def test_inject_overrides_existing_value(self):
+        with (
+            patch.dict(os.environ, {self._ENV: "1"}),
+            patch.object(memcache_module, "logger") as mock_logger,
+        ):
+            _inject_device_ub_qos(_qos_config(2))
+            self.assertEqual(os.environ[self._ENV], "2")
+            mock_logger.warning.assert_called_once()
+
+    def test_inject_same_value_does_not_warn(self):
+        with (
+            patch.dict(os.environ, {self._ENV: "2"}),
+            patch.object(memcache_module, "logger") as mock_logger,
+        ):
+            _inject_device_ub_qos(_qos_config(2))
+            mock_logger.warning.assert_not_called()
+
+    def test_init_injects_qos_before_validation(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(MemcacheBackend, "_setup_store"),
+        ):
+            MemcacheBackend(MagicMock(), device_id=0, extra_config={"qos_priority": 2})
+            self.assertEqual(os.environ.get(self._ENV), "2")
 
 
 # =========================================================================
@@ -889,7 +1180,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch.object(MemcacheBackend, "__init__", lambda self, pc: None):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
-            backend.local_rank = 0
+            backend.device_id = 0
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
@@ -900,6 +1191,52 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b = self._make_backend()
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
+
+    def test_setup_uses_captured_device(self):
+        b = self._make_backend()
+        b.device_id = 3
+        b._init_bm = True
+        store = MagicMock()
+        store.init.return_value = 0
+        module_path = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend"
+
+        with (
+            patch.object(
+                sys.modules["memcache_hybrid"],
+                "DistributedObjectStore",
+                return_value=store,
+                create=True,
+            ),
+            patch(f"{module_path}.torch.npu.set_device") as set_device,
+            patch(f"{module_path}.time.sleep"),
+        ):
+            self.assertIs(b._setup_store(), store)
+
+        set_device.assert_called_once_with(3)
+        store.init.assert_called_once_with(3, init_bm=True)
+
+    def test_scheduler_setup_does_not_create_npu_context(self):
+        b = self._make_backend()
+        b.device_id = 3
+        b._init_bm = False
+        store = MagicMock()
+        store.init.return_value = 0
+        module_path = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend"
+
+        with (
+            patch.object(
+                sys.modules["memcache_hybrid"],
+                "DistributedObjectStore",
+                return_value=store,
+                create=True,
+            ),
+            patch(f"{module_path}.torch.npu.set_device") as set_device,
+            patch(f"{module_path}.time.sleep"),
+        ):
+            self.assertIs(b._setup_store(), store)
+
+        set_device.assert_not_called()
+        store.init.assert_called_once_with(3, init_bm=False)
 
     def test_register_buffer(self):
         b = self._make_backend()

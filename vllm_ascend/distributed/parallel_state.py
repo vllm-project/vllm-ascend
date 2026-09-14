@@ -16,6 +16,7 @@ _EMBED_TP: GroupCoordinator | None = None
 _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
+_KVPP: GroupCoordinator | None = None
 
 
 def init_ascend_model_parallel(
@@ -41,6 +42,18 @@ def init_ascend_model_parallel(
         global_pcp_size,
         global_tp_size,
     )
+
+    kvpp_size = get_ascend_config().kvpp_config.size
+    global _KVPP
+    assert _KVPP is None, "KV layer parallel group is already initialized"
+    if kvpp_size > 1:
+        kvpp_group_ranks = all_ranks.reshape(-1, kvpp_size).unbind(0)
+        _KVPP = init_model_parallel_group(
+            [ranks.tolist() for ranks in kvpp_group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="kvpp",
+        )
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -173,7 +186,17 @@ def get_dynamic_eplb_group() -> GroupCoordinator:
     return _DYNAMIC_EPLB
 
 
+def get_kvpp_group() -> GroupCoordinator:
+    assert _KVPP is not None, "KV layer parallel group is not initialized"
+    return _KVPP
+
+
 def destroy_ascend_model_parallel():
+    global _KVPP
+    if _KVPP:
+        _KVPP.destroy()
+    _KVPP = None
+
     global _MC2
     if _MC2:
         _MC2.destroy()
