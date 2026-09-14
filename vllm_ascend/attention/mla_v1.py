@@ -34,6 +34,7 @@ from vllm_ascend.attention.attention_v1 import (
 from vllm_ascend.attention.flash_mla import (
     ensure_flash_mla_ops_loaded,
     flash_mla_with_kvcache,
+    validate_flash_mla_kv_cache,
 )
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -1589,9 +1590,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        # FLASHMLA[TODO]: #16468 also adapts this context-only KV writer for
-        # MLA DSpark. That branch has not been ported to the BBND cache here;
-        # ordinary FlashMLA prefill writes KV inside _forward_flash instead.
+        # FLASHMLA[OUT-OF-SCOPE]: #16468 also adapts this context-only KV
+        # writer for MLA DSpark. This branch only wires the two FlashMLA
+        # operators; COW/zeroing/cache-lifecycle work remains on #16456.
         if not self.use_mla_rope:
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
 
@@ -2197,11 +2198,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "FlashMLA requires the token-fused [P, S, 1, 576] cache from "
                 "the #16456 allocator."
             )
-        if kv_cache.ndim != 4 or kv_cache.shape[2] != 1 or kv_cache.shape[-1] != 576:
-            raise ValueError(
-                "FlashMLA PA_BBND cache must have shape [P, S, 1, 576], "
-                f"got {tuple(kv_cache.shape)}."
-            )
+        validate_flash_mla_kv_cache(
+            kv_cache,
+            expected_dtype=flash.query.dtype,
+            expected_device=flash.query.device,
+        )
 
         # FLASHMLA[REF-16468]: wait for scheduling and input-buffer refresh.
         # The existing executor uses an Event or a FULL-graph ExternalEvent.
@@ -2248,24 +2249,20 @@ class AscendMLAImpl(MLAAttentionImpl):
         # replacing its _C_ascend dispatcher with the installed package.
         # FLASHMLA[ADAPT-16456]: pass [P,S,1,576] directly as PA_BBND, instead
         # of #16468's [P,S,576].unsqueeze(1) with PA_BNBD.
+        # The scalar/layout values come from the same contract used by the
+        # metadata producer; only softmax_scale is filled by this layer.
+        contract = flash.contract.with_softmax_scale(self.scale)
         latent, _ = flash_mla_with_kvcache(
             flash.query,
             kv_cache,
-            block_table=flash.block_table,
-            cache_seqlens=flash.cache_lens,
-            cu_seqlens_q=flash.cu,
-            seqused_q=flash.used_q,
-            attn_mask=flash.attn_mask if attn_metadata.causal else None,
-            metadata=flash.schedule,
-            head_dim_v=512,
-            softmax_scale=self.scale,
-            mask_mode=3 if attn_metadata.causal else 0,
-            max_seqlen_q=flash.max_query_len,
-            max_seqlen_kv=flash.max_seq_len,
-            layout_q="TND",
-            layout_kv="PA_BBND",
-            layout_out="NTD",
-            return_softmax_lse=False,
+            **contract.attention_kwargs(
+                block_table=flash.block_table,
+                cache_seqlens=flash.cache_lens,
+                cu_seqlens_q=flash.cu,
+                seqused_q=flash.used_q,
+                attn_mask=flash.attn_mask if contract.mask_mode == 3 else None,
+                metadata=flash.schedule,
+            ),
         )
         # FLASHMLA[REF-16468]: NTD output [H,T,512] matches _v_up_proj's
         # head-major input. Then apply the optional gate and output projection.

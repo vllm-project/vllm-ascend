@@ -16,7 +16,11 @@ def helpers():
     """Load just the production helper, without importing the NPU runtime."""
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/attention_v1.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    selected = {"AscendFlashAttentionMetadata", "_build_flash_attention_metadata"}
+    selected = {
+        "FlashMLAContract",
+        "AscendFlashAttentionMetadata",
+        "_build_flash_attention_metadata",
+    }
     tree.body = [node for node in tree.body if getattr(node, "name", None) in selected]
     calls = []
 
@@ -31,6 +35,8 @@ def helpers():
     scope = {
         "torch": torch,
         "dataclass": dataclass,
+        "replace": __import__("dataclasses").replace,
+        "Any": object,
         "DeviceMetadataStage": SimpleNamespace(ATTENTION=2),
         "DeviceMetadataTask": lambda stage, run, group_id: SimpleNamespace(
             stage=stage, run=run, group_id=group_id
@@ -77,6 +83,11 @@ def test_metadata_task_uses_device_lengths_and_reuses_buffer(helpers):
     assert calls == []
     task = builder._device_metadata_tasks[0]
     assert task.group_id == id(flash.schedule)
+    assert flash.contract.num_heads_q == builder.flash_num_heads
+    assert flash.contract.num_heads_kv == 1
+    assert flash.contract.head_dim_qk == 576
+    assert flash.contract.head_dim_v == 512
+    assert flash.contract.layout_kv == "PA_BBND"
 
     # The task sees a correction made after the builder ran, without a CPU
     # mirror/readback. This is the async-speculative-decode contract.
@@ -104,6 +115,9 @@ def test_metadata_task_uses_device_lengths_and_reuses_buffer(helpers):
     builder._device_metadata_tasks[0].run()
     assert flash.cache_lens.tolist() == [8, 2, 10, 0]
     assert calls[-1][1]["mask_mode"] == 0
+    assert calls[-1][1]["head_dim_qk"] == 576
+    assert calls[-1][1]["head_dim_v"] == 512
+    assert calls[-1][1]["layout_q"] == "TND"
     assert pointers == {
         name: tensor.data_ptr()
         for name, tensor in vars(flash).items()
@@ -118,3 +132,20 @@ def test_metadata_falls_back_to_eager_without_executor(helpers):
     module._build_flash_attention_metadata(builder, _common())
     assert len(calls) == 1
     assert builder._device_metadata_tasks == ()
+
+
+def test_contract_and_cache_validation_preserve_strided_pa_bbnd(helpers):
+    module, _ = helpers
+    contract = module.FlashMLAContract(num_heads_q=8, max_seqlen_q=16, max_seqlen_kv=128)
+    metadata_kwargs = contract.metadata_kwargs(
+        torch.zeros(2, dtype=torch.int32), torch.ones(2, dtype=torch.int32)
+    )
+    assert metadata_kwargs["head_dim_qk"] == 576
+    assert contract.attention_kwargs(
+        block_table=torch.zeros(2, 1, dtype=torch.int32),
+        cache_seqlens=torch.ones(2, dtype=torch.int32),
+        cu_seqlens_q=torch.zeros(3, dtype=torch.int32),
+        seqused_q=torch.ones(2, dtype=torch.int32),
+        attn_mask=None,
+        metadata=torch.zeros(4096, dtype=torch.int32),
+    )["layout_kv"] == "PA_BBND"

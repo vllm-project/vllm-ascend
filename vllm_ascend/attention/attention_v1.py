@@ -42,7 +42,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.flash_mla import flash_mla_with_kvcache_metadata
+from vllm_ascend.attention.flash_mla import (
+    FlashMLAContract,
+    flash_mla_with_kvcache_metadata,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -98,6 +101,7 @@ class AscendFlashAttentionMetadata:
     max_query_len: int
     max_seq_len: int
     is_prefill: bool
+    contract: FlashMLAContract
 
 
 def _init_flash_attention_metadata(builder, impl) -> None:
@@ -150,9 +154,23 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
             max_query_len=tokens,
             max_seq_len=table.shape[1] * block_size,
             is_prefill=common.max_query_len > builder.decode_threshold,
+            contract=FlashMLAContract(
+                num_heads_q=builder.flash_num_heads,
+                max_seqlen_q=tokens,
+                max_seqlen_kv=table.shape[1] * block_size,
+            ),
         )
     flash = builder._flash_buffers[key]
     flash.is_prefill = common.max_query_len > builder.decode_threshold
+    # FLASHMLA[ABI]: both operators receive this exact scalar/layout contract.
+    # The tensors are refreshed below, but the contract is rebuilt per batch so
+    # causal and capacity changes cannot leave a stale tiling description.
+    flash.contract = FlashMLAContract(
+        num_heads_q=builder.flash_num_heads,
+        max_seqlen_q=flash.max_query_len,
+        max_seqlen_kv=flash.max_seq_len,
+        mask_mode=3 if common.causal else 0,
+    )
 
     def build_metadata() -> None:
         # FLASHMLA[REF-16468]: read current device tensors when the executor
@@ -184,20 +202,13 @@ def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMeta
         positions = common.positions[:tokens]
         flash.positions[:positions.shape[0]].copy_(positions)
         # FLASHMLA[EXTERNAL]: replace #16468's _C_ascend metadata dispatcher.
-        # Heads, lengths, dimensions, mask_mode and layout_q must agree with
-        # _forward_flash; the two operators cannot check that pair for us.
+        # Heads, lengths, dimensions, mask_mode and layout_q come from the
+        # same contract later consumed by _forward_flash.
         metadata = flash_mla_with_kvcache_metadata(
             flash.cache_lens,
-            builder.flash_num_heads,
-            1,
-            cu_seqlens_q=flash.cu,
-            seqused_q=flash.used_q,
-            max_seqlen_q=flash.max_query_len,
-            max_seqlen_kv=flash.max_seq_len,
-            head_dim_qk=576,
-            head_dim_v=512,
-            mask_mode=3 if common.causal else 0,
-            layout_q="TND",
+            flash.contract.num_heads_q,
+            flash.contract.num_heads_kv,
+            **flash.contract.metadata_kwargs(flash.cu, flash.used_q),
         )
         if metadata.dtype != torch.int32 or metadata.numel() != flash.schedule.numel():
             raise RuntimeError(

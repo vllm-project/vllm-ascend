@@ -515,10 +515,13 @@ class NPUModelRunner(GPUModelRunner):
         # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
         # in async spec decode mode; others (SFA, GDN, etc.) do not.
         # FLASHMLA[REF-16468]: its metadata consumes corrected device seq_lens,
-        # so _prepare_inputs can skip the optimistic CPU-mirror correction.
-        # FLASHMLA[TODO]: this global guard also covers non-MLA backends; scope
-        # it per consumer before enabling a mixed MLA/legacy-attention runner.
-        self._needs_seq_lens_cpu_sync = not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and (
+        # so the MLA path can skip the optimistic CPU-mirror correction. Keep
+        # legacy consumers on their old path even when a mixed model enables
+        # FlashMLA globally.
+        flash_mla_consumer = ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and issubclass(
+            self.attn_backend, AscendMLABackend
+        )
+        self._needs_seq_lens_cpu_sync = not flash_mla_consumer and (
             self.use_compress or issubclass(
                 self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
             )
