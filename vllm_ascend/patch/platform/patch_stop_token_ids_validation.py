@@ -52,7 +52,7 @@ def _validate_stop_token_ids(self, model_config) -> None:
         )
 
 
-def _validate_allowed_token_ids(self, model_config) -> None:
+def _validate_allowed_token_ids(self, vocab_source) -> None:
     allowed_token_ids = self.allowed_token_ids
     if allowed_token_ids is None:
         return
@@ -64,7 +64,17 @@ def _validate_allowed_token_ids(self, model_config) -> None:
             value=allowed_token_ids,
         )
 
-    vocab_size = model_config.get_vocab_size()
+    # The patched verify() passes the model config, which is the authoritative
+    # bound. The upstream verify() we still delegate to passes the tokenizer,
+    # whose vocabulary can be larger than the model's, so accept both: the
+    # model-config call is the strict one and this one is then a no-op.
+    if vocab_source is None:
+        return
+    if hasattr(vocab_source, "get_vocab_size"):
+        vocab_size = vocab_source.get_vocab_size()
+    else:
+        vocab_size = len(vocab_source)
+
     invalid_token_ids = [token_id for token_id in allowed_token_ids if token_id < 0 or token_id >= vocab_size]
     if invalid_token_ids:
         raise VLLMValidationError(
