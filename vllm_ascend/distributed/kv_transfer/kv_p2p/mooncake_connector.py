@@ -2065,15 +2065,11 @@ class MooncakeConnectorScheduler:
         partial_tail_offloads = self._partial_tail_offloads.pop(request.request_id, [])
         if partial_tail_offloads:
             state_group_ids = {
-                group_idx
-                for group_idx, group_info in enumerate(self.group_transfer_info)
-                if group_info.is_state_group
+                group_idx for group_idx, group_info in enumerate(self.group_transfer_info) if group_info.is_state_group
             }
             boundary_tokens = {boundary for _, _, boundary in partial_tail_offloads}
             offload_by_group = {
-                group_id: block_id
-                for group_id, block_id, _ in partial_tail_offloads
-                if group_id in state_group_ids
+                group_id: block_id for group_id, block_id, _ in partial_tail_offloads if group_id in state_group_ids
             }
             if len(boundary_tokens) == 1 and state_group_ids <= offload_by_group.keys():
                 remote_state_boundary_tokens = boundary_tokens.pop()

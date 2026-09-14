@@ -295,10 +295,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # ``get_kv_cache_config_from_groups`` wrapper above; configs built
         # without the tag (e.g. unit tests) default to non-producer.
         self.is_kv_producer = getattr(kv_cache_config, "is_kv_producer", False)
-        self.has_state_groups = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
-        )
+        self.has_state_groups = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
         for manager in self.single_type_managers:
             if isinstance(manager, MambaManager):
                 manager.is_kv_producer = self.is_kv_producer
