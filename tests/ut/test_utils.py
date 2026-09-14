@@ -379,7 +379,18 @@ class TestUtils(TestBase):
         the name of the vLLM class the Ascend op replaces (i.e. one of its
         base classes). A mismatched key silently disables the NPU fused op.
         """
-        for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        # Capture the (name, op_cls) pairs from register_oot calls instead of
+        # reading the module global: register_ascend_customop() rebinds the
+        # global and other tests may leave mocked op classes in it, while
+        # re-registering for real would hit the duplicate-name assert in
+        # vllm's op_registry_oot.
+        with mock.patch("vllm.model_executor.custom_op.CustomOp.register_oot") as mock_register:
+            utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+            utils.register_ascend_customop()
+
+        for call in mock_register.call_args_list:
+            name = call.kwargs["name"]
+            op_cls = call.kwargs["_decorated_op_cls"]
             base_names = [base.__name__ for base in op_cls.__mro__]
             self.assertIn(
                 name,
