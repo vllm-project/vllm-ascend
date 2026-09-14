@@ -169,7 +169,7 @@ def test_sfa_pcp_dcp_builds_pcp_ordered_indexer_slots_with_receiver_local_blocks
         padded_gather_idx=torch.tensor([2, 0, 1, 0], dtype=torch.int64),
         gathered_kv_write_mask=torch.tensor([True, True, True, False]),
     )
-    global_common = SimpleNamespace(seq_lens=global_batch.seq_lens)
+    global_common = SimpleNamespace(seq_lens=global_batch.seq_lens, block_table_tensor=local_block_table, num_reqs=1)
     common_attn_metadata = SimpleNamespace(
         replace=Mock(return_value=global_common),
     )

@@ -8,6 +8,50 @@ from vllm.distributed import get_dcp_group
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
+def get_cp_local_query_key_lens(
+    query_start_loc: torch.Tensor,
+    cum_query_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    local_start: int,
+    local_end: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return cumulative query lengths and causal KV lengths for a token shard.
+
+    ``local_end`` includes CP padding. Requests with no local queries must
+    have zero KV length, including graph-padding requests with zero seq_lens.
+    Callers copy the results into their own graph-stable metadata buffers.
+    """
+    global_start = query_start_loc[: cum_query_lens.shape[0]]
+    req_local_start = global_start.clamp(min=local_start)
+    req_local_end = cum_query_lens.clamp(max=local_end)
+    num_local_tokens = req_local_end - req_local_start
+    local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
+    offset = cum_query_lens - req_local_end
+    local_key_lens = torch.where(num_local_tokens > 0, torch.clamp_min(seq_lens - offset, 0), 0)
+    return local_query_lens, local_key_lens
+
+
+def build_pcp_ordered_slot_mapping(
+    global_slot_mapping: torch.Tensor,
+    pcp_context: Any,
+    slot_mapping_buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Write slots in PCP gather order into a caller-owned output buffer."""
+    gather_idx = pcp_context.padded_gather_idx
+    write_mask = pcp_context.gathered_kv_write_mask
+    if gather_idx is None or write_mask is None:
+        raise RuntimeError("PCP+DCP prefill requires the PCP gathered-token layout.")
+    num_tokens = gather_idx.numel()
+    if slot_mapping_buffer.shape[0] < num_tokens:
+        raise RuntimeError(
+            f"PCP+DCP indexer slot buffer is too small: capacity={slot_mapping_buffer.shape[0]}, required={num_tokens}."
+        )
+    slot_mapping = slot_mapping_buffer[:num_tokens]
+    torch.index_select(global_slot_mapping, 0, gather_idx, out=slot_mapping)
+    slot_mapping.masked_fill_(~write_mask, -1)
+    return slot_mapping
+
+
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int,

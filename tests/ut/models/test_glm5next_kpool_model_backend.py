@@ -261,8 +261,6 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     result = backend.forward(
         hidden,
         normalized_q_c,
-        None,
-        None,
         hidden + 3,
         metadata,
         compute_topk=True,

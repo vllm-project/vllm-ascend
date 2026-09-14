@@ -414,13 +414,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor | None,
-        sin: torch.Tensor | None,
         k_hidden_states: torch.Tensor,
         indexer_metadata: Any,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        del cos, sin
         if not isinstance(indexer_metadata, AscendIndexerKPoolMetadata):
             raise TypeError("GLM KPool backend requires AscendIndexerKPoolMetadata.")
         context = get_forward_context()
