@@ -39,7 +39,8 @@ Fine-grained TP is **model-agnostic** and supports all standard dense transforme
 
 > ⚠️ Note:  
 >
-> - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj. It additionally requires `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
+> - `o_proj` TP is only supported in Graph mode during Decode — an all-eager deployment is rejected at config load (as on V1), while occasional eagerly dispatched steps are DP-padded automatically. It additionally requires `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
+> - `o_proj` TP cannot be combined with PCP (`prefill_context_parallel_size > 1`); the combination is rejected at config load.
 > - `mlp` TP supports dense models, or dense layers in MoE models. For example, the first three dense layers of DeepSeek-R1.
 
 ### Configuration Limit

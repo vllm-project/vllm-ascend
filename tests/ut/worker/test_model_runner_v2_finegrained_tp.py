@@ -227,8 +227,10 @@ def _make_dp_padding_runner(enabled=True, aligned_tokens=0):
     runner.dp_rank = 3
     runner.decode_query_len = 2
     runner.max_num_reqs = 8
-    # vllm-ascend main's execute_model assigns model_state.kvpp_is_dummy_run before delegating.
+    # vllm-ascend main's execute_model assigns model_state.kvpp_is_dummy_run before delegating
+    # and calls self.kvpp.complete_forward() after; the initializer always defines both.
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     # need_timing=False keeps both profiling helpers pure no-ops (no NPU sync).
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
