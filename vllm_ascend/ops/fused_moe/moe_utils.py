@@ -16,10 +16,12 @@
 # limitations under the License.
 #
 import inspect
-import re
+from collections.abc import Callable
 from functools import lru_cache
 from importlib import import_module
+from typing import Any
 
+import regex as re
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -147,7 +149,7 @@ def load_cann_mega_moe_ops():
 
 
 def select_mega_moe_activation_kwargs(
-    mega_moe_op: object,
+    mega_moe_op: Callable[..., Any],
     *,
     activation: object,
     activation_clamp: float | None,

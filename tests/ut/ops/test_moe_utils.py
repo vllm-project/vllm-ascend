@@ -7,10 +7,12 @@ import torch_npu  # noqa: F401 -- registers torch.npu used by the module under t
 
 from vllm_ascend.ops.fused_moe.moe_utils import (
     _custom_gmm_swiglu_enabled,
+    _get_cann_mega_moe_quant_settings,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
     select_mega_moe_activation_kwargs,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -54,6 +56,22 @@ class TestFusionFlags(unittest.TestCase):
             self.assertTrue(_custom_gmm_swiglu_enabled(True, True, activation="silu"))
 
 
+class TestMegaMoeQuantSettings(unittest.TestCase):
+    def test_mxfp8_uses_e4m3_dispatch_and_weights(self):
+        self.assertEqual(_get_cann_mega_moe_quant_settings(QuantType.W8A8MXFP), (4, 24, 24))
+
+    def test_preserves_other_megamoe_quant_layouts(self):
+        for quant_type, expected in (
+            (QuantType.W8A8, (2, 258, 258)),
+            (QuantType.W4A8, (2, 258, 285)),
+            (QuantType.NONE, (0, None, None)),
+            (QuantType.W4A8MXFP, (4, 24, 296)),
+            (QuantType.W4A4MXFP, (4, 296, 296)),
+        ):
+            with self.subTest(quant_type=quant_type):
+                self.assertEqual(_get_cann_mega_moe_quant_settings(quant_type), expected)
+
+
 class TestSwigluScaleHelpers(unittest.TestCase):
     def test_prepare_dequant_swiglu_weight_scale_stacks_and_casts(self):
         scales = [torch.randn(4, dtype=torch.float16) for _ in range(2)]
@@ -74,6 +92,19 @@ class TestSwigluScaleHelpers(unittest.TestCase):
 
 
 class TestMegaMoeActivationKwargs(unittest.TestCase):
+    def test_select_mega_moe_activation_kwargs_binds_swiglu_aliases(self):
+        def mega_moe(*args, activation_clamp=None, swiglu_alpha=1.0, swiglu_beta=0.0):
+            return args, activation_clamp, swiglu_alpha, swiglu_beta
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(kwargs, {"activation_clamp": 7.0, "swiglu_alpha": 1.702, "swiglu_beta": 1.0})
+
     def test_select_mega_moe_activation_kwargs_keeps_clamp_only_for_legacy_op(self):
         def mega_moe(*args, activation_clamp=None, **kwargs):
             return args, activation_clamp, kwargs
