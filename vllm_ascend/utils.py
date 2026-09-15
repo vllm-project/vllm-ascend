@@ -1668,10 +1668,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 

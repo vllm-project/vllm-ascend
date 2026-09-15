@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -416,7 +417,12 @@ class FusedMC2CommImpl(MoECommMethod):
 
         activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
-        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+        supports_active_mask = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_ACTIVE_MASK)
+        if (
+            supports_active_mask
+            and self.token_dispatcher.global_bs == 0
+            and fused_experts_input.routing.mc2_mask is not None
+        ):
             # mc2_mask comes from the reserved bool buffer in
             # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
             # the per-token active mask, so cast only when the dtype does
@@ -430,6 +436,13 @@ class FusedMC2CommImpl(MoECommMethod):
         # A8W4-INT precision-compensation biases B1/B2 (l1_bias/l2_bias).
         l1_bias = weights.w1_scale_bias
         l2_bias = weights.w2_scale_bias
+        activation_kwargs = moe_utils.select_mega_moe_activation_kwargs(
+            self.mega_moe,
+            activation=fused_experts_input.activation,
+            activation_clamp=activation_clamp,
+            swiglu_alpha=self.swiglu_alpha,
+            swiglu_beta=self.swiglu_beta,
+        )
 
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
@@ -443,9 +456,9 @@ class FusedMC2CommImpl(MoECommMethod):
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
-            activation_clamp=activation_clamp,
             weight1_type=weight_type,
             weight2_type=weight_type,
+            **activation_kwargs,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a

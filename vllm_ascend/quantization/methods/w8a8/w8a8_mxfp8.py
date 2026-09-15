@@ -20,14 +20,14 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
@@ -385,6 +385,20 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 scale_buffer.copy_(target_scale.transpose(1, 2).contiguous())
             weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
 
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and use_cann_megamoe(vllm_config):
+            # GMM consumes [E, K, N], while MegaMoe expects one expert tensor
+            # in the checkpoint's [N, K] / [K, N] layouts. Transpose the GMM
+            # views back without duplicating the model weights or scales.
+            layer.cann_mega_moe_w13_weight_list = list(layer.w13_weight.data.transpose(1, 2).unbind(dim=0))
+            layer.cann_mega_moe_w2_weight_list = list(layer.w2_weight.data.transpose(1, 2).unbind(dim=0))
+            layer.cann_mega_moe_w13_weight_scale_list = list(
+                layer.w13_weight_scale.data.transpose(1, 2).unbind(dim=0)
+            )
+            layer.cann_mega_moe_w2_weight_scale_list = list(
+                layer.w2_weight_scale.data.transpose(1, 2).unbind(dim=0)
+            )
+
         # Mark as transformed
         layer._mxfp8_transformed = True
 
@@ -439,8 +453,26 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         _restore("w13_weight", "w13_weight_scale")
         _restore("w2_weight", "w2_weight_scale")
 
+        for attr in (
+            "cann_mega_moe_w13_weight_list",
+            "cann_mega_moe_w2_weight_list",
+            "cann_mega_moe_w13_weight_scale_list",
+            "cann_mega_moe_w2_weight_scale_list",
+        ):
+            if hasattr(layer, attr):
+                delattr(layer, attr)
+
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Return per-expert MXFP8 weights consumed by CANN MegaMoe."""
+        return MoEWeights(
+            w1=layer.cann_mega_moe_w13_weight_list,
+            w2=layer.cann_mega_moe_w2_weight_list,
+            w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
+            w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
+        )
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states

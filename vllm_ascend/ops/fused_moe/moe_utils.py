@@ -15,6 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
+import re
 from functools import lru_cache
 from importlib import import_module
 
@@ -33,8 +35,10 @@ COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
+_CANN_ACL_FLOAT8_E4M3FN = 24
 _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
@@ -125,6 +129,67 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
+def select_mega_moe_activation_kwargs(
+    mega_moe_op: object,
+    *,
+    activation: object,
+    activation_clamp: float | None,
+    swiglu_alpha: float,
+    swiglu_beta: float,
+) -> dict[str, object]:
+    """Build activation kwargs compatible with the installed MegaMoe wrapper.
+
+    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``). Older MegaMoe
+    builds only expose ``activation_clamp`` for standard SwiGLU, while newer
+    wrappers expose either ``activation``/``activation_params`` or direct
+    alpha/beta keyword arguments. Standard SwiGLU keeps the legacy call.
+    """
+    kwargs: dict[str, object] = {"activation_clamp": activation_clamp}
+    activation_name = getattr(activation, "value", activation)
+    if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
+        return kwargs
+
+    try:
+        parameter_names = set(inspect.signature(mega_moe_op).parameters)
+    except (TypeError, ValueError):
+        # Some compiled/custom operators do not expose an inspectable Python
+        # signature. Their docstring or torch schema still carries argument
+        # names.
+        signature_metadata = " ".join(
+            str(value)
+            for value in (getattr(mega_moe_op, "__doc__", None), getattr(mega_moe_op, "_schema", None))
+            if value is not None
+        )
+        known_names = {
+            "activation",
+            "activation_params",
+            "glu_alpha",
+            "glu_bias",
+            "swiglu_alpha",
+            "swiglu_beta",
+        }
+        parameter_names = {name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata)}
+
+    if {"activation", "activation_params"}.issubset(parameter_names):
+        kwargs.update(
+            activation="swigluoai",
+            activation_params={"alpha": swiglu_alpha, "beta": swiglu_beta},
+        )
+        return kwargs
+    if {"glu_alpha", "glu_bias"}.issubset(parameter_names):
+        kwargs.update(glu_alpha=swiglu_alpha, glu_bias=swiglu_beta)
+        return kwargs
+    if {"swiglu_alpha", "swiglu_beta"}.issubset(parameter_names):
+        kwargs.update(swiglu_alpha=swiglu_alpha, swiglu_beta=swiglu_beta)
+        return kwargs
+
+    raise RuntimeError(
+        "The installed CANN MegaMoe wrapper does not expose SwiGLU-OAI "
+        "activation parameters required by MiniMax-M3. Install a compatible "
+        "cann_ops_transformer build or disable fused MC2."
+    )
+
+
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
     # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
     # The current custom op package still requires explicit INT4 for W4A8
@@ -141,6 +206,12 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+    if quant_type == QuantType.W8A8MXFP:
+        return (
+            _CANN_MEGA_MOE_QUANT_MODE_MXFP,
+            _CANN_ACL_FLOAT8_E4M3FN,
+            _CANN_ACL_FLOAT8_E4M3FN,
+        )
     if quant_type == QuantType.NONE:
         return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
 

@@ -321,6 +321,44 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
                         torch.testing.assert_close(captured[name].float(), expected.float(), rtol=0, atol=0)
                 self.assertEqual(cast.call_count, 2 if nz_enabled else 0)
 
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.use_cann_megamoe", return_value=True)
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config_or_none")
+    def test_megamoe_uses_per_expert_mxfp8_views(self, mock_vllm, _mock_use_megamoe):
+        mock_vllm.return_value = create_mock_vllm_config()
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+
+        self.scheme.process_weights_after_loading(layer)
+        weights = self.scheme.get_fused_mc2_weights(layer)
+
+        self.assertEqual(len(weights.w1), self.num_experts)
+        self.assertEqual(len(weights.w2), self.num_experts)
+        self.assertEqual(len(weights.w1_scale), self.num_experts)
+        self.assertEqual(len(weights.w2_scale), self.num_experts)
+        self.assertEqual(weights.w1[0].dtype, torch.float8_e4m3fn)
+        self.assertEqual(weights.w1_scale[0].dtype, torch.uint8)
+        self.assertEqual(weights.w1[0].shape, (2 * self.intermediate_size, self.hidden_size))
+        self.assertEqual(weights.w2[0].shape, (self.hidden_size, self.intermediate_size))
+        self.assertEqual(
+            weights.w1_scale[0].shape,
+            (2 * self.intermediate_size, self.hidden_size // 64, 2),
+        )
+        self.assertTrue(weights.w1[0].is_contiguous())
+        self.assertTrue(weights.w2[0].is_contiguous())
+        self.assertTrue(weights.w1_scale[0].is_contiguous())
+        self.assertTrue(weights.w2_scale[0].is_contiguous())
+        self.assertEqual(weights.w1[0].untyped_storage().data_ptr(), layer.w13_weight.untyped_storage().data_ptr())
+        self.assertEqual(
+            weights.w1_scale[0].untyped_storage().data_ptr(),
+            layer.w13_weight_scale.untyped_storage().data_ptr(),
+        )
+
+        self.scheme.restore_weights_for_rl_loading(layer)
+        self.assertFalse(hasattr(layer, "cann_mega_moe_w13_weight_list"))
+
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size

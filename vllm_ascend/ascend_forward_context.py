@@ -320,6 +320,9 @@ def _select_capacity_and_world_size_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
+    if use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
+
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
         "num_experts_per_tok",

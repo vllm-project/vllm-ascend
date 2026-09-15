@@ -528,6 +528,16 @@ class TestGetCacheScaleMapper(TestBase):
         )
 
 
+class TestGetRotationPath(TestBase):
+    def test_get_rotation_path_without_quant_description(self):
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(),
+            model_config=SimpleNamespace(model="/target"),
+        )
+
+        self.assertIsNone(get_rotation_path(vllm_config))
+
+
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
         config = AscendModelSlimConfig({"old_key.weight": "INT8"})
