@@ -82,6 +82,10 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
     the block table. Preserve the groups and allocation descriptors while
     restoring the Mamba-specific sizing path.
     """
+    # TODO: Remove this workaround once vLLM 0.28 support is dropped.
+    # vLLM 0.29 already handles wrapped Mamba block-table sizing correctly:
+    # https://github.com/vllm-project/vllm/pull/50493
+    # https://github.com/vllm-project/vllm/pull/50823
     groups = []
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
