@@ -34,6 +34,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    _log_dspark_attention_route,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -606,6 +607,57 @@ def _make_impl(
             attn_sink=None,
             swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
         )
+
+
+def test_dspark_attention_trace_reports_swa_without_compressed_global_attention():
+    query = torch.empty((14, 1, 2))
+    swa_kv_cache = torch.empty((4, 128, 1, 2))
+    dspark_swa_indices = torch.empty((14, 1, 4224), dtype=torch.int32)
+    attn_kwargs = {
+        "ori_kv": swa_kv_cache,
+        "ori_sparse_indices": dspark_swa_indices,
+        "ori_mask_mode": 4,
+        "ori_win_left": 4102,
+        "ori_win_right": 0,
+    }
+
+    with patch("vllm_ascend.attention.dsa_v1.logger.info") as log_info:
+        _log_dspark_attention_route(
+            enabled=True,
+            layer_name="model.layers.61.self_attn",
+            compress_ratio=0,
+            query=query,
+            swa_kv_cache=swa_kv_cache,
+            dspark_swa_indices=dspark_swa_indices,
+            attn_kwargs=attn_kwargs,
+        )
+
+    log_info.assert_called_once()
+    log_args = log_info.call_args.args
+    assert log_args[0].startswith("[DSparkAttentionTrace]")
+    assert log_args[1] == "model.layers.61.self_attn"
+    assert log_args[2:8] == (True, True, False, False, False, False)
+    assert log_args[8:12] == (0, 4, 4102, 0)
+    assert log_args[12:] == ((14, 1, 2), (4, 128, 1, 2), (14, 1, 4224))
+
+
+@pytest.mark.parametrize(
+    ("enabled", "dspark_swa_indices"),
+    [(False, torch.empty((1, 1, 1), dtype=torch.int32)), (True, None)],
+)
+def test_dspark_attention_trace_skips_disabled_or_non_dspark_calls(enabled, dspark_swa_indices):
+    with patch("vllm_ascend.attention.dsa_v1.logger.info") as log_info:
+        _log_dspark_attention_route(
+            enabled=enabled,
+            layer_name="layer",
+            compress_ratio=1,
+            query=torch.empty((1, 1, 2)),
+            swa_kv_cache=torch.empty((1, 1, 1, 2)),
+            dspark_swa_indices=dspark_swa_indices,
+            attn_kwargs={"ori_kv": object()},
+        )
+
+    log_info.assert_not_called()
 
 
 def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():

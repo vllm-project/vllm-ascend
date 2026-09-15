@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
@@ -1089,6 +1090,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.softmax_scale = self.head_dim**-0.5
+        self._log_dspark_attention = envs.VLLM_ASCEND_LOG_DSPARK_ATTENTION
         self.tp_group = get_tp_group()
         self.tp_size = self.tp_group.world_size
         self.tp_rank = self.tp_group.rank_in_group
@@ -1707,6 +1709,21 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
 
         if self.compress_ratio <= 1:
+            if self._log_dspark_attention and swa_req_metadata.dspark_swa_indices is not None:
+                dsa_v1._log_dspark_attention_route(
+                    enabled=True,
+                    layer_name=layer_name,
+                    compress_ratio=self.compress_ratio,
+                    query=q,
+                    swa_kv_cache=swa_kv_cache,
+                    dspark_swa_indices=swa_req_metadata.dspark_swa_indices,
+                    attn_kwargs=dict(
+                        ori_kv=swa_kv_cache,
+                        ori_block_table=swa_metadata.req_metadata.block_table,
+                        metadata=swa_metadata.req_metadata.sas_metadata,
+                        **common_attn_kwargs,
+                    ),
+                )
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,

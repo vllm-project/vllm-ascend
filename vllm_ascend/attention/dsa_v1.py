@@ -7,6 +7,7 @@ import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -16,6 +17,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -79,6 +81,44 @@ def _is_w8a8_dynamic(linear) -> bool:
         return False
     inner_method = getattr(quant_method, "quant_method", None)
     return isinstance(inner_method, AscendW8A8DynamicLinearMethod)
+
+
+def _log_dspark_attention_route(
+    *,
+    enabled: bool,
+    layer_name: str,
+    compress_ratio: int,
+    query: torch.Tensor,
+    swa_kv_cache: torch.Tensor,
+    dspark_swa_indices: torch.Tensor | None,
+    attn_kwargs: dict[str, Any],
+) -> None:
+    """Log DSpark's concrete sparse-attention inputs without device sync."""
+    if not enabled or dspark_swa_indices is None:
+        return
+
+    logger.info(
+        "[DSparkAttentionTrace] layer=%s attention_design=swa "
+        "uses_swa_kv=%s uses_dspark_swa_indices=%s "
+        "compressed_global_attention=%s cmp_kv=%s "
+        "cmp_block_table=%s cmp_sparse_indices=%s compress_ratio=%d "
+        "ori_mask_mode=%s ori_win_left=%s ori_win_right=%s "
+        "query_shape=%s swa_kv_shape=%s swa_indices_shape=%s",
+        layer_name,
+        "ori_kv" in attn_kwargs,
+        "ori_sparse_indices" in attn_kwargs,
+        any(key in attn_kwargs for key in ("cmp_kv", "cmp_block_table", "cmp_sparse_indices")),
+        "cmp_kv" in attn_kwargs,
+        "cmp_block_table" in attn_kwargs,
+        "cmp_sparse_indices" in attn_kwargs,
+        compress_ratio,
+        attn_kwargs.get("ori_mask_mode"),
+        attn_kwargs.get("ori_win_left"),
+        attn_kwargs.get("ori_win_right"),
+        tuple(query.shape),
+        tuple(swa_kv_cache.shape),
+        tuple(dspark_swa_indices.shape),
+    )
 
 
 class AscendDSABackend(AttentionBackend):
@@ -1027,6 +1067,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.softmax_scale = self.head_dim**-0.5
+        self._log_dspark_attention = envs.VLLM_ASCEND_LOG_DSPARK_ATTENTION
 
         # MLA Args
         self.wq_a = kwargs["wq_a"]
@@ -1676,5 +1717,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             if self.compress_ratio == 4:
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
+
+        if self._log_dspark_attention and swa_req_metadata.dspark_swa_indices is not None:
+            _log_dspark_attention_route(
+                enabled=True,
+                layer_name=layer_name,
+                compress_ratio=self.compress_ratio,
+                query=q,
+                swa_kv_cache=swa_kv_cache,
+                dspark_swa_indices=swa_req_metadata.dspark_swa_indices,
+                attn_kwargs=attn_kwargs,
+            )
 
         return attn_op(q, **attn_kwargs)[0]

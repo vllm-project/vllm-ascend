@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to log the actual DeepSeek V4 DSpark attention routing. Set to 1
+    # to emit one diagnostic record per draft-layer attention call, or 0 to
+    # disable it (default). This variable is not sensitive. The enabled path
+    # is intended only for diagnostics because logging is performance-critical.
+    "VLLM_ASCEND_LOG_DSPARK_ATTENTION": lambda: bool(int(os.getenv("VLLM_ASCEND_LOG_DSPARK_ATTENTION", "0"))),
 }
 
 # end-env-vars-definition
