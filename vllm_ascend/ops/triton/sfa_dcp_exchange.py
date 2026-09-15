@@ -19,7 +19,9 @@ _HEADS = 64
 _HEAD_DIM = 512
 _OUTPUT_WORDS_PER_PEER = 2048
 _WORDS_PER_PEER = 2056
-_MAX_DECODE_TOKENS = 12
+# Manually chosen conservative cap, not a demonstrated kernel limit.
+# Inputs above 192 have not been tested and retain the upstream path.
+_MAX_DECODE_TOKENS = 192
 
 
 if triton is not None:
