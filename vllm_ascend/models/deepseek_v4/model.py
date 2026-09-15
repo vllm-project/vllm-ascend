@@ -26,6 +26,7 @@
 import math
 import typing
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from itertools import islice
 
 import torch
@@ -35,7 +36,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -105,6 +106,21 @@ from vllm_ascend.worker.v2.pp_utils import (
 )
 
 sequence_parallel_chunk = sp_shard
+
+
+def _cpu_construct_then_npu():
+    """Construct empty parameters on CPU, then one .to(npu).
+
+    Per-tensor NPU empty() during 60+ MoE layers dominates engine construct.
+    CPU empty() plus a single H2D of uninitialized storage avoids that driver
+    round-trip. Weight load still writes onto the NPU parameters.
+    """
+    try:
+        if torch.npu.is_available():
+            return torch.device("cpu"), torch.device(f"npu:{torch.npu.current_device()}")
+    except Exception:
+        pass
+    return None, None
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -339,10 +355,17 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # Dummy load keeps zeros so garbage indices cannot fault. Real
+            # checkpoints overwrite this table; empty skips a vocab-sized
+            # zero-fill on every hash layer during construct.
+            load_format = getattr(
+                getattr(get_current_vllm_config(), "load_config", None),
+                "load_format",
+                "auto",
+            )
+            tid2eid_init = torch.zeros if str(load_format) == "dummy" else torch.empty
             self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
+                tid2eid_init(
                     config.vocab_size,
                     config.num_experts_per_tok,
                     dtype=torch.int32,
@@ -878,24 +901,20 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
 
         # Pre-hc_head residual stream buffer for the speculative draft
-        # (MTP / DSpark / DFlash). Only needed when the decoder consumes
-        # target-model hidden states; allocating it unconditionally would
-        # permanently cost max_num_batched_tokens * hc_dim per rank.
-        # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
+        # (MTP / DSpark / DFlash). Allocate on first forward so target
+        # construct does not pay for a draft-only workspace.
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        self._needs_mtp_hidden_states = bool(
+            get_pp_group().is_last_rank
+            and spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
-        self._mtp_hidden_buffer = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                hc_dim,
-                dtype=vllm_config.model_config.dtype,
-                device=self.device,
-            )
-            if get_pp_group().is_last_rank and needs_mtp_hidden_states
-            else None
+        self._mtp_buffer_shape = (
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            hc_dim,
         )
+        self._mtp_buffer_dtype = vllm_config.model_config.dtype
+        self._mtp_hidden_buffer = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -983,7 +1002,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
+        if self._needs_mtp_hidden_states:
+            if self._mtp_hidden_buffer is None:
+                self._mtp_hidden_buffer = torch.empty(
+                    self._mtp_buffer_shape,
+                    dtype=self._mtp_buffer_dtype,
+                    device=self.device,
+                )
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -1048,16 +1073,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.config = config
         self.quant_config = quant_config
 
-        self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
+        cpu_dev, npu_dev = _cpu_construct_then_npu()
+        with torch.device(cpu_dev) if cpu_dev is not None else nullcontext():
+            self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+            if get_pp_group().is_last_rank:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
+            else:
+                self.lm_head = PPMissingLayer()
+        if npu_dev is not None:
+            self.to(npu_dev)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
         # Set MoE hyperparameters
