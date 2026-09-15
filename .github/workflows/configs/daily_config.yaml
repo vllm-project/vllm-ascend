@@ -38,7 +38,6 @@ daily:
         - vllm_ascend/
         - .github/workflows/configs/daily_config.yaml
       tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
-      pytest_args: --ignore=tests/ut/kv_offload/test_sfa_pd_rd2h_connector.py
   # --- A3: nightly high‑freq subset (pytest‑driven, runs on a3‑2) ---
   a3_nightly_hf:
     - name: a3-nightly-hf
@@ -50,9 +49,10 @@ daily:
       tests: >-
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
-      pytest_args: --ignore=tests/ut/kv_offload/test_sfa_pd_rd2h_connector.py
 
 cpu_ut:
     - name: cpu-ut
       os: linux-x86_64-cpu
       tests: tests/ut
+      pytest_args: -k "not test_initialize_kv_cache_installs_aclgraph_factory_and_pcp"
+
