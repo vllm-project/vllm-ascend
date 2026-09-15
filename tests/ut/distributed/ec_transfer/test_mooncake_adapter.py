@@ -152,11 +152,12 @@ def test_v1_no_forward_preserves_ec_output() -> None:
     runner = object.__new__(NPUModelRunner)
     runner.encoder_cache = {}
     runner.vllm_config = object()
-    ec_output = ECConnectorOutput(finished_sending={"image"})
+    ec_output = ECConnectorOutput()
 
     @contextmanager
     def output_context(*args, **kwargs):
         yield ec_output
+        ec_output.finished_sending = {"image"}
 
     runner.maybe_get_ec_connector_output = output_context
     with (
@@ -167,6 +168,8 @@ def test_v1_no_forward_preserves_ec_output() -> None:
 
     assert output is not EMPTY_MODEL_RUNNER_OUTPUT
     assert output.ec_connector_output is ec_output
+    assert output.ec_connector_output.finished_sending == {"image"}
+    assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None
 
 
 def test_v1_no_forward_without_metadata_is_noop() -> None:
