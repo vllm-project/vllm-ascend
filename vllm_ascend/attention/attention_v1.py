@@ -2687,11 +2687,17 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         # clean eager data both ops are identity transforms.
         cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values
         seqused_kv = seq_lens_gpu.clamp(min=1)
-        # Upper bound on any single query length (the step's total token
-        # count); the vendored-QFA bring-up measured prefill against a constant
-        # max_model_len bound as safe too, so a loose bound only affects
-        # tiling, not correctness.
-        max_seqlen_q = num_tokens
+        # The longest single query in the batch -- NOT the batch token total.
+        # The metadata op seeds its querySeqSize with this attr and then raises
+        # it per request with max(attr, cu_seqlens_q[i+1] - cu_seqlens_q[i]),
+        # so a value that is too small is corrected by the op while one that is
+        # too large is never walked back: a 256-request decode step used to
+        # declare 256 where every query is 1. max_query_len is the same
+        # quantity, already computed on the CPU by _prepare_inputs, so this
+        # costs neither a device sync nor a host reduction. Under graph capture
+        # the attr freezes at the capture value; the op's max() is what makes
+        # that safe for every replay.
+        max_seqlen_q = attn_metadata.max_query_len or num_tokens
 
         qfa_metadata = self._get_qfa_metadata(
             attn_metadata,
