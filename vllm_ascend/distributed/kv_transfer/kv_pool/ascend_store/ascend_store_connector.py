@@ -400,10 +400,10 @@ class LookupKeyServer:
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
                 hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
-                hashes_str = self.decoder.decode(all_frames[3:])
+                suffix_hashes = self.decoder.decode(all_frames[3:])
                 result = self.pool_worker.lookup_scheduler(
                     token_len,
-                    hashes_str,
+                    suffix_hashes,
                     kv_group_ids,
                     use_layerwise=False,
                     hbm_hit_tokens=hbm_hit_tokens,

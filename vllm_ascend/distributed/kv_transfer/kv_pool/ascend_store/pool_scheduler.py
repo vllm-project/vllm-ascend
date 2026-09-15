@@ -683,9 +683,21 @@ class KVPoolScheduler:
                     return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
+                assert num_computed_tokens % self.hash_block_size == 0, (
+                    "num_computed_tokens must align to the request hash block size"
+                )
+                first_lookup_hash = num_computed_tokens // self.hash_block_size
+                suffix_block_hashes = request.block_hashes[first_lookup_hash:]
+                logger.debug(
+                    "KV pool lookup request token_len=%d hbm_hit_tokens=%d omitted_hashes=%d suffix_hashes=%d",
+                    token_len,
+                    num_computed_tokens,
+                    first_lookup_hash,
+                    len(suffix_block_hashes),
+                )
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
-                    request.block_hashes,
+                    suffix_block_hashes,
                     self.kv_cache_group_ids,
                     hbm_hit_tokens=num_computed_tokens,
                 )
@@ -1243,6 +1255,7 @@ class LookupKeyClient:
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
     ) -> int:
+        """Query using only hashes beyond the HBM-cached prefix."""
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)

@@ -928,6 +928,52 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 16)
 
+    def test_lookup_scheduler_restores_absolute_suffix_coordinates(self):
+        worker = self._make_worker()
+        worker.cache_coordinator = None
+        worker.m_store.exists.return_value = [1, 0]
+
+        result = worker.lookup_scheduler(
+            64,
+            ["h2", "h3"],
+            use_layerwise=False,
+            hbm_hit_tokens=32,
+        )
+
+        self.assertEqual(result, 48)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(keys[0].endswith("@h2"))
+        self.assertTrue(keys[1].endswith("@h3"))
+
+    def test_lookup_scheduler_uses_terminal_hash_across_hbm_boundary(self):
+        worker = self._make_worker()
+        worker.cache_coordinator = None
+        worker.token_database.block_size = [64]
+        worker.m_store.exists.return_value = [1]
+
+        result = worker.lookup_scheduler(
+            96,
+            ["h2", "h3", "h4", "h5"],
+            use_layerwise=False,
+            hbm_hit_tokens=32,
+        )
+
+        self.assertEqual(result, 64)
+        keys = worker.m_store.exists.call_args.args[0]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith("@h3"))
+
+    def test_lookup_scheduler_returns_hbm_hit_without_suffix_keys(self):
+        worker = self._make_worker()
+        worker.cache_coordinator = None
+
+        self.assertEqual(
+            worker.lookup_scheduler(32, [], use_layerwise=False, hbm_hit_tokens=32),
+            32,
+        )
+        worker.m_store.exists.assert_not_called()
+
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()
         worker.m_store.exists.side_effect = Exception("fail")

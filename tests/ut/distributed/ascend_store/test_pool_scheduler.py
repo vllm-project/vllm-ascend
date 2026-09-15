@@ -285,6 +285,25 @@ class TestKVPoolScheduler(unittest.TestCase):
         mock_client_cls.return_value.lookup.assert_not_called()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_get_num_new_matched_tokens_sends_only_hash_suffix(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
+        mock_client_cls.return_value.lookup.return_value = 48
+        request = MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id="r1",
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        )
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 32), (16, False))
+        mock_client_cls.return_value.lookup.assert_called_once_with(
+            64,
+            [b"h2", b"h3"],
+            [0],
+            hbm_hit_tokens=32,
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_update_state_after_alloc_no_load_spec(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
