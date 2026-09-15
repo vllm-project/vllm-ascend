@@ -62,6 +62,17 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
+def resize_moe_comm_expert_layout(num_experts: int, num_local_experts: int) -> None:
+    """Resize dispatcher caches after adding a cross-layer expert pool."""
+    seen_dispatchers: set[int] = set()
+    for method in _MoECommMethods.values():
+        dispatcher = method.token_dispatcher
+        if id(dispatcher) in seen_dispatchers:
+            continue
+        dispatcher.resize_expert_layout(num_experts, num_local_experts)
+        seen_dispatchers.add(id(dispatcher))
+
+
 @dataclass
 class FusedExpertsResult:
     routed_out: torch.Tensor

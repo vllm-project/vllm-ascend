@@ -73,6 +73,7 @@ def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
             dynamic_eplb=True,
             expert_map_path=None,
             num_redundant_experts=2,
+            uses_global_expert_pool=False,
         )
     )
 

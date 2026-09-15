@@ -5,13 +5,15 @@ from vllm.logger import logger
 from .policy_abstract import EplbPolicy
 from .policy_default_eplb import DefaultEplb
 from .policy_flashlb import FlashLB, warm_up
+from .policy_global_expert_pool import GlobalExpertPoolEplb
+from .policy_layer import LayerEplb
 from .policy_random import RandomLoadBalance
 from .policy_swift_balancer import SwiftBalanceEplb
 
 
 class PolicyFactory:
     @staticmethod
-    def generate_policy(policy_type: int) -> EplbPolicy:
+    def generate_policy(policy_type: int, policy_config: dict | None = None) -> EplbPolicy:
         policy: dict[int, type[EplbPolicy]] = {
             # Constraint applying Dynamic EPLB policy V2:
             # If there exists redundant expert:
@@ -24,8 +26,16 @@ class PolicyFactory:
             # FlashLB EPLB policy: expert replacement based on Joint Optimization,
             # Multi-Shot Enhancement and Incremental Adjustment
             3: FlashLB,
+            # Role-aware policy: cross-layer slots for prefill, per-layer
+            # redundant experts for decode.
+            4: GlobalExpertPoolEplb,
         }
         policy_class = policy.get(policy_type)
+        if policy_type == 4:
+            node_role = (policy_config or {}).get("node_role", "prefill")
+            if node_role not in ("prefill", "decode"):
+                raise ValueError("policy 4 node_role must be 'prefill' or 'decode'")
+            policy_class = GlobalExpertPoolEplb if node_role == "prefill" else LayerEplb
         if policy_class is None:
             policy_class = RandomLoadBalance
             logger.warning(
@@ -35,7 +45,12 @@ class PolicyFactory:
             )
         else:
             logger.info("[eplb/policy] Policy: %s (type=%s)", policy_class.__name__, policy_type)
-        policy_instance = policy_class()
+        if policy_type == 4:
+            constructor_config = dict(policy_config or {})
+            constructor_config.pop("node_role", None)
+            policy_instance = policy_class(**constructor_config)
+        else:
+            policy_instance = policy_class()
         if policy_type == 3:
             warm_up()
         return policy_instance
