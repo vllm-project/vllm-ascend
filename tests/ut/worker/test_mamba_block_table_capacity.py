@@ -180,7 +180,8 @@ def test_unwrap_preserves_allocation_descriptors_group_order_and_other_specs():
     ]
 
 
-def test_npu_model_runner_normalizes_mamba_groups_before_parent_initialization():
+@pytest.mark.parametrize("is_vllm_028", [True, False])
+def test_npu_model_runner_only_normalizes_mamba_groups_for_vllm_028(is_vllm_028):
     mamba = _mamba_spec()
     original = KVCacheConfig(16, [], [_wrapped_group(mamba, ["mamba.0", "mamba.1"])])
     original_snapshot = deepcopy(original)
@@ -189,11 +190,14 @@ def test_npu_model_runner_normalizes_mamba_groups_before_parent_initialization()
         pass
 
     parent_initialize = MagicMock(side_effect=ParentInitializationReached)
+    version_is = MagicMock(return_value=is_vllm_028)
+    unwrap = MagicMock(wraps=_unwrap)
     initialize = _load_function(
         ASCEND_ROOT / "vllm_ascend/worker/v2/model_runner.py",
         "initialize_kv_cache",
         {
-            "unwrap_mamba_kv_cache_groups": _unwrap,
+            "vllm_version_is": version_is,
+            "unwrap_mamba_kv_cache_groups": unwrap,
             "graph_manager_wrapper": lambda runner: nullcontext(),
             "super": lambda: SimpleNamespace(initialize_kv_cache=parent_initialize),
         },
@@ -204,8 +208,14 @@ def test_npu_model_runner_normalizes_mamba_groups_before_parent_initialization()
         initialize(SimpleNamespace(), original)
 
     parent_initialize.assert_called_once()
+    version_is.assert_called_once_with("0.28.0")
     (parent_config,) = parent_initialize.call_args.args
-    assert parent_config is not original
-    assert parent_config.kv_cache_groups[0].kv_cache_spec is mamba
+    if is_vllm_028:
+        unwrap.assert_called_once_with(original)
+        assert parent_config is not original
+        assert parent_config.kv_cache_groups[0].kv_cache_spec is mamba
+    else:
+        unwrap.assert_not_called()
+        assert parent_config is original
     assert original == original_snapshot
     assert isinstance(original.kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs)
