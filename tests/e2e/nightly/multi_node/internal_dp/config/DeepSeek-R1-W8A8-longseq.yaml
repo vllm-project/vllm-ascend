@@ -14,6 +14,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0"
   VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: 480
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 disaggregated_prefill:
   enabled: true

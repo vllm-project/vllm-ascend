@@ -44,12 +44,14 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe/moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "attention/ngram_spec_decode/ngram_spec_decode_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
+#include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "attention/fused_gdn_gating/fused_gdn_gating_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -784,10 +786,10 @@ at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& weight,
     const at::Tensor& conv_state,
     const c10::optional<at::Tensor>& bias_opt,
-    at::IntArrayRef query_start_loc_opt,
-    at::IntArrayRef cache_indices_opt,
-    at::IntArrayRef initial_state_mode_opt,
-    at::IntArrayRef num_accepted_tokens_opt,
+    const c10::optional<at::Tensor>& query_start_loc_opt,
+    const c10::optional<at::Tensor>& cache_indices_opt,
+    const c10::optional<at::Tensor>& initial_state_mode_opt,
+    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
     int64_t  run_mode)
@@ -2419,6 +2421,30 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
 
     ops.def(
+        "npu_kv_quant_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
+        "                                    Tensor sparse_indices, float scale_value, *,"
+        "                                    int key_quant_mode=1, int value_quant_mode=1,"
+        "                                    Tensor? key_dequant_scale=None,"
+        "                                    Tensor? value_dequant_scale=None,"
+        "                                    Tensor? block_table=None,"
+        "                                    Tensor? actual_seq_lengths_query=None,"
+        "                                    Tensor? actual_seq_lengths_kv=None,"
+        "                                    int sparse_block_size=1,"
+        "                                    str layout_query='BSND', str layout_kv='BSND',"
+        "                                    int sparse_mode=3,"
+        "                                    int pre_tokens=9223372036854775807,"
+        "                                    int next_tokens=9223372036854775807,"
+        "                                    int attention_mode=2,"
+        "                                    int quant_scale_repo_mode=1,"
+        "                                    int tile_size=128,"
+        "                                    int rope_head_dim=64,"
+        "                                    bool return_softmax_lse=False)"
+        " -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
+    );
+    ops.impl("npu_kv_quant_sparse_flash_attention", torch::kPrivateUse1,
+             &vllm_ascend::npu_kv_quant_sparse_flash_attention);
+
+    ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
         "                     Tensor[] scale1, Tensor[] scale2, Tensor[] bias1, Tensor[] bias2, Tensor probs, str group,"
         "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0) -> (Tensor out, Tensor expert_token_nums)"
@@ -2502,10 +2528,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor weight, "
         "                         Tensor conv_state, "
         "                         Tensor? bias_opt, "
-        "                         int[] query_start_loc_opt, "
-        "                         int[] cache_indices_opt, "
-        "                         int[] initial_state_mode_opt, "
-        "                         int[] num_accepted_tokens_opt, "
+        "                         Tensor? query_start_loc_opt, "
+        "                         Tensor? cache_indices_opt, "
+        "                         Tensor? initial_state_mode_opt, "
+        "                         Tensor? num_accepted_tokens_opt, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
         "                         int run_mode"
@@ -2914,16 +2940,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
     //store_kv_block
-    ops.def(
-        "store_kv_block_pre(Tensor slot_mapping_npu, int[2] slot_mapping_list =[], int block_size=0)"
-         "-> (Tensor group_len ,Tensor group_key_idx, Tensor group_key_cache_idx)"
-    );
-    ops.impl("store_kv_block_pre", torch::kPrivateUse1, &vllm_ascend::store_kv_block_pre);
+     ops.def(
+        "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
+         "-> ()"
+     );
+    ops.impl("store_kv_block_metadata", torch::kPrivateUse1, &vllm_ascend::store_kv_block_metadata);
 
     ops.def(
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
+    
     // Fused GDN gating.
     ops.def(
         "npu_fused_gdn_gating(Tensor A_log, "

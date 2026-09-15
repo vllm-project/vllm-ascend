@@ -11,7 +11,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -476,8 +476,9 @@ def test_generate_pcp_mtp_input(
         input_batch.num_computed_tokens_cpu,
         input_batch.num_prompt_tokens,
     )
-    pcp_manager.generate_pcp_mtp_input(total_num_scheduled_tokens, num_scheduled_tokens, False,
-                                       input_batch, arange_np)
+    with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
+        pcp_manager.generate_pcp_mtp_input(total_num_scheduled_tokens, num_scheduled_tokens, False,
+                                           input_batch, arange_np)
     assert torch.equal(
         pcp_manager.input_ids_pcp_full.cpu[:total_num_scheduled_tokens],
         target_input_ids_pcp_full)

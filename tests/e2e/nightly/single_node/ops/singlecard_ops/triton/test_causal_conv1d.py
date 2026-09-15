@@ -32,13 +32,6 @@ def validate_cmp(y_cal, y_ref, dtype, device="npu"):
         raise ValueError('Invalid parameter "dtype" is found : {}'.format(dtype))
 
 
-def to_int64_tuple(t):
-    t = t.to(torch.int64)
-    if t.dim() == 0:
-        return (t.item(),)
-    return tuple(t.tolist())
-
-
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [True])
@@ -108,10 +101,10 @@ def test_ascend_causal_conv1d(
         weight_origin,
         conv_state=conv_states_origin,
         bias_opt=bias,
-        query_start_loc_opt=to_int64_tuple(query_start_loc),
-        cache_indices_opt=to_int64_tuple(cache_indices),
-        initial_state_mode_opt=to_int64_tuple(has_initial_state_tensor),
-        num_accepted_tokens_opt=[],
+        query_start_loc_opt=query_start_loc,
+        cache_indices_opt=cache_indices,
+        initial_state_mode_opt=has_initial_state_tensor,
+        num_accepted_tokens_opt=None,
         activation_mode=activation_num,
         pad_slot_id=PAD_SLOT_ID,
         run_mode=0,

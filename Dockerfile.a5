@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:9.0.0-950-ubuntu22.04-py3.12
+FROM quay.io/ascend/cann:9.0.1-950-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
@@ -30,7 +30,10 @@ RUN apt-get update -y && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
+    python3 -m pip uninstall -y mooncake-transfer-engine mooncake-transfer-engine-ascend mooncake-transfer-engine-npu && \
+    find /usr/local -type d -path '*/site-packages/mooncake' -prune -exec rm -rf {} + && \
+    python3 -m pip install --no-cache-dir mooncake-transfer-engine-npu==${MOONCAKE_TAG} --index-url https://mirrors.aliyun.com/pypi/web/simple && \
+    python3 -c "from pathlib import Path; import mooncake.engine; module = Path(mooncake.engine.__file__); assert module.name == 'engine.so', f'Unexpected Mooncake engine module: {module}'" && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 

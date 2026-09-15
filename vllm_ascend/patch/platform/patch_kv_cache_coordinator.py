@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -145,6 +146,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
             ), "block_size must be divisible by hash_block_size"
         self.verify_and_split_kv_cache_groups()
+
+        # Align the WRITE-path mask granularity (reachable_block_mask) with the
+        # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
+        # only caches blocks that land on a boundary where future cache hits can
+        # actually be matched.
+        # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
+        for mgr in self.single_type_managers:
+            if isinstance(mgr, SlidingWindowManager):
+                mgr.scheduler_block_size = self.lcm_block_size
 
         self.use_eagle = use_eagle
 
@@ -290,8 +300,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if use_eagle:
-                    # Eagle needs to match one more block and then pop the last.
+                if use_eagle and not isinstance(spec, MambaSpec):
+                    # Mamba finders do not drop the EAGLE lookahead block, so
+                    # allowing a margin here could grow the hybrid hit length.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
@@ -392,8 +403,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 use_eagle = idx in self.eagle_attn_group_indices and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if use_eagle:
-                    # Eagle needs to match one more block and then pop the last.
+                if use_eagle and not isinstance(spec, MambaSpec):
+                    # Mamba finders do not drop the EAGLE lookahead block, so
+                    # allowing a margin here could grow the hybrid hit length.
                     _max_length = min(curr_hit_length + spec.block_size, max_cache_hit_length)
                 eagle_kwarg = {"drop_eagle_block": use_eagle}
                 hit_blocks = manager_cls.find_longest_cache_hit(
