@@ -321,7 +321,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - For low-latency scenarios, use `dp1tp16` (data-parallel-size 1, tensor-parallel-size 16) and consider reducing `--max-num-seqs` and `--max-num-batched-tokens`.
 - For high-throughput scenarios, increase `--max-num-seqs` and enable `--enable-prefix-caching`.
-- For long-context scenarios (e.g., 200K), use w4a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
+- For long-context scenarios (e.g., 200k), use w4a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
 - If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `"enable_mlapo"` can also reduce memory usage (at the cost of performance).
 
 ### 5.2 Multi-node Deployment
