@@ -127,4 +127,64 @@ visible_length = actual_seq_lengths_key[i] - (query_end - 1 - query_row)
 
 ## 调用示例
 
-Torch接口注册完成后补充。
+该算子通过vLLM Ascend的Torch扩展调用。调用方负责预先分配全部输出Tensor，算子返回值为`None`，计算结果写入`cache_slots_pool`及6个输出Tensor。
+
+```python
+import torch
+
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
+
+# 此处省略输入Tensor的构造，shape和dtype要求见“参数说明”。
+topk_src_ids = torch.full((T, 1, 2048), -1, dtype=torch.int32, device="npu")
+topk_dst_slots = torch.full_like(topk_src_ids, -1)
+topk_miss_counts = torch.zeros(T, dtype=torch.int32, device="npu")
+miss_src_ids = torch.full((B, 32768), -1, dtype=torch.int32, device="npu")
+miss_dst_slots = torch.full_like(miss_src_ids, -1)
+miss_counts = torch.zeros(B, dtype=torch.int32, device="npu")
+
+torch.ops._C_ascend.npu_fused_lightning_indexer_manage(
+    index_weights=index_weights,
+    query_dequant_scale=query_dequant_scale,
+    query=query,
+    index_key_dequant_scale=index_key_dequant_scale,
+    index_key_cache=index_key_cache,
+    index_block_table=index_block_table,
+    actual_seq_lengths_query=actual_seq_lengths_query,
+    actual_seq_lengths_key=actual_seq_lengths_key,
+    offload_seq_lengths_key=offload_seq_lengths_key,
+    num_cache_tokens=num_cache_tokens,
+    request_state=request_state,
+    req_pool_entries=req_pool_entries,
+    cache_slots_pool=cache_slots_pool,
+    topk_src_ids=topk_src_ids,
+    topk_dst_slots=topk_dst_slots,
+    topk_miss_counts=topk_miss_counts,
+    miss_src_ids=miss_src_ids,
+    miss_dst_slots=miss_dst_slots,
+    miss_counts=miss_counts,
+)
+```
+
+Python接口内部通过`EXEC_NPU_CMD`调用`aclnnFusedLightningIndexerManageGetWorkspaceSize`和`aclnnFusedLightningIndexerManage`两段式接口，调用方无需自行申请Workspace或管理`aclOpExecutor`。
+
+## 测试说明
+
+算子正确性测试位于`tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_lightning_indexer_manage.py`，需要在已编译安装当前代码的Ascend NPU环境执行：
+
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_lightning_indexer_manage.py
+```
+
+测试覆盖以下场景：
+
+- FP16、BF16以及32、64个Index Head的代表组合；
+- 非卸载、首次卸载、稳态卸载及混合状态Batch；
+- MTP多路Query、Q=14边界、非连续Pool行和非Identity Block Table；
+- 首次建Cache、稳态淘汰、Miss搬运计划、Source到Slot映射及重复调用All-Hit；
+- `-2 -> -1 -> -1`、`-3 -> -1`、`-3 -> -2 -> -1`生命周期；
+- 超过`2^17`的长Source ID编码路径；
+- 代表性的shape、dtype、连续性和最大Query路数校验。
+
+测试使用`torch_npu.npu_lightning_indexer`作为TopK参考实现，仅验证功能正确性，不包含性能测试、耗时阈值或性能基线。
