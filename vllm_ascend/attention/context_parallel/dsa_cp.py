@@ -7,7 +7,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
+from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
@@ -38,6 +38,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_stor
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
@@ -1430,6 +1431,25 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
+    def _start_kv_hidden_states_all_gather(
+        self,
+        hidden_states_local: torch.Tensor,
+        enabled: bool,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None]:
+        if not enabled:
+            return hidden_states_local, None
+        return all_gather_async(hidden_states_local, self.tp_group, async_op=True)
+
+    @staticmethod
+    def _finish_kv_hidden_states_all_gather(
+        hidden_states: torch.Tensor,
+        handle: torch.distributed.Work | None,
+        num_actual_tokens: int,
+    ) -> torch.Tensor:
+        if handle is not None:
+            handle.wait()
+        return hidden_states[:num_actual_tokens]
+
     def _get_layer_metadata(
         self,
         attn_layer_name: str,
@@ -1733,9 +1753,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        hidden_states = hidden_states_local
-        if need_gather_q_kv:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states_local, dim=0)
+        hidden_states, kv_all_gather_handle = self._start_kv_hidden_states_all_gather(
+            hidden_states_local,
+            need_gather_q_kv,
+        )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
         local_cos = cp_metadata.local_cos[layer_name]
@@ -1745,8 +1766,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
-
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
         ):
@@ -1779,6 +1798,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
 
         self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+
+        # The Q branch above only consumes the local SP shard. Delay the KV
+        # gather wait until its first consumer so communication can run while
+        # Q projection, normalization, and RoPE execute.
+        hidden_states_cache = self._finish_kv_hidden_states_all_gather(
+            hidden_states,
+            kv_all_gather_handle,
+            common_attn_metadata.num_actual_tokens,
+        )
 
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)

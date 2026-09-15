@@ -179,6 +179,39 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         torch.testing.assert_close(local_hidden_states[:2], hidden_states[3:5])
         torch.testing.assert_close(local_hidden_states[2], torch.zeros(4, dtype=hidden_states.dtype))
 
+    def test_main_kv_gather_is_async_with_sharded_o_proj(self):
+        impl = self._make_impl()
+        impl.enable_sparse_sfa_c8 = False
+        k_pe = torch.arange(4).reshape(2, 2)
+        k_nope = torch.arange(6).reshape(2, 3)
+        gathered_kv = torch.arange(20).reshape(4, 5)
+        handle = MagicMock()
+        tp_group = object()
+
+        with (
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async",
+                return_value=(gathered_kv, handle),
+            ) as gather,
+        ):
+            result, handles = impl._prepare_kv_for_parallel(
+                k_pe,
+                k_nope,
+                knope_scale=None,
+                full_gather_o_proj_enabled=False,
+            )
+
+        gathered_input, gathered_group = gather.call_args.args
+        self.assertIs(gathered_group, tp_group)
+        self.assertTrue(gather.call_args.kwargs["async_op"])
+        torch.testing.assert_close(gathered_input, torch.cat((k_pe, k_nope), dim=1))
+        self.assertIs(result, gathered_kv)
+        self.assertEqual(handles, [handle])
+
     def test_enable_o_proj_switch_rejects_unsupported_method(self):
         impl = self._make_impl(_UnsupportedOProjLinearMethod())
 
