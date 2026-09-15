@@ -48,6 +48,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.config_utils import is_deepseek_v41
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
@@ -740,7 +741,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     # This is used to hold a position.
                     slot_mapping=self.runner.input_batch.block_table[self.kv_cache_gid].slot_mapping.gpu,
                     positions=self.runner.positions,
-                    positions_cpu=self.runner._dsa_positions_cpu_buf if self.use_compress else None,
+                    positions_cpu=(
+                        self.runner._dsa_positions_cpu_buf
+                        if self.use_compress and not is_deepseek_v41(self.draft_model_config.hf_config)
+                        else None
+                    ),
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
                     is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),

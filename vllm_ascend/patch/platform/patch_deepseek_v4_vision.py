@@ -29,6 +29,9 @@ def register_deepseek_v4_vision_config_convertor() -> None:
     class AscendDeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         """Route vision checkpoints to the Ascend multimodal wrapper."""
 
+        architecture = "DeepseekV4ForConditionalGeneration"
+        mm_prefix_span_leading_pad_modulus = 4
+
         def __init__(
             self,
             hf_config: "PretrainedConfig",
@@ -36,7 +39,7 @@ def register_deepseek_v4_vision_config_convertor() -> None:
             revision: str | None = None,
         ) -> None:
             if getattr(hf_config, "vision_n_layers", 0) > 0:
-                hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
+                hf_config.architectures = [self.architecture]
                 hf_config.mm_prefix_clamp_sliding_window = True
                 hf_config.mm_prefix_span_leading_pad_modulus = 4
             super().__init__(hf_config, hf_text_config, revision)
@@ -44,5 +47,14 @@ def register_deepseek_v4_vision_config_convertor() -> None:
         def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
             return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)
 
+    class AscendDeepseekV41ModelArchConfigConvertor(
+        AscendDeepseekV4ModelArchConfigConvertor,
+    ):
+        """Route V4.1 vision checkpoints to their multimodal wrapper."""
+
+        architecture = "DeepseekV41ForConditionalGeneration"
+        mm_prefix_span_leading_pad_modulus = 2
+
     MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"] = AscendDeepseekV4ModelArchConfigConvertor
+    MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4.1"] = AscendDeepseekV41ModelArchConfigConvertor
     _REGISTERED = True
