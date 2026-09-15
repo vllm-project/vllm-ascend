@@ -31,6 +31,8 @@ TRITON_POOL_CHUNK_SIZE = 2048
 TRITON_POOL_SUB_TILE_SIZE = 128
 # Chunk tokens to limit the FP32 score buffer to this budget where possible.
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
+# Keep masked scores finite for the NPU top-k backend.
+TRITON_SCORE_MASK_VALUE = torch.finfo(torch.float32).min
 
 
 # Keep batch-varying inputs unspecialized to avoid recompiling per step.
@@ -59,6 +61,7 @@ def _glm5_next_lightning_indexer_score_kernel(
     INDEX_KPOOL: tl.constexpr,
     BLOCK_POOL: tl.constexpr,
     SUB_POOL: tl.constexpr,
+    SCORE_MASK_VALUE: tl.constexpr,
 ):
     # qbar/scores rows are chunk-local; positions/query-boundary lookups use
     # the batch-global token index.
@@ -84,7 +87,7 @@ def _glm5_next_lightning_indexer_score_kernel(
     chunk_start = chunk * BLOCK_POOL
     # Dynamic trip count: requests shorter than the static max pool length
     # skip their out-of-range sub-tiles even inside captured graphs. Cells
-    # beyond ``visible_pool_len`` keep the -inf the wrapper initialized.
+    # beyond ``visible_pool_len`` keep the wrapper's finite mask value.
     chunk_visible = tl.maximum(tl.minimum(visible_pool_len, chunk_start + BLOCK_POOL) - chunk_start, 0)
     num_subs = tl.cdiv(chunk_visible, SUB_POOL)
     for sub in tl.range(num_subs):
@@ -108,7 +111,7 @@ def _glm5_next_lightning_indexer_score_kernel(
         )
         k_tile = tl.load(indexer_cache_ptr + k_addrs, mask=valid_pool[:, None], other=0.0).to(tl.float32)
         scores = tl.sum(k_tile * qbar[None, :], axis=1)
-        scores = tl.where(valid_pool, scores, float("-inf"))
+        scores = tl.where(valid_pool, scores, SCORE_MASK_VALUE)
         tl.store(scores_ptr + local_token_idx * max_pool_seq_len + pool_offsets, scores, mask=in_range)
 
 
@@ -170,11 +173,11 @@ def glm5_next_lightning_indexer_triton(
             .sum(dim=1)
             .contiguous()
         )
-        # -inf init: the kernel skips sub-tiles beyond a request's visible pools,
-        # and those cells must stay excluded from the top-k.
+        # The kernel skips invisible sub-tiles. Use the same finite mask
+        # for initialization, partial sub-tiles, and invalid top-k results.
         scores = torch.full(
             (rows, max_pool_seq_len),
-            float("-inf"),
+            TRITON_SCORE_MASK_VALUE,
             dtype=torch.float32,
             device=query.device,
         )
@@ -201,11 +204,12 @@ def glm5_next_lightning_indexer_triton(
             index_kpool,
             block_pool,
             TRITON_POOL_SUB_TILE_SIZE,
+            TRITON_SCORE_MASK_VALUE,
         )
 
         topk_vals, pool_ids = torch.topk(scores, topk, dim=1)
         pool_ids = torch.where(
-            topk_vals == float("-inf"),
+            topk_vals == TRITON_SCORE_MASK_VALUE,
             torch.full_like(pool_ids, -1),
             pool_ids,
         )
