@@ -1220,6 +1220,18 @@ class NPUWorker(WorkerBase):
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
+    def get_kv_transfer_finished(self) -> tuple[set[str], set[str]] | None:
+        """Drain the worker-side KV connector's finished-transfer queues.
+
+        Called right after a dummy batch so the engine core can promote
+        requests whose KV landed *during* that dummy, instead of leaving them
+        for the next iteration's poll. The drain is destructive, so the caller
+        must hand the result to the scheduler in the same step.
+        """
+        if not has_kv_transfer_group():
+            return None
+        return get_kv_transfer_group().get_finished(set())
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
