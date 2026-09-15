@@ -971,8 +971,9 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         # packs the same block IDs in the same order.
         if global_dcp_num_blocks is None:
             raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
-        num_blocks = global_dcp_num_blocks.to(device=self.device, non_blocking=True)
-        valid_mask = self.arange_buffer[: global_dcp_block_table.shape[1]].unsqueeze(0) < num_blocks.unsqueeze(1)
+        valid_mask = self.arange_buffer[: global_dcp_block_table.shape[1]].unsqueeze(
+            0
+        ) < global_dcp_num_blocks.unsqueeze(1)
         # Select allocated entries without modifying shared tables or
         # introducing a block-0 placeholder for unused columns.
         valid_block_ids = global_dcp_block_table[valid_mask].unique()

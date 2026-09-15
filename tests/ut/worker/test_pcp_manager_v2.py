@@ -451,6 +451,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
 @pytest.mark.parametrize("is_prefilling", [False, True])
 def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.device = torch.device("cpu")
     manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
     input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
@@ -482,6 +483,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
     actual = manager.build_attention_context()
 
     if dcp_world_size > 1 and is_prefilling:
+        assert actual.global_block_table_num_blocks.device == manager.device
         torch.testing.assert_close(
             actual.global_block_table_num_blocks, torch.tensor([[7, 3], [15, 11]], dtype=torch.int32)
         )

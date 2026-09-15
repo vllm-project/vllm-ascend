@@ -44,7 +44,7 @@ class AscendPCPAttentionContext:
     hidden_restore_idx: torch.Tensor
     padded_gather_idx: torch.Tensor | None = None
     gathered_kv_write_mask: torch.Tensor | None = None
-    # CPU snapshot of allocated kernel-block counts in global request order.
+    # Device snapshot of allocated kernel-block counts in global request order.
     global_block_table_num_blocks: torch.Tensor | None = None
 
 
@@ -498,7 +498,7 @@ class AscendPCPManager(PCPManager):
         if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
             global_block_table_num_blocks = torch.from_numpy(
                 self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
-            )
+            ).to(device=self.device, non_blocking=True)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
