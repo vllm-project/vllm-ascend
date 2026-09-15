@@ -125,6 +125,8 @@ class TestPCPPoolWorker(unittest.TestCase):
                         "llama-7b@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@h0",
                     )
                     worker._start_kv_transfer_threads()
+                    self.assertEqual(send_thread.call_args.args[5], pcp_rank)
+                    self.assertEqual(send_thread.call_args.args[6], pcp_size)
                     self.assertIs(recv_thread.call_args.args[1], worker.token_database)
                     self.doCleanups()
 
@@ -1941,6 +1943,40 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(len(sizes), 2)
         self.assertEqual(block_ids, [10, 10])
         self.assertTrue(keys[0].endswith(f"@{b'h1'.hex()}"))
+
+    def test_tp_mismatch_pcp_write_ownership(self):
+        for pcp_size in (1, 2, 4):
+            for tp_rank in (0, 1):
+                with self.subTest(pcp_size=pcp_size, tp_rank=tp_rank):
+                    written = []
+                    for pcp_rank in range(pcp_size):
+                        worker = self._make_strided_worker(tp_rank=tp_rank)
+                        worker.pcp_rank, worker.pcp_size = pcp_rank, pcp_size
+                        worker.enable_kv_events = True
+                        worker.kv_send_thread = MagicMock()
+                        worker.kv_send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
+                        worker.m_store = MagicMock()
+                        req = ReqMeta(
+                            req_id="r1",
+                            token_len_chunk=8,
+                            block_ids=[10, 11],
+                            block_hashes=[b"h0", b"h1"],
+                            original_block_size=4,
+                        )
+                        worker._store_kv_tp_mismatch(req)
+                        expected_blocks = [i for i in range(2) if i % pcp_size == pcp_rank]
+                        if expected_blocks:
+                            keys = worker.m_store.put.call_args.args[0]
+                            self.assertEqual(len(keys), 2 * len(expected_blocks))
+                            written.extend(keys)
+                            events = worker.kv_send_thread.update_kv_event.call_args.args[0]
+                            self.assertEqual(len(events), len(req.block_hashes))
+                        else:
+                            worker.m_store.put.assert_not_called()
+                            worker.kv_send_thread.update_kv_event.assert_not_called()
+                        worker.kv_send_thread.dec_stored_request.assert_called_once_with("r1")
+                    self.assertEqual(len(written), 4)
+                    self.assertEqual(len(set(written)), 4)
 
     def test_load_kv_tp_mismatch_calls_backend_get(self):
         worker = self._make_strided_worker()

@@ -724,6 +724,8 @@ class KVPoolWorker:
                     self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
+                    self.pcp_rank,
+                    self.pcp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -2602,6 +2604,8 @@ class KVPoolWorker:
         block_ids: list[int],
         token_len: int,
         mask_num: int = 0,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
     ) -> tuple[list[str], list[list[int]], list[list[int]], list[int]]:
         """Walk chunks x sub-keys; emit (keys, addrs, sizes, block_ids) for backend put/get.
 
@@ -2618,6 +2622,8 @@ class KVPoolWorker:
             block_hashes,
             block_ids,
             mask_num=mask_num,
+            shard_rank=shard_rank,
+            shard_size=shard_size,
         ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
@@ -2682,7 +2688,12 @@ class KVPoolWorker:
             token_len = req_meta.token_len_chunk
             block_ids = req_meta.block_ids_by_group[0]
             keys, addrs, sizes, _ = self._build_tp_mismatch_keys_and_addrs(
-                req_meta.block_hashes, block_ids, token_len, mask_num=0
+                req_meta.block_hashes,
+                block_ids,
+                token_len,
+                mask_num=0,
+                shard_rank=self.pcp_rank,
+                shard_size=self.pcp_size,
             )
             if not keys:
                 return
