@@ -52,4 +52,7 @@ daily:
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
       pytest_args: --ignore=tests/ut/kv_offload/test_sfa_pd_rd2h_connector.py
 
-
+cpu_ut:
+    - name: cpu-ut
+      os: linux-x86_64-cpu
+      tests: tests/ut
