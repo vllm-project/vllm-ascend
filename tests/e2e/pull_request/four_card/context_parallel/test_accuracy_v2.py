@@ -42,7 +42,10 @@ PCP_FULL_DECODE_GRAPH = {
     "cudagraph_capture_sizes": [4, 8],
 }
 
-DSV3_2_MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
+DSV3_2_MODEL = os.getenv(
+    "DSV3_2_MODEL_PATH",
+    "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning",
+)
 DSV3_2_PROMPTS = [
     "The capital of France is",
     "Hello, my name is Tom, I am",
@@ -194,20 +197,19 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
     },
 )
 
-DSV3_2_SFA_PCP_MTP_CASE = InferenceCase(
+DSV3_2_SFA_PCP_DP_CASE = InferenceCase(
     model=DSV3_2_MODEL,
     prompts=DSV3_2_PROMPTS,
     max_tokens=5,
     runner_kwargs={
         **DSV3_2_SFA_PCP_CASE.runner_kwargs,
-        "speculative_config": {
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        },
+        "tensor_parallel_size": 1,
+        "data_parallel_size": 2,
+        "distributed_executor_backend": "mp",
     },
 )
 
-DSV3_2_SFA_PCP_PP_CASE = InferenceCase(
+DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
     model=DSV3_2_MODEL,
     prompts=DSV3_2_PROMPTS,
     max_tokens=5,
@@ -216,6 +218,10 @@ DSV3_2_SFA_PCP_PP_CASE = InferenceCase(
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 2,
         "async_scheduling": True,
+        "speculative_config": {
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
     },
 )
 
@@ -252,7 +258,32 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 @pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="sfa_pcp",
+    feature="sfa_pcp,chunked_prefill,prefix_caching",
+    parallel="DP,EP,PCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph() -> None:
+    """Guard MRV2 SFA PCP graph execution with two DP replicas."""
+    _run_inference_case(DSV3_2_SFA_PCP_DP_CASE)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="sfa_pcp,mtp",
     parallel="EP,PCP,PP",
     deploy="pd_mix",
     hardware="A3",
@@ -269,9 +300,9 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_pp_model_runner_v2_graph() -> None:
-    """Guard MRV2 SFA PCP+PP graph execution with async scheduling."""
-    _run_inference_case(DSV3_2_SFA_PCP_PP_CASE)
+def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
+    """Guard MRV2 SFA PCP+PP+MTP graph execution with async scheduling."""
+    _run_inference_case(DSV3_2_SFA_PCP_PP_MTP_CASE)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
@@ -298,31 +329,6 @@ def test_dsv3_2_sfa_pcp_pp_model_runner_v2_graph() -> None:
 def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP+DCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
-
-
-@pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="sfa_pcp,mtp",
-    parallel="TP,EP,PCP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "HCCL_BUFFSIZE": "768",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_mtp_model_runner_v2_graph() -> None:
-    """Guard MRV2 SFA PCP MTP full-decode-only graph execution."""
-    _run_inference_case(DSV3_2_SFA_PCP_MTP_CASE)
 
 
 def _run_pcp_spec_decode(
