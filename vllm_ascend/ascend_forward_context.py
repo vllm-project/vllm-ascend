@@ -393,10 +393,17 @@ def is_acl_full_graph_capturing() -> bool:
     Piecewise graphs must not use FIA task groups. ``ModelWithContext`` already
     excludes ``PIECEWISE`` when writing ``_EXTRA_CTX.capturing``; this helper
     re-checks the live stream so compiled attention cannot bake in GPU's flag.
+
+    Require an actual ``True``. cpu-ut stubs ``torch.npu`` as a MagicMock, so
+    ``is_current_stream_capturing()`` is truthy even when no stream is
+    capturing. That would send eager FIA UTs into ``full_graph_fia``.
     """
     npu = getattr(torch, "npu", None)
     is_capturing = getattr(npu, "is_current_stream_capturing", None)
-    if is_capturing is None or not is_capturing():
+    if is_capturing is None:
+        return False
+    # MagicMock is truthy; only a real True means the NPU stream is capturing.
+    if is_capturing() is not True:
         return False
     ctx = get_forward_context()
     return getattr(ctx, "cudagraph_runtime_mode", None) != CUDAGraphMode.PIECEWISE
