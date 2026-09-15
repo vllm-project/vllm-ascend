@@ -1,18 +1,27 @@
 import torch
 import torch_npu
 
-# KV cache MXFP8 scale layouts. The block and head axes are ordered the way
-# QuantFlashAttn's PA_BBND reads them -- the same order as the K/V caches
-# themselves ([num_blocks, block_size, num_kv_heads, head_dim]) -- so attention
-# consumes cache and scales without transposing either (validated on-device by
-# the vendored-QFA bring-up; the public ops-transformer doc lists PA_BBND
-# k_descale (Bn, Bs, KV_N, D/64, 2) / v_descale (Bn, Bs/64, KV_N, D, 2)).
+# KV cache MXFP8 scale layouts, PA_NZ flavor (QFA layout_kv="PA_NZ"; golden
+# reference: quant_flash_attn_golden.py "PA_NZ: fp8=[Bn,N,D//32,Bs,32],
+# Kscale=[Bn,N,Bs//16,D//64,16,2], Vscale=[Bn,N,D//16,Bs//64,16,2]"). The K/V
+# caches themselves keep the natural [num_blocks, block_size, num_kv_heads,
+# head_dim] storage and are viewed as (num_blocks, num_kv_heads,
+# head_dim // 32, block_size, 32) at the operator boundary -- the same NZ
+# view npu_scatter_pa_kv_cache already consumes on the FIA C8 path -- so
+# allocation, hybrid partitioning, PD transfer and prefix-cache CoW are all
+# layout-agnostic. Only the scale caches below change physical shape.
+# The trailing 2 packs the even/odd 32-element MX scale groups (the native
+# output format of npu_dynamic_mx_quant; unchanged by PA_NZ, which only
+# rearranges the outer axes).
 # K scale token:  [num_tokens, num_kv_heads, head_dim // 64, 2]
-# K scale cache:  [num_blocks, block_size, num_kv_heads, head_dim // 64, 2]
+# K scale cache:  [num_blocks, num_kv_heads, block_size // 16, head_dim // 64, 16, 2]
 # V scale token (axis=0 quant): [cdiv(num_tokens, 64), num_kv_heads, head_dim, 2]
-# V scale cache:  [num_blocks, block_size // 64, num_kv_heads, head_dim, 2]
+# V scale cache:  [num_blocks, num_kv_heads, head_dim // 16, block_size // 64, 16, 2]
 MXFP_KV_SCALE_GROUP_SIZE = 64
 MXFP_KV_SCALE_VALUES_PER_GROUP = 2
+MXFP_KV_NZ_DIM_FRAG = 32
+MXFP_K_SCALE_NZ_TOKEN_FRAG = 16
+MXFP_V_SCALE_NZ_DIM_FRAG = 16
 # Unified per-block scale bytes: num_kv_heads * block_size * head_dim / MXFP8_GROUP_SIZE (K and V).
 MXFP8_GROUP_SIZE = 32
 # E8M0 scale elements are always 1 byte in KV cache budgeting.
@@ -60,12 +69,13 @@ def mxfp_k_scale_cache_shape(
     block_size: int,
     num_kv_heads: int,
     head_dim: int,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         num_blocks,
-        block_size,
         num_kv_heads,
+        block_size // MXFP_K_SCALE_NZ_TOKEN_FRAG,
         mxfp_kv_scale_groups(head_dim),
+        MXFP_K_SCALE_NZ_TOKEN_FRAG,
         MXFP_KV_SCALE_VALUES_PER_GROUP,
     )
 
@@ -75,12 +85,13 @@ def mxfp_v_scale_cache_shape(
     block_size: int,
     num_kv_heads: int,
     head_dim: int,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     return (
         num_blocks,
-        mxfp_kv_block_scale_groups(block_size),
         num_kv_heads,
-        head_dim,
+        head_dim // MXFP_V_SCALE_NZ_DIM_FRAG,
+        mxfp_kv_block_scale_groups(block_size),
+        MXFP_V_SCALE_NZ_DIM_FRAG,
         MXFP_KV_SCALE_VALUES_PER_GROUP,
     )
 
@@ -116,13 +127,18 @@ def mxfp_resolve_kv_cache_layout(
 ) -> tuple[
     tuple[int, int, int, int],
     tuple[int, int, int, int],
-    tuple[int, int, int, int, int],
-    tuple[int, int, int, int, int],
+    tuple[int, int, int, int, int, int],
+    tuple[int, int, int, int, int, int],
 ]:
     """Derive C8_MXFP KV cache shapes from spec dims and allocated raw buffer sizes.
 
     ``num_blocks`` is derived from the k_scale buffer; ``k_dim``/``v_dim`` come from the caller
     (typically ``KVCacheSpec``). All four raw buffers must match the expected numel.
+
+    The K/V caches keep the natural 4-D (num_blocks, block_size, num_kv_heads,
+    dim) storage; the NZ 5-D view for QFA's PA_NZ layout is taken at the
+    operator boundary. The scale caches are allocated directly in the 6-D
+    PA_NZ shapes.
 
     Returns (k_shape, v_shape, k_scale_shape, v_scale_shape).
     """
@@ -189,8 +205,9 @@ def scatter_mxfp_k_scale_cache(
 
     ``key_scale`` shape: ``[num_tokens, num_kv_heads, head_dim // 64, 2]``
     (any 1-byte dtype; callers pass a uint8 view of the E8M0 scale).
-    ``key_scale_cache`` shape (PA_BBND, block before head):
-    ``[num_blocks, block_size, num_kv_heads, head_dim // 64, 2]``.
+    ``key_scale_cache`` shape (PA_NZ): ``[num_blocks, num_kv_heads,
+    block_size // 16, head_dim // 64, 16, 2]`` -- a token at in-block offset
+    ``o`` lands at ``[block, n, o // 16, :, o % 16, :]``.
 
     ACL-graph-capture safe: no host-device synchronization (``.all()``/
     ``bool()``/``.item()`` are illegal mid-capture -- "Stream during the
@@ -211,12 +228,14 @@ def scatter_mxfp_k_scale_cache(
     valid = slots >= 0
     safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
     block_ids = safe_slots // block_size
-    block_offsets = safe_slots % block_size
+    offsets = safe_slots % block_size
+    seg_ids = offsets // MXFP_K_SCALE_NZ_TOKEN_FRAG
+    frag_ids = offsets % MXFP_K_SCALE_NZ_TOKEN_FRAG
     # Row mask (device-only): valid rows take the new scale, padded rows
     # rewrite the current content of their clamp target -- a no-op.
-    cached = key_scale_cache[block_ids, block_offsets]
+    cached = key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :]
     updates = torch.where(valid.view(-1, 1, 1, 1), key_scale, cached)
-    key_scale_cache[block_ids, block_offsets] = updates
+    key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :] = updates
 
 
 def scatter_mxfp_v_cache(
@@ -255,11 +274,13 @@ def scatter_mxfp_v_scale_cache(
 
     ``value_scale`` comes from ``npu_dynamic_mx_quant(..., axis=0)`` and has shape
     ``[ceil(num_tokens / 64), num_kv_heads, head_dim, 2]``. The cache layout is
-    ``[num_blocks, block_size // 64, num_kv_heads, head_dim, 2]`` (PA_BBND).
+    PA_NZ ``[num_blocks, num_kv_heads, head_dim // 16, block_size // 64, 16, 2]``:
+    a 64-token group at in-block group-offset ``g`` lands at
+    ``[block, n, d // 16, g, d % 16, :]`` for every channel ``d``.
 
     Unused while V's scale is the checkpoint's static per-channel one (a
     static V scale is broadcast into the cache once and never scattered);
-    kept for a dynamic-V design. Indexing follows the PA_BBND order the rest
+    kept for a dynamic-V design. Indexing follows the PA_NZ order the rest
     of this module uses, so it stays correct if a dynamic-V path ever calls it.
     """
     validate_mxfp_v_scale_block_size(block_size)
@@ -273,4 +294,8 @@ def scatter_mxfp_v_scale_cache(
     v_scale_cache_block_size = mxfp_kv_block_scale_groups(block_size)
     block_ids = v_scale_slot_mapping // v_scale_cache_block_size
     v_scale_cache_offsets = v_scale_slot_mapping % v_scale_cache_block_size
-    value_scale_cache[block_ids, v_scale_cache_offsets] = value_scale
+    # value_scale: [G, N, D, 2] -> [G, N, D // 16, 16, 2]; the advanced
+    # indexing below broadcasts the G-length index vectors to the front,
+    # so the source lines up group-by-group with the target slots.
+    packed = value_scale.reshape(num_scales, *value_scale.shape[1:2], -1, MXFP_V_SCALE_NZ_DIM_FRAG, MXFP_KV_SCALE_VALUES_PER_GROUP)
+    value_scale_cache[block_ids, :, :, v_scale_cache_offsets, :, :] = packed
