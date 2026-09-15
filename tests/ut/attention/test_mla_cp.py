@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.mla_cp import (
@@ -26,8 +27,18 @@ from vllm_ascend.attention.mla_v1 import (
 )
 
 
-def test_mla_dcp_extends_v1_backend() -> None:
+@pytest.mark.parametrize("dcp_size", [1, 2, 4])
+def test_mla_dcp_extends_v1_backend(dcp_size) -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", return_value=None),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+    ):
+        impl = AscendMlaDCPImpl()
+    assert impl.can_return_lse_for_decode
+    assert impl.need_to_return_lse_for_decode is (dcp_size > 1)
+    assert impl.supports_mtp_with_cp_non_trivial_interleave_size
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
@@ -37,6 +48,29 @@ def test_mla_dcp_extends_v1_backend() -> None:
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
     assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
+
+
+@pytest.mark.parametrize("interleave_size", [1, 768])
+def test_mla_dcp_passes_upstream_speculative_cp_check(interleave_size):
+    dcp_group = SimpleNamespace(world_size=4, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", return_value=None),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+    ):
+        impl = AscendMlaDCPImpl()
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+            cp_kv_cache_interleave_size=interleave_size,
+        ),
+        speculative_config=SimpleNamespace(),
+    )
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"target": SimpleNamespace(impl=impl)},
+    ):
+        check_attention_cp_compatibility(config)
 
 
 def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries() -> None:
@@ -481,7 +515,13 @@ def test_mla_dcp_builder_preserves_varlen_capability(supports_varlen):
         builder.block_size = 128
 
     config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
-    with patch.object(AscendMLAMetadataBuilder, "__init__", autospec=True, side_effect=initialize_base) as init:
+    with (
+        patch.object(AscendMLAMetadataBuilder, "__init__", autospec=True, side_effect=initialize_base) as init,
+        patch(
+            "vllm_ascend.attention.context_parallel.common_cp.get_dcp_group",
+            return_value=SimpleNamespace(world_size=2, rank_in_group=0),
+        ),
+    ):
         AscendMlaDCPMetadataBuilder(
             SimpleNamespace(), ["layer"], config, torch.device("cpu"), supports_dcp_with_varlen=supports_varlen
         )

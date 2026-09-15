@@ -83,9 +83,11 @@ class DCPDraftReplicatedMixin:
         with self._draft_dcp_context():
             model = super().load_draft_model(target_model, target_attn_layer_names)
         if self.replicated_draft_kv:
-            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase, self.draft_attn_layer_names)
-            for layer in layers.values():
-                layer._ascend_dcp_replicated_draft = True
+            # The upstream load_model sets draft_attn_layer_names after this hook.
+            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+            for name, layer in layers.items():
+                if name not in target_attn_layer_names:
+                    layer._ascend_dcp_replicated_draft = True
         return model
 
     def set_attn(

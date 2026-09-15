@@ -728,8 +728,10 @@ def _allocate_kv_cache(
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                # Replicated draft planning emits one layer per descriptor;
+                # its layer stride is unused and may be zero.
                 if (
-                    kv_cache_tensor.layer_stride != layer_size
+                    (len(shared_names) > 1 and kv_cache_tensor.layer_stride != layer_size)
                     or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
                 ):
                     raise ValueError(
