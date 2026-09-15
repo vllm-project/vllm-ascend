@@ -9,12 +9,13 @@ import torch
 from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
 
 
-def make_policy(*, changed, new_deployment):
+def make_policy(*, changed, new_deployment, per_layer_priority=None, max_layers=2):
     policy = AscendV2EplbPolicy.__new__(AscendV2EplbPolicy)
+    policy.max_rebalanced_layers_per_cycle = max_layers
     policy._policy = MagicMock()
     policy._policy.rebalance_experts.return_value = (
         changed,
-        None,
+        per_layer_priority,
         new_deployment,
     )
     return policy
@@ -31,7 +32,18 @@ def test_uses_swift_balancer_policy(monkeypatch):
     policy = AscendV2EplbPolicy()
 
     assert policy._policy is generated_policy
+    assert policy.max_rebalanced_layers_per_cycle == 2
     generate_policy.assert_called_once_with(2)
+
+
+def test_rejects_non_positive_rebalanced_layer_limit(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.eplb.core.policy.policy_factory.PolicyFactory.generate_policy",
+        MagicMock(),
+    )
+
+    with pytest.raises(ValueError, match="must be greater than 0"):
+        AscendV2EplbPolicy(max_rebalanced_layers_per_cycle=0)
 
 
 def test_build_physical_load_splits_replicated_expert_load():
@@ -93,6 +105,84 @@ def test_rebalance_keeps_old_mapping_when_policy_declines_update():
 
     torch.testing.assert_close(result, old_mapping)
     assert result is not old_mapping
+
+
+def test_rebalance_limits_changed_layers_by_policy_priority():
+    old_mapping = torch.tensor(
+        [
+            [0, 1, 0, 1],
+            [0, 1, 0, 1],
+            [0, 1, 0, 1],
+            [0, 1, 0, 1],
+        ]
+    )
+    new_deployment = [
+        [[0, 0], [1, 1]],
+        [[1, 1], [0, 0]],
+        [[0, 0], [1, 1]],
+        [[1, 1], [0, 0]],
+    ]
+    policy = make_policy(
+        changed=True,
+        new_deployment=new_deployment,
+        per_layer_priority=[3, 1, 0, 2],
+        max_layers=2,
+    )
+
+    result = policy.rebalance_experts(
+        weight=torch.tensor(
+            [
+                [100, 20],
+                [100, 20],
+                [100, 20],
+                [100, 20],
+            ]
+        ),
+        num_replicas=4,
+        num_groups=1,
+        num_nodes=1,
+        num_ranks=2,
+        old_global_expert_indices=old_mapping,
+    )
+
+    torch.testing.assert_close(result[0], old_mapping[0])
+    torch.testing.assert_close(result[1], torch.tensor([1, 1, 0, 0]))
+    torch.testing.assert_close(result[2], old_mapping[2])
+    torch.testing.assert_close(result[3], torch.tensor([1, 1, 0, 0]))
+
+
+def test_rebalance_priority_skips_unchanged_layers():
+    old_mapping = torch.tensor(
+        [
+            [0, 1, 0, 1],
+            [0, 1, 0, 1],
+            [0, 1, 0, 1],
+        ]
+    )
+    new_deployment = [
+        [[0, 1], [0, 1]],
+        [[1, 1], [0, 0]],
+        [[0, 0], [1, 1]],
+    ]
+    policy = make_policy(
+        changed=True,
+        new_deployment=new_deployment,
+        per_layer_priority=[0, 2, 1],
+        max_layers=1,
+    )
+
+    result = policy.rebalance_experts(
+        weight=torch.tensor([[100, 20], [100, 20], [100, 20]]),
+        num_replicas=4,
+        num_groups=1,
+        num_nodes=1,
+        num_ranks=2,
+        old_global_expert_indices=old_mapping,
+    )
+
+    torch.testing.assert_close(result[0], old_mapping[0])
+    torch.testing.assert_close(result[1], old_mapping[1])
+    torch.testing.assert_close(result[2], torch.tensor([0, 0, 1, 1]))
 
 
 def test_rebalance_rejects_elastic_slot_count_change():
