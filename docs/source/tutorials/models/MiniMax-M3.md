@@ -925,7 +925,6 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [kv_pool.md §5.1](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
 | Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
-| A3 Prefill memory | `--gpu-memory-utilization 0.92` | Use `0.85` so Prefill can donate FabricMem to the pool |
 | Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
 
 #### 5.4.1 Prerequisites
@@ -1287,25 +1286,6 @@ mooncake_master \
 3. Send requests only to the proxy on port `8009`.
 4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
 5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
-
-#### 5.4.6 Summary of Changes vs. Section 5.3
-
-| Item | Where | What to set |
-| ---- | ----- | ----------- |
-| `PYTHONHASHSEED=0` | Prefill and Decode | Same value on every node so block hashes match. |
-| `MOONCAKE_CONFIG_PATH` | Prefill and Decode | Point to the local `./mooncake.json` from Section 5.4.1. |
-| Mooncake `LD_LIBRARY_PATH` | Prefill and Decode | Add the Mooncake package directory. |
-| Pooling hardware env | Prefill and Decode | A3 HCCS: `ACL_OP_INIT_MODE=1` + `ASCEND_ENABLE_USE_FABRIC_MEM=1`. 950DT UB: `ASCEND_LOCAL_COMM_RES_PATH` + `ASCEND_LOCAL_COMM_RES`. Keep Section 5.3 `HCCL_*` / socket IFNAME exports. |
-| `--kv-transfer-config` | Prefill and Decode | Replace single `MooncakeConnectorV1` with `MultiConnector` + `AscendStoreConnector`. |
-| `MooncakeConnectorV1` child | Extra config | Keep Section 5.3 `kv_role`, `kv_port`, and `prefill` / `decode` topology. On 950DT keep `"ascend_local_comm_res_path": "/etc/hixlep"`. |
-| `AscendStoreConnector` child | Extra config | `backend: mooncake` and `lookup_rpc_port = 37000/37100 + DP_RANK`. |
-| `engine_id` | Prefill and Decode | Unique per DP rank, for example `minimax-m3-prefill-dp${4}`. |
-| Prefill `mooncake.json` | Prefill node | A3 `global_segment_size=16GB`; 950DT `128GB`; `preferred_segment=true`. |
-| Decode `mooncake.json` | Decode node | Same Master and `tenant_id`, but `global_segment_size=0`. |
-| Prefill `--gpu-memory-utilization` | A3 Prefill | `0.85` (pool headroom). 950DT Prefill stays `0.92`. |
-| `/etc/hccn.conf` | Container | Mount read-only. 950DT also needs `/etc/hixlep/`. |
-
-> The pooling combination on MiniMax-M3 + EAGLE3 + A3 `PP2` still needs a live bring-up to confirm. 950DT products use `PP=1` on both roles.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
