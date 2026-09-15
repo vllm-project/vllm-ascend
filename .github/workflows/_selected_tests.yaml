@@ -317,13 +317,36 @@ jobs:
         run: |
           pip uninstall -y triton-ascend triton
 
+      - name: Prune uv cache for CI
+        # Runs only when a save will follow. `uv cache prune --ci` is uv's
+        # official CI command: it keeps the reusable wheel/sdist/metadata
+        # entries and drops cache content with no reuse value across runs.
+        # The explicit rm also removes `builds-v0/`, uv's ephemeral
+        # build-isolation envs (GB-scale for packages like torch) that are
+        # rebuilt on every install. Without this the save step packs
+        # multi-GB garbage and, on slow self-hosted runners (observed on
+        # A2), grinds until the 2h job timeout cancels the whole job and
+        # fails CI-gate. The `du -sh` line surfaces the pruned size in the
+        # log for verification.
+        if: ${{ steps.uv-cache.outputs.cache-hit != 'true' }}
+        run: |
+          rm -rf /root/.cache/uv/builds-v0
+          uv cache prune --ci
+          du -sh /root/.cache/uv/* 2>/dev/null | sort -rh | head -20
+
       - name: Save uv wheel cache
-        # Always save: matrix shards that install the same wheel set in
-        # parallel race to write the same key, and the previous
-        # `cache-hit != 'true'` guard only suppressed re-saves within
-        # one shard. `runs-on/cache/save@v5` is idempotent for identical
-        # key+path payloads, so unconditional save removes the race
-        # without any correctness cost.
+        # Skipped on exact cache hit so steady-state runs pay zero save
+        # cost. Shards that missed (including restore-keys partial hits)
+        # may still race to write the same key, which is fine because
+        # `runs-on/cache/save@v5` is idempotent for identical key+path
+        # payloads. timeout-minutes + continue-on-error cap the worst
+        # case: a save that still degrades on some runner is killed after
+        # 10 minutes and turned into a warning instead of skipping the
+        # test run and failing the PR gate (same best-effort pattern as
+        # the upload steps below).
+        if: ${{ steps.uv-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 10
+        continue-on-error: true
         uses: runs-on/cache/save@v5
         with:
           path: /root/.cache/uv
