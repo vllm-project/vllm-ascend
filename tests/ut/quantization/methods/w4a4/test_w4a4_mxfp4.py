@@ -11,7 +11,7 @@ from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicLinearMethod,
     _rename_packed_weight_parameter,
 )
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
@@ -76,9 +76,15 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, (272, 2))
         torch.testing.assert_close(layer.weight[:8], torch.zeros(8, 2, dtype=torch.uint8))
         torch.testing.assert_close(layer.weight[8:], original_weight.transpose(0, 1))
+        # Convert the packed byte carrier, without FP4/FP8 dtype overrides.
         mock_cast.assert_called_once()
-        self.assertEqual(mock_cast.call_args.args[0].shape, (272, 2))
+        self.assertEqual(mock_cast.call_args.args[0].shape, (2, 272))
+        self.assertEqual(mock_cast.call_args.args[0].dtype, torch.uint8)
+        self.assertEqual(mock_cast.call_args.args[1], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(mock_cast.call_args.kwargs, {})
         self.assertTrue(mock_cast.call_args.args[0].is_contiguous())
+        self.assertFalse(layer.weight.data.is_contiguous())
+        self.assertFalse(layer.weight_scale.data.is_contiguous())
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=False)
     def test_process_weights_nz_disabled_keeps_pre_nz_layout(self, mock_should_trans_nz):
