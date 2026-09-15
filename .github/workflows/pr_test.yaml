@@ -612,6 +612,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         needs.select-tests.outputs.has_tests == 'true'
+        && !contains(github.event.pull_request.labels.*.name, 'ready-hf')
       }}
     name: run-selected-tests (vllm@${{ matrix.vllm_version }})
     strategy:
@@ -643,6 +644,7 @@ jobs:
         needs.prepare-csrc-cache.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
+        && !contains(github.event.pull_request.labels.*.name, 'ready-hf')
       }}
     name: run-selected-tests-upstream (vllm@${{ matrix.vllm_version_short }})
     strategy:
