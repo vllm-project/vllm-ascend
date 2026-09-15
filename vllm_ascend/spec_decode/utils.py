@@ -143,6 +143,20 @@ class DCPReplicatedDraftMixin:
             kv_transfer_config=None,
         )
 
+    def _reserve_replicated_block_table(self, gid: int, block_table: torch.Tensor) -> None:
+        if gid in self._per_group_replication_sizes:
+            # Reserve the expanded table before capture; refresh live rows in
+            # the first pass while keeping the backing storage stable.
+            self._build_replicated_block_table(
+                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
+            )
+            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
+
+    def _prepare_draft_cp_metadata(self, metadata) -> None:
+        if getattr(self, "replicated_draft_kv", False):
+            metadata.context_parallel_metadata = None
+            metadata.dcp_local_seq_lens = None
+
     def _build_replicated_block_table(
         self,
         gid: int,
@@ -220,6 +234,8 @@ class DCPReplicatedDraftMixin:
         num_tokens: int,
     ) -> torch.Tensor:
         result = self._per_group_context_slot_mapping_buffers[gid]
+        if gid not in self._per_group_replication_sizes:
+            return result
         result.fill_(-1)
         if num_tokens == 0:
             return result

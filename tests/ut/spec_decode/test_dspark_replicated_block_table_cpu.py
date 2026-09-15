@@ -362,6 +362,25 @@ class TestReplicatedDraftHooks(unittest.TestCase):
         proposer._build_replicated_context_slot_mapping(0, table, torch.empty(0), torch.tensor([0]), 0, 0)
         self.assertTrue(torch.all(slots == -1))
 
+    def test_ordinary_context_slots_and_cp_metadata_passthrough(self):
+        proposer = load_proposer()()
+        proposer._per_group_replication_sizes = {}
+        original = torch.tensor([7, 11, -1], dtype=torch.int32)
+        proposer._per_group_context_slot_mapping_buffers = {0: original}
+        result = proposer._build_replicated_context_slot_mapping(0, None, None, None, 0, 0)
+        self.assertIs(result, original)
+        torch.testing.assert_close(result, torch.tensor([7, 11, -1], dtype=torch.int32))
+        metadata = SimpleNamespace(context_parallel_metadata=object(), dcp_local_seq_lens=object())
+        context, lengths = metadata.context_parallel_metadata, metadata.dcp_local_seq_lens
+        proposer.replicated_draft_kv = False
+        proposer._prepare_draft_cp_metadata(metadata)
+        self.assertIs(metadata.context_parallel_metadata, context)
+        self.assertIs(metadata.dcp_local_seq_lens, lengths)
+        proposer.replicated_draft_kv = True
+        proposer._prepare_draft_cp_metadata(metadata)
+        self.assertIsNone(metadata.context_parallel_metadata)
+        self.assertIsNone(metadata.dcp_local_seq_lens)
+
 
 if __name__ == "__main__":
     unittest.main()
