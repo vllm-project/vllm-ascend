@@ -696,6 +696,13 @@ at::Tensor npu_causal_conv1d_custom(
     int64_t  pad_slot_id,
     int64_t  run_mode)
 {
+    // P2: regenerated aclnn_causal_conv1d.h signature is positional in OpDef order
+    // (8 inputs, 4 attrs: activation/pad/run/split_qkv, 4 outputs: y/y_q/y_k/y_v).
+    // Single-output path: split_qkv=false, y=output, y_q/y_k/y_v left unbound (nullptr).
+    bool splitQkv = false;
+    c10::optional<at::Tensor> yqUnused;
+    c10::optional<at::Tensor> ykUnused;
+    c10::optional<at::Tensor> yvUnused;
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
@@ -708,12 +715,63 @@ at::Tensor npu_causal_conv1d_custom(
                     activation_mode,
                     pad_slot_id,
                     run_mode,
-                    output
+                    splitQkv,
+                    output,
+                    yqUnused,
+                    ykUnused,
+                    yvUnused
                 );
 
     return output;
 }
 
+// P1: split-output variant for KDA. Writes q/k/v into 3 separate contiguous
+// tensors (y_q/y_k/y_v, each [N, C] with the same leading dims as x; the
+// caller can view [N, C] as [1, N, H, D] without a copy) instead of a merged
+// y, eliminating the external chunk(3)+rearrange+.contiguous(). Reuses the
+// same aclnnCausalConv1d op with split_qkv=true (ge OpDef routes the 4
+// outputs; the merged y slot stays unbound via an empty optional). gdn.py
+// keeps using the single-output npu_causal_conv1d_custom.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_causal_conv1d_custom_3io(
+    const at::Tensor& y_q,
+    const at::Tensor& y_k,
+    const at::Tensor& y_v,
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& bias_opt,
+    const c10::optional<at::Tensor>& query_start_loc_opt,
+    const c10::optional<at::Tensor>& cache_indices_opt,
+    const c10::optional<at::Tensor>& initial_state_mode_opt,
+    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
+{
+    // P2: split path. split_qkv=true; merged y left unbound (nullptr), y_q/y_k/y_v bound.
+    bool splitQkv = true;
+    c10::optional<at::Tensor> yMergedUnused;
+    EXEC_NPU_CMD(aclnnCausalConv1d,
+                    x,
+                    weight,
+                    bias_opt,
+                    conv_state,
+                    query_start_loc_opt,
+                    cache_indices_opt,
+                    initial_state_mode_opt,
+                    num_accepted_tokens_opt,
+                    activation_mode,
+                    pad_slot_id,
+                    run_mode,
+                    splitQkv,
+                    yMergedUnused,
+                    y_q,
+                    y_k,
+                    y_v
+                );
+
+    return std::make_tuple(y_q, y_k, y_v);
+}
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     const at::Tensor& x,
     int64_t k,
@@ -3302,6 +3360,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+=======
+    // P1: split-output variant (KDA only). Returns (y_q, y_k, y_v) directly;
+    // gdn.py keeps the single-output npu_causal_conv1d_custom above.
+    ops.def(
+        "npu_causal_conv1d_custom_3io(Tensor y_q, Tensor y_k, Tensor y_v, Tensor x, "
+        "                              Tensor weight, "
+        "                              Tensor conv_state, "
+        "                              Tensor? bias_opt, "
+        "                              Tensor? query_start_loc_opt, "
+        "                              Tensor? cache_indices_opt, "
+        "                              Tensor? initial_state_mode_opt, "
+        "                              Tensor? num_accepted_tokens_opt, "
+        "                              int activation_mode, "
+        "                              int pad_slot_id, "
+        "                              int run_mode"
+        ") -> (Tensor y_q, Tensor y_k, Tensor y_v)");
+    ops.impl("npu_causal_conv1d_custom_3io", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom_3io);
 
     ops.def(
         "moe_gating_top_k_hash("
