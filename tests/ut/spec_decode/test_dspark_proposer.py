@@ -56,7 +56,7 @@ def test_draft_config_keeps_pd_connector_owned_by_target(replicated):
     with (
         patch.object(AscendSpecDecodeBaseProposer, "_create_draft_vllm_config", return_value=base),
         patch.object(AscendDSparkProposer, "_uses_dcp_replicated_draft_kv", return_value=replicated),
-        patch("vllm_ascend.spec_decode.dspark_proposer.replace") as replace_config,
+        patch("vllm_ascend.spec_decode.utils.replace") as replace_config,
     ):
         result = proposer._create_draft_vllm_config()
     if replicated:
