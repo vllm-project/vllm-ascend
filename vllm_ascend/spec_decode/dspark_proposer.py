@@ -271,11 +271,12 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
         long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        for attn_group in self.draft_attn_groups:
-            gid = attn_group.kv_cache_group_id
-            self._per_group_block_table_buffers[gid] = self._get_draft_block_table(
-                gid, batch_size, cad.seq_lens[:batch_size]
+        self._per_group_block_table_buffers = {
+            attn_group.kv_cache_group_id: self._get_draft_block_table(
+                attn_group.kv_cache_group_id, batch_size, cad.seq_lens[:batch_size]
             )
+            for attn_group in self.draft_attn_groups
+        }
         self._context_slot_mapping_buffers = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
