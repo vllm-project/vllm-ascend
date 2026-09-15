@@ -1,12 +1,87 @@
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import regex as re
 import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
-from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8 import (
+    AscendKimiK3W4A8DynamicLinearMethod,
+    AscendW4A8DynamicFusedMoEMethod,
+)
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+
+
+class TestAscendKimiK3W4A8DynamicLinearMethod(TestBase):
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    def setUp(self, mock_get_current_vllm_config, _mock_get_tp_world_size):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "1.0.0"})
+        mock_get_current_vllm_config.return_value = mock_vllm_config
+        self.method = AscendKimiK3W4A8DynamicLinearMethod()
+
+    def test_creates_packed_weights_and_scales(self):
+        weight = self.method.get_weight(8, 32, torch.bfloat16)
+        self.assertEqual(weight["weight"].shape, (16, 8))
+        self.assertEqual(weight["weight"].dtype, torch.int8)
+        self.assertEqual(weight["_packed_dim"], 0)
+        self.assertEqual(weight["_packed_factor"], 2)
+
+        column_params = self.method.get_pergroup_param(8, 32, torch.bfloat16, layer_type="others")
+        row_params = self.method.get_pergroup_param(8, 32, torch.bfloat16, layer_type="row")
+        self.assertEqual(column_params["weight_scale"].shape, (32, 1))
+        self.assertEqual(column_params["scale_bias"].shape, (32, 1))
+        self.assertEqual(row_params["scale_bias"].shape, (32, 16))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    def test_rejects_non_kimi_checkpoint_layouts(self, mock_get_current_vllm_config):
+        mock_vllm_config = Mock()
+        mock_get_current_vllm_config.return_value = mock_vllm_config
+
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 256, "version": "1.0.0"})
+        with self.assertRaisesRegex(ValueError, "per-channel"):
+            AscendKimiK3W4A8DynamicLinearMethod()
+
+        mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0, "version": "0"})
+        with self.assertRaisesRegex(ValueError, "version 1.0.0"):
+            AscendKimiK3W4A8DynamicLinearMethod()
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz", side_effect=identity)
+    def test_processes_shared_expert_weight_for_grouped_matmul(self, _mock_maybe_trans_nz):
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros((4, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((8, 1), dtype=torch.float32), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.zeros((8, 1), dtype=torch.float32), requires_grad=False)
+        layer.scale_bias = torch.nn.Parameter(torch.ones((8, 1), dtype=torch.float32), requires_grad=False)
+
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (1, 8, 1))
+        self.assertEqual(layer.weight.dtype, torch.int32)
+        self.assertEqual(layer.weight_scale.shape, (8,))
+        self.assertEqual(layer.weight_scale.dtype, torch.int64)
+        self.assertEqual(layer.weight_scale_fp32.shape, (8,))
+        self.assertEqual(layer.scale_bias.shape, (8,))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.torch_npu.npu_grouped_matmul")
+    def test_apply_uses_single_expert_grouped_matmul(self, mock_grouped_matmul):
+        quantized_x = torch.ones((2, 8), dtype=torch.int8)
+        pertoken_scale = torch.ones(2)
+        expected = torch.randn(2, 16, dtype=torch.bfloat16)
+        mock_grouped_matmul.return_value = [expected]
+        layer = MagicMock()
+        layer.weight = torch.zeros((1, 8, 2), dtype=torch.int32)
+        layer.weight_scale = torch.ones(16, dtype=torch.int64)
+        layer.scale_bias = torch.zeros(16)
+
+        output = self.method.apply(layer, (quantized_x, pertoken_scale))
+
+        torch.testing.assert_close(output, expected)
+        kwargs = mock_grouped_matmul.call_args.kwargs
+        self.assertEqual(kwargs["group_list"].tolist(), [2])
+        self.assertEqual(kwargs["group_list_type"], 1)
+        self.assertEqual(kwargs["output_dtype"], torch.bfloat16)
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
