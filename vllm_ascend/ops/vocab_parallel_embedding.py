@@ -370,19 +370,26 @@ class AscendLogitsProcessor(LogitsProcessor):
         if skip_gather:
             return self._apply_head(lm_head, hidden_states, embedding_bias)
         if lmhead_tp_enable():
-            return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
+            return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias, skip_gather)
         else:
-            return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
+            return self._get_logits_normal(hidden_states, lm_head, embedding_bias, skip_gather)
 
     def _get_logits_lmheadtp(
         self,
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
+        # Models opting into vocab-parallel sampling (`skip_gather=True`) own both
+        # the redistribution and the vocab de-padding, so the raw shard is returned
+        # untrimmed - unlike the `enable_reduce_sample` path below, which hands back
+        # a shard already cut to this rank's original vocab window.
+        if skip_gather:
+            return logits
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
@@ -400,8 +407,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
             logits = self._gather_logits(logits)
