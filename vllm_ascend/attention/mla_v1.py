@@ -53,6 +53,7 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     vllm_version_is,
     weak_ref_tensors,
@@ -262,6 +263,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        self.dcp_enabled = enable_dcp()
         self.pcp_rank = 0
         if self.pcp_enabled:
             self.pcp_rank = get_pcp_group().rank_in_group
@@ -458,14 +460,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        parallel_config = self.vllm_config.parallel_config
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=not (
-                    self.pcp_enabled or parallel_config.decode_context_parallel_size > 1
+                treat_short_extends_as_decodes=(
+                    not (self.pcp_enabled or self.dcp_enabled)
+                    # Only DCP needs the PD last-token recompute override.
+                    # Use the builder's config outside the current-config context.
+                    or (self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
                 ),
             )
         )
@@ -766,6 +770,8 @@ class DecodeMLAPreprocessResult(NamedTuple):
     k_pe: torch.Tensor | None = None
     decode_q_wo_k_up: torch.Tensor | None = None
     dequant_scale_q_nope: torch.Tensor | None = None
+    current_k_nope: torch.Tensor | None = None
+    current_k_pe: torch.Tensor | None = None
 
 
 class PrefillMLAPreprocessResult(NamedTuple):
@@ -1145,6 +1151,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if (
             not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
+            # DCP causal decode needs the unfused projections for current KV.
+            and not enable_dcp()
             and self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
@@ -1428,6 +1436,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return k_pe, k_nope
         return kv_cache[1], kv_cache[0]
 
+    def _decode_requires_current_kv(self, attn_metadata: AscendMLAMetadata) -> bool:
+        return False
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1435,9 +1446,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
+        return_current_kv: bool = False,
     ):
         if not self.use_mla_rope:
-            self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            current_k_pe, current_k_nope = self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            if return_current_kv:
+                return kv_cache[1], kv_cache[0], current_k_pe, current_k_nope
             return kv_cache[1], kv_cache[0]
 
         assert self.kv_a_layernorm is not None
@@ -1447,12 +1461,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         if self.qk_rope_head_dim == 0:
-            return self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=False)
+            result = self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=return_current_kv)
+            if return_current_kv:
+                return kv_cache[1], kv_cache[0], *result
+            return result
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
         if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, current_k_pe, current_k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             cos,
@@ -1463,7 +1480,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             c_kv_scale=c_kv_scale,
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
             cache_mode=cache_mode,
+            is_output_kv=return_current_kv,
         )
+        if return_current_kv:
+            return k_pe, k_nope, current_k_pe, current_k_nope
         return k_pe, k_nope
 
     def exec_kv_prefill(
@@ -1566,14 +1586,17 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
+        decode_preprocess_res: DecodeMLAPreprocessResult,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
-        dequant_scale_q_nope=None,
     ) -> torch.Tensor:
+        q_nope = decode_preprocess_res.ql_nope
+        q_pe = decode_preprocess_res.q_pe
+        k_nope = decode_preprocess_res.k_nope
+        k_pe = decode_preprocess_res.k_pe
+        assert q_nope is not None and q_pe is not None
+        assert k_nope is not None and k_pe is not None
+        dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
         # TODO: The CANN package is expected to support num_heads that are not
@@ -1648,6 +1671,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
             if self.fa_quant_layer:
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
         elif self.fa_quant_layer:
             attn_mask = None
@@ -1660,6 +1684,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
                 attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
             else:
@@ -1669,6 +1694,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 if self.head_padding > 0:
                     q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                     q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
+                assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
         else:
@@ -1961,9 +1987,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_pe = (decode_q_pe / dequant_scale_q_nope.unsqueeze(-1) / self.fak_descale_float).to(torch.bfloat16)
         decode_slots = attn_metadata.slot_mapping[:num_decode_tokens:1]
         decode_kv_no_split = kv_no_split[:num_decode_tokens]
-        decode_k_pe, decode_k_nope = self.exec_kv_decode(decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+        return_current_kv = self._decode_requires_current_kv(attn_metadata)
+        kv_result = self.exec_kv_decode(
+            decode_kv_no_split,
+            cos,
+            sin,
+            kv_cache,
+            decode_slots,
+            return_current_kv=return_current_kv,
+        )
+        decode_k_pe, decode_k_nope = kv_result[:2]
+        current_k_pe, current_k_nope = kv_result[2:] if return_current_kv else (None, None)
         return DecodeMLAPreprocessResult(
-            decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
+            decode_ql_nope,
+            decode_q_pe,
+            decode_k_nope,
+            decode_k_pe,
+            dequant_scale_q_nope=dequant_scale_q_nope,
+            current_k_nope=current_k_nope,
+            current_k_pe=current_k_pe,
         )
 
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
@@ -2071,6 +2113,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if (
             (self.fa_quant_layer or self.enable_mlapo)
             and can_use_decode_prolog
+            # The fused prolog does not return the replicated current KV.
+            and not self._decode_requires_current_kv(attn_metadata)
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
@@ -2085,15 +2129,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
-            output_decode = self._forward_decode(
-                decode_preprocess_res.ql_nope,
-                decode_preprocess_res.q_pe,
-                decode_preprocess_res.k_nope,
-                decode_preprocess_res.k_pe,
-                kv_cache[0].shape[1],
-                attn_metadata,
-                decode_preprocess_res.dequant_scale_q_nope,
-            )
+            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
 

@@ -124,6 +124,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert query_start_loc_values == [
         "self.input_buffers.query_start_loc",
         "query_start_loc[:num_reqs_padded + 1]",
+        "self.input_buffers.query_start_loc",
     ]
     assert ast.unparse(assignments["seq_lens"]) == "self.input_buffers.seq_lens[:num_reqs_padded]"
 
@@ -582,3 +583,27 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+def test_init_model_state_uses_override_then_default():
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+    custom_cls = MagicMock()
+    model = MagicMock()
+    model.get_model_state_cls.return_value = custom_cls
+
+    assert init_asecnd_model_state(vllm_config, model, encoder_cache, device) is custom_cls.return_value
+
+    with (
+        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=False),
+        patch("vllm_ascend.worker.v2.model_states.default.AscendModelState") as default_cls,
+    ):
+        state = init_asecnd_model_state(
+            vllm_config,
+            MagicMock(spec=["forward"]),
+            encoder_cache,
+            device,
+        )
+    assert state is default_cls.return_value

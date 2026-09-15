@@ -9,6 +9,8 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
+  tests/e2e/pull_request/four_card/test_kvpp_pd.py: 180
   tests/e2e/pull_request/two_card/test_kvpp.py: 300
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
