@@ -68,6 +68,65 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
         return model
 
+    def _sample_sequential_topk(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> None:
+        # DeepSeek-V4 greedy DSpark does not allocate draft_logits.
+        capability_model = getattr(self.model, "original_model", self.model)
+        supports_sparse_projection = all(
+            callable(getattr(capability_model, method, None))
+            for method in ("compute_draft_topk", "score_draft_candidates")
+        )
+        if self.draft_logits is None and supports_sparse_projection:
+            self._sample_sequential_topk_greedy(num_reqs, head_hidden)
+            return
+        super()._sample_sequential_topk(num_reqs, head_hidden)
+
+    def _sample_sequential_topk_greedy(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> None:
+        assert self._draft_topk is not None
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        draft_ids, base_values = self.model.compute_draft_topk(
+            sample_hidden,
+            self._draft_topk,
+        )
+        draft_ids = draft_ids.view(num_reqs, n_spec, self._draft_topk)
+        base_values = base_values.view(num_reqs, n_spec, self._draft_topk)
+
+        confidence_markov_embeds = []
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        for step in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+            if self.enable_adaptive_verification:
+                confidence_markov_embeds.append(markov_embed)
+            scores = self.model.score_draft_candidates(
+                markov_embed,
+                base_values[:, step],
+                draft_ids[:, step],
+            )
+            selected = scores.argmax(dim=-1, keepdim=True)
+            selected_ids = draft_ids[:, step].gather(1, selected).squeeze(1)
+            sampled = self.model.map_draft_to_target(selected_ids)
+            self.draft_tokens[:num_reqs, step] = sampled
+            prev = sampled
+
+        if self.enable_adaptive_verification:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                num_reqs,
+                n_spec,
+            )
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE

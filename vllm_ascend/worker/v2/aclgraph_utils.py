@@ -278,11 +278,30 @@ class ModelWithContext(nn.Module):
     def compute_draft_logits(self, hidden_states: torch.Tensor):
         return self.original_model.compute_draft_logits(hidden_states)
 
+    def compute_draft_topk(
+        self,
+        hidden_states: torch.Tensor,
+        k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.original_model.compute_draft_topk(hidden_states, k)
+
     def markov_embed(self, token_ids: torch.Tensor):
         return self.original_model.markov_embed(token_ids)
 
     def markov_bias(self, markov_embed: torch.Tensor):
         return self.original_model.markov_bias(markov_embed)
+
+    def score_draft_candidates(
+        self,
+        markov_embed: torch.Tensor,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.original_model.score_draft_candidates(
+            markov_embed,
+            values,
+            token_ids,
+        )
 
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)

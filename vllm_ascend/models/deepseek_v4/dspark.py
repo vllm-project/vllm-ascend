@@ -90,6 +90,27 @@ class DSparkMarkovHead(nn.Module):
     def bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.markov_w2(markov_embed)
 
+    def score_gathered(
+        self,
+        markov_embed: torch.Tensor,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+        scale: float = 1.0,
+    ) -> torch.Tensor:
+        """Add Markov scores only for the selected vocabulary rows.
+
+        markov_w2 is replicated on every TP rank, so global token IDs
+        directly select output rows without another collective.
+        """
+        weight = self.markov_w2.weight[token_ids]
+        return torch.baddbmm(
+            values.unsqueeze(-1),
+            weight,
+            markov_embed.unsqueeze(-1),
+            beta=1.0,
+            alpha=scale,
+        ).squeeze(-1)
+
 
 class DSparkConfidenceHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
@@ -383,6 +404,45 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.
         return self.compute_logits(hidden_states)
+    def compute_draft_topk(
+        self, hidden_states: torch.Tensor, k: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return global top-k base logits without dense-vocab all-gather."""
+        processor = self.logits_processor
+        if processor.scale <= 0.0 and processor.scale != 1.0:
+            raise ValueError(
+                "Vocab-parallel DSpark top-k does not support a non-positive "
+                "logit scale."
+            )
+
+        logits = processor._apply_head(
+            self.lm_head,
+            self.model.norm(hidden_states),
+            None,
+        )
+        num_pad = self.lm_head.shard_indices.num_org_vocab_padding
+        if num_pad > 0:
+            logits[..., -num_pad:] = -float("inf")
+
+        local_k = min(k, logits.shape[-1])
+        values, token_ids = torch.topk(logits, local_k, dim=-1)
+        token_ids = (
+            token_ids.to(torch.int64)
+            + self.lm_head.shard_indices.org_vocab_start_index
+        )
+
+        if self.lm_head.tp_size > 1:
+            values = tensor_model_parallel_all_gather(values, dim=-1)
+            token_ids = tensor_model_parallel_all_gather(token_ids, dim=-1)
+            values, selected = torch.topk(values, k, dim=-1)
+            token_ids = token_ids.gather(-1, selected)
+
+        values = values.float()
+        if processor.scale != 1.0:
+            values = values * processor.scale
+        if processor.soft_cap is not None:
+            values = torch.tanh(values / processor.soft_cap) * processor.soft_cap
+        return token_ids, values.to(hidden_states.dtype)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         return draft_ids  # full-vocab: draft ids are target ids
@@ -404,6 +464,19 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_bias(markov_embed)
+
+    def score_draft_candidates(
+        self,
+        markov_embed: torch.Tensor,
+        values: torch.Tensor,
+        token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.markov_head.score_gathered(
+            markov_embed,
+            values,
+            token_ids,
+            self.logits_processor.scale,
+        )
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
