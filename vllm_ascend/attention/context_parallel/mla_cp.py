@@ -7,7 +7,7 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -39,8 +39,6 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
-
-logger = init_logger(__name__)
 
 
 class MLASplitAttentionKind(Enum):
