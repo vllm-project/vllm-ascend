@@ -30,7 +30,11 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    MoECommType,
+    moe_output_is_reduced,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -238,11 +242,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
-            MoECommType.ALLTOALL,
-            MoECommType.MC2,
-            MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
+        if torch.compiler.is_compiling():
+            # Profile runs still compile at max_num_batched_tokens, where the
+            # runtime method can be ALLGATHER.  FULL decode capture uses the
+            # capacity-sized MC2 contract, so bake that contract into the
+            # outer graph.  The profile output is discarded; real calls with
+            # a different contract bypass this graph in the forward context.
+            compiled_moe_comm_type = _EXTRA_CTX.compiled_moe_comm_type
+            if compiled_moe_comm_type is not None:
+                moe_comm_type = compiled_moe_comm_type
+        return moe_output_is_reduced(
+            moe_comm_type,
+            self.moe_config.is_sequence_parallel,
+        )
 
     def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
         shared_experts = getattr(self, "ascend_shared_experts", None)
