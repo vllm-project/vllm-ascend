@@ -22,6 +22,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -46,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
+    split_kv_cache_head_slots,
     tensor_storage_key,
     validate_register_region_count,
 )
@@ -165,7 +167,9 @@ class MooncakeBaseConnectorWorker:
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
         """
-        if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
+        # A single strided layer does not own the gaps between its blocks.
+        # Those gaps can contain other attention layers or recurrent state.
+        if len(caches) < 2 or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
 
         tensor_num_blocks = {cache.shape[0] for cache in caches}
@@ -209,6 +213,7 @@ class MooncakeBaseConnectorWorker:
         """Register configured KV cache allocations and publish metadata."""
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
+        kv_caches = dict(kv_caches)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
         layer_names: list[str] = []
@@ -240,6 +245,17 @@ class MooncakeBaseConnectorWorker:
 
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
+                if (
+                    isinstance(spec, FullAttentionSpec)
+                    and not isinstance(spec, MLAAttentionSpec)
+                    and isinstance(cache_or_caches, torch.Tensor)
+                    and cache_or_caches.ndim == 4
+                    and cache_or_caches.shape[1] == 2 * spec.num_kv_heads
+                ):
+                    # Standardized [pages, 2H, tokens, D] caches expose K/V as
+                    # aliases while preserving the runner's canonical tensor.
+                    cache_or_caches = split_kv_cache_head_slots(cache_or_caches, spec.num_kv_heads)
+                    kv_caches[layer_name] = cache_or_caches
                 caches = as_kv_cache_tensors(cache_or_caches)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
