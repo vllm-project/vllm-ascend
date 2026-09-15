@@ -63,7 +63,10 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.device.mxfp_kv_cache import scatter_mxfp_k_scale_cache
+from vllm_ascend.device.mxfp_kv_cache import (
+    scatter_mxfp_k_scale_cache,
+    scatter_mxfp_pa_nz_kv_cache,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import uses_mooncake_connector, vllm_version_is, weak_ref_tensors
 
@@ -2841,17 +2844,19 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
         key_cache, value_cache = kv_cache[0], kv_cache[1]
         block_size = key_cache.shape[1]
-        # Write the K/V payloads through the PA_NZ 5-D view so the storage
-        # holds the NZ-fragmented layout QFA reads (layout_kv=PA_NZ). The
-        # scatter op consumes the same NZ view on the FIA C8 path, and the
-        # allocation/hybrid/PD/CoW machinery keeps seeing the natural
-        # (num_blocks, block_size, num_kv_heads, head_dim) storage shape.
-        DeviceOperator.reshape_and_cache(
-            key=quant_key,
-            value=quant_value,
-            key_cache=self._nz_5d_view(key_cache, block_size),
-            value_cache=self._nz_5d_view(value_cache, block_size),
-            slot_mapping=slot_mapping,
+        # Write the K/V payloads in the PA_NZ layout QFA reads
+        # (layout_kv=PA_NZ). npu_scatter_pa_kv_cache's shape contract
+        # (key_cache.dim2 == num_kv_heads) does not fit the PA_NZ axis
+        # order, so the scatter is done in-house; the allocation, hybrid
+        # partitioning, PD and CoW machinery keeps seeing the natural
+        # (num_blocks, block_size, num_kv_heads, head_dim) storage.
+        scatter_mxfp_pa_nz_kv_cache(
+            quant_key,
+            quant_value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            block_size,
         )
 
         # Scatter the dynamic per-token K scales; V's static per-channel scale

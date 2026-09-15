@@ -13,6 +13,7 @@ from vllm_ascend.device.mxfp_kv_cache import (
     mxfp_v_scale_cache_shape,
     mxfp_v_scale_page_bytes,
     scatter_mxfp_k_scale_cache,
+    scatter_mxfp_pa_nz_kv_cache,
 )
 from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import (
     AscendC8MXFPKVCacheAttentionMethod,
@@ -42,6 +43,70 @@ class TestMXFPScaleCacheShapes(TestBase):
     def test_head_dim_must_align_to_scale_group(self):
         with self.assertRaises(ValueError):
             mxfp_k_scale_cache_shape(num_blocks=1, block_size=512, num_kv_heads=1, head_dim=100)
+
+
+class TestScatterMXFPPaNzKvCache(TestBase):
+    """PA_NZ KV scatter: tokens land at [block, n, d//32, offset, d%32]."""
+
+    BLOCK_SIZE = 4
+    NUM_KV_HEADS = 2
+    HEAD_DIM = 64  # D//32 = 2 fragments
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.key_cache = torch.zeros(
+            (2, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM), dtype=torch.uint8
+        )
+        self.value_cache = torch.zeros_like(self.key_cache)
+
+    def _nz(self, cache):
+        return cache.view(2, self.NUM_KV_HEADS, self.HEAD_DIM // 32, self.BLOCK_SIZE, 32)
+
+    def test_scatter_writes_tokens_at_their_nz_coordinates(self):
+        # Byte value encodes (token, head, channel) so every assertion
+        # names its source element.
+        num_tokens = 3
+        idx = torch.arange(num_tokens * self.NUM_KV_HEADS * self.HEAD_DIM)
+        key = (
+            (idx // (self.NUM_KV_HEADS * self.HEAD_DIM)) * 100
+            + ((idx // self.HEAD_DIM) % self.NUM_KV_HEADS) * 10
+            + (idx % self.HEAD_DIM)
+        ).to(torch.uint8).reshape(num_tokens, self.NUM_KV_HEADS, self.HEAD_DIM)
+        value = key.clone()
+        # slot 2 -> block 0, offset 2; slot 5 -> block 1, offset 1; -1 -> padding.
+        slot_mapping = torch.tensor([2, 5, -1], dtype=torch.int64)
+
+        scatter_mxfp_pa_nz_kv_cache(
+            key, value, self.key_cache, self.value_cache, slot_mapping, self.BLOCK_SIZE
+        )
+
+        for token, slot in ((0, 2), (1, 5)):
+            block, offset = slot // self.BLOCK_SIZE, slot % self.BLOCK_SIZE
+            for head in range(self.NUM_KV_HEADS):
+                for channel in range(self.HEAD_DIM):
+                    expected = key[token, head, channel]
+                    got = self._nz(self.key_cache)[block, head, channel // 32, offset, channel % 32]
+                    self.assertEqual(got.item(), expected.item())
+                    self.assertEqual(self._nz(self.value_cache)[block, head, channel // 32, offset, channel % 32].item(), expected.item())
+        # Untouched offsets stay zero (both blocks, all heads/channels).
+        untouched = self._nz(self.key_cache).clone()
+        untouched[0, :, :, 2, :] = 0
+        untouched[1, :, :, 1, :] = 0
+        self.assertTrue(torch.all(untouched == 0))
+
+    def test_padded_rows_are_no_ops(self):
+        sentinel = 7
+        self.key_cache[0, 0] = sentinel  # slot 0 payload
+        key = torch.full((2, self.NUM_KV_HEADS, self.HEAD_DIM), 200, dtype=torch.uint8)
+        slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
+
+        scatter_mxfp_pa_nz_kv_cache(
+            key, key.clone(), self.key_cache, self.value_cache, slot_mapping, self.BLOCK_SIZE
+        )
+
+        self.assertTrue(torch.all(self.key_cache[0, 0] == sentinel))
+        self.assertTrue(torch.all(self.key_cache[0, 1:] == 0))
+        self.assertTrue(torch.all(self.key_cache[1] == 0))
 
 
 class TestScatterMXFPKScaleCache(TestBase):
