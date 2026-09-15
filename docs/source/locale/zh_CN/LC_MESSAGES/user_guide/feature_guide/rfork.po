@@ -1,138 +1,323 @@
-# SOME DESCRIPTIVE TITLE.
+# Chinese translations for the Tensor R-Fork guide.
 # Copyright (C) 2026, vllm-ascend team
 # This file is distributed under the same license as the vllm-ascend package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
-"Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-08 14:01+0000\n"
-"PO-Revision-Date: 2026-07-08 14:01+0000\n"
-"Last-Translator: \n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
-"Generated-By: detect_po_changes.py\n"
 
-msgid "# RFork Guide"
-msgstr "# RFork 指南"
+msgid "# Tensor R-Fork (RFork) Guide"
+msgstr "# Tensor R-Fork（RFork）指南"
 
-msgid ""
-"This guide explains how to use **RFork** as a model-loader plugin in **vLLM "
-"Ascend**."
-msgstr "本指南说明如何在 **vLLM Ascend** 中将 **RFork** 用作模型加载器插件。"
+msgid "This guide explains how to use **Tensor R-Fork** as a model-loader plugin in **vLLM Ascend**."
+msgstr "本指南介绍如何在 **vLLM Ascend** 中使用模型加载器插件 **Tensor R-Fork**。"
+
+msgid "## TL;DR"
+msgstr "## 太长不看"
+
+msgid "**Tensor R-Fork** stands for **Tensor Remote Fork** and is abbreviated as **RFork**. It is a warm-start weight loading path for vLLM Ascend. Instead of always reading model weights from storage, a new instance can request a compatible **seed** instance from an external planner, then pull weights directly from that seed through `YuanRong TransferEngine`."
+msgstr "**Tensor R-Fork** 的全称是 **Tensor Remote Fork**，简称 **RFork**。它是 vLLM Ascend 的一种热启动权重加载方式。新实例无需每次都从存储读取模型权重，而是可以向外部规划器请求兼容的 **seed** 实例，再通过 `YuanRong TransferEngine` 直接从该 seed 拉取权重。"
+
+msgid "The \"fork\" is a remote tensor-level operation, not an operating-system process fork. RFork treats the NPU memory of an existing vLLM instance as a reusable weight source; the destination creates an independent model instance and reads the seed's registered tensors into its pre-allocated NPU parameter buffers."
+msgstr "这里的“fork”是远程张量级操作，并非操作系统的进程 fork。RFork 将现有 vLLM 实例的 NPU 内存作为可复用的权重源；目标端会创建独立的模型实例，并将 seed 已注册的张量读入预先分配的 NPU 参数缓冲区。"
+
+msgid "## Background"
+msgstr "## 背景"
+
+msgid "For large models, repeatedly loading the same checkpoint can make storage and host-side staging the main startup bottlenecks. RFork changes the warm-start data path for later replicas:"
+msgstr "对于大模型，重复加载同一个检查点时，存储访问和主机侧暂存可能成为启动过程的主要瓶颈。RFork 改变了后续副本的热启动数据路径："
+
+msgid "| Load weights from | Data flow | Typical bottleneck |"
+msgstr "| 权重来源 | 数据流 | 典型瓶颈 |"
+
+msgid "| Remote storage | Remote storage → remote network → local network interface → local host DRAM → local NPU memory | Storage or network bandwidth |"
+msgstr "| 远端存储 | 远端存储 → 远端网络 → 本地网络接口 → 本地主机 DRAM → 本地 NPU 内存 | 存储或网络带宽 |"
+
+msgid "| Local disk | Local disk → host DRAM → NPU memory | Disk bandwidth |"
+msgstr "| 本地磁盘 | 本地磁盘 → 主机 DRAM → NPU 内存 | 磁盘带宽 |"
+
+msgid "| Local host DRAM | Host DRAM → NPU memory | Host-to-device interconnect |"
+msgstr "| 本地主机 DRAM | 主机 DRAM → NPU 内存 | 主机到设备互连 |"
+
+msgid "| RFork seed instance | Seed NPU memory → YuanRong TransferEngine → destination NPU memory | Inter-node transport bandwidth |"
+msgstr "| RFork seed 实例 | Seed NPU 内存 → YuanRong TransferEngine → 目标端 NPU 内存 | 节点间传输带宽 |"
+
+msgid "This design provides the following benefits for scale-out deployments:"
+msgstr "该设计为横向扩容场景带来以下优势："
+
+msgid "- **Faster warm starts** by reusing tensors that are already resident on another NPU instance."
+msgstr "- **加快热启动**：复用已驻留在其他 NPU 实例上的张量。"
+
+msgid "- **Less repeated storage traffic** because later replicas do not need to read the complete checkpoint again when a compatible seed is available."
+msgstr "- **减少重复存储流量**：存在兼容 seed 时，后续副本无需再次读取完整检查点。"
+
+msgid "- **Less host-side staging** because TransferEngine reads registered tensor ranges into the destination's final NPU buffers."
+msgstr "- **减少主机侧暂存**：TransferEngine 将已注册的张量范围读入目标端最终的 NPU 缓冲区。"
+
+msgid "- **Lower source-side disruption** because the seed exposes registered memory instead of reloading or broadcasting the model through vLLM workers. Actual inference impact still depends on the inter-node transport, available bandwidth, and concurrent transfer load."
+msgstr "- **降低对源端的干扰**：seed 暴露已注册内存，而不是通过 vLLM worker 重新加载或广播模型。实际推理影响仍取决于节点间传输方式、可用带宽和并发传输负载。"
+
+msgid "The first instance still needs to load the model normally. RFork accelerates subsequent compatible instances; it is not a replacement for the initial checkpoint load."
+msgstr "第一个实例仍需正常加载模型。RFork 用于加速后续兼容实例，不能替代首次检查点加载。"
+
+msgid "At cluster scale, this turns running vLLM Ascend replicas into a distributed pool of NPU-resident weight sources. An instance provides inference compute while also making its already-materialized tensors available to later replicas."
+msgstr "在集群层面，运行中的 vLLM Ascend 副本会组成一个分布式 NPU 驻留权重池。实例在提供推理计算的同时，也能将已具现化的张量提供给后续副本。"
+
+msgid "### Default Loader vs. RFork"
+msgstr "### 默认加载器与 RFork 对比"
+
+msgid "| Characteristic | Default loader | RFork |"
+msgstr "| 特性 | 默认加载器 | RFork |"
+
+msgid "| Weight source | Model storage | Running seed instance |"
+msgstr "| 权重来源 | 模型存储 | 运行中的 seed 实例 |"
+
+msgid "| Destination path | Storage and host staging before reaching NPU memory | TransferEngine reads into pre-allocated NPU buffers |"
+msgstr "| 目标端路径 | 经过存储和主机侧暂存后进入 NPU 内存 | TransferEngine 读入预先分配的 NPU 缓冲区 |"
+
+msgid "| Additional dependency | None beyond the normal model-loading stack | YuanRong TransferEngine and an RFork planner |"
+msgstr "| 额外依赖 | 常规模型加载栈之外无额外依赖 | YuanRong TransferEngine 和 RFork 规划器 |"
+
+msgid "| Setup overhead | Storage access and checkpoint deserialization | NPU memory registration and seed discovery |"
+msgstr "| 初始化开销 | 存储访问和检查点反序列化 | NPU 内存注册和 seed 发现 |"
+
+msgid "| Repeated scale-out | Every instance reads the checkpoint | Compatible instances reuse an existing seed |"
+msgstr "| 重复扩容 | 每个实例都读取检查点 | 兼容实例复用现有 seed |"
+
+msgid "| Failure behavior | Loading fails if the checkpoint path is unavailable | RFork cleans up and falls back to the default loader |"
+msgstr "| 失败行为 | 检查点路径不可用时加载失败 | RFork 清理状态并回退到默认加载器 |"
+
+msgid "RFork is most useful when the same model and parallel configuration are started repeatedly. For a single cold start, memory registration and planner coordination add work without an existing seed to reuse."
+msgstr "在相同模型和并行配置需要重复启动时，RFork 最有价值。对于单次冷启动，由于没有可复用的 seed，内存注册和规划器协调反而会增加额外工作。"
+
+msgid "## Architecture"
+msgstr "## 架构"
+
+msgid "RFork consists of four cooperating components:"
+msgstr "RFork 由四个协同组件构成："
+
+msgid "- **Planner**: Tracks seed identity, deployment topology, health, and transfer leases, then selects a compatible seed for each destination."
+msgstr "- **规划器**：跟踪 seed 标识、部署拓扑、健康状态和传输租约，并为每个目标端选择兼容的 seed。"
+
+msgid "- **Seed instance**: An initialized vLLM Ascend instance that registers its live NPU weight buffers and publishes TransferEngine metadata."
+msgstr "- **Seed 实例**：已完成初始化的 vLLM Ascend 实例，负责注册当前使用的 NPU 权重缓冲区并发布 TransferEngine 元数据。"
+
+msgid "- **Destination instance**: A new vLLM Ascend instance that creates the matching tensor layout and pulls weights into its local NPU buffers."
+msgstr "- **目标实例**：新的 vLLM Ascend 实例，负责创建匹配的张量布局并将权重拉取到本地 NPU 缓冲区。"
+
+msgid "- **YuanRong TransferEngine**: Manages registered memory and performs batched reads between the seed and destination."
+msgstr "- **YuanRong TransferEngine**：管理已注册内存，并在 seed 与目标端之间执行批量读取。"
+
+msgid "### End-to-End Workflow"
+msgstr "### 端到端工作流程"
+
+msgid "The RFork loading flow is:"
+msgstr "RFork 加载流程如下："
+
+msgid "1. vLLM starts with `--load-format rfork`."
+msgstr "1. 使用 `--load-format rfork` 启动 vLLM。"
+
+msgid "2. RFork builds a **seed key** from the model identity and deployment topology."
+msgstr "2. RFork 根据模型标识和部署拓扑构建 **seed key**。"
+
+msgid "3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key."
+msgstr "3. RFork 初始化本地模型并完成必要的张量布局准备和同步，然后向规划器请求与该 key 匹配的 seed。"
+
+msgid "4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers."
+msgstr "4. 如果规划器返回 seed，新实例会注册本地权重内存、从 seed 获取远端 TransferEngine 元数据，并将权重批量传输到本地参数缓冲区。"
+
+msgid "5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader."
+msgstr "5. 如果没有可用 seed，或任一步骤失败，RFork 会清理状态并回退到默认加载器。"
+
+msgid "6. After the instance finishes loading, it starts a local seed service and periodically reports heartbeat to the planner, so later instances can reuse it."
+msgstr "6. 实例完成加载后会启动本地 seed 服务，并定期向规划器上报心跳，以供后续实例复用。"
+
+msgid "TransferEngine metadata is exchanged through the seed HTTP service, while tensor contents are transferred through TransferEngine. Each worker owns its own TransferEngine session and listening port, so corresponding parallel ranks transfer their local weight shards independently."
+msgstr "TransferEngine 元数据通过 seed HTTP 服务交换，张量内容则通过 TransferEngine 传输。每个 worker 都拥有独立的 TransferEngine 会话和监听端口，因此对应的并行 rank 会分别传输各自的本地权重分片。"
+
+msgid "### Seed-Side Initialization"
+msgstr "### Seed 端初始化"
+
+msgid "After a vLLM Ascend instance finishes loading its model, each RFork worker prepares the tensors that another instance may read:"
+msgstr "vLLM Ascend 实例完成模型加载后，每个 RFork worker 都会准备可供其他实例读取的张量："
+
+msgid "1. RFork prepares the transferable Ascend tensor layout and enumerates the live model tensors."
+msgstr "1. RFork 准备可传输的 Ascend 张量布局，并枚举当前有效的模型张量。"
+
+msgid "2. Logical tensor ranges are associated with their backing NPU allocations. Overlapping logical ranges that share one allocation are registered without registering the same backing memory repeatedly."
+msgstr "2. 将逻辑张量范围与其底层 NPU 内存分配关联起来。共享同一内存分配的重叠逻辑范围不会重复注册相同的底层内存。"
+
+msgid "3. Registration requests are split into bounded batches before being submitted to YuanRong TransferEngine."
+msgstr "3. 注册请求会拆分为大小受限的批次，再提交给 YuanRong TransferEngine。"
+
+msgid "4. The worker publishes its TransferEngine session, tensor addresses, element sizes, and shapes through the local seed service."
+msgstr "4. Worker 通过本地 seed 服务发布 TransferEngine 会话、张量地址、元素大小和 shape。"
+
+msgid "5. A heartbeat advertises the seed key, address, port, and rank to the planner."
+msgstr "5. 心跳会向规划器上报 seed key、地址、端口和 rank。"
+
+msgid "The seed remains a normal serving instance. RFork does not ask it to reread the checkpoint or run a model-weight broadcast. Transfers can still consume inter-node and NPU-memory bandwidth, so production deployments should control concurrent readers and observe inference latency."
+msgstr "Seed 仍是正常提供服务的实例。RFork 不会要求它重新读取检查点或执行模型权重广播。传输仍可能占用节点间带宽和 NPU 内存带宽，因此生产部署应限制并发读取方数量并观察推理时延。"
+
+msgid "### Destination-Side Loading"
+msgstr "### 目标端加载"
+
+msgid "The destination performs the following steps for each worker rank:"
+msgstr "目标端为每个 worker rank 执行以下步骤："
+
+msgid "1. Build the destination model structure and allocate the final NPU tensor layout."
+msgstr "1. 构建目标端模型结构并分配最终的 NPU 张量布局。"
+
+msgid "2. After required layout preparation and synchronization, acquire a seed lease and register the destination tensor ranges with its local TransferEngine session."
+msgstr "2. 完成必要的布局准备和同步后，获取 seed 租约并使用本地 TransferEngine 会话注册目标端张量范围。"
+
+msgid "3. Fetch the matching seed worker's session and tensor manifest over HTTP."
+msgstr "3. 通过 HTTP 获取匹配 seed worker 的会话和张量清单。"
+
+msgid "4. Verify tensor names, element counts, element sizes, and shapes before transferring data."
+msgstr "4. 传输前校验张量名称、元素数量、元素大小和 shape。"
+
+msgid "5. Group tensors into bounded chunks and use batched synchronous reads to copy them into the destination buffers."
+msgstr "5. 将张量划分为大小受限的分块，并通过批量同步读取复制到目标缓冲区。"
+
+msgid "6. Schedule bounded asynchronous lease release after the transfer, whether it succeeds or falls back."
+msgstr "6. 无论传输成功还是触发回退，传输结束后都会调度重试次数有限的异步租约释放。"
+
+msgid "Once loading completes, the destination can publish itself as another seed. A deployment can therefore grow from one storage-loaded instance into a pool of reusable NPU-resident weight sources."
+msgstr "加载完成后，目标端也可以将自身发布为新的 seed。因此，一个部署可以从单个通过存储加载的实例扩展为可复用的 NPU 驻留权重源池。"
+
+msgid "### Registration and Shutdown Lifecycle"
+msgstr "### 注册与关停生命周期"
+
+msgid "Registered NPU memory must remain valid while remote readers may still hold leases. RFork therefore keeps Python tensor owners and TransferEngine registration state alive until unregistration or finalization succeeds."
+msgstr "远端读取方仍可能持有租约时，已注册的 NPU 内存必须保持有效。因此，在注销或终结成功之前，RFork 会一直保留 Python 张量所有者和 TransferEngine 注册状态。"
+
+msgid "During worker shutdown, RFork first stops advertising the seed, terminates the heartbeat, and closes the local seed service. It then finalizes TransferEngine. If remote reads are still active, finalization retries `ErrorCode.kNotReady` with a bounded delay. If the seed service cannot stop or finalization does not complete within the retry limit, RFork retains the registration state rather than releasing memory that may still be referenced."
+msgstr "Worker 关停时，RFork 会先停止发布 seed、终止心跳并关闭本地 seed 服务，然后终结 TransferEngine。如果远端读取仍在进行，终结操作会以有限次数和间隔重试 `ErrorCode.kNotReady`。如果 seed 服务无法停止，或终结操作在重试上限内仍未完成，RFork 会保留注册状态，而不会释放可能仍被引用的内存。"
+
+msgid "rfork flowchart"
+msgstr "RFork 流程图"
+
+msgid "- **Scale-out after a first successful load**: The first instance may still load from storage, but later instances with the same deployment identity can reuse it as a seed and shorten startup time."
+msgstr "- **首次成功加载后的横向扩容**：第一个实例仍可从存储加载，但具有相同部署标识的后续实例可以将其作为 seed 复用，从而缩短启动时间。"
+
+msgid "- **Elastic serving clusters**: Because RFork asks a planner for available seeds, it fits clusters where instances are created and reclaimed dynamically."
+msgstr "- **弹性服务集群**：RFork 会向规划器请求可用 seed，因此适用于动态创建和回收实例的集群。"
+
+msgid "- **Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`, optional `pp_rank`, `tp_rank`, optional `ep_rank`, and optional `draft` role into the seed key, so only topology-compatible instances are matched together."
+msgstr "- **拓扑敏感部署**：RFork 会将 `kv_role`、`node_rank`、可选的 `pp_rank`、`tp_rank`、可选的 `ep_rank` 和可选的 `draft` 角色编码到 seed key 中，因此只会匹配拓扑兼容的实例。"
 
 msgid "## Usage"
 msgstr "## 使用方法"
 
-msgid ""
-"To enable RFork, pass `--load-format rfork` and provide RFork settings "
-"through `--model-loader-extra-config` as a JSON string."
-msgstr ""
-"要启用 RFork，请传递 `--load-format rfork` 并通过 `--model-loader-extra-config` 以 JSON"
-" 字符串形式提供 RFork 设置。"
+msgid "To enable RFork, pass `--load-format rfork` and provide RFork settings through `--model-loader-extra-config` as a JSON string."
+msgstr "要启用 RFork，请传入 `--load-format rfork`，并通过 `--model-loader-extra-config` 以 JSON 字符串形式提供 RFork 配置。"
 
 msgid "### RFork Prerequisites"
 msgstr "### RFork 前提条件"
 
-msgid ""
-"- Install the runtime dependency `YuanRong TransferEngine` on every RFork instance.\n"
-"- Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py)."
-msgstr ""
-"- 在每个 RFork 实例上安装运行时依赖 `YuanRong TransferEngine`。\n"
-"- 运行一个实现 RFork seed 协议的规划器服务。一个简单的模拟规划器脚本位于 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py)。"
+msgid "- Install `YuanRong TransferEngine` on every RFork instance."
+msgstr "- 在每个 RFork 实例上安装 `YuanRong TransferEngine`。"
+
+msgid "- Run a planner service that implements the RFork seed protocol. A simple mock planner script is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py)."
+msgstr "- 运行实现 RFork seed 协议的规划器服务。项目在 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 中提供了一个简单的模拟规划器脚本。"
 
 msgid "### Configuration Fields"
 msgstr "### 配置字段"
 
+msgid "| **rfork_seed_key_separator** | String | Separator used when building the RFork seed key string. | Optional. Default: `$`. Keep the same value across compatible instances. |"
+msgstr "| **rfork_seed_key_separator** | 字符串 | 构建 RFork seed key 字符串时使用的分隔符。 | 可选。默认值：`$`。兼容实例之间必须保持一致。 |"
+
 msgid "### How RFork Matches Seeds"
-msgstr "### RFork 如何匹配 Seeds"
+msgstr "### RFork 如何匹配 Seed"
 
 msgid ""
-"RFork does not match instances by `model_url` alone. The local seed key is "
+"RFork does not match instances by `model_url` alone. The seed identity is "
 "composed from:"
-msgstr "RFork 不单独通过 `model_url` 匹配实例。本地 seed 键由以下部分组成："
+msgstr "RFork 不单独通过 `model_url` 匹配实例。种子身份由以下部分组成："
 
 msgid ""
 "- `model_url`\n"
 "- `model_deploy_strategy_name`\n"
-"- disaggregation mode derived from `kv_transfer_config.kv_role` or `kv_both`\n"
-"- `node_rank`\n"
 "- `pp_rank` when pipeline parallel size is greater than 1\n"
 "- `tp_rank`\n"
 "- `ep_rank` when expert parallelism is enabled for an MoE model\n"
-"- optional `draft` suffix when the worker runs as a draft model"
+"- `draft` role when the worker runs as a draft model"
 msgstr ""
 "- `model_url`\n"
 "- `model_deploy_strategy_name`\n"
-"- 从 `kv_transfer_config.kv_role` 或 `kv_both` 派生的分离模式\n"
-"- `node_rank`\n"
 "- 当流水线并行大小大于 1 时的 `pp_rank`\n"
 "- `tp_rank`\n"
 "- 当 MoE 模型启用专家并行时的 `ep_rank`\n"
-"- 当工作器作为草稿模型运行时的可选 `draft` 后缀"
-
-msgid ""
-"This means two instances must agree on both model identity and deployment topology before the planner will treat them as interchangeable seeds.\n"
-"For deployments without pipeline or expert parallelism, the existing seed-key format is unchanged."
-msgstr ""
-"这意味着两个实例必须在模型标识和部署拓扑上达成一致，规划器才会将它们视为可互换的 seed。\n"
-"对于没有流水线或专家并行的部署，现有的 seed 键格式保持不变。"
+"- 当工作器作为草稿模型运行时的 `draft` 角色"
 
 msgid "### Quantized Models"
 msgstr "### 量化模型"
 
-msgid ""
-"For quantized models, RFork transfers tensors after Ascend weight post-"
-"processing instead of raw checkpoint parameters. The receiver first builds "
-"the same post-load tensor layout as the seed, then RFork copies the live NPU"
-" tensors used by inference."
-msgstr ""
-"对于量化模型，RFork 在 Ascend 权重后处理之后传输张量，而不是原始检查点参数。接收方首先构建与 seed 相同的加载后张量布局，然后 "
-"RFork 复制推理使用的活跃 NPU 张量。"
+msgid "For quantized models, RFork transfers tensors after Ascend weight post-processing instead of raw checkpoint parameters. The receiver first builds the same post-load tensor layout as the seed, then RFork copies the live NPU tensors used by inference."
+msgstr "对于量化模型，RFork 传输 Ascend 权重后处理后的张量，而不是原始检查点参数。接收端会先构建与 seed 相同的加载后张量布局，再由 RFork 复制推理实际使用的 NPU 张量。"
 
-msgid ""
-"This path handles Ascend quantization changes such as weight transposition, "
-"NZ format conversion, packed weights, derived scale tensors, and MLA/SFA "
-"runtime tensors such as `W_UV` and `W_UK_T`. Empty tensors that were "
-"released during post-processing are not included in the transfer manifest."
-msgstr ""
-"此路径处理 Ascend 量化更改，例如权重转置、NZ 格式转换、压缩权重、派生缩放张量以及 MLA/SFA 运行时张量（如 `W_UV` 和 "
-"`W_UK_T`）。后处理期间释放的空张量不包含在传输清单中。"
+msgid "This path handles Ascend quantization changes such as weight transposition, NZ format conversion, packed weights, derived scale tensors, and MLA/SFA runtime tensors such as `W_UV` and `W_UK_T`. Empty tensors that were released during post-processing are not included in the transfer manifest."
+msgstr "该路径支持 Ascend 量化过程中的权重转置、NZ 格式转换、打包权重、派生 scale 张量，以及 `W_UV`、`W_UK_T` 等 MLA/SFA 运行时张量。后处理期间已经释放的空张量不会包含在传输清单中。"
 
 msgid "When validating RFork for a quantized model:"
-msgstr "验证量化模型的 RFork 时："
-
-msgid ""
-"- Apply the same vLLM Ascend code to both the seed instance and the receiver instance.\n"
-"- Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.\n"
-"- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.\n"
-"- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`."
-msgstr ""
-"- 对 seed 实例和接收方实例应用相同的 vLLM Ascend 代码。\n"
-"- 更改 RFork 代码后重新启动规划器和所有 vLLM 实例，因为现有的 seed 会保留其旧的传输元数据。\n"
-"- 更改模型参数或 RFork 代码后使用新的 `model_deploy_strategy_name`，这样规划器就不会将接收方与不兼容的旧 seed 匹配。\n"
-"- 成功的 RFork 传输会记录 `transfer weights starts` 和 `transfer weights time`。回退路径会记录 `RFork transfer failed`。"
+msgstr "为量化模型验证 RFork 时："
 
 msgid "## Tested Models"
 msgstr "## 已测试模型"
 
-msgid ""
-"The following table records models that have been explicitly tested with "
-"RFork weight transfer. A model should be added here only after RFork "
-"transfer succeeds and the loaded instance passes basic inference validation."
-msgstr ""
-"下表记录了已明确使用 RFork 权重传输进行测试的模型。只有在 RFork 传输成功且加载的实例通过基本推理验证后，才应将模型添加到此表中。"
+msgid "- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed."
+msgstr "- 修改模型参数或 RFork 代码后，应使用新的 `model_deploy_strategy_name`，避免规划器将接收端与不兼容的旧 seed 匹配。"
+
+msgid "- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`."
+msgstr "- RFork 传输成功时会记录 `transfer weights starts` 和 `transfer weights time`；回退路径会记录 `RFork transfer failed`。"
+
+msgid "## Supported Models"
+msgstr "## 支持的模型"
+
+msgid "Mainstream DeepSeek/Qwen/GLM series are supported."
+msgstr "支持主流的 DeepSeek/Qwen/GLM 系列模型。"
+
+msgid "## Performance Considerations"
+msgstr "## 性能注意事项"
+
+msgid "RFork indexes tensor intervals for allocator-block lookup and uses binary search to verify backing-memory coverage before registration. New seed services return weight and shape metadata together in one HTTP response; receivers retain the two-request path for older seed services that omit inline shape metadata."
+msgstr "RFork 为张量区间建立索引以查找 allocator 内存块，并在注册前通过二分查找验证底层内存的完整覆盖。新 seed 服务在同一个 HTTP 响应中返回权重和 shape 元数据；对于未内联 shape 元数据的旧 seed 服务，接收端保留两次请求的兼容路径。"
+
+msgid "RFork performance depends on model size, parallelism, NPU memory layout, TransferEngine registration time, inter-node bandwidth, and the number of concurrent destinations."
+msgstr "RFork 性能取决于模型大小、并行配置、NPU 内存布局、TransferEngine 注册时间、节点间带宽和并发目标端数量。"
+
+msgid "For an NPU deployment, compare RFork with the default loader using at least these metrics:"
+msgstr "在 NPU 部署中对比 RFork 与默认加载器时，至少应关注以下指标："
+
+msgid "- time from process start until the service becomes ready;"
+msgstr "- 从进程启动到服务就绪的时间；"
+
+msgid "- `transfer weights time` and transferred bytes reported in the vLLM logs;"
+msgstr "- vLLM 日志中记录的 `transfer weights time` 和传输字节数；"
+
+msgid "- storage and host-memory traffic during startup;"
+msgstr "- 启动期间的存储和主机内存流量；"
+
+msgid "- seed-instance inference latency while transfers are active;"
+msgstr "- 传输进行期间 seed 实例的推理时延；"
+
+msgid "- seed hit rate, transfer failure rate, and fallback rate."
+msgstr "- Seed 命中率、传输失败率和回退率。"
+
+msgid "Memory registration adds setup cost to the seed. Its benefit is realized when later replicas reuse that registration, so tests should include repeated scale-out rather than only a single cold start."
+msgstr "内存注册会增加 seed 的初始化开销，其收益要在后续副本复用注册时才能体现。因此，测试应包含重复横向扩容，而不应只测试一次冷启动。"
 
 msgid "## Example Commands & Placeholders"
 msgstr "## 示例命令与占位符"
 
 msgid "> Replace parts in `<...>` before running."
-msgstr "> 运行前替换 `<...>` 中的部分。"
+msgstr "> 运行前请替换 `<...>` 中的内容。"
 
 msgid "### 1. Install YuanRong TransferEngine"
 msgstr "### 1. 安装 YuanRong TransferEngine"
@@ -140,99 +325,56 @@ msgstr "### 1. 安装 YuanRong TransferEngine"
 msgid "### 2. Start the Planner"
 msgstr "### 2. 启动规划器"
 
-msgid ""
-"A simple planner implementation is provided at "
-"[`rfork_planner.py`](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/examples/rfork/rfork_planner.py)."
-msgstr ""
-"一个简单的规划器实现位于 [`rfork_planner.py`](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/examples/rfork/rfork_planner.py)。"
+msgid "A simple planner implementation is provided at [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py)."
+msgstr "项目在 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 中提供了一个简单的规划器实现。"
 
 msgid "### 3. Start vLLM Instances"
 msgstr "### 3. 启动 vLLM 实例"
 
-msgid ""
-"Use the same RFork startup command for both the first instance and later "
-"instances in the same deployment."
-msgstr "对同一部署中的第一个实例和后续实例使用相同的 RFork 启动命令。"
+msgid "Use the same RFork startup command for both the first instance and later instances in the same deployment."
+msgstr "同一部署中的第一个实例和后续实例使用相同的 RFork 启动命令。"
 
-msgid ""
-"For the first instance, the planner usually has no compatible seed yet, so "
-"RFork falls back to the default loader. After loading finishes, that "
-"instance starts its local seed service and reports itself to the planner."
-msgstr ""
-"对于第一个实例，规划器通常还没有兼容的 seed，因此 RFork 会回退到默认加载器。加载完成后，该实例会启动其本地 seed "
-"服务并向规划器报告自身。"
+msgid "For the first instance, the planner usually has no compatible seed yet, so RFork falls back to the default loader. After loading finishes, that instance starts its local seed service and reports itself to the planner."
+msgstr "启动第一个实例时，规划器通常还没有兼容的 seed，因此 RFork 会回退到默认加载器。加载完成后，该实例会启动本地 seed 服务并向规划器上报自身。"
 
-msgid ""
-"For later instances, if the planner can allocate a compatible seed, RFork "
-"will try to transfer weights from the existing seed instance before falling "
-"back to the default loader."
-msgstr "对于后续实例，如果规划器可以分配一个兼容的 seed，RFork 将尝试从现有 seed 实例传输权重，然后再回退到默认加载器。"
+msgid "For later instances, if the planner can allocate a compatible seed, RFork will try to transfer weights from the existing seed instance before falling back to the default loader."
+msgstr "对于后续实例，如果规划器能够分配兼容的 seed，RFork 会优先尝试从现有 seed 实例传输权重；失败时再回退到默认加载器。"
 
 msgid "### Placeholder Descriptions"
 msgstr "### 占位符说明"
 
-msgid ""
-"- `<model_path>`: Model path or model identifier passed to `vllm serve`.\n"
-"- `<served_model_name>`: Service name exposed by vLLM.\n"
-"- `<planner_ip>`: IP address or hostname of the RFork planner.\n"
-"- `<planner_port>`: Listening port of the RFork planner.\n"
-"- `<model_url>`: Stable model identity string used to build the RFork seed key.\n"
-"- `<deploy_strategy>`: Stable deployment-strategy name used to build the RFork seed key.\n"
-"- `<port>`: Serving port of the vLLM instance being started."
-msgstr ""
-"- `<model_path>`: 传递给 `vllm serve` 的模型路径或模型标识符。\n"
-"- `<served_model_name>`: vLLM 暴露的服务名称。\n"
-"- `<planner_ip>`: RFork 规划器的 IP 地址或主机名。\n"
-"- `<planner_port>`: RFork 规划器的监听端口。\n"
-"- `<model_url>`: 用于构建 RFork 种子键的稳定模型标识字符串。\n"
-"- `<deploy_strategy>`: 用于构建 RFork 种子键的稳定部署策略名称。\n"
-"- `<port>`: 正在启动的 vLLM 实例的服务端口。"
+msgid "- `<model_path>`: Model path or model identifier passed to `vllm serve`."
+msgstr "- `<model_path>`：传递给 `vllm serve` 的模型路径或模型标识。"
+
+msgid "- `<served_model_name>`: Service name exposed by vLLM."
+msgstr "- `<served_model_name>`：vLLM 对外暴露的服务名称。"
+
+msgid "- `<planner_ip>`: IP address or hostname of the RFork planner."
+msgstr "- `<planner_ip>`：RFork 规划器的 IP 地址或主机名。"
+
+msgid "- `<planner_port>`: Listening port of the RFork planner."
+msgstr "- `<planner_port>`：RFork 规划器的监听端口。"
+
+msgid "- `<model_url>`: Stable model identity string used to build the RFork seed key."
+msgstr "- `<model_url>`：用于构建 RFork seed key 的稳定模型标识字符串。"
+
+msgid "- `<deploy_strategy>`: Stable deployment-strategy name used to build the RFork seed key."
+msgstr "- `<deploy_strategy>`：用于构建 RFork seed key 的稳定部署策略名称。"
+
+msgid "- `<port>`: Serving port of the vLLM instance being started."
+msgstr "- `<port>`：待启动 vLLM 实例的服务端口。"
 
 msgid "## Note & Caveats"
-msgstr "## 注意事项与提醒"
-
-msgid ""
-"- RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.\n"
-"- If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.\n"
-"- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.\n"
-"- The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol."
-msgstr ""
-"- RFork 在运行时需要 `YuanRong TransferEngine`。如果缺少该包，RFork 将无法初始化传输后端。\n"
-"- 如果使用 RFORK，**每个工作进程**必须绑定一个监听端口。该端口是随机分配的。\n"
-"- RFork 权重传输不支持动态 EPLB，因为专家权重和放置位置可能在种子服务启动后发生变化。如果 `eplb_config.dynamic_eplb` 或 `eplb_config.expert_map_record_path` 启用了动态 EPLB，RFork 传输将被绕过，模型将通过默认模型加载器加载。\n"
-"- 示例 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 仅是一个简单的模拟实现。如果您需要更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现您自己的规划器。"
+msgstr "## 注意事项"
 
 msgid "## Overview"
 msgstr "## 概述"
 
-msgid ""
-"RFork is a warm-start weight loading path for vLLM Ascend. Instead of always"
-" reading model weights from storage, a new instance can request a compatible"
-" **seed** instance from an external planner, then pull weights directly from"
-" that seed through `YuanRong TransferEngine`."
-msgstr ""
-"RFork 是 vLLM Ascend 的一种热启动权重加载路径。新实例无需始终从存储中读取模型权重，而是可以向外部调度器请求一个兼容的 **种子** "
-"实例，然后通过 `YuanRong TransferEngine` 直接从该种子实例拉取权重。"
+msgid "- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader."
+msgstr "- RFork 权重传输不支持动态 EPLB，因为 seed 服务启动后，专家权重和放置位置可能发生变化。如果通过 `eplb_config.dynamic_eplb` 或 `eplb_config.expert_map_record_path` 启用动态 EPLB，系统会跳过 RFork 传输并使用默认模型加载器。"
 
 msgid "The RFork loading flow in the current implementation is:"
 msgstr "当前实现中的 RFork 加载流程如下："
-
-msgid ""
-"1. vLLM starts with `--load-format rfork`.\n"
-"2. RFork builds a **seed key** from the model identity and deployment topology.\n"
-"3. RFork asks the planner for an available seed matching that key.\n"
-"4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.\n"
-"5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader.\n"
-"6. After the instance finishes loading, it starts a local seed service and periodically reports heartbeat to the planner, so later instances can reuse it."
-msgstr ""
-"1. vLLM 以 `--load-format rfork` 参数启动。\n"
-"2. RFork 根据模型标识和部署拓扑构建一个 **种子键**。\n"
-"3. RFork 向调度器请求一个与该键匹配的可用种子实例。\n"
-"4. 如果返回了种子实例，新实例在其本地 NPU 上初始化模型结构，注册本地权重内存，从种子实例获取远程传输引擎元数据，并将权重批量传输到本地参数缓冲区。\n"
-"5. 如果没有可用种子实例，或任何步骤失败，RFork 会进行清理并回退到默认加载器。\n"
-"6. 实例完成加载后，启动本地种子服务并定期向调度器发送心跳，以便后续实例可以复用该实例。"
 
 msgid "## Flowchart"
 msgstr "## 流程图"
@@ -243,11 +385,11 @@ msgstr "## 应用场景"
 msgid ""
 "- **Scale-out after a first successful load**: The first instance may still load from storage, but later instances with the same deployment identity can reuse it as a seed and shorten startup time.\n"
 "- **Elastic serving clusters**: Because RFork asks a planner for available seeds, it fits clusters where instances are created and reclaimed dynamically.\n"
-"- **Topology-sensitive deployments**: RFork encodes `kv_role`, `node_rank`, optional `pp_rank`, `tp_rank`, optional `ep_rank`, and optional `draft` role into the seed key, so only topology-compatible instances are matched together."
+"- **Topology-sensitive deployments**: RFork encodes optional `pp_rank`, `tp_rank`, and optional `ep_rank` into the seed key, so only shard-compatible instances are matched together. The `kv_role` and the physical node are deliberately excluded, so prefill and decode instances on different nodes can share seeds."
 msgstr ""
 "- **首次成功加载后的横向扩展**：第一个实例可能仍从存储加载，但后续具有相同部署标识的实例可以将其作为种子实例复用，从而缩短启动时间。\n"
 "- **弹性服务集群**：由于 RFork 向调度器请求可用种子实例，因此适用于实例动态创建和回收的集群。\n"
-"- **拓扑敏感的部署**：RFork 将 `kv_role`、`node_rank`、可选的 `pp_rank`、`tp_rank`、可选的 `ep_rank` 以及可选的 `draft` 角色编码到种子键中，因此只有拓扑兼容的实例才会被匹配在一起。"
+"- **拓扑敏感的部署**：RFork 将可选的 `pp_rank`、`tp_rank` 以及可选的 `ep_rank` 编码到种子键中，因此只有分片兼容的实例才会被匹配在一起。`kv_role` 和物理节点被有意排除，因此不同节点上的 prefill 和 decode 实例可以共享种子。"
 
 msgid "| Field Name | Type | Description | Allowed Values / Notes |"
 msgstr "| 字段名 | 类型 | 描述 | 允许值 / 备注 |"
@@ -289,14 +431,6 @@ msgstr ""
 "可选。默认值：`5.0`。必须大于 `0`。无效值将回退为默认值。 |"
 
 msgid ""
-"| **rfork_seed_key_separator** | String | Separator used when building the "
-"RFork seed key string. | Optional. Default: `$`. Keep the same value across "
-"compatible instances. |"
-msgstr ""
-"| **rfork_seed_key_separator** | 字符串 | 构建 RFork 种子键字符串时使用的分隔符。 | "
-"可选。默认值：`$`。在兼容的实例之间保持相同的值。 |"
-
-msgid ""
 "| Qwen2.5-7B | BF16 | A2 | Tested | RFork transfer has been validated. |"
 msgstr "| Qwen2.5-7B | BF16 | A2 | 已测试 | RFork 传输已验证通过。 |"
 
@@ -323,3 +457,217 @@ msgstr "| GLM5-W4A8 | W4A8 | A2 | 已测试 | RFork 传输已验证通过。 |"
 msgid ""
 "| Kimi2.5-W4A8 | W4A8 | A2 | Tested | RFork transfer has been validated. |"
 msgstr "| Kimi2.5-W4A8 | W4A8 | A2 | 已测试 | RFork 传输已验证通过。 |"
+
+msgid ""
+"1. vLLM starts with `--load-format rfork`.\n"
+"2. RFork builds a **seed key** from the model identity and deployment topology.\n"
+"3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key.\n"
+"4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.\n"
+"5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader.\n"
+"6. RFork completes post-load processing and switches the model to evaluation mode before it starts a local seed service and advertises it to the planner. A seed-service startup failure does not reload the valid model; RFork only cleans up its registered memory."
+msgstr ""
+"1. vLLM 使用 `--load-format rfork` 启动。\n"
+"2. RFork 根据模型身份和部署拓扑构建**种子键**。\n"
+"3. RFork 初始化本地模型并完成必要的张量布局准备和同步，然后向规划器请求与该键匹配的种子。\n"
+"4. 如果返回了种子，新实例会注册本地权重内存、从种子获取远端传输引擎元数据，并将权重批量传输到本地参数缓冲区。\n"
+"5. 如果没有可用种子或任一传输步骤失败，RFork 会清理资源并回退到默认加载器。\n"
+"6. RFork 完成加载后处理并将模型切换到评估模式后，才启动本地种子服务并向规划器上报。种子服务启动失败不会重新加载已有效的模型；RFork 只清理其注册内存。"
+
+msgid ""
+"| **rfork_request_timeout_sec** | Number | Timeout for every planner and "
+"seed HTTP request. | Optional. Default: `10.0`. Must be finite and greater "
+"than `0`; invalid values fall back to the default. |"
+msgstr ""
+"| **rfork_request_timeout_sec** | 数字 | 每个规划器和种子 HTTP 请求的超时时间。 | "
+"可选。默认值：`10.0`。必须是有限且大于 `0` 的值；无效值将回退到默认值。 |"
+
+msgid "| **rfork_heartbeat_interval_sec** | Number | Delay before the next seed heartbeat after the previous heartbeat request completes. | Optional. Default: `30.0`. Must be a finite, positive JSON number. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. |"
+msgstr "| **rfork_heartbeat_interval_sec** | 数字 | 在上一次种子心跳请求完成后等待、再发送下一次心跳的间隔。 | 可选。默认值：`30.0`。必须是有限的正 JSON 数字。仅限 `model-loader-extra-config` 的 JSON 字段；显式无效值会抛出 `ValueError`；没有环境变量回退。 |"
+
+msgid "| **rfork_lease_release_max_attempts** | Integer | Maximum number of attempts for lease release, including the initial request. | Optional. Default: `3`. Must be a positive JSON integer. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. Rejected responses stop immediately. |"
+msgstr "| **rfork_lease_release_max_attempts** | 整数 | 租约释放的最大尝试次数，包括初始请求。 | 可选。默认值：`3`。必须是正 JSON 整数。仅限 `model-loader-extra-config` 的 JSON 字段；显式无效值会抛出 `ValueError`；没有环境变量回退。被拒绝的响应会立即停止。 |"
+
+msgid "| **rfork_lease_release_retry_interval_sec** | Number | Wait between transient lease-release failures. | Optional. Default: `30.0`. Must be a finite, positive JSON number. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. |"
+msgstr "| **rfork_lease_release_retry_interval_sec** | 数字 | 可重试的租约释放失败之间的等待时间。 | 可选。默认值：`30.0`。必须是有限的正 JSON 数字。仅限 `model-loader-extra-config` 的 JSON 字段；显式无效值会抛出 `ValueError`；没有环境变量回退。 |"
+
+msgid ""
+"| **rfork_seed_bind_host** | String | Local address/interface for the seed "
+"HTTP server. | Optional. Default: `0.0.0.0`. |"
+msgstr ""
+"| **rfork_seed_bind_host** | 字符串 | 种子 HTTP 服务的本地绑定地址或接口。 | 可选。默认值：`0.0.0.0`。"
+" |"
+
+msgid ""
+"| **rfork_seed_advertise_host** | String | Address reported to the planner "
+"for later receivers. | Optional. Default: auto-detect the local address. |"
+msgstr ""
+"| **rfork_seed_advertise_host** | 字符串 | 向规划器上报、供后续接收实例访问的地址。 | "
+"可选。默认自动检测本地地址。 |"
+
+msgid "RFork manages its environment fallbacks in its own `RForkConfig` configuration module:"
+msgstr "RFork 在自身的 `RForkConfig` 配置模块中管理环境变量回退："
+
+msgid "Each worker uses an `RForkSession` to own the planner lease, registered tensors, seed HTTP service, and heartbeat. The session coordinates fallback cleanup and finalizes TransferEngine only after the seed service stops and the outgoing lease is released. Configuration, manifest validation, and HTTP clients are separate RFork modules; startup arguments and environment variable names remain unchanged."
+msgstr "每个 worker 使用 `RForkSession` 管理规划器租约、已注册张量、seed HTTP 服务和心跳。Session 协调回退清理，仅在 seed 服务停止且所持租约释放后终结 TransferEngine。配置、manifest 校验和 HTTP 客户端拆分为独立的 RFork 模块；启动参数和环境变量名称保持不变。"
+
+msgid "| Environment variable | Default | Notes |"
+msgstr "| 环境变量 | 默认值 | 备注 |"
+
+msgid "| `MODEL_URL` | unset | |"
+msgstr "| `MODEL_URL` | 未设置 | |"
+
+msgid "| `MODEL_DEPLOY_STRATEGY_NAME` | unset | |"
+msgstr "| `MODEL_DEPLOY_STRATEGY_NAME` | 未设置 | |"
+
+msgid "| `RFORK_SCHEDULER_URL` | unset | |"
+msgstr "| `RFORK_SCHEDULER_URL` | 未设置 | |"
+
+msgid "| `RFORK_SEED_TIMEOUT_SEC` | `5.0` | Finite and positive only. |"
+msgstr "| `RFORK_SEED_TIMEOUT_SEC` | `5.0` | 仅允许有限的正值。 |"
+
+msgid "| `RFORK_REQUEST_TIMEOUT_SEC` | `10.0` | Finite and positive only. |"
+msgstr "| `RFORK_REQUEST_TIMEOUT_SEC` | `10.0` | 仅允许有限的正值。 |"
+
+msgid "| `RFORK_SEED_BIND_HOST` | `0.0.0.0` | |"
+msgstr "| `RFORK_SEED_BIND_HOST` | `0.0.0.0` | |"
+
+msgid "| `RFORK_SEED_ADVERTISE_HOST` | auto-detect | |"
+msgstr "| `RFORK_SEED_ADVERTISE_HOST` | 自动检测 | |"
+
+msgid ""
+"`model_loader_extra_config` takes precedence over environment values for fields\n"
+"that support environment fallbacks. Numeric values reject booleans, NaN,\n"
+"infinity, and non-positive values. The three operational fields above are\n"
+"JSON-only; invalid explicit values raise `ValueError` rather than using an\n"
+"environment fallback."
+msgstr ""
+"`model_loader_extra_config` 对支持环境变量回退的字段优先于环境变量。数值配置拒绝布尔值、NaN、无穷大和非正数。"
+"上述三个操作字段仅支持 JSON；显式无效值会抛出 `ValueError`，不会使用环境变量回退。"
+
+msgid ""
+"Heartbeat scheduling waits `rfork_heartbeat_interval_sec` after each heartbeat\n"
+"request completes (default: `30.0`); it is not a fixed-rate interval. Seed\n"
+"heartbeats report health and do not renew leases. The lease-release fields\n"
+"affect lease release only; the public synchronous release helper uses the same\n"
+"configured max-attempt and retry-interval values. Client-side seed deregistration\n"
+"(`remove_seed`) keeps its internal retry policy of three attempts with\n"
+"`0.1`-second linear backoff."
+msgstr ""
+"心跳调度会在每次心跳请求完成后等待 `rfork_heartbeat_interval_sec`（默认值：`30.0`），而不是采用固定速率间隔。"
+"种子心跳用于上报健康状态，不会续租。租约释放字段仅影响租约释放；公开的同步释放辅助函数使用相同的已配置最大尝试次数和重试间隔值。"
+"客户端种子注销（`remove_seed`）仍使用内部重试策略：尝试三次，采用 `0.1` 秒线性退避。"
+
+msgid ""
+"The parallel ranks keep seed and receiver on the same model shard, while the\n"
+"disaggregation role (`kv_role`) and the physical node are deliberately excluded\n"
+"so prefill and decode instances on different nodes can share seeds."
+msgstr ""
+"并行秩保证种子和接收方位于同一模型分片，而分离角色（`kv_role`）和物理节点被有意排除，因此不同节点上的 prefill "
+"和 decode 实例可以共享种子。"
+
+msgid ""
+"The identity is anchored by a SHA256 compatibility fingerprint covering model\n"
+"revision, dtype, quantization method, a digest of the full quantization config,\n"
+"model architecture, tensor/pipeline/expert parallel world sizes, Ascend NZ\n"
+"layout mode, and hardware layout policy. This prevents an old or differently\n"
+"configured seed from being selected merely because its textual key happens to\n"
+"match."
+msgstr ""
+"该身份由 SHA256 兼容性指纹锚定，涵盖模型修订版本、数据类型、量化方式、完整量化配置的摘要、模型架构、张量/流水线/"
+"专家并行规模、Ascend NZ 布局模式和硬件布局策略。这样可防止旧种子或配置不同的种子仅因文本键碰巧相同而被选中。"
+
+msgid ""
+"Two instances must agree on model identity and parallel layout before the "
+"planner will treat them as interchangeable seeds. The seed key is an opaque "
+"SHA256 digest, so seed and receiver instances must run the same RFork "
+"protocol to derive the same key."
+msgstr ""
+"两个实例必须在模型身份和并行布局上达成一致，规划器才会将它们视为可互换种子。种子键是不透明的 SHA256 "
+"摘要，因此种子实例和接收实例必须运行相同的 RFork 协议才能推导出相同的键。"
+
+msgid "### Planner Responsibilities"
+msgstr "### 规划器职责"
+
+msgid "Lease release runs asynchronously after transfer. Planner release requests never hold the session lock. The client makes at most `rfork_lease_release_max_attempts` release attempts per lease (default: `3`, including the initial request), waiting `rfork_lease_release_retry_interval_sec` seconds (default: `30.0`) between transient failures (network errors, HTTP 408/429, or 5xx). These settings affect lease release only. Other rejected responses stop immediately even when attempts remain; HTTP 200 and 404 retain their existing acknowledgement semantics. The public synchronous release helper uses the same configured max-attempt and retry-interval values. Failed releases do not reload valid weights or prevent model loading from continuing, but the worker is not advertised as a new seed until release is acknowledged. After retry exhaustion, the unresolved lease remains recorded and requires planner-side investigation/recovery. Shutdown does not wait for release I/O and retains TransferEngine resources if release is unresolved."
+msgstr "租约释放在传输完成后异步执行。规划器释放请求不会持有 session 锁。客户端对每个租约最多执行 `rfork_lease_release_max_attempts` 次释放尝试（默认值：`3`，包括初始请求），在可重试故障（网络错误、HTTP 408/429 或 5xx）之间等待 `rfork_lease_release_retry_interval_sec` 秒（默认值：`30.0`）。这些设置仅影响租约释放。即使仍有剩余次数，其他被拒绝的响应也会立即停止；HTTP 200 和 404 继续沿用现有确认语义。公开的同步释放辅助函数使用相同的已配置最大尝试次数和重试间隔值。释放失败不会重新加载有效权重，也不会阻止模型继续加载，但在释放得到确认前，worker 不会作为新的 seed 上报。重试耗尽后，未解决的租约仍会被记录，需要规划器侧调查/恢复。关闭过程不会等待释放 I/O；如果释放未解决，仍会保留 TransferEngine 资源。"
+
+msgid "The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The loader acquires its lease after model initialization and any required layout preparation/synchronization. Size the timeout for memory registration, metadata fetch, transfer and asynchronous release, including retry delays. Initialization and layout timings are logged separately. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer."
+msgstr "示例规划器默认在 60 秒后回收遗留租约，此机制独立于 seed 心跳过期。可通过 `--lease-ttl-sec` 或 `RFORK_MOCK_LEASE_TTL_SEC` 设置正整数秒数；显式 CLI 值优先于有效的环境变量值。加载器在模型初始化及必要的布局准备和同步完成后才获取租约。超时应覆盖内存注册、元数据获取、传输及异步释放，包括重试等待。初始化和布局处理耗时分别记录。Seed 心跳不会续租。过期租约释放时返回 404，当前客户端将其视为已经释放；启动成功并不证明租约在整个传输期间都有效。"
+
+msgid "If no seed is available after preparation, the loader discards the prepared model and loads from the checkpoint. This adds preparation cost to a seed miss. Before fallback, it restores the pre-attempt compilation registries and rotary cache so shared main/draft state is preserved. Model construction and rollback in a worker are assumed to be serialized. Lease renewal is not enabled: it requires explicit support from both planner and client."
+msgstr "准备完成后如果没有可用 seed，加载器会丢弃已准备的模型并从检查点加载，因此 seed 未命中会增加准备成本。回退前会恢复本次尝试之前的编译注册表和旋转位置编码缓存，保留 main/draft 共享状态。此逻辑假设同一 worker 内的模型构造和回退串行执行。当前未启用租约续租，因为这需要规划器和客户端双方明确支持。"
+
+msgid "After an instance becomes ready, each worker periodically reports its seed metadata to the planner. A new instance asks the planner for a seed with the same seed key; the planner selects one with available capacity and returns a lease. A missing or unhealthy seed is not fatal because the destination can use the default loader and later join the seed pool itself."
+msgstr "实例就绪后，每个 worker 会定期向规划器上报 seed 元数据。新实例使用相同的 seed key 向规划器请求 seed；规划器选择仍有可用容量的 seed 并返回租约。缺失或不健康的 seed 不会导致致命错误，因为目标实例可以改用默认加载器，并在随后自行加入 seed 池。"
+
+msgid "The bundled planner demonstrates this workflow, but it is a functional example rather than a production scheduler. A production planner should provide:"
+msgstr "随附的规划器演示了这一流程，但它只是功能示例，而不是生产级调度器。生产环境中的规划器应提供："
+
+msgid "- compatibility matching based on model identity and parallel deployment topology;"
+msgstr "- 基于模型身份和并行部署拓扑进行兼容性匹配；"
+
+msgid "- heartbeat-based health tracking and stale-seed removal;"
+msgstr "- 基于心跳的健康状态跟踪和过期 seed 清理；"
+
+msgid "- capacity and lease accounting so one seed is not overloaded by concurrent destinations;"
+msgstr "- 容量与租约核算，避免单个 seed 被并发目标实例压垮；"
+
+msgid "- reliable lease release when a transfer completes or fails;"
+msgstr "- 在传输完成或失败时可靠地释放租约；"
+
+msgid "- observability for seed selection, transfer failures, and fallback frequency."
+msgstr "- 针对 seed 选择、传输失败和回退频率的可观测性。"
+
+msgid ""
+"- Apply the same vLLM Ascend code to both the seed instance and the receiver instance.\n"
+"- Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.\n"
+"- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code when operating with an older planner; compatibility fingerprints also reject incompatible old seeds before native transfer.\n"
+"- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`."
+msgstr ""
+"- 在种子实例和接收实例上使用相同的 vLLM Ascend 代码。\n"
+"- 修改 RFork 代码后重启规划器和所有 vLLM 实例，因为已有种子仍保留旧的传输元数据。\n"
+"- 在修改模型参数或 RFork 代码后、与较旧规划器协同运行时，使用新的 `model_deploy_strategy_name`；兼容性指纹也会在原生传输前拒绝不兼容的旧种子。\n"
+"- RFork 传输成功时会记录 `transfer weights starts` 和 `transfer weights time`；回退路径会记录 `RFork transfer failed`。"
+
+msgid ""
+"- RFork requires `MemoryRegistration`, `ErrorCode.kNotReady`, `batch_register_memory_ex()`, and `finalize()` from `YuanRong TransferEngine`. Packages without these APIs cannot initialize the transfer backend; RFork falls back to the default loader and does not start a seed service.\n"
+"- If RFork is used, **each worker process** must bind a listening port. The seed bind host is configurable and the port is assigned randomly.\n"
+"- RFork currently requires all materialized model parameters and registered buffers to reside on NPU. Mixed CPU/NPU or CPU-offloaded model state is rejected and falls back to the default loader rather than performing a partial transfer.\n"
+"- Keep the seed bind/advertise addresses reachable from the receiver workers. Transport encryption and access control remain the deployment's responsibility, so use HTTPS and network isolation for untrusted networks.\n"
+"- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.\n"
+"- The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol."
+msgstr ""
+"- RFork 需要 `YuanRong TransferEngine` 提供 `MemoryRegistration`、`ErrorCode.kNotReady`、`batch_register_memory_ex()` 和 `finalize()`。不包含这些 API 的软件包无法初始化传输后端；RFork 会回退到默认加载器，且不会启动 seed 服务。\n"
+"- 使用 RFork 时，**每个 worker 进程**都必须绑定一个监听端口。种子绑定地址可配置，端口随机分配。\n"
+"- RFork 当前要求所有已实体化的模型参数和已注册缓冲区都位于 NPU。混合 CPU/NPU 或 CPU 卸载的模型状态会被拒绝并回退到默认加载器，避免执行不完整传输。\n"
+"- 请确保接收 worker 可以访问种子的绑定和上报地址。传输加密与访问控制由部署环境负责，因此在不可信网络中应使用 HTTPS 和网络隔离。\n"
+"- RFork 权重传输不支持动态 EPLB，因为种子服务启动后专家权重和放置位置可能发生变化。如果 `eplb_config.dynamic_eplb` 或 `eplb_config.expert_map_record_path` 启用动态 EPLB，RFork 会跳过传输并使用默认模型加载器。\n"
+"- 示例 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 只是简单的模拟实现。如需更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现自己的规划器。"
+
+
+msgid "Dashed arrows show **Planner coordination**, thin arrows show **Seed HTTP metadata exchange**, and the thick arrow shows **TransferEngine weight data**. The destination requests the seed's transfer session, tensor addresses, and shapes over HTTP, then initiates batch reads from Seed NPU memory into its local NPU buffers. The Planner and Seed HTTP service do not carry tensor contents."
+msgstr "虚线箭头表示 **Planner 调度协调**，细实线箭头表示 **Seed HTTP 元数据交换**，粗实线箭头表示 **TransferEngine 权重数据传输**。目标端通过 HTTP 请求 seed 的传输会话、张量地址和形状，再发起批量读取，将 Seed NPU 内存中的权重读入本地 NPU 缓冲区。Planner 和 Seed HTTP 服务均不传输张量内容。"
+
+msgid "The diagram shows one matching rank pair. Each destination worker independently acquires a seed for its TP/PP/EP shard identity and transfers that shard into its own NPU buffers. Different destination ranks may select corresponding seed workers from different instances. After loading and releasing its source lease, a destination can advertise itself as another seed."
+msgstr "图中展示一对匹配的 rank。每个目标端 worker 根据自身 TP/PP/EP 分片身份独立申请 seed，并将对应分片传输到自己的 NPU 缓冲区。不同目标端 rank 可以从不同实例中选择对应的 seed worker。加载完成并释放源端租约后，目标端也可以将自身发布为新的 seed。"
+
+msgid "5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader."
+msgstr "5. 如果没有可用 seed，或任一传输步骤失败，RFork 会清理状态并回退到默认加载器。"
+
+msgid "6. After a successful transfer, RFork schedules asynchronous source-lease release, completes any remaining post-load processing, and switches the model to evaluation mode. It then starts a local seed service and advertises it to the planner when the source lease has been released. A seed-service startup failure retains the loaded model and cleans up Seed resources as far as safely possible."
+msgstr "6. 传输成功后，RFork 会调度异步源端租约释放，完成剩余的加载后处理，并将模型切换为评估模式。源端租约释放后，再启动本地 seed 服务并向 Planner 上报。Seed 服务启动失败时会保留已加载模型，并在安全允许的范围内清理 Seed 资源。"
+
+msgid "Model initialization and required layout preparation happen **before lease acquisition**, keeping the lease focused on registration, metadata exchange, and transfer. Session setup, initialization, layout, or post-load errors also use the fallback cleanup path. If the default loader itself fails, model loading fails."
+msgstr "模型初始化和必要的布局准备发生在**申请租约之前**，使租约主要覆盖内存注册、元数据交换和权重传输。会话创建、初始化、布局处理或加载后处理发生错误时，也会进入回退清理路径。如果默认加载器本身失败，模型加载将失败。"
+
+msgid "Source-lease release runs asynchronously with bounded retries. A pending release delays Seed publication without discarding the loaded model; publication can resume after release is acknowledged. Exhausted release retries or incomplete cleanup suppress publication. A Seed service startup or advertisement failure also **keeps the loaded model**, with no checkpoint reload. When dynamic EPLB disables RFork, the loader bypasses this flow and uses the default loader directly."
+msgstr "源端租约通过异步方式释放，并设置有限的重试次数。释放尚未完成时会延迟发布 Seed，但不会丢弃已加载模型；确认释放后可以继续发布。重试次数耗尽或清理未完成时，不会发布 Seed。Seed 服务启动或上报失败时也会**保留已加载模型**，无需重新读取检查点。动态 EPLB 导致 RFork 被禁用时，加载器会跳过此流程，直接使用默认加载器。"
+
+msgid "Release logs include a hashed lease identifier, attempt count, elapsed acquisition-to-release time, HTTP status and a bounded response excerpt with control characters removed and the lease ID redacted. These allow diagnosis without printing the raw USER_ID credential. Per-request timeouts are connect/read inactivity limits, not a strict total wall-clock deadline."
+msgstr "释放日志包含哈希后的租约标识、尝试次数、从获取到释放的耗时、HTTP 状态，以及长度受限的响应摘要；摘要会去除控制字符并隐藏租约 ID。这些信息可用于诊断，同时避免输出原始 USER_ID 凭据。每次请求的超时限制针对连接或读取阶段的无活动时间，并非严格的总耗时上限。"
+
+msgid "For example, start the planner with a 60-second lease TTL:"
+msgstr "例如，使用 60 秒的租约 TTL 启动 Planner："
+
+msgid "Increasing the lease TTL does not change the seed heartbeat TTL (`--heartbeat-ttl-sec`, default 60 seconds). The planner process reads these settings at startup; changing a client-side environment variable does not reconfigure a running planner."
+msgstr "增大租约 TTL 不会改变 seed 心跳 TTL（`--heartbeat-ttl-sec`，默认 60 秒）。Planner 进程在启动时读取这些配置；修改客户端环境变量不会重新配置已运行的 Planner。"
