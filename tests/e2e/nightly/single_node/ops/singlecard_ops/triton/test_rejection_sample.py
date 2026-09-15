@@ -603,7 +603,6 @@ def test_rejection_random_sample_boundary(is_greedy_pattern):
         None,  # synthetic_conditional_rates
         NO_ORI_TARGET_PROBS=True,
         NO_DRAFT_PROBS=False,
-        ENABLE_REDUCE_SAMPLING=False,
         SYNTHETIC_MODE=False,
         ENTROPY_VERIFY=False,
         BLOCK_SIZE=block_size,
