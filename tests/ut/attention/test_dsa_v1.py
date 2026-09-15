@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -61,6 +62,24 @@ from vllm_ascend.worker.v2.pcp_manager import (
     AscendPCPAttentionContext,
     AscendPCPManager,
 )
+
+_DSA_C_ASCEND_OPS = (
+    "npu_sparse_attn_sharedkv",
+    "npu_sparse_attn_sharedkv_metadata",
+    "npu_kv_quant_sparse_attn_sharedkv",
+    "npu_kv_quant_sparse_attn_sharedkv_metadata",
+    "kv_compress_epilog",
+    "npu_scatter_nd_update_sk",
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_dsa_c_ascend_ops():
+    # CPU images do not register these custom ops on torch.ops._C_ascend.
+    with ExitStack() as stack:
+        for name in _DSA_C_ASCEND_OPS:
+            stack.enter_context(patch.object(torch.ops._C_ascend, name, create=True, new=MagicMock()))
+        yield
 
 
 def test_build_vision_bidirectional_swa_indices():
