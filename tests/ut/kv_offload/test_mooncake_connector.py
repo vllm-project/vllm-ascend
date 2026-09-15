@@ -2796,6 +2796,17 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(ptrs, [layer_tensor.data_ptr()])
         self.assertEqual(lengths, [layer_size])
 
+    def test_registered_hybrid_buffer_merges_overlapping_descriptors(self):
+        alignment = 2 * 1024 * 1024
+
+        ptrs, lengths = MooncakeConnectorWorker._merge_overlapping_register_regions(
+            [4 * alignment, 2 * alignment, 10 * alignment],
+            [2 * alignment, 4 * alignment, alignment],
+        )
+
+        self.assertEqual(ptrs, [2 * alignment, 10 * alignment])
+        self.assertEqual(lengths, [4 * alignment, alignment])
+
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())

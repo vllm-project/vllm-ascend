@@ -2471,6 +2471,32 @@ class MooncakeConnectorWorker:
             )
         return candidates.pop() if candidates else None
 
+    @staticmethod
+    def _merge_overlapping_register_regions(ptrs: list[int], lengths: list[int]) -> tuple[list[int], list[int]]:
+        """Coalesce ranges that Mooncake would reject as overlapping."""
+        if len(ptrs) != len(lengths):
+            raise ValueError("Mooncake register pointers and lengths must match.")
+
+        ranges = sorted((ptr, ptr + length) for ptr, length in zip(ptrs, lengths) if length > 0)
+        merged: list[tuple[int, int]] = []
+        for start, end in ranges:
+            if merged and start < merged[-1][1]:
+                previous_start, previous_end = merged[-1]
+                merged[-1] = (previous_start, max(previous_end, end))
+            else:
+                merged.append((start, end))
+
+        if len(merged) != len(ranges):
+            logger.warning(
+                "Coalesced %d overlapping Mooncake KV registration ranges into %d ranges.",
+                len(ranges),
+                len(merged),
+            )
+        return (
+            [start for start, _ in merged],
+            [end - start for start, end in merged],
+        )
+
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
@@ -2539,7 +2565,7 @@ class MooncakeConnectorWorker:
             ptrs.extend(base for base, _ in regions_by_storage.values())
             lengths.extend(end - base for base, end in regions_by_storage.values())
 
-        return ptrs, lengths
+        return self._merge_overlapping_register_regions(ptrs, lengths)
 
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
