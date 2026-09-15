@@ -180,7 +180,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
-        # Upstream propose builds metadata before selecting eager or graph replay.
+        # Eager DP dispatch can pad tokens while retaining the local request count.
+        # Size every MLA metadata buffer for the query rows actually executed.
+        if self.attn_architecture == "MLA":
+            num_reqs_padded, remainder = divmod(kwargs["num_tokens_padded"], self.num_query_per_req)
+            assert remainder == 0, "MLA draft tokens must contain whole query groups"
         metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
         if self.attn_architecture == "MLA":
             return self._update_draft_attn_metadata(metadata, num_reqs_padded)
