@@ -20,6 +20,8 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
 
 @triton.jit(
     do_not_specialize=[
@@ -52,7 +54,8 @@ def _q_gather_prep_head_major_kernel(
 ):
     """Assemble the fused query directly in head-major layout.
 
-    One program per (head, token) row of the output. Writes the fused row
+    Grid-stride over the ``num_heads * num_tokens`` output rows: each program
+    processes a subset of the (head, token) rows. Writes the fused row
     ``[nope | rope]`` into ``out[h, t, :]`` (contiguous), producing exactly
     the buffer that ``all_gather_into_tensor`` needs for the native-DCP head
     gather. This replaces the torch ``cat -> permute -> contiguous`` chain
@@ -65,22 +68,28 @@ def _q_gather_prep_head_major_kernel(
     inside the tensor storages); any other shape falls back to the torch
     assembly in the caller (``prep_query_head_major`` raises).
     """
-    row = tl.program_id(0)
-    head_idx = row // num_tokens
-    token_idx = row % num_tokens
-    dst_base = row * total_dim
-    src_base_n = token_idx * qn_stride_t + head_idx * qn_stride_h
-    src_base_p = token_idx * qp_stride_t + head_idx * qp_stride_h
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    total_tasks = num_tokens * num_heads
 
     offs_n = tl.arange(0, BLOCK_N)
     n_mask = offs_n < nope_dim
-    qn = tl.load(qn_ptr + src_base_n + offs_n, mask=n_mask, other=0)
-    tl.store(out_ptr + dst_base + offs_n, qn, mask=n_mask)
-
     offs_p = tl.arange(0, BLOCK_R)
     p_mask = offs_p < rope_dim
-    qp = tl.load(qp_ptr + src_base_p + offs_p, mask=p_mask, other=0)
-    tl.store(out_ptr + dst_base + nope_dim + offs_p, qp, mask=p_mask)
+
+    for task_id in range(pid, total_tasks, num_programs):
+        row = task_id
+        head_idx = row // num_tokens
+        token_idx = row % num_tokens
+        dst_base = row * total_dim
+        src_base_n = token_idx * qn_stride_t + head_idx * qn_stride_h
+        src_base_p = token_idx * qp_stride_t + head_idx * qp_stride_h
+
+        qn = tl.load(qn_ptr + src_base_n + offs_n, mask=n_mask, other=0)
+        tl.store(out_ptr + dst_base + offs_n, qn, mask=n_mask)
+
+        qp = tl.load(qp_ptr + src_base_p + offs_p, mask=p_mask, other=0)
+        tl.store(out_ptr + dst_base + nope_dim + offs_p, qp, mask=p_mask)
 
 
 def _qualifies_fast_path(
@@ -159,7 +168,10 @@ def prep_query_head_major(
         dtype=ql_nope.dtype,
         device=ql_nope.device,
     )
-    grid = (num_tokens * num_heads,)
+    init_device_properties_triton()
+    num_vectorcore = get_vectorcore_num()
+    grid = (min(num_tokens * num_heads, num_vectorcore),)
+
     _q_gather_prep_head_major_kernel[grid](
         ql_nope,
         q_pe,
@@ -177,4 +189,5 @@ def prep_query_head_major(
         BLOCK_R=block_r,
         multibuffer=False,
     )
+
     return out
