@@ -2502,15 +2502,6 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-            is_prefill_batch = bool(torch.any(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-                < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
-            ))
-            # AIV all-reduce is asynchronous with respect to the host. Drain
-            # every prefill forward at the batch boundary, including a short
-            # final chunk. Decode remains asynchronous and pays no sync cost.
-            if is_prefill_batch and os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
-                torch.npu.current_stream().synchronize()
             self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
                 profiling_chunk_config,
                 execution_start_time,
@@ -2631,6 +2622,13 @@ class NPUModelRunner(GPUModelRunner):
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+        num_reqs = self.input_batch.num_reqs
+        is_prefill_batch = bool(
+            torch.any(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+                < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
+            )
+        )
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -2744,6 +2742,12 @@ class NPUModelRunner(GPUModelRunner):
                         draft_by_req_id.get(req_id, [])
                         for req_id in req_ids_output_copy
                     ]
+
+        # AIV all-reduce is asynchronous with respect to the host. Drain once
+        # after both target and draft forwards for every prefill batch,
+        # including a short final chunk. Decode remains asynchronous.
+        if is_prefill_batch and os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
+            torch.npu.current_stream().synchronize()
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
