@@ -40,8 +40,8 @@ import torch
 try:
     from vllm.triton_utils import HAS_TRITON, tl, triton
 except ImportError:  # standalone test environments without vllm installed
-    import triton
-    import triton.language as tl
+    import triton  # type: ignore[import-untyped]
+    import triton.language as tl  # type: ignore[import-untyped]
 
     HAS_TRITON = True
 
