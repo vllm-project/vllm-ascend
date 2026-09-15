@@ -27,6 +27,7 @@ from vllm_ascend.attention.mla_v1 import (
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
+    assert AscendMlaDCPImpl.can_return_lse_for_decode
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
@@ -60,7 +61,43 @@ def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries(
     builder.dcp_rank = 0
     builder.cp_local_block_size = 4
     builder.query_lens = torch.tensor([4, 4])
-    builder._require_dcp_metadata = lambda _metadata: dcp_metadata
+    with patch.object(
+        AscendMLAMetadataBuilder,
+        "build_decode_metadata",
+        return_value=decode,
+    ):
+        result = builder.build_decode_metadata(
+            common_prefix_len=0,
+            common_attn_metadata=SimpleNamespace(
+                context_parallel_metadata=dcp_metadata,
+                dcp_local_seq_lens=None,
+            ),
+        )
+
+    assert result is decode
+    assert result.cp_seq_len.tolist() == [12]
+    assert result.cp_history_seq_len == [8, 0]
+    assert result.actual_seq_lengths_q == [4, 8]
+    assert result.dcp_mtp_attn_mask is None
+
+
+def test_mla_dcp_decode_metadata_uses_mrv2_cpu_lengths() -> None:
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(4),
+        block_table=torch.ones((1, 2), dtype=torch.int32),
+        seq_lens=torch.tensor([20]),
+        max_seq_lens=20,
+        seq_lens_list=[20],
+        # One real request followed by one FULL-graph padded request.
+        actual_seq_lengths_q=[4, 8],
+    )
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 1
+    builder.dcp_size = 2
+    builder.dcp_rank = 0
+    builder.cp_local_block_size = 4
+    builder.seq_lens = torch.tensor([20], dtype=torch.int32)
+    builder.query_lens = torch.tensor([4], dtype=torch.int32)
 
     with patch.object(
         AscendMLAMetadataBuilder,
@@ -69,11 +106,16 @@ def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries(
     ):
         result = builder.build_decode_metadata(
             common_prefix_len=0,
-            common_attn_metadata=SimpleNamespace(),
+            common_attn_metadata=SimpleNamespace(
+                context_parallel_metadata=None,
+                # Current main leaves this optional value unset; MLA derives the
+                # required all-rank host lists from its existing CPU seq_lens.
+                dcp_local_seq_lens=None,
+            ),
         )
 
     assert result is decode
-    assert result.cp_seq_len.tolist() == [12]
+    assert result.cp_seq_len == [12]
     assert result.cp_history_seq_len == [8, 0]
     assert result.actual_seq_lengths_q == [4, 8]
     assert result.dcp_mtp_attn_mask is None
