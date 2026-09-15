@@ -44,10 +44,19 @@ def _make_model_config(**kwargs) -> SimpleNamespace:
 def _make_vllm_config(
     model_config=None,
     speculative_config=None,
+    lora_config=None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=model_config,
         speculative_config=speculative_config,
+        lora_config=lora_config,
+    )
+
+
+def _make_speculative_config(method: str, num_speculative_tokens_per_batch_size=None):
+    return SimpleNamespace(
+        method=method,
+        num_speculative_tokens_per_batch_size=num_speculative_tokens_per_batch_size,
     )
 
 
@@ -94,28 +103,76 @@ class TestIsSupportedV2ModelRunnerFeature:
     @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash"])
     def test_whitelisted_methods(self, monkeypatch, method):
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        config = _make_vllm_config(speculative_config=SimpleNamespace(method=method))
+        config = _make_vllm_config(speculative_config=_make_speculative_config(method))
 
         assert is_supported_v2_model_runner_feature(config) is True
 
     @pytest.mark.parametrize("method", ["ngram", "ngram_gpu", "eagle", "unknown_method"])
     def test_unsupported_method(self, method):
-        config = _make_vllm_config(speculative_config=SimpleNamespace(method=method))
+        config = _make_vllm_config(speculative_config=_make_speculative_config(method))
 
         assert is_supported_v2_model_runner_feature(config) is False
 
     def test_whitelisted_method_logs_info(self, monkeypatch):
         info_calls = []
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
-        config = _make_vllm_config(speculative_config=SimpleNamespace(method="eagle3"))
+        config = _make_vllm_config(speculative_config=_make_speculative_config("eagle3"))
 
         assert is_supported_v2_model_runner_feature(config) is True
         assert len(info_calls) == 1
 
+    def test_lora_is_excluded(self, monkeypatch):
+        warning_calls = []
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
+        config = _make_vllm_config(lora_config=object())
+
+        assert is_supported_v2_model_runner_feature(config) is False
+        assert len(warning_calls) == 1
+
+    def test_lora_is_excluded_even_with_whitelisted_spec(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config("eagle3"),
+            lora_config=object(),
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is False
+
+    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash"])
+    def test_dynamic_speculative_decoding_is_excluded(self, monkeypatch, method):
+        warning_calls = []
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config(
+                method,
+                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
+            )
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is False
+        assert len(warning_calls) == 1
+
 
 class TestV2ModelRunnerEnvironmentReady:
     def test_unsupported_feature(self):
-        config = _make_vllm_config(speculative_config=SimpleNamespace(method="ngram"))
+        config = _make_vllm_config(speculative_config=_make_speculative_config("ngram"))
+
+        assert _v2_model_runner_environment_ready(config) is False
+
+    def test_lora_is_not_ready(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(lora_config=object())
+
+        assert _v2_model_runner_environment_ready(config) is False
+
+    def test_dynamic_speculative_decoding_is_not_ready(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config(
+                "dflash",
+                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
+            )
+        )
 
         assert _v2_model_runner_environment_ready(config) is False
 
@@ -185,6 +242,43 @@ class TestUseV2ModelRunner:
 
         assert use_v2_model_runner(config) is False
         assert len(warning_calls) == 1
+
+    def test_default_disabled_for_lora(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(
+            model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]),
+            lora_config=object(),
+        )
+
+        assert use_v2_model_runner(config) is False
+
+    def test_default_disabled_for_dynamic_speculative_decoding(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]),
+            speculative_config=_make_speculative_config(
+                "dflash",
+                num_speculative_tokens_per_batch_size=[[1, 256, 4]],
+            ),
+        )
+
+        assert use_v2_model_runner(config) is False
+
+    def test_env_override_wins_with_lora(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+        config = _make_vllm_config(
+            model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]),
+            lora_config=object(),
+        )
+
+        assert use_v2_model_runner(config) is True
 
 
 class TestV2ModelRunnerValidationPatch:
