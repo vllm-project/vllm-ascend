@@ -1220,7 +1220,10 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            num_prompt_tokens=tracker.num_prompt_tokens or target_token_len,
+            # A resumed MRV2 request re-prefills prompt + previously generated
+            # tokens. Reachability masks must treat that complete range as the
+            # prefill boundary for this generation.
+            num_prompt_tokens=tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len,
             original_block_size=original_block_size,
             last_block_gva=tracker.last_block_gva,
             partial_block_index=partial_block_index,

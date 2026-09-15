@@ -2524,71 +2524,112 @@ class KVPoolWorker:
         send_thread = self.kv_send_thread
         if send_thread is None:
             return
+        assert isinstance(send_thread, KVCacheStoreSendingThread)
         req_id = req_meta.req_id
-        if not send_thread.is_live_store_job(req_meta):  # type: ignore[attr-defined]
+        if not send_thread.is_live_store_job(req_meta):
             return
         token_len = req_meta.token_len_chunk
         block_ids = req_meta.block_ids_by_group[0]
+        save_start_token = send_thread.get_saved_offset(req_id)
         keys, addrs, sizes, _ = self._build_tp_mismatch_keys_and_addrs(
             req_meta.block_hashes,
             block_ids,
             token_len,
             mask_num=0,
-            save_start_token=send_thread.get_saved_offset(req_id),  # type: ignore[attr-defined]
+            save_start_token=save_start_token,
         )
         if not keys:
             return
+        logical_key_count = len(keys)
         partitions = getattr(self.token_database, "partitions", None)
         if self.kv_role == "kv_consumer" and partitions is not None and len(partitions) > 1:
             # TP-mismatch keys still represent logical Decode blocks here.
             # Expand them before lookup so a partial Prefill-PP write retries
             # only the missing physical partition rather than treating rank 0
             # as proof that the whole block exists.
-            keys, addrs, sizes = send_thread._decode_adaptor_prefill_pp(  # type: ignore[attr-defined]
+            keys, addrs, sizes = send_thread._decode_adaptor_prefill_pp(
                 keys,
                 addrs,
                 sizes,
             )
-        exists_states = send_thread.lookup(keys)  # type: ignore[attr-defined]
+        if len(keys) % logical_key_count != 0:
+            raise RuntimeError(
+                f"Prefill-PP adaptor expanded {logical_key_count} TP keys to an invalid count {len(keys)}"
+            )
+        physical_keys_per_logical_key = len(keys) // logical_key_count
+        physical_keys_per_block = self.num_sub_keys * physical_keys_per_logical_key
+        exists_states = send_thread.lookup(keys)
         missing_indices = [i for i, exists in enumerate(exists_states) if not exists]
         if not missing_indices:
             return
-        keys = [keys[i] for i in missing_indices]
-        addrs = [addrs[i] for i in missing_indices]
-        sizes = [sizes[i] for i in missing_indices]
+        missing_keys = [keys[i] for i in missing_indices]
+        missing_addrs = [addrs[i] for i in missing_indices]
+        missing_sizes = [sizes[i] for i in missing_indices]
         if req_meta.current_event is not None:
             req_meta.current_event.synchronize()
         logger.debug(
             "KV pool worker tp_mismatch put req=%s keys=%d sample_keys=%s",
             req_id,
-            len(keys),
-            keys[:3],
+            len(missing_keys),
+            missing_keys[:3],
         )
-        put_result = self.m_store.put(keys, addrs, sizes)
-        if isinstance(put_result, list) and (len(put_result) != len(keys) or not all(put_result)):
-            raise RuntimeError(f"KV store backend partially failed to put TP-mismatch request {req_id}")
-        if put_result is False:
-            raise RuntimeError(f"KV store backend failed to put TP-mismatch request {req_id}")
+        put_result = self.m_store.put(missing_keys, missing_addrs, missing_sizes)
+        if isinstance(put_result, list):
+            if len(put_result) != len(missing_keys):
+                raise RuntimeError(
+                    f"KV store backend returned {len(put_result)} results for {len(missing_keys)} TP-mismatch keys"
+                )
+            put_failed = not all(put_result)
+        else:
+            put_failed = put_result is False
 
         if self.enable_kv_events:
+            successful_missing_indices = (
+                {physical_idx for physical_idx, succeeded in zip(missing_indices, put_result, strict=True) if succeeded}
+                if isinstance(put_result, list)
+                else (set() if put_failed else set(missing_indices))
+            )
+            completed_block_indices = {
+                block_idx
+                for block_idx in {index // physical_keys_per_block for index in missing_indices}
+                if all(
+                    exists_states[index] or index in successful_missing_indices
+                    for index in range(
+                        block_idx * physical_keys_per_block,
+                        min((block_idx + 1) * physical_keys_per_block, len(keys)),
+                    )
+                )
+            }
             event_block_size = (
                 req_meta.original_block_size[0]
                 if isinstance(req_meta.original_block_size, list)
                 else req_meta.original_block_size
             )
             stored_events: list[BlockStored] = []
-            prev_key = None
-            for idx, (start, end, _base_key) in enumerate(
-                self.token_database.process_tokens(token_len, req_meta.block_hashes)
+            group_hashes = get_block_hashes(
+                req_meta.block_hashes,
+                self.block_size,
+                self.token_database.hash_block_size,
+            )
+            for relative_idx, (start, end, _base_key) in enumerate(
+                self.token_database.process_tokens(
+                    token_len,
+                    req_meta.block_hashes,
+                    mask_num=save_start_token,
+                )
             ):
-                if idx >= len(req_meta.block_hashes):
-                    break
-                block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
-                token_ids = send_thread.get_event_token_ids(req_meta, start, end)  # type: ignore[attr-defined]
+                if relative_idx not in completed_block_indices:
+                    continue
+                block_idx = start // self.block_size
+                if block_idx >= len(group_hashes):
+                    continue
+                block_hash = maybe_convert_block_hash(group_hashes[block_idx])
+                parent_hash = maybe_convert_block_hash(group_hashes[block_idx - 1]) if block_idx > 0 else None
+                token_ids = send_thread.get_event_token_ids(req_meta, start, end)
                 stored_events.append(
                     BlockStored(
                         block_hashes=[block_hash],
-                        parent_block_hash=prev_key,
+                        parent_block_hash=parent_hash,
                         token_ids=token_ids,
                         block_size=event_block_size,
                         lora_id=None,
@@ -2596,9 +2637,11 @@ class KVPoolWorker:
                         lora_name=None,
                     )
                 )
-                prev_key = block_hash
             if stored_events:
-                send_thread.update_kv_event(stored_events)  # type: ignore[attr-defined]
+                send_thread.update_kv_event(stored_events)
+        if put_failed:
+            qualifier = "partially " if isinstance(put_result, list) else ""
+            raise RuntimeError(f"KV store backend {qualifier}failed to put TP-mismatch request {req_id}")
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.backend_name == "mooncake" and self.use_block_key_layerwise:

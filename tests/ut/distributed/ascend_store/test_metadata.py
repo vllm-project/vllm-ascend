@@ -656,6 +656,24 @@ class TestReqMeta(unittest.TestCase):
         self.assertEqual(meta.save_end_token, 32)
         self.assertEqual(meta.target_token_len, 33)
 
+    def test_from_request_tracker_uses_mrv2_reprefill_boundary_for_masks(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=64,
+            allocated_block_ids=[0, 1, 2, 3],
+            num_prompt_tokens=32,
+            prefill_end_tokens=48,
+        )
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.num_prompt_tokens, 48)
+
     def test_from_request_tracker_defers_c8_boundary_without_hash(self):
         tracker = RequestTracker(
             req_id="r1",
