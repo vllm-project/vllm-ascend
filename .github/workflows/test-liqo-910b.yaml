@@ -7,5 +7,12 @@ on:
 jobs:
   test:
     runs-on: linux-aarch64-910b-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci-base:latest
+      resources:
+        requests:
+          huawei.com/ascend-1980: 1
+        limits:
+          huawei.com/ascend-1980: 1
     steps:
-      - run: echo "Hello from 910b runner" && sleep 120
+      - run: npu-smi info && sleep 60
