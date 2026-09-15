@@ -195,19 +195,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
 
-    def _reduce_shared_output_if_needed(
-        self,
-        shared_output: torch.Tensor | None,
-        fused_output_is_reduced: bool,
-    ) -> torch.Tensor | None:
-        if (
-            shared_output is not None
-            and fused_output_is_reduced
-            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
-        ):
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
-        return shared_output
-
     @property
     def local_num_experts(self) -> int:
         """Number of physical experts managed by this EPLB layer."""
@@ -217,6 +204,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
+    def _should_reduce_routed_before_combine(self) -> bool:
+        """Static layer policy; communication-dependent decisions stay in the op."""
+        # Shared DP already produces a complete output, so reduce routed first.
+        if self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
+            return True
+        # A routed transform must receive the complete TP result.
+        if self.routed_output_transform is None or self.moe_config.is_sequence_parallel:
+            return False
+        return self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1
+
     # Shared-expert layout-specific communication is handled by
     # AscendSharedExperts, so only standard TP weights need a separate
     # all-reduce when routed output has already been reduced.
@@ -225,46 +222,40 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_output: torch.Tensor | None,
         fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
-        if fused_output_is_reduced is None:
-            fused_output_is_reduced = self._fused_output_is_reduced
-        return self._reduce_shared_output_if_needed(
-            shared_output,
-            fused_output_is_reduced,
-        )
+        if (
+            shared_output is None
+            or self._get_shared_expert_parallel_mode() is not SharedExpertParallelMode.TENSOR_PARALLEL
+        ):
+            return shared_output
+        # The upstream boolean can be specialized during tracing. Only the
+        # model-static early-reduction policy may be tested outside the op.
+        if self._should_reduce_routed_before_combine():
+            return tensor_model_parallel_all_reduce(shared_output)
+        return torch.ops.vllm.maybe_all_reduce_shared_expert(shared_output, self.layer_name)
 
     def _maybe_reduce_routed_output_before_transform(
         self,
         fused_output: torch.Tensor,
         fused_output_is_reduced: bool,
     ) -> tuple[torch.Tensor, bool]:
-        fused_output, fused_output_is_reduced = super()._maybe_reduce_routed_output_before_transform(
-            fused_output,
-            fused_output_is_reduced,
-        )
-
-        if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
-            and not fused_output_is_reduced
-        ):
-            fused_output = tensor_model_parallel_all_reduce(fused_output)
-            fused_output_is_reduced = True
+        if self._should_reduce_routed_before_combine():
+            fused_output = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
+                fused_output, self.layer_name
+            )
+            return fused_output, True
         return fused_output, fused_output_is_reduced
 
-    # Ascend already handles reduction in its own dispatch path, so
-    # the upstream kwarg is accepted for interface alignment only.
     def _maybe_reduce_final_output(  # type: ignore[misc]
         self,
         states: torch.Tensor,
         trunc_size: int | None,
         output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
-        if output_is_reduced is None:
-            output_is_reduced = self._fused_output_is_reduced
-        if not output_is_reduced and not self.moe_config.is_sequence_parallel:
-            # Use the normal TP collective when the upstream reduction
-            # contract requires it. Sequence-parallel outputs are token
-            # shards, so reducing them position-wise would corrupt the result.
-            states = tensor_model_parallel_all_reduce(states)
+        # Do not branch on output_is_reduced: it can describe the tracing
+        # batch rather than the batch replaying this graph. Early reduction
+        # and sequence parallelism are static properties of the layer.
+        if not self.moe_config.is_sequence_parallel and not self._should_reduce_routed_before_combine():
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states, self.layer_name)
         if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
         return states
