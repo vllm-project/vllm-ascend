@@ -89,6 +89,13 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[int]
     ssm_sizes: tuple[int, int]
     local_ip: str = ""
+    # Per cache-entry physical tensors: entry name (a kv_caches key,
+    # identical on both sides) -> flat [ptr0, stride0_bytes, ptr1, ...] for
+    # the entry's tensor tuple. Needed when the prefill side runs PP > 1:
+    # the config-level kv_cache_tensors are packed per stage, so their layer
+    # composition differs from the consumer's full-model table, and whole-
+    # block copies between config-paired tensors land at wrong layer offsets.
+    entry_addrs: dict[str, list[int]] | None = None
 
 
 @dataclass
@@ -410,7 +417,10 @@ class KVCacheRecvingThread(threading.Thread):
         self.hma_group_size = hma_group_size
         self.mamba_ssm_size = mamba_ssm_size
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_entry_addrs: dict[str, dict[int, dict[str, list[int]] | None]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
+        self._entry_windows: dict[str, int] | None = None
+        self._entry_routing_warned: set[tuple] = set()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
         first_kv_cache = next(iter(self.kv_caches.values()))
@@ -601,6 +611,7 @@ class KVCacheRecvingThread(threading.Thread):
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
 
+        transfer_ok = True
         try:
             logger.debug("Starting to transfer KV cache for request %s.", remote_request_id)
             if not self.use_hybrid:
@@ -609,11 +620,19 @@ class KVCacheRecvingThread(threading.Thread):
                 self._transfer_kv_cache_all_groups(req_meta)
             logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
         except Exception:
+            transfer_ok = False
             logger.exception("Failed to transfer KV cache for request %s.", remote_request_id)
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
                 if len(req_meta["local_block_ids"]) > 0:
+                    if not transfer_ok:
+                        logger.error(
+                            "KV transfer failed for request %s but the task is still marked done. "
+                            "Its blocks will be credited as loaded (false external hit) and "
+                            "decoding will read uninitialized memory. See the exception above.",
+                            request_id,
+                        )
                     self.task_tracker.update_done_task_count(request_id)
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
@@ -670,71 +689,82 @@ class KVCacheRecvingThread(threading.Thread):
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            # Entry addresses are only consumed by the PP > 1 routing branch
+            # below; do not touch the table on the PP = 1 positional path.
+            remote_entry_table = (
+                self.remote_entry_addrs[remote_engine_id].get(remote_handshake_port)
+                if self._prefill_pp_size > 1
+                else None
+            )
         session_id = f"{remote_host}:{remote_transfer_port}"
 
-        # With P-side PP the remote worker only owns its stage's
-        # kv_cache_tensors. Offset the local (D) group-major flat addr list to
-        # the remote stage's global group range before zipping, so stage-1
-        # data lands in D's groups 8-15 instead of overwriting groups 0-7.
         local_addrs = local_kv_caches_base_addrs
         block_len_arr = self.block_len_per_addr
         block_stride_arr = self.block_stride_per_addr
         addr_group_arr = self.addr_group_idx
-        if self._prefill_pp_size > 1:
-            tp_num_need_pulls = req_meta["tp_num_need_pulls"]
-            remote_pp_rank = req_meta["offset"] // tp_num_need_pulls
-            num_groups = len(self.kv_cache_config.kv_cache_tensors)
-            groups_per_stage = num_groups // self._prefill_pp_size
-            addrs_per_group, rem = divmod(len(local_addrs), num_groups)
-            if rem != 0:
-                raise ValueError("non-uniform per-group address counts unsupported")
-            if num_groups % self._prefill_pp_size != 0:
-                raise ValueError("pp split not group-aligned")
-            start = remote_pp_rank * groups_per_stage * addrs_per_group
-            end = (remote_pp_rank + 1) * groups_per_stage * addrs_per_group
-            local_addrs = local_addrs[start:end]
-            block_len_arr = self.block_len_per_addr[start:end]
-            block_stride_arr = self.block_stride_per_addr[start:end]
-            if addr_group_arr:
-                addr_group_arr = self.addr_group_idx[start:end]
-            logger.debug(
-                "Cross-PP pull alignment: remote_port=%d -> pp_rank=%d local_addrs[%d:%d]=%d remote=%d",
-                remote_handshake_port,
-                remote_pp_rank,
-                start,
-                end,
-                len(local_addrs),
-                len(remote_kv_caches_base_addrs),
-            )
 
         req_start_time = time.perf_counter()
-        src_list, dst_list, length_list = [], [], []
-        for i in range(self.hma_group_size):
-            if not remote_block_ids[i] or not local_block_ids[i]:
-                continue
-            cur_remote_block_ids = remote_block_ids[i]
-            cur_local_block_ids = local_block_ids[i]
-            if not isinstance(self.kv_cache_specs[i], MambaSpec) and len(cur_local_block_ids) < len(
-                cur_remote_block_ids
-            ):
-                cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
-            grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
-                cur_remote_block_ids, cur_local_block_ids
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+
+        if self._prefill_pp_size > 1:
+            # A PP-stage producer only owns its stage's KV tensors, and the
+            # config-level kv_cache_tensors are packed per stage, so their
+            # layer composition differs from the consumer's full-model table
+            # (e.g. DeepSeek-V4: 2 layers per 32768B tensor on the producer
+            # vs 4-layer stride-2 overlapping windows on the consumer).
+            # Positional pairing between the two tables then copies real KV
+            # bytes at wrong layer-composition offsets. Route through cache
+            # ENTRIES instead: entry names are kv_caches keys, identical on
+            # both sides, and slot semantics hold regardless of how each
+            # side packs entries into physical tensors.
+            if self.has_mamba:
+                raise NotImplementedError(
+                    "MooncakeHybridConnector does not support Mamba groups with prefill pp_size > 1 yet."
+                )
+            if not remote_entry_table:
+                raise ValueError(
+                    "MooncakeHybridConnector with prefill pp_size > 1 needs the prefill workers to "
+                    "advertise per-entry tensor addresses (entry_addrs) in the handshake metadata, "
+                    f"but peer {remote_host}:{remote_handshake_port} did not. Both the P and D sides "
+                    "must run a version including this change."
+                )
+            self._append_entry_routing_segments(
+                local_block_ids,
+                remote_block_ids,
+                remote_entry_table,
+                src_list,
+                dst_list,
+                length_list,
             )
-            for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
-                zip(local_addrs, remote_kv_caches_base_addrs)
-            ):
-                if addr_group_arr and i not in addr_group_arr[k]:
+        else:
+            for i in range(self.hma_group_size):
+                if not remote_block_ids[i] or not local_block_ids[i]:
                     continue
-                block_len = block_len_arr[k]
-                block_stride = block_stride_arr[k]
-                for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
-                    src = src_layer_base_addr + local_block_id[0] * block_stride
-                    dst = dst_layer_base_addr + remote_block_id[0] * block_stride
-                    length = block_len * len(local_block_id)
-                    src_list.append(src)
-                    dst_list.append(dst)
-                    length_list.append(length)
+                cur_remote_block_ids = remote_block_ids[i]
+                cur_local_block_ids = local_block_ids[i]
+                if not isinstance(self.kv_cache_specs[i], MambaSpec) and len(cur_local_block_ids) < len(
+                    cur_remote_block_ids
+                ):
+                    cur_remote_block_ids = cur_remote_block_ids[-len(cur_local_block_ids) :]
+                grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                    cur_remote_block_ids, cur_local_block_ids
+                )
+                for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
+                    zip(local_addrs, remote_kv_caches_base_addrs)
+                ):
+                    if addr_group_arr and i not in addr_group_arr[k]:
+                        continue
+                    block_len = block_len_arr[k]
+                    block_stride = block_stride_arr[k]
+                    for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                        src = src_layer_base_addr + local_block_id[0] * block_stride
+                        dst = dst_layer_base_addr + remote_block_id[0] * block_stride
+                        length = block_len * len(local_block_id)
+                        src_list.append(src)
+                        dst_list.append(dst)
+                        length_list.append(length)
 
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
@@ -755,6 +785,120 @@ class KVCacheRecvingThread(threading.Thread):
             self.tp_rank,
             session_id,
         )
+
+    def _get_entry_windows(self) -> dict[str, int]:
+        """Entry name -> sliding window in tokens (absent = not windowed).
+
+        Keyed by ENTRY name, never by transformer layer index: several
+        groups can share one layer (e.g. main KV vs indexer vs compressor
+        state over the same layers) with different window semantics, and a
+        layer-keyed map leaks one group's window into another group's
+        alignment decisions."""
+        if self._entry_windows is None:
+            ew: dict[str, int] = {}
+            for group in self.kv_cache_config.kv_cache_groups:
+                spec = group.kv_cache_spec
+                per_layer = getattr(spec, "kv_cache_specs", None)
+                items = per_layer.items() if per_layer else [(nm, spec) for nm in group.layer_names]
+                for nm, layer_spec in items:
+                    if isinstance(layer_spec, SlidingWindowSpec):
+                        ew[nm] = layer_spec.sliding_window
+            self._entry_windows = ew
+        return self._entry_windows
+
+    def _append_entry_routing_segments(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        remote_entry_table: dict[str, list[int]],
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+    ) -> None:
+        """Build transfer segments addressing the remote tensors per cache entry.
+
+        For every kv cache group i, transfer group i's blocks through each of
+        group i's cache entries: local tensor @ local ids <- remote entry
+        tensor @ remote ids. Entry names are kv_caches keys and identical on
+        both sides, so slot semantics hold regardless of how each side packs
+        entries into physical tensors: slot b of an entry's tensor holds that
+        entry's page for whichever group owns block b."""
+        entry_windows = self._get_entry_windows()
+        for i in range(self.hma_group_size):
+            if not local_block_ids[i] or i >= len(remote_block_ids):
+                continue
+            if isinstance(self.kv_cache_specs[i], MambaSpec):
+                continue
+            # Windowed groups carry a reserved null block (id <= 0) padding
+            # out-of-window positions. It never holds request data and the
+            # consumer's lists exclude it, so an unstripped null shifts the
+            # positional mapping by one block.
+            cur_local_block_ids = [b for b in local_block_ids[i] if b > 0]
+            cur_remote_block_ids = [b for b in remote_block_ids[i] if b > 0]
+            if not cur_local_block_ids or not cur_remote_block_ids:
+                continue
+            n = min(len(cur_local_block_ids), len(cur_remote_block_ids))
+            if n != len(cur_local_block_ids) or n != len(cur_remote_block_ids):
+                # The producer's advertised list for a sliding-window group
+                # is the window tail (clipped in get_sw_clipped_blocks), and
+                # both sides' ceil-rounding can differ by a block. Tail-align
+                # only when every entry of this group is windowed; a merged
+                # group mixing windowed and full-attention entries keeps the
+                # head (tail alignment would drop its earliest tokens).
+                entry_names = self.kv_cache_config.kv_cache_groups[i].layer_names
+                vals = [entry_windows.get(nm, 0) for nm in entry_names]
+                pair_window = min(vals) if vals and all(v > 0 for v in vals) else 0
+                logger.info(
+                    "Cross-PP entry routing length mismatch (align): g=%d window=%d local=%s remote=%s -> n=%d",
+                    i,
+                    pair_window,
+                    list(cur_local_block_ids),
+                    list(cur_remote_block_ids),
+                    n,
+                )
+                cur_local_block_ids = cur_local_block_ids[-n:] if pair_window > 0 else cur_local_block_ids[:n]
+                cur_remote_block_ids = cur_remote_block_ids[:n]
+            grouped_remote, grouped_local = group_concurrent_contiguous(cur_remote_block_ids, cur_local_block_ids)
+            for entry_name in self.kv_cache_config.kv_cache_groups[i].layer_names:
+                tensors_d = self.kv_caches.get(entry_name)
+                flat_p = remote_entry_table.get(entry_name)
+                if tensors_d is None:
+                    warn_key = (i, entry_name, "local")
+                    if warn_key not in self._entry_routing_warned:
+                        self._entry_routing_warned.add(warn_key)
+                        logger.warning(
+                            "Cross-PP entry routing: entry %s (g=%d) not in local kv_caches, skipped",
+                            entry_name,
+                            i,
+                        )
+                    continue
+                if not flat_p:
+                    # Entries of layers outside this peer's PP stage are
+                    # absent from its table by construction; expected.
+                    continue
+                td_list = tensors_d if isinstance(tensors_d, (tuple, list)) else (tensors_d,)
+                for j, td in enumerate(td_list):
+                    if 2 * j + 1 >= len(flat_p):
+                        break
+                    ptr_p, stride_p = flat_p[2 * j], flat_p[2 * j + 1]
+                    stride_d = td.stride(0) * td.element_size()
+                    if stride_d != stride_p:
+                        warn_stride_key = (i, entry_name, j, "stride")
+                        if warn_stride_key not in self._entry_routing_warned:
+                            self._entry_routing_warned.add(warn_stride_key)
+                            logger.warning(
+                                "Cross-PP entry routing: entry %s[%d] stride mismatch local=%d remote=%d, skipped",
+                                entry_name,
+                                j,
+                                stride_d,
+                                stride_p,
+                            )
+                        continue
+                    for rb, lb in zip(grouped_remote, grouped_local):
+                        seg_len = stride_d * len(lb)
+                        src_list.append(td.data_ptr() + lb[0] * stride_d)
+                        dst_list.append(ptr_p + rb[0] * stride_p)
+                        length_list.append(seg_len)
 
     def _transfer_kv_cache(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -1010,6 +1154,7 @@ class KVCacheRecvingThread(threading.Thread):
             with self.remote_metadata_lock:
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+                self.remote_entry_addrs[engine_id][remote_handshake_port] = agent_meta.entry_addrs
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1277,7 +1422,14 @@ class MooncakeConnectorScheduler:
         self.need_truncate = self.use_compress
         sw_sizes_tokens: list[tuple[int, int]] = []
         self.group_block_size = []
-        for g in kv_cache_config.kv_cache_groups:
+        # A compressed group's blocks each hold block_size * compress_ratio
+        # prompt tokens (spec tokens_per_block = block_size // compress_ratio
+        # slots for that many tokens), so transfer accounting must divide the
+        # prompt length by the ratio or it advertises blocks the prefill side
+        # never wrote. Mirrors MooncakeConnectorScheduler's accounting in
+        # mooncake_connector.py; the hybrid connector was missing it.
+        self.group_compress_ratio = [1 for _ in range(len(kv_cache_config.kv_cache_groups))]
+        for i, g in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
                 group_spec_set = []
                 for layer_name in g.layer_names:
@@ -1290,6 +1442,8 @@ class MooncakeConnectorScheduler:
                     sw_sizes_tokens.append((group_spec_set[0].sliding_window, group_spec_set[0].block_size))
                 else:
                     sw_sizes_tokens.append((0, layer_spec.block_size))
+                    if self.use_compress and hasattr(group_spec_set[0], "compress_ratio"):
+                        self.group_compress_ratio[i] = group_spec_set[0].compress_ratio
                 if isinstance(layer_spec, MambaSpec):
                     self.need_truncate = True
             else:
@@ -1298,6 +1452,8 @@ class MooncakeConnectorScheduler:
                     sw_sizes_tokens.append((g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size))
                 else:
                     sw_sizes_tokens.append((0, g.kv_cache_spec.block_size))
+                    if self.use_compress and hasattr(g.kv_cache_spec, "compress_ratio"):
+                        self.group_compress_ratio[i] = g.kv_cache_spec.compress_ratio
                 if isinstance(g.kv_cache_spec, MambaSpec):
                     self.need_truncate = True
                 self.kv_cache_specs.append([g.kv_cache_spec])
@@ -1305,6 +1461,22 @@ class MooncakeConnectorScheduler:
         self.num_swa_blocks = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0 for n_tokens, block_size in sw_sizes_tokens
         ]
+
+    def _tokens_per_block(self, i: int) -> int:
+        """Tokens actually covered by one scheduler block of group i.
+
+        Specs whose block_size counts SLOTS (== cache_config.block_size, e.g.
+        compressed main-KV pages) cover compress_ratio prompt tokens per
+        slot, while specs whose block_size is already in token units (e.g.
+        DeepSeek-V4 indexer specs report storage_block_size *
+        compress_ratio) must not be multiplied again. Mixing the two
+        under-advertises or over-advertises blocks and scrambles the
+        consumer's token mapping."""
+        if not (self.use_compress and self.num_swa_blocks[i] == 0):
+            return self.group_block_size[i]
+        if self.group_block_size[i] == self.block_size:
+            return self.group_block_size[i] * self.group_compress_ratio[i]
+        return self.group_block_size[i]
 
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
@@ -1360,10 +1532,15 @@ class MooncakeConnectorScheduler:
             params["_p_side_truncated"] = True
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
+        # Mirrors the non-hybrid connector (#9808): a compressed group's block
+        # holds block_size * compress_ratio prompt tokens, so the block count
+        # is cdiv(prompt_len, tokens_per_block). Using the raw group block
+        # size over- or under-advertises blocks for compressed models and the
+        # decode side aligns its own lists against the advertised lengths.
         transfer_block_ids = []
         for i, blocks in enumerate(block_ids):
-            group_token_len = prompt_len
-            group_block_len = math.ceil(group_token_len / self.group_block_size[i])
+            tokens_per_block = self._tokens_per_block(i)
+            group_block_len = math.ceil(prompt_len / tokens_per_block)
             if group_block_len > 0:
                 transfer_block_ids.append(blocks[:group_block_len])
             else:
@@ -1826,6 +2003,14 @@ class MooncakeConnectorWorker:
             lengths = [end - start for start, end in merged_regions]
 
         global_te.register_buffer(ptrs, lengths)
+        # Per-entry physical tensor map for consumers pulling from a PP-stage
+        # producer: entry names are kv_caches keys and identical on both
+        # sides, unlike the config-level kv_cache_tensors whose layer
+        # composition differs once a stage packs its own tensors.
+        entry_addrs: dict[str, list[int]] = {}
+        for entry_name, entry_tensors in kv_caches.items():
+            tensors = entry_tensors if isinstance(entry_tensors, (tuple, list)) else (entry_tensors,)
+            entry_addrs[entry_name] = [v for t in tensors for v in (t.data_ptr(), t.stride(0) * t.element_size())]
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
@@ -1836,6 +2021,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_addr,
             ssm_sizes=self._mamba_ssm_size,
             local_ip=get_ip(),
+            entry_addrs=entry_addrs,
         )
         self.xfer_handshake_metadata = metadata
 
