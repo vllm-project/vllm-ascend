@@ -2358,7 +2358,7 @@ QFA_QUANT_MODE_MXFP8 = 1
 QFA_MASK_MODE_CAUSAL = 3
 QFA_LAYOUT_TND = "TND"
 QFA_LAYOUT_N2TGD = "N2TGD"
-QFA_LAYOUT_PA_BBND = "PA_BBND"
+QFA_LAYOUT_PA_NZ = "PA_NZ"
 # MXFP8 takes the q scale in one of two layouts, and the choice selects the
 # kernel: TND (Q_T, Q_N, D/64, 2) compiles the prefill template, N2TGD
 # (KV_N, Q_T, G, D/64, 2) the decode one, which merges the S1 and G axes.
@@ -2426,13 +2426,16 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     ``cann_ops_transformer.ops.quant_flash_attn_metadata`` +
     ``cann_ops_transformer.ops.quant_flash_attn`` directly on the paged cache.
 
-    Layout: PA_BBND. K/V and both E8M0 scale caches are stored in the natural
-    ``[num_blocks, block_size, num_kv_heads, head_dim]`` order that
-    reshape_and_cache writes, which is exactly what QFA's PA_BBND reads -- so
-    no layer ever transposes or copies the cache (the per-step
-    ``transpose(1,2).contiguous()`` full-cache copy of the FIA-based design is
-    gone; validated on-device by the vendored-QFA bring-up on the same
-    operator).
+    Layout: PA_NZ (QFA layout_kv="PA_NZ"). The K/V caches keep the natural
+    ``[num_blocks, block_size, num_kv_heads, head_dim]`` storage that
+    allocation, hybrid partitioning, PD transfer and prefix-cache CoW see;
+    reshape_and_cache writes and QFA reads both go through the NZ 5-D view
+    ``(num_blocks, num_kv_heads, head_dim//32, block_size, 32)`` -- the same
+    NZ layout ``npu_scatter_pa_kv_cache`` already consumes on the FIA C8
+    path, so no layer ever transposes or copies the cache storage. The two
+    E8M0 scale caches are allocated directly in the PA_NZ 6-D shapes
+    (K: ``[num_blocks, num_kv_heads, block_size//16, head_dim//64, 16, 2]``,
+    V: ``[num_blocks, num_kv_heads, head_dim//16, block_size//64, 16, 2]``).
 
     One QFA call per step: decode and prefill requests share a single
     CAUSAL-masked invocation (cu_seqlens_q over the whole batch), instead of
@@ -2474,6 +2477,26 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     # required for objects that predate the class swap.
     enable_hamming_sparse: bool = False
     _v_scale_filled_caches: set[torch.Tensor] | None = None
+
+    # NZ fragment size of the PA_NZ K/V cache view (matches the FIA C8 path's
+    # _nz_5d_view and QFA's PA_NZ fp8 layout [Bn, N, D//32, Bs, 32]).
+    _KV_NZ_DIM_FRAG = 32
+
+    def _nz_5d_view(self, cache: torch.Tensor, block_size: int) -> torch.Tensor:
+        """View a natural (num_blocks, block_size, num_kv_heads, head_dim) C8
+        MXFP cache tensor in the PA_NZ layout QFA reads:
+        (num_blocks, num_kv_heads, head_dim//32, block_size, 32). Head count
+        and head dim are derived from the cache itself so models whose V head
+        dim differs from the Q/K head dim stay correct."""
+        num_kv_heads = cache.shape[2]
+        head_dim = cache.shape[3]
+        return cache.view(
+            -1,
+            num_kv_heads,
+            head_dim // self._KV_NZ_DIM_FRAG,
+            block_size,
+            self._KV_NZ_DIM_FRAG,
+        )
 
     def _qfa_step_cache(self, attn_metadata: AscendMetadata) -> dict:
         cache = getattr(attn_metadata, "qfa_metadata_cache", None)
@@ -2519,7 +2542,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
             # quant_mode=1 refuses a null v_descale at the aclnn entry
-            # (quant_flash_attn_metadata_check.h), but under PA_BBND nothing
+            # (quant_flash_attn_metadata_check.h), but under PA_NZ nothing
             # reads it -- a minimal 5D E8M0 placeholder suffices. batch_size
             # must NOT be passed with a TND layout_q (the checker rejects
             # it); the op infers it from cu_seqlens_q.
@@ -2528,7 +2551,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # this torch_npu build, not a torch.dtype; tensor.view() would
             # parse it as a target shape. Bitcast with the stock torch dtype
             # instead (itemsize 1 -> 1, shape preserved).
-            v_descale_stub = torch.zeros(1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device).view(
+            v_descale_stub = torch.zeros(1, 1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device).view(
                 torch.float8_e8m0fnu
             )
             metadata = metadata_op(
@@ -2548,7 +2571,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 win_right=-1,
                 layout_q=QFA_LAYOUT_TND,
                 layout_q_descale=layout_q_descale,
-                layout_kv=QFA_LAYOUT_PA_BBND,
+                layout_kv=QFA_LAYOUT_PA_NZ,
                 layout_out=QFA_LAYOUT_TND,
             )
             if use_step_cache:
@@ -2622,12 +2645,18 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
     ) -> torch.Tensor:
         key, value, key_scale, value_scale = kv_cache
+        # The K/V caches keep the natural (num_blocks, block_size,
+        # num_kv_heads, head_dim) storage; QFA reads them through the PA_NZ
+        # 5-D view (same NZ layout npu_scatter_pa_kv_cache wrote them in).
+        # The scale caches are already allocated in the PA_NZ 6-D shapes.
         # The scale caches are stored as raw uint8 (index_put_ on float8
         # either errors or falls back to AICPU); QFA's checker wants E8M0, so
         # bitcast at the call boundary (torch.float8_e8m0fnu -- the torch
         # dtype; torch_npu.float8_e8m0fnu is the integer ID 293 on this
         # build and would be parsed as a view *shape*). Same for the q scale
         # when the quant helper returns it as uint8 bytes.
+        key = self._nz_5d_view(key, key.shape[1])
+        value = self._nz_5d_view(value, value.shape[1])
         if key_scale.dtype != torch.float8_e8m0fnu:
             key_scale = key_scale.view(torch.float8_e8m0fnu)
         if value_scale.dtype != torch.float8_e8m0fnu:
@@ -2667,7 +2696,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             max_seqlen_kv=-1,
             layout_q=QFA_LAYOUT_TND,
             layout_q_descale=layout_q_descale,
-            layout_kv=QFA_LAYOUT_PA_BBND,
+            layout_kv=QFA_LAYOUT_PA_NZ,
             layout_out=QFA_LAYOUT_TND,
             return_softmax_lse=False,
         )
@@ -2811,11 +2840,17 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         num_actual_tokens = quant_key.shape[0]
         slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
         key_cache, value_cache = kv_cache[0], kv_cache[1]
+        block_size = key_cache.shape[1]
+        # Write the K/V payloads through the PA_NZ 5-D view so the storage
+        # holds the NZ-fragmented layout QFA reads (layout_kv=PA_NZ). The
+        # scatter op consumes the same NZ view on the FIA C8 path, and the
+        # allocation/hybrid/PD/CoW machinery keeps seeing the natural
+        # (num_blocks, block_size, num_kv_heads, head_dim) storage shape.
         DeviceOperator.reshape_and_cache(
             key=quant_key,
             value=quant_value,
-            key_cache=key_cache,
-            value_cache=value_cache,
+            key_cache=self._nz_5d_view(key_cache, block_size),
+            value_cache=self._nz_5d_view(value_cache, block_size),
             slot_mapping=slot_mapping,
         )
 
@@ -2830,21 +2865,26 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             key_scale.view(torch.uint8) if key_scale.dtype != torch.uint8 else key_scale,
             key_scale_cache,
             slot_mapping,
-            key_cache.shape[1],
+            block_size,
         )
         filled_caches = self._v_scale_filled_caches
         if filled_caches is None:
             filled_caches = set()
             self._v_scale_filled_caches = filled_caches
         if value_scale_cache not in filled_caches:
-            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast ->
-            # (num_blocks, block_size // 64, num_kv_heads, head_size, 2)
-            # (PA_BBND). Derive num_kv_heads / v head_dim from the cache
+            # (hidden_size) -> (num_kv_heads, head_size) -> (num_kv_heads,
+            # head_size // 16, 1, 16, 1) -> broadcast ->
+            # (num_blocks, num_kv_heads, head_size // 16, block_size // 64,
+            # 16, 2) (PA_NZ). Derive num_kv_heads / v head_dim from the cache
             # layout instead of self.num_kv_heads / self.head_size so models
             # whose V head dim differs from the Q/K head dim stay correct.
-            num_kv_heads = value_scale_cache.shape[2]
-            v_head_dim = value_scale_cache.shape[3]
-            value_scale_cache.copy_(value_scale.view(1, 1, num_kv_heads, v_head_dim, 1))
+            num_kv_heads = value_scale_cache.shape[1]
+            v_dim_frags = value_scale_cache.shape[2]
+            v_dim_frag_size = value_scale_cache.shape[4]
+            v_head_dim = v_dim_frags * v_dim_frag_size
+            value_scale_cache.copy_(
+                value_scale.view(num_kv_heads, v_dim_frags, 1, v_dim_frag_size, 1)
+            )
             # Only claim the cache is filled when the copy actually ran. Graph
             # capture records the copy without executing it, while this Python
             # line runs for real -- so marking it there leaves the cache full of
@@ -2928,6 +2968,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
 
             self.reshape_and_cache(key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata)
 
-        # PA_BBND: QFA reads the paged cache in the order it is stored, so the
-        # cache tuple is passed through as-is -- no transpose, no copy.
+        # PA_NZ: QFA reads the paged cache through the NZ view taken in
+        # _run_qfa, so the cache tuple is passed through as-is -- no
+        # transpose, no storage copy.
         return self._forward_mxfp8_attention(query_mxfp8, query_scale, kv_cache, attn_metadata, output)

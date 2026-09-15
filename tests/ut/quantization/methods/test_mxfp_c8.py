@@ -7,6 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.device.mxfp_kv_cache import (
     MXFP8_GROUP_SIZE,
     MXFP_KV_SCALE_GROUP_SIZE,
+    MXFP_K_SCALE_NZ_TOKEN_FRAG,
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_page_bytes,
     mxfp_v_scale_cache_shape,
@@ -23,13 +24,14 @@ class TestMXFPScaleCacheShapes(TestBase):
     """Shape/byte-budget formulas for the C8-MXFP E8M0 scale caches."""
 
     def test_k_scale_cache_shape_d256_bs512(self):
-        # PA_BBND: block axis before the head axis, matching the K/V caches.
+        # PA_NZ: [Bn, N, Bs//16, D//64, 16, 2] (golden quant_flash_attn_golden.py).
         shape = mxfp_k_scale_cache_shape(num_blocks=8, block_size=512, num_kv_heads=4, head_dim=256)
-        self.assertEqual(shape, (8, 512, 4, 4, 2))
+        self.assertEqual(shape, (8, 4, 32, 4, 16, 2))
 
     def test_v_scale_cache_shape_d256_bs512(self):
+        # PA_NZ: [Bn, N, D//16, Bs//64, 16, 2].
         shape = mxfp_v_scale_cache_shape(num_blocks=8, block_size=512, num_kv_heads=4, head_dim=256)
-        self.assertEqual(shape, (8, 8, 4, 256, 2))
+        self.assertEqual(shape, (8, 4, 16, 8, 16, 2))
 
     def test_scale_page_bytes_are_equal_for_k_and_v(self):
         k_bytes = mxfp_k_scale_page_bytes(num_kv_heads=4, block_size=512, head_dim=256)
@@ -51,9 +53,21 @@ class TestScatterMXFPKScaleCache(TestBase):
         self.num_kv_heads = 2
         self.head_dim = MXFP_KV_SCALE_GROUP_SIZE
         self.key_scale_cache = torch.zeros(
-            (2, self.block_size, self.num_kv_heads, self.head_dim // MXFP_KV_SCALE_GROUP_SIZE, 2),
+            (
+                2,
+                self.num_kv_heads,
+                self.block_size // MXFP_K_SCALE_NZ_TOKEN_FRAG,
+                self.head_dim // MXFP_KV_SCALE_GROUP_SIZE,
+                MXFP_K_SCALE_NZ_TOKEN_FRAG,
+                2,
+            ),
             dtype=torch.uint8,
         )
+
+    def _at(self, slot):
+        """(block, seg, frag) coordinates of a slot in the PA_NZ cache."""
+        block, offset = slot // self.block_size, slot % self.block_size
+        return block, offset // MXFP_K_SCALE_NZ_TOKEN_FRAG, offset % MXFP_K_SCALE_NZ_TOKEN_FRAG
 
     def test_scatter_valid_and_padded_slots(self):
         key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
@@ -67,26 +81,34 @@ class TestScatterMXFPKScaleCache(TestBase):
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, 2] == 130))
-        self.assertTrue(torch.all(self.key_scale_cache[1, 1] == 130))
+        block, seg, frag = self._at(2)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 130))
+        block, seg, frag = self._at(513)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 130))
         # Untouched positions stay zero, including the padding clamp target.
-        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 0))
-        self.assertTrue(torch.all(self.key_scale_cache[0, 1] == 0))
-        self.assertTrue(torch.all(self.key_scale_cache[1, 0] == 0))
+        block, seg, frag = self._at(0)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
+        block, seg, frag = self._at(1)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
+        block, seg, frag = self._at(512)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
 
     def test_scatter_all_padding_rows_are_no_op(self):
         """A pure-padding batch (all -1) must not modify the cache: rows
         clamp to slot 0 and rewrite the cache's own current content."""
         # Pre-populate slot 0 with a sentinel; the padding rewrite keeps it.
-        self.key_scale_cache[0, 0] = 99
+        block, seg, frag = self._at(0)
+        self.key_scale_cache[block, :, seg, :, frag] = 99
         key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
         slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 99))
-        self.assertTrue(torch.all(self.key_scale_cache[0, 1:] == 0))
-        self.assertTrue(torch.all(self.key_scale_cache[1] == 0))
+        block, seg, frag = self._at(0)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 99))
+        untouched = self.key_scale_cache.clone()
+        untouched[block, :, seg, :, frag] = 0
+        self.assertTrue(torch.all(untouched == 0))
 
     def test_scatter_padding_and_real_at_nonzero_slot_coexist(self):
         """Padding rows clamp to slot 0 while a real token writes a different
@@ -95,7 +117,8 @@ class TestScatterMXFPKScaleCache(TestBase):
         slot 0 in the same batch is not reachable in v1 supported paths --
         eager batches carry no -1 rows and graph-mode padding uses valid
         dummy slots -- so that combination is not asserted here.)"""
-        self.key_scale_cache[0, 0] = 55
+        block, seg, frag = self._at(0)
+        self.key_scale_cache[block, :, seg, :, frag] = 55
         key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
         key_scale[0] = 200  # real token at slot 3
         key_scale[1] = 77  # padding row (clamps to slot 0, rewrites 55)
@@ -103,8 +126,10 @@ class TestScatterMXFPKScaleCache(TestBase):
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, 3] == 200))
-        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 55))
+        block, seg, frag = self._at(3)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 200))
+        block, seg, frag = self._at(0)
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 55))
 
 
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):

@@ -157,8 +157,6 @@ from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.mxfp_kv_cache import (
     MXFP8_GROUP_SIZE,
-    MXFP_KV_SCALE_GROUP_SIZE,
-    MXFP_KV_SCALE_VALUES_PER_GROUP,
     mxfp_k_scale_cache_shape,
     mxfp_v_scale_cache_shape,
 )
@@ -5599,26 +5597,27 @@ class NPUModelRunner(GPUModelRunner):
                     if current_sparse_sfa_c8:
                         kv_caches[layer_name] = (k_cache,)
                     elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
-                        # PA_BBND order (block before head): the scale caches
-                        # sit next to their K/V payloads in the layout QFA
-                        # reads, so no layer transposes anything at attention
-                        # time.
-                        k_scale_cache_shape = (
-                            k_shape[0],
-                            k_shape[1],
-                            k_shape[2],
-                            k_shape[3] // MXFP_KV_SCALE_GROUP_SIZE,
-                            MXFP_KV_SCALE_VALUES_PER_GROUP,
+                        # PA_NZ: the scale caches are allocated directly in
+                        # the 6-D NZ shapes QFA reads (layout_kv=PA_NZ), so
+                        # no layer transposes anything at attention time.
+                        # The K/V caches keep the natural 4-D storage; the
+                        # NZ 5-D view is taken at the operator boundary.
+                        k_scale_cache = raw_k_scale_tensor.view(torch.uint8).view(
+                            mxfp_k_scale_cache_shape(
+                                k_shape[0],
+                                k_shape[1],
+                                k_shape[2],
+                                k_shape[3],
+                            )
                         )
-                        v_scale_cache_shape = (
-                            v_shape[0],
-                            v_shape[1] // MXFP_KV_SCALE_GROUP_SIZE,
-                            v_shape[2],
-                            v_shape[3],
-                            MXFP_KV_SCALE_VALUES_PER_GROUP,
+                        v_scale_cache = raw_v_scale_tensor.view(torch.uint8).view(
+                            mxfp_v_scale_cache_shape(
+                                v_shape[0],
+                                v_shape[1],
+                                v_shape[2],
+                                v_shape[3],
+                            )
                         )
-                        k_scale_cache = raw_k_scale_tensor.view(torch.uint8).view(k_scale_cache_shape)
-                        v_scale_cache = raw_v_scale_tensor.view(torch.uint8).view(v_scale_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, k_scale_cache, v_scale_cache)
                     else:
                         assert v_cache is not None
