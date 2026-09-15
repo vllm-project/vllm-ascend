@@ -462,6 +462,25 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
+        # Test case 8: scalar gate weights with a dimension of 1 are never
+        # converted (NPU rejects FRACTAL_NZ cast when k=1), even under
+        # FORCE_NZ policy and nz_mode=2.
+        for hw_profile in [
+            get_hardware_profile(AscendDeviceType.A2),
+            get_hardware_profile(AscendDeviceType._310P),
+        ]:
+            mock_npu_format_cast.reset_mock()
+            mock_config.weight_nz_mode = 2
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch("vllm_ascend.utils.get_current_hardware_profile", return_value=hw_profile),
+            ):
+                for shape in [(1, 2048), (2048, 1)]:
+                    weight = torch.randn(*shape, dtype=torch.bfloat16)
+                    result = utils.maybe_trans_nz(weight)
+                    self.assertIs(result, weight)
+                    mock_npu_format_cast.assert_not_called()
+
 
 def test_is_pd_decode_recompute_scheduler_enabled_without_config():
     assert utils.is_pd_decode_recompute_scheduler_enabled() is False

@@ -271,6 +271,11 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
+    # NPU rejects FRACTAL_NZ cast when a matrix dimension is 1 (e.g. scalar
+    # gates such as Qwen MoE's shared_expert_gate with shape [1, hidden]).
+    if weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1):
+        return False
+
     # Some hardware profiles require NZ weight layout.
     if get_current_hardware_profile().weight_layout_policy is WeightLayoutPolicy.FORCE_NZ:
         return True
@@ -296,6 +301,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
+# - matrix with a dimension of 1: never convert (NPU rejects FRACTAL_NZ cast)
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
