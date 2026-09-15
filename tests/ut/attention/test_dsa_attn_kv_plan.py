@@ -73,6 +73,9 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert not plan.requires_block_offset_slots
+        kwargs: dict[str, Any] = {}
+        plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
+        assert "cu_seqlens_ori_kv" not in kwargs
         torch.testing.assert_close(
             plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
             torch.tensor([5, -1], dtype=torch.int32),
