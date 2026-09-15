@@ -84,6 +84,7 @@ def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
     draft_index: int | None = None,
+    runtime_buffer: dict[str, dict[str, tuple[torch.Tensor, torch.Tensor]]] | None = None,
 ):
     if isinstance(positions, torch.Tensor):
         pos_map = {"default": positions}
@@ -112,6 +113,20 @@ def get_cos_and_sin_dsa(
 
                 if group_buffers is None:
                     continue
+
+                # PCP's global KV update and rank-local attention use different
+                # positions in the same step. Keep caller-owned buffers stable
+                # for graph replay without aliasing the default local cache.
+                if runtime_buffer is not None and draft_index is None:
+                    isolated_groups = runtime_buffer.setdefault(config_key, {})
+                    if group_name not in isolated_groups:
+                        # Allocate the full registered capacity even when the
+                        # first call is a small warmup/capture batch.
+                        isolated_groups[group_name] = (
+                            torch.empty_like(group_buffers[0]),
+                            torch.empty_like(group_buffers[1]),
+                        )
+                    group_buffers = isolated_groups[group_name]
 
                 buf_cos, buf_sin = group_buffers
                 num_tokens = pos_tensor.size(0)
