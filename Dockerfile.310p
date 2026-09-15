@@ -83,21 +83,19 @@ ARG RUSTUP_UPDATE_ROOT
 ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
     RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT
 # When an internal RUSTUP_DIST_SERVER mirror is provided (CI builds), pre-install
-# rustup-init from the mirror so build_rust.sh doesn't reach the public
-# https://sh.rustup.rs (unreachable from build containers). External builds
-# without the mirror keep the original public install path. The default
-# toolchain is read from vllm's rust-toolchain.toml (falling back to stable),
-# so it always matches the version vllm pins.
+# rustup via the rustup-init.sh bootstrap from the mirror so build_rust.sh
+# doesn't reach the public https://sh.rustup.rs (unreachable from build
+# containers). The bootstrap downloader hardcodes --proto '=https' (curl) and
+# --https-only (wget), so strip them via sed to allow the internal http mirror.
+# External builds without the mirror keep the original public install path. The
+# default toolchain is read from vllm's rust-toolchain.toml (falling back to
+# stable).
 RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
-      case $(uname -m) in \
-        x86_64) ARCH=x86_64-unknown-linux-gnu ;; \
-        aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
-      esac && \
       TOOLCHAIN=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' /vllm-workspace/vllm/rust-toolchain.toml) && \
-      curl -fsSL "${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
-      chmod +x /tmp/rustup-init && \
-      /tmp/rustup-init -y --default-toolchain "${TOOLCHAIN:-stable}" && \
-      rm /tmp/rustup-init && \
+      curl -fsSL "${RUSTUP_UPDATE_ROOT}/rustup-init.sh" -o /tmp/rustup-init.sh && \
+      sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh && \
+      sh /tmp/rustup-init.sh -y --default-toolchain "${TOOLCHAIN:-stable}" && \
+      rm /tmp/rustup-init.sh && \
       . "$HOME/.cargo/env"; \
     fi
 ENV PATH="$HOME/.cargo/bin:$PATH"
