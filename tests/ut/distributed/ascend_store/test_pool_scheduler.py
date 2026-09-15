@@ -146,6 +146,40 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual((need, is_async), (expected, load_async and expected > 0))
                 self.assertEqual("r1" in scheduler.load_specs, expected > 0)
 
+    def test_layer_reuse_logs_independent_and_reused_load_tokens(self):
+        config = self._make_config(
+            extra_config={
+                "backend": "memcache",
+                "layerwise_num_shared_buffers": 1,
+            }
+        )
+        config.model_config.get_num_layers.return_value = 4
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        self.assertTrue(scheduler.layerwise_offload)
+        scheduler._get_layerwise_hit_tokens = MagicMock(return_value=48)
+        request = MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id="r1",
+            block_hashes=[b"h"] * 4,
+        )
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.logger.info") as mock_info:
+            scheduler.get_num_new_matched_tokens(request, 16)
+
+        mock_info.assert_called_once_with(
+            "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, usable hit tokens: %d, "
+            "need to allocate: %d, independent layer load tokens per layer: %d, "
+            "reused layer load tokens per layer: %d",
+            "r1",
+            64,
+            48,
+            48,
+            32,
+            32,
+            48,
+        )
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_retention_interval_does_not_skip_external_lookup(self, mock_client_cls):
         """A retained checkpoint can be reused before two retention intervals."""
