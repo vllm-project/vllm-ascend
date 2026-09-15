@@ -35,8 +35,10 @@ COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
+_CANN_ACL_FLOAT8_E4M3FN = 24
 _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
@@ -204,6 +206,12 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
+    if quant_type == QuantType.W8A8MXFP:
+        return (
+            _CANN_MEGA_MOE_QUANT_MODE_MXFP,
+            _CANN_ACL_FLOAT8_E4M3FN,
+            _CANN_ACL_FLOAT8_E4M3FN,
+        )
     if quant_type == QuantType.NONE:
         return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
 

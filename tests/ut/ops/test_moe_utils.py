@@ -6,11 +6,13 @@ import torch
 import torch_npu  # noqa: F401 -- registers torch.npu used by the module under test
 
 from vllm_ascend.ops.fused_moe.moe_utils import (
+    _get_cann_mega_moe_quant_settings,
     _custom_gmm_swiglu_enabled,
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
     select_mega_moe_activation_kwargs,
 )
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -52,6 +54,11 @@ class TestFusionFlags(unittest.TestCase):
         self.assertFalse(_custom_gmm_swiglu_enabled(True, False))
         with patch("vllm_ascend.ops.fused_moe.moe_utils.enable_custom_op", return_value=True):
             self.assertTrue(_custom_gmm_swiglu_enabled(True, True, activation="silu"))
+
+
+class TestMegaMoeQuantSettings(unittest.TestCase):
+    def test_mxfp8_uses_e4m3_dispatch_and_weights(self):
+        self.assertEqual(_get_cann_mega_moe_quant_settings(QuantType.W8A8MXFP), (4, 24, 24))
 
 
 class TestSwigluScaleHelpers(unittest.TestCase):

@@ -50,6 +50,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.CANN_MEGAMOE_ACTIVE_MASK,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
@@ -71,6 +72,7 @@ _EXPECTED_CAPABILITIES = {
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
@@ -97,6 +99,12 @@ _EXPECTED_CAPABILITIES = {
         }
     ),
 }
+
+
+def test_a5_supports_cann_megamoe():
+    profile = get_hardware_profile(AscendDeviceType.A5)
+
+    assert profile.supports(HardwareCapability.CANN_MEGAMOE)
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -416,7 +417,12 @@ class FusedMC2CommImpl(MoECommMethod):
 
         activation_clamp = self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
-        if self.token_dispatcher.global_bs == 0 and fused_experts_input.routing.mc2_mask is not None:
+        supports_active_mask = get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_ACTIVE_MASK)
+        if (
+            supports_active_mask
+            and self.token_dispatcher.global_bs == 0
+            and fused_experts_input.routing.mc2_mask is not None
+        ):
             # mc2_mask comes from the reserved bool buffer in
             # ascend_forward_context.set_mc2_mask. MegaMoe wants int8 as
             # the per-token active mask, so cast only when the dtype does
