@@ -494,6 +494,7 @@ def test_dcp_replicated_dspark_block_table_and_slot_mapping(
     proposer._per_group_replication_sizes = {0: 2}
     proposer._per_group_manager_block_sizes = {0: manager_block_size}
     proposer._per_group_kernel_block_sizes = {0: kernel_block_size}
+    proposer.max_batch_size = 4
     proposer._replicated_block_table_storage = {}
     proposer._replicated_block_table_arange = {}
     proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(16, dtype=torch.int32)}
@@ -531,6 +532,7 @@ def test_dcp_replicated_dspark_uses_only_active_block_table_rows() -> None:
     proposer._per_group_replication_sizes = {0: 2}
     proposer._per_group_manager_block_sizes = {0: 4}
     proposer._per_group_kernel_block_sizes = {0: 4}
+    proposer.max_batch_size = 4
     proposer._replicated_block_table_storage = {}
     proposer._replicated_block_table_arange = {}
 
