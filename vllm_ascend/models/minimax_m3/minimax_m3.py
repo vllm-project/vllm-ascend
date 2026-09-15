@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -86,6 +87,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -216,9 +218,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         sparse_cfg: dict[str, Any] | None = None,
         disable_index_value: bool = False,
         reduce_results: bool = True,
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         assert sparse_cfg is not None
+        self.is_sequence_parallel = is_sequence_parallel
         self.hidden_size = hidden_size
         self.disable_index_value = disable_index_value
 
@@ -279,6 +283,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 quant_config=quant_config,
                 prefix=f"{prefix}.indexer_proj",
             )
+        # MiniMax-only: the QKV quant method gathers fp8 activations after the
+        # per-token quantise (SP). This flag is only set here, so other models
+        # using the same method are unaffected.
+        if getattr(self.qkv_proj, "quant_method", None) is not None:
+            self.qkv_proj.quant_method.is_sequence_parallel = is_sequence_parallel
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -597,6 +606,7 @@ class MiniMaxM3MLP(nn.Module):
         reduce_results: bool = True,
         intermediate_size: int | None = None,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         hidden_size = config.hidden_size
@@ -609,6 +619,7 @@ class MiniMaxM3MLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -617,6 +628,7 @@ class MiniMaxM3MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "swigluoai":
@@ -656,6 +668,13 @@ class MiniMaxM3MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.n_shared_experts = getattr(config, "n_shared_experts", 0) or 0
 
+        # Sequence parallelism for the MoE layer. Enabled structurally (no
+        # config/env switch) whenever expert parallel is active on more than
+        # one TP rank, so it only affects MiniMax M3 and is on by default.
+        self.is_sequence_parallel = (
+            parallel_config.enable_expert_parallel and self.tp_size > 1
+        )
+
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
@@ -691,6 +710,7 @@ class MiniMaxM3MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
                 intermediate_size=intermediate_size,
+                is_sequence_parallel=self.is_sequence_parallel,
             )
         else:
             self.shared_experts = None
@@ -725,6 +745,7 @@ class MiniMaxM3MoE(nn.Module):
             apply_routed_scale_to_output=True,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
         # Ascend dispatch uses this metadata to size the global physical
@@ -738,8 +759,11 @@ class MiniMaxM3MoE(nn.Module):
         param.data.copy_(loaded_weight.to(torch.float32))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        _, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states).contiguous()
 
         if self.experts.is_internal_router:
             final_hidden_states = self.experts(
@@ -754,7 +778,10 @@ class MiniMaxM3MoE(nn.Module):
                 router_logits=router_logits,
             )
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        # SP: keep the MoE output on the token shard. The token all-gather is
+        # deferred to the next block's QKV input quant path, so the collective
+        # carries the smaller (fp8) quantised activations instead of bf16.
+        return final_hidden_states.view(hidden_states.shape[0], hidden_dim)
 
 
 class MiniMaxM3Attention(nn.Module):
@@ -773,9 +800,11 @@ class MiniMaxM3Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        self.is_sequence_parallel = is_sequence_parallel
 
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -806,6 +835,8 @@ class MiniMaxM3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        if getattr(self.qkv_proj, "quant_method", None) is not None:
+            self.qkv_proj.quant_method.is_sequence_parallel = is_sequence_parallel
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -905,6 +936,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
+        attn_kwargs["is_sequence_parallel"] = self.is_sequence_parallel
         if is_sparse_attention_layer:
             self.self_attn = MiniMaxM3SparseAttention(
                 **attn_kwargs,
@@ -922,6 +954,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
         # ``layer.is_layer_sparse``.
         self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
+
+        # Sequence-parallel MoE leaves the layer activation on the token shard.
+        # The attention path re-gathers after the QKV activation quantise, so the
+        # decoder layer keeps the residual stream in sync at the norm points.
+        self.is_sequence_parallel = (
+            parallel_config.enable_expert_parallel
+            and get_tensor_model_parallel_world_size() > 1
+        )
 
         if self.is_layer_sparse:
             self.block_sparse_moe = MiniMaxM3MoE(
@@ -947,6 +987,10 @@ class MiniMaxM3DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
+        if self.is_sequence_parallel:
+            # Previous MoE left the activation on the token shard; align the
+            # (full-token) residual stream onto the same shard for the norm.
+            residual = sequence_parallel_chunk(residual).contiguous()
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -956,6 +1000,25 @@ class MiniMaxM3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
+        if self.is_sequence_parallel:
+            # The QKV path gathers (fp8) back to the full-token layout; bring
+            # the shard residual back to full before the post-attention norm.
+            # NOTE: this runs on the default stream, sequential to self_attn, so
+            # it is already ordered after the QKV gather / attention output.
+            residual = tensor_model_parallel_all_gather(residual.contiguous(), 0)
+            # Padding branch: the SP shard is padded to a TP multiple, so the
+            # gathered residual may carry padding rows. Trim to the attention
+            # output's token count (no-op when both are padded consistently) to
+            # keep the residual row-aligned with the full attention output.
+            residual = residual[: hidden_states.shape[0]]
+            # Env-verification guard: if the sparse attention trims to the actual
+            # token count while the SP shard is padded to a TP multiple, the
+            # residual and the full attention output will disagree here. This
+            # assert surfaces that mismatch immediately on NPU.
+            assert residual.shape[0] == hidden_states.shape[0], (
+                "SP residual all-gather token mismatch: "
+                f"residual={residual.shape[0]} vs attn_out={hidden_states.shape[0]}"
+            )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
