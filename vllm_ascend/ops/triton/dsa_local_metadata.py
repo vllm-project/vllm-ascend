@@ -131,9 +131,6 @@ def build_local_metadata_kernel(
     if COMPUTE_START_POS:
         sp = seq_len_i - (q_end_i - q_start_i)
         tl.store(start_pos_out_ptr + offs, sp)
-    else:
-        zero_sp = tl.zeros((BLOCK,), dtype=tl.int32)
-        tl.store(start_pos_out_ptr + offs, zero_sp)
 
 
 def build_local_metadata(
@@ -158,6 +155,8 @@ def build_local_metadata(
     ([0] + cumsum of an empty vector = 0), so the kernel launch is
     skipped entirely and the buffers are zero-filled in one op.
     """
+    # SUB_N x COLS fold requires the capacity to be a multiple of SUB_N.
+    assert block % 8 == 0, f"block size {block} must be a multiple of 8"
     if num_reqs == 0:
         local_query_start_loc.zero_()
         local_seq_lens.zero_()

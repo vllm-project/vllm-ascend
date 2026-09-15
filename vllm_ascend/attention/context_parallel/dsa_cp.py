@@ -1130,7 +1130,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_end,
                 num_reqs,
                 start_pos_out=start_pos_out,
-                block=self.local_query_start_loc.numel() - 1,
+                block=local_query_start_loc.numel() - 1,
             )
         else:
             if local_query_start_loc is not None:
