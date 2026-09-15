@@ -88,9 +88,8 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     request = SimpleNamespace(request_id="old", block_hashes=hashes, num_prompt_tokens=65, shared_prefix_boundary=None)
     # Exercise the real coordinator, including main's replay_boundary keyword.
     coordinator.cache_blocks(request, 64)
-    if not vllm_version_is("0.28.0"):
-        assert full_mgr.cache_hit_alignment_tokens == scheduler_size
-        assert tail_mgr.cache_hit_alignment_tokens == scheduler_size
+    assert full_mgr.cache_hit_alignment_tokens == scheduler_size
+    assert tail_mgr.cache_hit_alignment_tokens == scheduler_size
     assert tail_mgr.req_to_blocks["old"][0].block_hash is None
     full_mgr.free("old")
     tail_mgr.free("old")
@@ -109,7 +108,6 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
-@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="separate write-mask alignment is a main API")
 def test_partial_hash_alignment_reaches_real_managers_and_cached_blocks():
     register_all_kvcache_specs(None)
     register_ascend_kv_cache_specs()

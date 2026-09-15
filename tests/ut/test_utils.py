@@ -263,11 +263,11 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
-        for installed in ("0.29.0+empty", "0.1.dev1+g98dff2a81d.empty"):
+        for installed in ("0.29.0", "0.29.0+empty"):
             with mock.patch("vllm.__version__", installed):
                 self.assertTrue(utils.vllm_version_is.__wrapped__("0.29.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
-        for installed in ("0.1.dev1+g84030bbe3d.empty", "0.1.dev1+g98dff2.empty", "0.29.0rc1"):
+        for installed in ("0.1.dev1+g84030bbe3d.empty", "0.29.0rc1"):
             with mock.patch("vllm.__version__", installed):
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.29.0"))
         # Test caching takes effect without leaving a polluted process cache.

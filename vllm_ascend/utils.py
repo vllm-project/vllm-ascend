@@ -625,23 +625,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-@torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str, installed_version: Version) -> bool:
-    """Identify the pinned release in an untagged empty-device SCM build.
-
-    Both supported lanes now use v1 PCP, so module locations cannot identify
-    the release. setuptools-scm preserves the checkout SHA in the local version.
-    """
-    if target_vllm_version != "0.29.0" or installed_version.local is None:
-        return False
-    scm_node = installed_version.local.split(".")[0]
-    if not scm_node.startswith("g"):
-        return False
-    commit = scm_node[1:]
-    release_commit = "98dff2a81d747d1dba01a47f939f48c3526d4206"
-    return 7 <= len(commit) <= 40 and release_commit.startswith(commit)
-
-
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
@@ -656,11 +639,7 @@ def vllm_version_is(target_vllm_version: str):
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         parsed = Version(vllm_version)
-        if Version(parsed.public) == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version, parsed)
-        return False
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
