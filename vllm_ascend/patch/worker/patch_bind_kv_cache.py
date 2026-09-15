@@ -58,4 +58,30 @@ def bind_kv_cache(
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Bind per-layer cache views without unpacking them.
+
+    vLLM #53781 split ``bind_kv_cache`` into the runner-list builder and this
+    layer binder, which delegates to ``AttentionLayerBase.bind_kv_cache``.
+    Ascend reshapes the K/V (and recurrent state) views itself, so the raw
+    container must be stored as-is: the upstream Mamba override would try to
+    unpack an already-reshaped list.
+    """
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+
+    ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
+    if not vllm_version_is("0.28.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
 utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.28.0"):
+    # vLLM #53781 is the only caller of this helper; main binds through it
+    # instead of the runner-list ``bind_kv_cache``.
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

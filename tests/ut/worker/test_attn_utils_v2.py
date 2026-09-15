@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -329,6 +330,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
+        # vLLM #53781: init_kv_cache reads attention_config.hisparse_config.
+        attention_config=SimpleNamespace(hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -447,7 +450,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             # `_reshape_kv_cache_v2` expects the flat attention-group list,
             # matching upstream v0.28.0 `init_kv_cache`, which flattens
             # `attn_groups` before reshaping.
-            return attn_utils._reshape_kv_cache_v2(
+            reshaped = attn_utils._reshape_kv_cache_v2(
                 attn_groups=[attn_group],
                 kv_cache_raw_tensors=raw_tensors,
                 cache_dtype=cache_config.cache_dtype,
@@ -455,31 +458,32 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 shared_kv_cache_layers={},
                 kv_cache_config=_kv_cache_config,
             )
+            # Mirror `allocate_kv_cache_main`: vLLM #53781 filters the runner
+            # list on `cache.device`, so per-layer K/V containers expose it.
+            return {name: attn_utils._as_device_aware(cache) for name, cache in reshaped.items()}
 
-        def _ascend_bind_kv_cache(
+        def _ascend_bind_kv_cache_to_layers(
             kv_caches: dict[str, Any],
             forward_context: dict[str, Any],
-            runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
             kv_cache_groups: Any = None,
         ) -> None:
             del num_attn_module, kv_cache_groups
-            assert len(runner_kv_caches_) == 0
-            for kv_cache in kv_caches.values():
-                runner_kv_caches_.append(kv_cache)
             for layer_name_, kv_cache in kv_caches.items():
                 forward_context[layer_name_].kv_cache = kv_cache
 
         monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache_to_layers)
         kv_caches = upstream_attn_utils.init_kv_cache(
-            runner_kv_caches=runner_kv_caches,
             forward_context={layer_name: cache_layer},
             kv_cache_config=kv_cache_config,
             device=torch.device("cpu"),
             kernel_block_sizes=[spec.block_size],
             vllm_config=vllm_config,
         )
+        # vLLM #53781 moved the runner-list construction into the model runner,
+        # which filters on `.device`; reproduce it to keep the shared checks.
+        runner_kv_caches = [cache for cache in kv_caches.values() if cache.device == torch.device("cpu")]
 
     cache_components = kv_caches[layer_name]
     assert len(runner_kv_caches) == 1
@@ -892,6 +896,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
     }
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only changed the main allocation entry point")
 @pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
 def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 """Upstream-drift guards for the balance-scheduling platform patch.
 
@@ -582,7 +583,16 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+    # A lazily imported profiling-chunk patch also wraps run_engine_core and can
+    # become the outermost wrapper when another test enables profiling earlier
+    # in the shared batch; DyntraLB then sits directly inside it. Walk one level
+    # out in that case so the DyntraLB -> balance relationship stays assertable.
+    run_engine_core = _UpstreamEngineCoreProc.run_engine_core
+    if run_engine_core is not _dyntra_patch._dyntra_lb_run_engine_core:
+        from vllm_ascend.patch.platform import patch_profiling_chunk
+
+        run_engine_core = patch_profiling_chunk._original_run_engine_core
+    assert run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
         "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
     )
     assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (

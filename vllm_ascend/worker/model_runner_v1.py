@@ -1728,8 +1728,12 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
+        # Pinning is only meaningful for a real accelerator; on a CPU device
+        # (e.g. CPU unit tests) ``pin_memory()`` needs PrivateUse1 hooks that
+        # are not registered, so keep the numpy-backed tensors unpinned.
+        pin_metadata = getattr(self.device, "type", None) != "cpu"
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            torch.from_numpy(value).pin_memory() if pin_metadata else torch.from_numpy(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,

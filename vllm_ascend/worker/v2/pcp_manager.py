@@ -64,18 +64,34 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        # vLLM #56107 removed the RequestState dependency from the base PCP
+        # manager on main (it derives rank-local state from the global batch).
+        # The 0.28.0 lane still threads ``req_states`` into the constructor.
+        if vllm_version_is("0.28.0"):
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                req_states=req_states,  # type: ignore[call-arg]
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU

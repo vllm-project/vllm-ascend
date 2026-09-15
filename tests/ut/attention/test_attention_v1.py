@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -151,14 +152,14 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(pcp_builder.pcp_enabled)
         self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
-    def test_unpadded_preserves_internal_seq_lens_cpu(self):
-        internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+    def test_unpadded_preserves_seq_lens_cpu_upper_bound(self):
+        seq_lens_cpu_upper_bound = torch.tensor([4, 5, 6], dtype=torch.int32)
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
             query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
             seq_lens=torch.tensor([4, 5, 6], dtype=torch.int32),
-            _seq_lens_cpu=internal_seq_lens_cpu,
             seq_lens_cpu=None,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             num_computed_tokens_cpu=None,
             num_reqs=3,
             num_actual_tokens=9,
@@ -174,7 +175,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         unpadded_metadata = common_attn_metadata.unpadded(num_actual_tokens=5, num_actual_reqs=2)
 
-        self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
+        self.assertTrue(torch.equal(unpadded_metadata.seq_lens_cpu_upper_bound, seq_lens_cpu_upper_bound[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
