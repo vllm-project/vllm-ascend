@@ -50,6 +50,7 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     PAGED_ATTENTION = auto()
     RC_DEVICE_DISCOVERY = auto()
+    REARRANGE_QKV_DMA = auto()
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     RUNTIME_CUSTOM_OPS = auto()
     SFA_DCP_REPLICATED_INDEXER = auto()
@@ -148,6 +149,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.REARRANGE_QKV_DMA,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
