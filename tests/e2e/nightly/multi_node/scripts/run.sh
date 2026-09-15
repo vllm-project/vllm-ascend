@@ -150,9 +150,9 @@ check_and_config() {
     # github加速镜像
     git config --global url."https://shturl.cc//https://github.com/".insteadOf "https://github.com/"
 
-    # pip主源改用清华新pypi源，移除废弃 /pypi/web/simple
-    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+    # pip主源改用清华新pypi源改为华为源
+    pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+    pip config set global.trusted-host mirrors.huaweicloud.com
 
     # 昇腾私有源放 extra‑index‑url，华为云ascend pypi
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
