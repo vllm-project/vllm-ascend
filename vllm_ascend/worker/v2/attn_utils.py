@@ -73,22 +73,33 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
-def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
-    """Expose identical Mamba specs to upstream MRV2 state handling."""
+def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose homogeneous Mamba specs to the upstream MRV2 initializer.
+
+    vLLM 0.28 sizes block tables by checking MambaSpec directly. Leaving an identical
+    set of Mamba specs wrapped in UniformTypeKVCacheSpecs drops the extra
+    speculative state slots, so scheduler writes and GDN reads can overflow
+    the block table. Preserve the groups and allocation descriptors while
+    restoring the Mamba-specific sizing path.
+    """
     groups = []
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
-            inner_specs = list(spec.kv_cache_specs.values())
+            layer_specs = list(spec.kv_cache_specs.values())
             if (
-                inner_specs
-                and isinstance(inner_specs[0], MambaSpec)
-                and all(inner == inner_specs[0] for inner in inner_specs)
+                layer_specs
+                and isinstance(layer_specs[0], MambaSpec)
+                and all(layer_spec == layer_specs[0] for layer_spec in layer_specs)
             ):
-                group = replace(group, kv_cache_spec=inner_specs[0])
+                group = replace(group, kv_cache_spec=layer_specs[0])
         groups.append(group)
-    # Do not mutate the scheduler/connector copy of the cache configuration.
     return replace(kv_cache_config, kv_cache_groups=groups)
+
+
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Keep the upstream normalization entry point for existing callers."""
+    return unwrap_mamba_kv_cache_groups(kv_cache_config)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
