@@ -18,6 +18,8 @@ All the arguments that can be set by users are:
 5. `--dp-address`: IP address of data parallel master node
 6. `--dp-rpc-port`: Port of data parallel master node, default 12345
 7. `--vllm-start-port`: Starting port of vLLM serving instances, default 9000
+8. `--dp-deploy-role`: Deploy role of current dp: mixed, prefill, decode.
+9. `--local-dp-start-rank`: Starting rank for current dp on local device.
 
 An example of running external DP in one single node:
 
@@ -38,4 +40,42 @@ python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-s
 
 # On node 1:
 python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 2 --dp-rank-start 2 --dp-address x.x.x.x --dp-rpc-port 12342
+```
+
+An example of running external DP in two nodes for pd-disaggregated deployment:
+
+```(python)
+cd examples/external_online_dp
+# For pd-disaggregated deployment, we can create launch_online_dp_p.py for prefill-dp, launch_online_dp_d.py for decode-dp.
+# running Prefill-DP2TP4 & Decode-DP4TP2 in two nodes with 8 NPUs each
+
+# On node 0 for Prefill:
+python launch_online_dp.py --dp-size 2 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12342 --dp-deploy-role prefill
+
+# On node 1 for Decode:
+python launch_online_dp.py --dp-size 4 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12342 --dp-deploy-role decode
+```
+
+An example of running external DP in single node for single-node pd-disaggregated deployment:
+
+```(python)
+cd examples/external_online_dp
+# For pd-disaggregated deployment, we can create launch_online_dp_p.py for prefill-dp, launch_online_dp_d.py for decode-dp.
+# running Prefill-DP2TP2 & Decode-DP4TP1 in single node with total 8 NPUs
+
+# On local single node:
+python launch_online_dp.py --dp-size 2 --tp-size 2 --dp-size-local 2 --dp-rank-start 0 --dp-address 0.0.0.0 --dp-rpc-port 12342 --vllm-start-port 6600 --dp-deploy-role prefill
+python launch_online_dp.py --dp-size 4 --tp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address 0.0.0.0 --dp-rpc-port 12442 --vllm-start-port 6700 --dp-deploy-role decode --local-dp-start-rank 4
+```
+
+An example of running external DP in single node for rank-class pd-disaggregated deployment:
+
+```(python)
+cd examples/external_online_dp
+# For pd-disaggregated deployment, we can create launch_online_dp_p.py for prefill-dp, launch_online_dp_d.py for decode-dp.
+# running Prefill-DP2TP1 & Decode-DP2TP1 in single node with 8 NPUs but using only 4 NPUs
+
+# On local single node:
+python launch_online_dp.py --dp-size 2 --tp-size 1 --dp-size-local 2 --dp-rank-start 0 --dp-address 0.0.0.0 --dp-rpc-port 12342 --vllm-start-port 6600 --dp-deploy-role prefill
+python launch_online_dp.py --dp-size 2 --tp-size 1 --dp-size-local 2 --dp-rank-start 0 --dp-address 0.0.0.0 --dp-rpc-port 12442 --vllm-start-port 6700 --dp-deploy-role decode --local-dp-start-rank 2
 ```
