@@ -61,8 +61,19 @@ def _make_speculative_config(method: str, num_speculative_tokens_per_batch_size=
 
 
 class TestIsDefaultV2ModelRunnerModel:
-    def test_whitelisted_architecture(self):
-        config = _make_vllm_config(model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]))
+    @pytest.mark.parametrize(
+        "architecture",
+        [
+            "Qwen3ForCausalLM",
+            "MiniMaxM2ForCausalLM",
+            "DeepseekV3ForCausalLM",
+            "GlmMoeDsaForCausalLM",
+            "DeepseekV4ForCausalLM",
+            "Qwen3_5MoeForCausalLM",
+        ],
+    )
+    def test_whitelisted_architecture(self, architecture):
+        config = _make_vllm_config(model_config=_make_model_config(architectures=[architecture]))
 
         assert is_default_v2_model_runner_model(config) is True
 
@@ -100,7 +111,7 @@ class TestIsSupportedV2ModelRunnerFeature:
 
         assert is_supported_v2_model_runner_feature(config) is True
 
-    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash"])
+    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash", "dspark"])
     def test_whitelisted_methods(self, monkeypatch, method):
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(speculative_config=_make_speculative_config(method))
@@ -138,7 +149,7 @@ class TestIsSupportedV2ModelRunnerFeature:
 
         assert is_supported_v2_model_runner_feature(config) is False
 
-    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash"])
+    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash", "dspark"])
     def test_dynamic_speculative_decoding_is_excluded(self, monkeypatch, method):
         warning_calls = []
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
