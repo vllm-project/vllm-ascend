@@ -1,3 +1,4 @@
+import gc
 import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -412,6 +413,192 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
+
+    def _upstream_capture_sizes(self, vllm_config):
+        """Stand in for the part of `_set_cudagraph_sizes()` under test.
+
+        Upstream builds 1, 2, 4 then multiples of 8 up to the ceiling and
+        truncates `max_cudagraph_capture_size` to the largest entry, which is
+        what leaves an off-grid ceiling uncaptured.
+        """
+        compilation_config = vllm_config.compilation_config
+        ceiling = min(
+            compilation_config.max_cudagraph_capture_size,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        sizes = [size for size in (1, 2, 4) if size <= ceiling]
+        sizes += list(range(8, min(ceiling + 1, 256), 8))
+        compilation_config.cudagraph_capture_sizes = sizes
+        compilation_config.max_cudagraph_capture_size = sizes[-1]
+
+    def test_restore_default_capture_ceiling_captures_off_grid_max_num_seqs(self):
+        from vllm_ascend import platform
+
+        # 12 and 20 are off the capture grid; 16 and 24 land on it.
+        test_cases = [
+            (12, [1, 2, 4, 8], [1, 2, 4, 8, 12], 12),
+            (20, [1, 2, 4, 8, 16], [1, 2, 4, 8, 16, 20], 20),
+            (16, [1, 2, 4, 8, 16], [1, 2, 4, 8, 16], 16),
+            (24, [1, 2, 4, 8, 16, 24], [1, 2, 4, 8, 16, 24], 24),
+        ]
+
+        for max_num_seqs, upstream_sizes, expected_sizes, expected_max in test_cases:
+            with self.subTest(max_num_seqs=max_num_seqs):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+                vllm_config.scheduler_config.max_num_batched_tokens = 8192
+                vllm_config.compilation_config.max_cudagraph_capture_size = None
+                vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+                self.platform.apply_config_platform_defaults(vllm_config)
+                self._upstream_capture_sizes(vllm_config)
+                self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, upstream_sizes)
+
+                platform._restore_default_capture_ceiling(vllm_config)
+
+                self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, expected_sizes)
+                self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, expected_max)
+
+    def test_restore_default_capture_ceiling_keeps_user_ceiling(self):
+        from vllm_ascend import platform
+
+        # The user asked to stop capturing at 8; max_num_seqs is off-grid above
+        # it, and must not pull the ceiling back up.
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.scheduler_config.max_num_seqs = 12
+        vllm_config.scheduler_config.max_num_batched_tokens = 8192
+        vllm_config.compilation_config.max_cudagraph_capture_size = 8
+        vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+        self.platform.apply_config_platform_defaults(vllm_config)
+        self._upstream_capture_sizes(vllm_config)
+
+        platform._restore_default_capture_ceiling(vllm_config)
+
+        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 8)
+
+    def test_restore_default_capture_ceiling_respects_token_budget(self):
+        from vllm_ascend import platform
+
+        # A ceiling upstream already clipped to max_num_batched_tokens must stay
+        # clipped, otherwise the restored size exceeds the token budget.
+        # SchedulerConfig rejects max_num_batched_tokens < max_num_seqs, so the
+        # ceiling can only outgrow the budget through speculative decode, where
+        # it is max_num_seqs * decode_query_len rather than max_num_seqs.
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.scheduler_config.max_num_seqs = 12
+        vllm_config.scheduler_config.max_num_batched_tokens = 16
+        vllm_config.speculative_config = MagicMock(num_speculative_tokens=2)
+        vllm_config.compilation_config.max_cudagraph_capture_size = None
+        vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+        self.platform.apply_config_platform_defaults(vllm_config)
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 36)
+        self._upstream_capture_sizes(vllm_config)
+
+        platform._restore_default_capture_ceiling(vllm_config)
+
+        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8, 16])
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 16)
+
+    def test_restore_default_capture_ceiling_ignores_other_config(self):
+        from vllm_ascend import platform
+
+        # The handoff is keyed on the config object, so a ceiling injected for
+        # one config cannot leak into the next one.
+        injected = TestNPUPlatform.mock_vllm_config()
+        injected.scheduler_config.max_num_seqs = 12
+        injected.scheduler_config.max_num_batched_tokens = 8192
+        injected.compilation_config.max_cudagraph_capture_size = None
+        injected.compilation_config.cudagraph_capture_sizes = None
+        self.platform.apply_config_platform_defaults(injected)
+
+        other = TestNPUPlatform.mock_vllm_config()
+        other.scheduler_config.max_num_seqs = 12
+        other.scheduler_config.max_num_batched_tokens = 8192
+        other.compilation_config.max_cudagraph_capture_size = 8
+        other.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+
+        platform._restore_default_capture_ceiling(other)
+
+        self.assertEqual(other.compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
+        self.assertEqual(other.compilation_config.max_cudagraph_capture_size, 8)
+
+    def test_restore_default_capture_ceiling_survives_nested_config(self):
+        from vllm_ascend import platform
+
+        # A second config initialized between the outer config's default and its
+        # restore -- a nested one built inside VllmConfig.__post_init__, say --
+        # must not cost the outer config its ceiling.
+        outer = TestNPUPlatform.mock_vllm_config()
+        outer.scheduler_config.max_num_seqs = 12
+        outer.scheduler_config.max_num_batched_tokens = 8192
+        outer.compilation_config.max_cudagraph_capture_size = None
+        outer.compilation_config.cudagraph_capture_sizes = None
+        self.platform.apply_config_platform_defaults(outer)
+        self._upstream_capture_sizes(outer)
+
+        nested = TestNPUPlatform.mock_vllm_config()
+        nested.scheduler_config.max_num_seqs = 20
+        nested.scheduler_config.max_num_batched_tokens = 8192
+        nested.compilation_config.max_cudagraph_capture_size = None
+        nested.compilation_config.cudagraph_capture_sizes = None
+        self.platform.apply_config_platform_defaults(nested)
+        self._upstream_capture_sizes(nested)
+
+        platform._restore_default_capture_ceiling(outer)
+        platform._restore_default_capture_ceiling(nested)
+
+        self.assertEqual(outer.compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8, 12])
+        self.assertEqual(outer.compilation_config.max_cudagraph_capture_size, 12)
+        self.assertEqual(nested.compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8, 16, 20])
+        self.assertEqual(nested.compilation_config.max_cudagraph_capture_size, 20)
+
+    def test_restore_default_capture_ceiling_does_not_leak_entries(self):
+        from vllm_ascend import platform
+
+        # Entries are dropped once their config is gone, so the map cannot grow
+        # for the life of the process. Configs take part in reference cycles, so
+        # they are reclaimed by a collector pass rather than when the last name
+        # goes away; until then the entry simply lingers, and the weak reference
+        # keeps it from matching anything, since an id is only reused once the
+        # object it belonged to has actually been freed.
+        for _ in range(5):
+            throwaway = TestNPUPlatform.mock_vllm_config()
+            throwaway.scheduler_config.max_num_seqs = 12
+            throwaway.compilation_config.max_cudagraph_capture_size = None
+            throwaway.compilation_config.cudagraph_capture_sizes = None
+            self.platform.apply_config_platform_defaults(throwaway)
+            del throwaway
+        gc.collect()
+
+        kept = TestNPUPlatform.mock_vllm_config()
+        kept.scheduler_config.max_num_seqs = 12
+        kept.compilation_config.max_cudagraph_capture_size = None
+        kept.compilation_config.cudagraph_capture_sizes = None
+        self.platform.apply_config_platform_defaults(kept)
+
+        self.assertEqual(len(platform._injected_max_cudagraph_capture_sizes), 1)
+
+    def test_restore_default_capture_ceiling_skips_when_capture_disabled(self):
+        from vllm_ascend import platform
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.scheduler_config.max_num_seqs = 12
+        vllm_config.scheduler_config.max_num_batched_tokens = 8192
+        vllm_config.compilation_config.max_cudagraph_capture_size = None
+        vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+        self.platform.apply_config_platform_defaults(vllm_config)
+        # enforce_eager / cudagraph_mode NONE empties the list upstream.
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+        vllm_config.compilation_config.max_cudagraph_capture_size = 0
+
+        platform._restore_default_capture_ceiling(vllm_config)
+
+        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [])
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 0)
 
     def test_validate_indexer_pp_config_rejects_indexshare_partition(self):
         indexer_types = ["full", "full", "full", "shared", "shared", "shared"]
