@@ -11,6 +11,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendC8MXFPAttentionBackendImpl,
     AscendMetadata,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import (
@@ -1007,3 +1008,64 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
         mock_graph_task_update_begin.assert_called_once()
         mock_graph_task_update_end.assert_called_once()
+
+
+class TestC8MXFPMaxSeqlenQ(TestBase):
+    """QFA's max_seqlen_q is the longest single query, not the batch total.
+
+    The metadata op seeds querySeqSize with the attr and then raises it with
+    max(attr, per-request length), so an inflated attr is never walked back.
+    """
+
+    def setUp(self):
+        self.impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        self.impl.sliding_window = None
+
+    def _capture_max_seqlen_q(self, query_start_loc, max_query_len):
+        num_tokens = int(query_start_loc[-1])
+        attn_metadata = SimpleNamespace(
+            causal=True,
+            query_start_loc_gpu=torch.tensor(query_start_loc, dtype=torch.int32),
+            seq_lens_gpu=torch.ones(len(query_start_loc) - 1, dtype=torch.int32),
+            max_query_len=max_query_len,
+        )
+        seen = {}
+
+        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q):
+            seen["metadata_op"] = max_seqlen_q
+            return MagicMock()
+
+        def fake_run(*args, max_seqlen_q, **kwargs):
+            seen["main_op"] = max_seqlen_q
+            return kwargs["output"]
+
+        with (
+            patch.object(AscendC8MXFPAttentionBackendImpl, "_get_qfa_metadata", fake_metadata),
+            patch.object(AscendC8MXFPAttentionBackendImpl, "_run_qfa", fake_run),
+        ):
+            self.impl._forward_mxfp8_attention(
+                torch.zeros(num_tokens, 8, dtype=torch.uint8),
+                torch.zeros(num_tokens, 1, dtype=torch.uint8),
+                (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+                attn_metadata,
+                torch.zeros(num_tokens, 8),
+            )
+
+        # Both operators must be planned against the same bound.
+        self.assertEqual(seen["metadata_op"], seen["main_op"])
+        return seen["main_op"]
+
+    def test_uniform_decode_does_not_declare_the_batch_total(self):
+        # 4 requests, one query token each: the old code declared 4.
+        self.assertEqual(self._capture_max_seqlen_q([0, 1, 2, 3, 4], max_query_len=1), 1)
+
+    def test_mtp_decode_uses_the_draft_query_length(self):
+        # 3 requests x 2 tokens (1 + 1 draft): the old code declared 6.
+        self.assertEqual(self._capture_max_seqlen_q([0, 2, 4, 6], max_query_len=2), 2)
+
+    def test_mixed_batch_uses_the_longest_prefill(self):
+        # One 5-token prefill plus 3 decodes; the longest query is the prefill.
+        self.assertEqual(self._capture_max_seqlen_q([0, 5, 6, 7, 8], max_query_len=5), 5)
+
+    def test_missing_max_query_len_falls_back_to_the_token_count(self):
+        self.assertEqual(self._capture_max_seqlen_q([0, 1, 2, 3, 4], max_query_len=None), 4)

@@ -422,6 +422,9 @@ def test_final_output_never_all_reduces_sequence_shards(
 @pytest.mark.parametrize(
     ("mode", "fused_output_is_reduced", "reduce_shared"),
     [
+        # Only TP-sharded shared-expert weights need their own collective, and
+        # then only when the combine kernel already reduced the routed half --
+        # otherwise the pair gets reduced once as a sum at the end.
         (SharedExpertParallelMode.TENSOR_PARALLEL, False, False),
         (SharedExpertParallelMode.TENSOR_PARALLEL, True, True),
         (SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY, True, False),
