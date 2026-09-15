@@ -2,9 +2,13 @@ import gc
 
 import pytest
 import torch
-from vllm.triton_utils import HAS_TRITON, triton
+from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
+from vllm_ascend.ops.triton.dsa_local_metadata import (
+    DSA_LOCAL_METADATA_BLOCK,
+    build_local_metadata,
+    build_local_metadata_kernel,
+)
 
 MAX_NUM_SEQS = 1024
 NUM_REQS_LIST = [1, 7, 32, 1024]
@@ -48,7 +52,7 @@ def _run_native(
     return local_query_start_loc, local_seq_lens, start_pos
 
 
-def _run_triton(
+def _run_fused(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     local_start: int,
@@ -58,12 +62,9 @@ def _run_triton(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     local_query_start_loc = torch.zeros(MAX_NUM_SEQS + 1, dtype=torch.int32, device=query_start_loc.device)
     local_seq_lens = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=query_start_loc.device)
-    zero_i32 = torch.tensor([0], device=query_start_loc.device, dtype=torch.int32)
-    start_pos_out = (
-        torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=query_start_loc.device) if compute_start_pos else zero_i32
-    )
+    start_pos_out = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=query_start_loc.device)
 
-    build_local_metadata_triton[(1,)](
+    build_local_metadata(
         query_start_loc,
         seq_lens,
         local_query_start_loc,
@@ -71,12 +72,15 @@ def _run_triton(
         local_start,
         local_end,
         num_reqs,
-        start_pos_out,
-        BLOCK_NUM_REQS=triton.next_power_of_2(num_reqs),
-        COMPUTE_START_POS=compute_start_pos,
+        start_pos_out=start_pos_out if compute_start_pos else None,
+        block=MAX_NUM_SEQS,
     )
 
-    return local_query_start_loc, local_seq_lens, start_pos_out if compute_start_pos else None
+    return (
+        local_query_start_loc,
+        local_seq_lens,
+        start_pos_out if compute_start_pos else None,
+    )
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
@@ -115,7 +119,7 @@ def test_build_local_metadata_triton(
     local_end = local_start + tokens_per_rank
 
     for compute_start_pos in [True, False]:
-        trt_qsl, trt_sl, trt_sp = _run_triton(
+        trt_qsl, trt_sl, trt_sp = _run_fused(
             query_start_loc,
             seq_lens,
             local_start,
@@ -186,7 +190,7 @@ def test_build_local_metadata_triton_masks_graph_padding(device: str) -> None:
         device=device,
     )
 
-    trt_qsl, trt_sl, _ = _run_triton(
+    trt_qsl, trt_sl, _ = _run_fused(
         query_start_loc,
         seq_lens,
         local_start,
@@ -221,3 +225,151 @@ def test_build_local_metadata_triton_masks_graph_padding(device: str) -> None:
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_build_local_metadata_no_recompile_across_num_reqs(device: str) -> None:
+    """The whole point of the fixed-capacity kernel: sweeping num_reqs
+    across power-of-2 boundaries (the old next_power_of_2 blocking
+    re-JITed at each crossing) must not add kernel cache entries."""
+    torch.set_default_device(device)
+
+    def entry_count() -> int:
+        return sum(len(v) for v in build_local_metadata_kernel.cache.values())
+
+    cache_before = entry_count()
+    for num_reqs in [1, 2, 3, 5, 8, 17, 32, 33, 64, 100, 128, 129, 256, 512, 1024]:
+        query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+        for i in range(num_reqs):
+            query_start_loc[i + 1] = query_start_loc[i] + 4
+        seq_lens = torch.full((num_reqs,), 64, dtype=torch.int32, device=device)
+        local_query_start_loc = torch.zeros(MAX_NUM_SEQS + 1, dtype=torch.int32, device=device)
+        local_seq_lens = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=device)
+        start_pos_out = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=device)
+        build_local_metadata(
+            query_start_loc,
+            seq_lens,
+            local_query_start_loc,
+            local_seq_lens,
+            0,
+            64,
+            num_reqs,
+            start_pos_out=start_pos_out,
+            block=MAX_NUM_SEQS,
+        )
+    assert entry_count() - cache_before <= 1, (
+        "num_reqs sweep must not grow the kernel cache "
+        f"(before={cache_before}, after={entry_count()})"
+    )
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_build_local_metadata_empty_batch(device: str) -> None:
+    """num_reqs == 0 short-circuits on the host: outputs must be all
+    zeros (the [0] prefix plus an empty cumsum) for every output tensor,
+    including start_pos_out, without touching the input pointers."""
+    torch.set_default_device(device)
+
+    query_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
+    seq_lens = torch.zeros(0, dtype=torch.int32, device=device)
+    local_query_start_loc = torch.full((MAX_NUM_SEQS + 1,), 7, dtype=torch.int32, device=device)
+    local_seq_lens = torch.full((MAX_NUM_SEQS,), 7, dtype=torch.int32, device=device)
+    start_pos_out = torch.full((MAX_NUM_SEQS,), 7, dtype=torch.int32, device=device)
+
+    build_local_metadata(
+        query_start_loc,
+        seq_lens,
+        local_query_start_loc,
+        local_seq_lens,
+        0,
+        32,
+        0,
+        start_pos_out=start_pos_out,
+        block=MAX_NUM_SEQS,
+    )
+
+    assert torch.all(local_query_start_loc == 0)
+    assert torch.all(local_seq_lens == 0)
+    assert torch.all(start_pos_out == 0)
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_build_local_metadata_tail_overwrites_stale_data(device: str) -> None:
+    """The kernel overwrites the full capacity region, so a smaller batch
+    following a larger one must not observe stale values beyond num_reqs
+    (this is what lets the caller skip its fill_(0) pre-zeroing)."""
+    torch.set_default_device(device)
+
+    # Step 1: large batch writes non-zero metadata into the buffers.
+    num_reqs_large = 64
+    query_start_loc = torch.zeros(num_reqs_large + 1, dtype=torch.int32, device=device)
+    for i in range(num_reqs_large):
+        query_start_loc[i + 1] = query_start_loc[i] + 8
+    seq_lens = torch.full((num_reqs_large,), 256, dtype=torch.int32, device=device)
+    local_query_start_loc = torch.zeros(MAX_NUM_SEQS + 1, dtype=torch.int32, device=device)
+    local_seq_lens = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=device)
+    start_pos_out = torch.zeros(MAX_NUM_SEQS, dtype=torch.int32, device=device)
+    build_local_metadata(
+        query_start_loc,
+        seq_lens,
+        local_query_start_loc,
+        local_seq_lens,
+        0,
+        512,
+        num_reqs_large,
+        start_pos_out=start_pos_out,
+        block=MAX_NUM_SEQS,
+    )
+    assert local_query_start_loc[num_reqs_large + 1 :].abs().max().item() == 0
+    assert local_seq_lens[num_reqs_large:].abs().max().item() == 0
+
+    # Step 2: small batch into the SAME (dirty) buffers, no pre-zeroing.
+    num_reqs_small = 5
+    query_start_loc = torch.zeros(num_reqs_small + 1, dtype=torch.int32, device=device)
+    for i in range(num_reqs_small):
+        query_start_loc[i + 1] = query_start_loc[i] + 4
+    seq_lens = torch.full((num_reqs_small,), 64, dtype=torch.int32, device=device)
+    build_local_metadata(
+        query_start_loc,
+        seq_lens,
+        local_query_start_loc,
+        local_seq_lens,
+        0,
+        32,
+        num_reqs_small,
+        start_pos_out=start_pos_out,
+        block=MAX_NUM_SEQS,
+    )
+    assert local_query_start_loc[num_reqs_small + 1 :].abs().max().item() == 0
+    assert local_seq_lens[num_reqs_small:].abs().max().item() == 0
+    assert start_pos_out[num_reqs_small:].abs().max().item() == 0
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available")
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_build_local_metadata_default_block_matches_capacity(device: str) -> None:
+    """The default block is the production scheduler capacity: the builder
+    allocates local_query_start_loc with max_num_seqs + 1 elements, so the
+    kernel's default BLOCK must divide it evenly (SUB_N=8 fold)."""
+    assert DSA_LOCAL_METADATA_BLOCK == 512
+    assert (DSA_LOCAL_METADATA_BLOCK + 1) == 513
+    assert DSA_LOCAL_METADATA_BLOCK % 8 == 0
