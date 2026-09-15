@@ -25,6 +25,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     get_attention_compute_start_gate,
     reset_attention_compute_start_gate,
@@ -117,6 +119,8 @@ class KVPoolWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.vllm_config = vllm_config
+        self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -236,6 +240,10 @@ class KVPoolWorker:
             self.put_step = self.tp_size // self.num_kv_head
             self.head_or_tp_rank = self.tp_rank // self.put_step
         else:
+            self.head_or_tp_rank = self.tp_rank
+            self.put_step = 1
+        if self.use_kvpp:
+            # Every owner saves all blocks of its layer shard, including its MTP replica.
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
         self.my_key_index = (
@@ -391,6 +399,7 @@ class KVPoolWorker:
         # group (not the index in layer_names). Multiple cache names at the
         # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
+        self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
 
         if self.kv_cache_config is not None:
@@ -405,7 +414,10 @@ class KVPoolWorker:
                 for layer_name in group_spec.layer_names
             }
             if physical_layers:
-                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                self._global_to_local_layer = {
+                    global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
+                }
+                effective_num_layers = max(self.num_layers, len(physical_layers))
                 if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
@@ -425,9 +437,7 @@ class KVPoolWorker:
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= self.num_layers:
-                        continue
-                    physical_layers.add(physical_layer)
+                    physical_layers.add(self._global_to_local_layer[physical_layer])
                 phys_to_layer_idx = {
                     physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
                 }
@@ -466,10 +476,19 @@ class KVPoolWorker:
                 self.prefetch_layer_map = cache_layout.prefetch_layer_map
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
             else:
-                self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
-                self.independent_layers = self._layerwise_reuse_layout.independent_layers
-                self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
-                self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
+                layout = self._layerwise_reuse_layout
+                stage_globals = sorted(layout.layer_cache_specs)
+                if stage_globals:
+                    self.prefetch_layer_map, self.independent_layers = self._remap_layout_to_stage_local(
+                        layout.prefetch_layer_map,
+                        layout.independent_layers,
+                        stage_globals,
+                    )
+                else:
+                    self.prefetch_layer_map = layout.prefetch_layer_map
+                    self.independent_layers = layout.independent_layers
+                self.layerwise_offload = layout.has_layer_reuse
+                self.num_prefetch_layers = layout.num_prefetch_layers
         else:
             self.num_prefetch_layers = 1
             if self.use_layerwise:
@@ -489,6 +508,19 @@ class KVPoolWorker:
             self.num_layers,
             self.num_kv_cache_groups,
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
+        )
+
+    @staticmethod
+    def _remap_layout_to_stage_local(
+        prefetch_layer_map: dict[int, int],
+        independent_layers: list[int],
+        stage_globals: list[int],
+    ) -> tuple[dict[int, int], list[int]]:
+        """Translate a global-indexed reuse layout to stage-local indices."""
+        global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(stage_globals)}
+        return (
+            {global_to_local[layer]: global_to_local[source] for layer, source in prefetch_layer_map.items()},
+            [global_to_local[layer] for layer in independent_layers],
         )
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
@@ -745,8 +777,7 @@ class KVPoolWorker:
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
-                continue
+            phys = self._global_to_local_layer.get(phys, phys)
             layer_names_by_physical.setdefault(phys, []).append(layer_name)
 
         layer_cache_entry_offsets = [0]
@@ -807,6 +838,10 @@ class KVPoolWorker:
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
+        if self.use_kvpp:
+            owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
             for group_id in range(self.num_kv_cache_groups)
@@ -845,7 +880,10 @@ class KVPoolWorker:
 
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                self._infer_cache_group_metadata(group_id, group_spec.layer_names)
+                layer_names = group_spec.layer_names
+                if self.use_kvpp:
+                    layer_names = [name for name in layer_names if name in kv_caches]
+                self._infer_cache_group_metadata(group_id, layer_names)
         else:
             self._infer_cache_group_metadata(0, list(kv_caches.keys()))
 
@@ -857,7 +895,7 @@ class KVPoolWorker:
         # num_layers (physical layers) in that case.
         original_num_layers = self.num_layers
         new_num_layers = sum(self.group_num_layers.values())
-        if self.num_kv_cache_groups == 1 and new_num_layers != original_num_layers:
+        if not self.use_kvpp and self.num_kv_cache_groups == 1 and new_num_layers != original_num_layers:
             self.num_layers = new_num_layers
             logger.info(
                 "KVPoolWorker: updated num_layers %d -> %d (includes MTP/spec-decode draft layers).",
@@ -1278,7 +1316,8 @@ class KVPoolWorker:
 
         Single-group models use the PR #11585 format (model@hash@rank) for
         backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups.
+        (model@group_id@hash@rank) to distinguish groups. PP stages also need
+        pp_rank because they share block hashes and TP/head rank numbering.
         """
         return self.layerwise_protocol.make_full_key(
             self.model_name,
@@ -1286,6 +1325,8 @@ class KVPoolWorker:
             block_hash_hex,
             self.head_or_tp_rank,
             self.num_kv_cache_groups,
+            self.pp_rank,
+            self.pp_size,
         )
 
     def _make_layerwise_partial_key(
@@ -1302,6 +1343,8 @@ class KVPoolWorker:
             block_index,
             end_token,
             self.head_or_tp_rank,
+            self.pp_rank,
+            self.pp_size,
         )
 
     def _refresh_allocated_gvas(self, keys: list[str]) -> None:
@@ -2794,6 +2837,8 @@ class KVPoolWorker:
         return self.num_kv_head
 
     def get_group_tp_size(self, kv_cache_group_id: int):
+        if self.use_kvpp:
+            return self.tp_size
         if self.tp_mismatch:
             return self.effective_tp_size
         if self.group_uses_align_state[kv_cache_group_id]:

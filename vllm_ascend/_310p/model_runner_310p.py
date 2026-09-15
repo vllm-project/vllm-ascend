@@ -452,7 +452,7 @@ class NPUModelRunner310(NPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
+        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
