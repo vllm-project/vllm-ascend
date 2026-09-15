@@ -54,6 +54,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             # Target attention remains DCP-aware. The GQA draft attention is
             # deliberately built with a DCP=1 config and a replicated cache.
             self.dcp_size = 1
+            self.dcp_rank = 0
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
@@ -219,10 +220,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         local_cols = min(dcp_block_table.shape[1], max_local_cols)
         replicated_cols = local_cols * replication_size
         required_shape = (dcp_block_table.shape[0], replicated_cols)
+        capacity_rows = max(required_shape[0], self.max_batch_size + 1)
         storage = self._replicated_block_table_storage.get(gid)
-        if storage is None or any(have < need for have, need in zip(storage.shape, required_shape)):
+        if storage is None or storage.shape != (capacity_rows, replicated_cols):
             storage = torch.empty(
-                required_shape,
+                (capacity_rows, replicated_cols),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -255,6 +257,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 local_phys_blocks * replication_size + lanes
             ) * blocks_per_phys_block + local_sub_blocks
         valid_rows = (seq_lens[: dcp_block_table.shape[0]] > 0).view(-1, 1)
+        storage.zero_()
         result = storage[: required_shape[0], : required_shape[1]]
         result.copy_(torch.where(valid_rows, replicated_blocks, 0))
         return result
@@ -420,6 +423,13 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
+        if gid in self._per_group_replication_sizes:
+            # Reserve the expanded table before capture; refresh live rows in
+            # the first pass while keeping the backing storage stable.
+            self._build_replicated_block_table(
+                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
+            )
+            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
 
     def set_inputs_first_pass(
         self,
@@ -448,16 +458,16 @@ class AscendDSparkProposer(AscendDflashProposer):
         cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
         long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
-        self._per_group_block_table_buffers = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
             block_table = self._per_group_block_tables[gid]
             if gid in self._per_group_replication_sizes:
-                block_table = self._build_replicated_block_table(
+                self._build_replicated_block_table(
                     gid,
                     block_table[:batch_size],
                     cad.seq_lens[:batch_size],
                 )
+                block_table = self._replicated_block_table_storage[gid]
             self._per_group_block_table_buffers[gid] = block_table
         self._context_slot_mapping_buffers = None
         self._dflash_num_context = int(cad.query_start_loc_cpu[batch_size])
