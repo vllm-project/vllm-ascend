@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import traceback
 from types import SimpleNamespace
 
 import pytest
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParserManager
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_ascend.patch.platform import patch_glm_reasoning_usage_accounting as patch
 
@@ -234,3 +236,94 @@ def test_chat_usage_wrapper_is_bound_only_for_glm_instances():
     assert not hasattr(qwen_serving, "_ascend_glm_reasoning_usage_patched")
     assert "chat_completion_stream_generator" not in qwen_serving.__dict__
     assert "chat_completion_full_generator" not in qwen_serving.__dict__
+
+
+def _engine_generator(shared_error, result):
+    # Mimics the engine-side output generator of one request: it may yield
+    # results before the engine dies, then re-raises the single shared
+    # EngineDeadError that OutputProcessor.propagate_error() hands to every
+    # in-flight request.
+    async def gen():
+        yield result
+        raise shared_error
+
+    return gen()
+
+
+async def _consume_generator(gen):
+    async for _ in gen:
+        pass
+
+
+def _collect_engine_dead_error(make_generator):
+    try:
+        asyncio.run(_consume_generator(make_generator()))
+    except EngineDeadError as exc:
+        return exc
+    raise AssertionError("EngineDeadError was not propagated")
+
+
+def _assert_fresh_engine_dead_errors(raised, shared_error):
+    for exc in raised:
+        assert isinstance(exc, EngineDeadError)
+        assert exc is not shared_error
+        # The shared error must stay out of the logged chain: otherwise the
+        # serving layer would print its ever-growing traceback again.
+        assert exc.__suppress_context__
+    depths = [len(traceback.extract_tb(exc.__traceback__)) for exc in raised]
+    assert len(set(depths)) == 1, depths
+
+
+def test_tracked_stream_results_reraise_fresh_engine_dead_error():
+    shared_error = EngineDeadError()
+    result = SimpleNamespace(outputs=[SimpleNamespace(index=0, token_ids=[10, 11])])
+    state = patch._StreamUsageState(
+        counters=[patch._IncrementalReasoningCounter(1, 2, enabled=True)]
+    )
+
+    raised = [
+        _collect_engine_dead_error(
+            lambda: patch._tracked_stream_results(
+                _engine_generator(shared_error, result), state
+            )
+        )
+        for _ in range(3)
+    ]
+
+    _assert_fresh_engine_dead_errors(raised, shared_error)
+
+
+def test_tracked_full_results_reraise_fresh_engine_dead_error():
+    shared_error = EngineDeadError()
+    result = SimpleNamespace(outputs=[])
+    state = patch._FullUsageState()
+
+    raised = [
+        _collect_engine_dead_error(
+            lambda: patch._tracked_full_results(
+                _engine_generator(shared_error, result), state
+            )
+        )
+        for _ in range(3)
+    ]
+
+    _assert_fresh_engine_dead_errors(raised, shared_error)
+    assert state.final_res is result
+
+
+def test_shared_engine_dead_error_traceback_accumulates_without_wrapper():
+    # Control group for the two tests above: without the wrapper re-raising a
+    # fresh error, the shared instance's traceback grows by one round of
+    # frames per failed request, which is what floods the server log.
+    shared_error = EngineDeadError()
+    result = SimpleNamespace(outputs=[])
+
+    depths = []
+    for _ in range(3):
+        exc = _collect_engine_dead_error(
+            lambda: _engine_generator(shared_error, result)
+        )
+        assert exc is shared_error
+        depths.append(len(traceback.extract_tb(exc.__traceback__)))
+
+    assert depths[0] < depths[1] < depths[2]
