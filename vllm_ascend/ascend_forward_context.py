@@ -420,6 +420,26 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
+def is_acl_full_graph_capturing() -> bool:
+    """Return whether FIA should wrap kernels in ACL ``graph_task_group``.
+
+    GPU V2 sets ``forward_context.capturing`` during CUDA-graph warmup and
+    piecewise capture. That flag is not "the current NPU stream is in ACL
+    capture". Calling ``graph_task_group_begin`` on a non-capturing stream
+    raises error 107029 and hung Qwen3 whitelist-MRv2 e2e.
+
+    Piecewise graphs must not use FIA task groups. ``ModelWithContext`` already
+    excludes ``PIECEWISE`` when writing ``_EXTRA_CTX.capturing``; this helper
+    re-checks the live stream so compiled attention cannot bake in GPU's flag.
+    """
+    npu = getattr(torch, "npu", None)
+    is_capturing = getattr(npu, "is_current_stream_capturing", None)
+    if is_capturing is None or not is_capturing():
+        return False
+    ctx = get_forward_context()
+    return getattr(ctx, "cudagraph_runtime_mode", None) != CUDAGraphMode.PIECEWISE
+
+
 def _extra_ctx_uses_additional_kwargs(ctx: Any) -> bool:
     """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
 

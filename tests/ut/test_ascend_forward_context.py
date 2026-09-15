@@ -583,3 +583,51 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert afc._EXTRA_CTX.capturing is False
     assert forward_context.capturing is True
     assert forward_context.additional_kwargs["capturing"] is False
+
+
+def test_is_acl_full_graph_capturing_ignores_gpu_flag_when_stream_idle(monkeypatch):
+    monkeypatch.setattr(
+        afc.torch,
+        "npu",
+        SimpleNamespace(is_current_stream_capturing=lambda: False),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.FULL, capturing=True),
+    )
+
+    assert afc.is_acl_full_graph_capturing() is False
+
+
+def test_is_acl_full_graph_capturing_requires_full_mode(monkeypatch):
+    monkeypatch.setattr(
+        afc.torch,
+        "npu",
+        SimpleNamespace(is_current_stream_capturing=lambda: True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.FULL),
+    )
+
+    assert afc.is_acl_full_graph_capturing() is True
+
+
+def test_is_acl_full_graph_capturing_skips_piecewise(monkeypatch):
+    monkeypatch.setattr(
+        afc.torch,
+        "npu",
+        SimpleNamespace(is_current_stream_capturing=lambda: True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.PIECEWISE),
+    )
+
+    assert afc.is_acl_full_graph_capturing() is False
