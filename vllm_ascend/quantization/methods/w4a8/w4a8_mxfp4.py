@@ -103,12 +103,39 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         return output
 
     def process_weights_after_loading(self, layer):
+        """Cast the weight to NZ format and reshape its scale for NPU inference.
+
+        Records the original shapes and marks the layer transformed so
+        ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
+        """
+        if getattr(layer, "_mxfp4_transformed", False):
+            return
+        if not hasattr(layer, "_mxfp4_original_shapes"):
+            layer._mxfp4_original_shapes = {
+                "weight": tuple(layer.weight.data.shape),
+                "weight_scale": tuple(layer.weight_scale.data.shape),
+            }
         layer.weight.data = torch_npu.npu_format_cast(
             layer.weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
         )
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         n, k = layer.weight_scale.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
+        layer._mxfp4_transformed = True
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Undo the NZ/scale transform so the weight loader can reload ND weights.
+
+        Reverses the transpose, casts the weight back to ND (format 2), and
+        restores the scale's original shape.
+        """
+        if not getattr(layer, "_mxfp4_transformed", False):
+            return
+        layer.weight.data = layer.weight.data.transpose(-1, -2)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
+        orig_scale_shape = layer._mxfp4_original_shapes["weight_scale"]
+        layer.weight_scale.data = layer.weight_scale.data.transpose(-3, -2).reshape(orig_scale_shape)
+        layer._mxfp4_transformed = False
 
 
 @register_scheme("W4A8_MXFP", "moe")
@@ -186,6 +213,20 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
+        """Cast MoE weights to NZ format and reshape their scales for NPU inference.
+
+        Records the original shapes and marks the layer transformed so
+        ``restore_weights_for_rl_loading`` can reverse it before an RL reload.
+        """
+        if getattr(layer, "_mxfp4_transformed", False):
+            return
+        if not hasattr(layer, "_mxfp4_original_shapes"):
+            layer._mxfp4_original_shapes = {
+                "w13_weight": tuple(layer.w13_weight.data.shape),
+                "w13_weight_scale": tuple(layer.w13_weight_scale.data.shape),
+                "w2_weight": tuple(layer.w2_weight.data.shape),
+                "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
+            }
         layer.w13_weight.data = torch_npu.npu_format_cast(
             layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
         )
@@ -198,6 +239,28 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
         g, n, k = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
+        layer._mxfp4_transformed = True
+
+    def restore_weights_for_rl_loading(self, layer):
+        """Undo the NZ/scale transform so the weight loader can reload ND weights.
+
+        Reverses the transpose, casts the expert weights back to ND (format 2),
+        and restores the scales' original shapes.
+        """
+        if not getattr(layer, "_mxfp4_transformed", False):
+            return
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 2)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 2)
+        orig_shapes = layer._mxfp4_original_shapes
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2).reshape(
+            orig_shapes["w13_weight_scale"]
+        )
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(-3, -2).reshape(
+            orig_shapes["w2_weight_scale"]
+        )
+        layer._mxfp4_transformed = False
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
