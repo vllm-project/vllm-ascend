@@ -18,7 +18,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, _use_mega_moe=False),
     )
 
 
@@ -85,6 +85,7 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
+    use_mega_moe: bool = False,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
@@ -94,7 +95,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, _use_mega_moe=use_mega_moe),
     )
 
 
@@ -163,6 +164,7 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(mon
         lambda: SimpleNamespace(
             enable_prefill_mc2=False,
             enable_fused_mc2=0,
+            _use_mega_moe=False,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
     )
@@ -182,7 +184,7 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0, _use_mega_moe=False),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
@@ -342,6 +344,24 @@ def test_select_moe_comm_method_a3_without_fused_mc2(
     vllm_config = _make_vllm_config()
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize("mode", [1, 2])
+@pytest.mark.parametrize("ep_world_size", [8, 64, 65])
+def test_fused_mc2_operator_selection_preserves_opt_in(monkeypatch, mode, ep_world_size):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        enable_fused_mc2=1,
+        use_mega_moe=mode == 2,
+        ep_world_size=ep_world_size,
+    )
+    config = _make_vllm_config()
+    use_mega_moe = mode == 2 and ep_world_size <= 64
+
+    assert afc.use_cann_megamoe(config) is use_mega_moe
+    expected = MoECommType.FUSED_MC2 if use_mega_moe or ep_world_size <= 32 else MoECommType.MC2
+    assert afc._select_fused_or_capacity_moe_comm_method(128, config, 128) == expected
 
 
 @pytest.mark.parametrize(
