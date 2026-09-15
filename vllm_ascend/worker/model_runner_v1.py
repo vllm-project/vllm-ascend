@@ -77,7 +77,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -253,7 +252,6 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendDCPReplicatedDraftAttentionSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -762,26 +760,7 @@ class NPUModelRunner(GPUModelRunner):
             return False
         hf_config = draft_model_config.hf_config
         architectures = getattr(hf_config, "architectures", ()) or ()
-        return getattr(hf_config, "model_type", None) == "qwen3" and any(
-            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
-            for architecture in architectures
-        )
-
-    def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
-        """Whether this runner uses the K3 target and GQA DSpark KV layout."""
-        if not self._draft_uses_qwen3_gqa_dspark():
-            return False
-        hf_config = getattr(self.model_config, "hf_config", None)
-        architectures = {
-            *(getattr(self.model_config, "architectures", ()) or ()),
-            *(getattr(hf_config, "architectures", ()) or ()),
-        }
-        architecture = getattr(self.model_config, "architecture", None)
-        if architecture:
-            architectures.add(architecture)
-        return getattr(hf_config, "model_type", None) == "kimi_k3" or any(
-            "KimiK3" in architecture for architecture in architectures
-        )
+        return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -4539,9 +4518,6 @@ class NPUModelRunner(GPUModelRunner):
         # backing allocation rather than the size of an individual layer.
         use_legacy_shared_by_layout = vllm_version_is("0.28.0")
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
-        has_replicated_draft = any(
-            isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in layer_kv_cache_spec.values()
-        )
         is_dsv4_main = not use_legacy_shared_by_layout and any(
             getattr(spec, "model_version", None) == "deepseek_v4"
             for spec in layer_kv_cache_spec.values()
@@ -4668,17 +4644,14 @@ class NPUModelRunner(GPUModelRunner):
             and not uses_padded_page_layout
             and self.hybrid_with_attn_and_mamba
             and supports_shared_backing_with_kv_transfer
-            and (has_replicated_draft or (not self.use_sparse and not self.use_compress))
+            and not self.use_sparse
+            and not self.use_compress
             and kv_cache_config.kv_cache_tensors
         ):
             layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
             tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
             regions: list[tuple[str, int, int]] = []
-            # The K3 planner explicitly emits contiguous layer regions even
-            # when the generic layout selector prefers block-outermost packing.
-            if len(tensor_sizes) == 1 and (
-                has_replicated_draft or (layout.is_layer_compact and layout.is_block_compact)
-            ):
+            if len(tensor_sizes) == 1 and layout.is_layer_compact and layout.is_block_compact:
                 backing_size = next(iter(tensor_sizes))
                 for descriptor in kv_cache_config.kv_cache_tensors:
                     for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
@@ -5249,20 +5222,8 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    physical_page_size_bytes = current_kv_cache_spec.page_size_bytes
-                    if isinstance(
-                        current_kv_cache_spec,
-                        AscendDCPReplicatedDraftAttentionSpec,
-                    ):
-                        # The custom spec reports the aggregate bytes backing one
-                        # target-DCP logical block. The draft backend still sees
-                        # the original per-lane page layout, only with D times as
-                        # many physical blocks.
-                        physical_page_size_bytes = (
-                            current_kv_cache_spec.lane_page_size_bytes
-                        )
-                    assert sum_page_size_bytes % physical_page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // physical_page_size_bytes
+                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -5826,29 +5787,6 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in attn_layer_names:
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
-
-        replicated_draft_layer_names = (
-            set(getattr(self.drafter, "_draft_attn_layer_names", ()))
-            if self._uses_dcp_replicated_dspark_draft_kv()
-            else set()
-        )
-        # Preserve the non-DCP target/Mamba layout. Only effective draft K/V
-        # bytes are replicated; from_full_attention_spec removes the target
-        # padding because the mixed planner allocates draft tensors separately.
-        for layer_name in replicated_draft_layer_names:
-            spec = kv_cache_spec[layer_name]
-            if not isinstance(spec, FullAttentionSpec):
-                raise TypeError(
-                    "Kimi K3's DCP-replicated GQA DSpark cache requires "
-                    f"FullAttentionSpec, got {type(spec).__name__} for "
-                    f"{layer_name}."
-                )
-            kv_cache_spec[layer_name] = (
-                AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
-                    spec,
-                    self.dcp_size,
-                )
-            )
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage

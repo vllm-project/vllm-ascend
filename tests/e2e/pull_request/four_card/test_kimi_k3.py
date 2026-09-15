@@ -407,7 +407,10 @@ def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2, 4, 8])
-def test_k3_gqa_tp8_dcp_replicated_draft_kv(k3_models: dict[str, str], dcp_size: int) -> None:
+def test_k3_gqa_tp8_dcp_replicated_draft_kv(
+    k3_models: dict[str, str], dcp_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     args = _engine_args(k3_models, "gqa", tp=8)
     args["decode_context_parallel_size"] = dcp_size
     args["enforce_eager"] = True

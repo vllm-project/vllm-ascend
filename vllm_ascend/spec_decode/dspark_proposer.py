@@ -4,11 +4,7 @@
 from typing import Any
 
 import torch
-from vllm.config import (
-    CUDAGraphMode,
-    VllmConfig,
-    get_layers_from_vllm_config,
-)
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -16,20 +12,15 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionState,
-)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import enable_pcp
-from vllm_ascend.core.kv_cache_interface import (
-    AscendDCPReplicatedDraftAttentionSpec,
-)
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
-from vllm_ascend.spec_decode.utils import DCPReplicatedDraftMixin, DynamicSpecScheduler
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 
 
-class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
+class AscendDSparkProposer(AscendDflashProposer):
     """DSpark block proposer.
 
     DSpark uses vLLM's ``mtp`` method in user config, but its execution shape is
@@ -45,7 +36,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
-        self._init_dcp_replicated_draft()
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
@@ -109,7 +99,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         # one allocation, so kv_cache_spec.block_size is not interchangeable
         # with the attention kernel's block size.
         self._per_group_kernel_block_sizes: dict[int, int] = {}
-        self._per_group_manager_block_sizes: dict[int, int] = {}
 
         self._per_group_block_table_buffers: dict[int, torch.Tensor] = {}
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
@@ -149,12 +138,7 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         self._per_group_kernel_block_sizes = {}
-        self._per_group_manager_block_sizes = {}
-        self._per_group_replication_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
-        draft_vllm_config = self.vllm_config
-        if getattr(self, "replicated_draft_kv", False):
-            draft_vllm_config = self._create_draft_vllm_config()
 
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & self._draft_attn_layer_names
@@ -182,21 +166,12 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
                         layer_kv_cache_spec,
                         kv_cache_gid,
                     )
-                    builder_proxy = attn_group
-                    if getattr(self, "replicated_draft_kv", False):
-                        builder_proxy = self.MetadataBuilderProxy(attn_group)
-                    builder_proxy.create_metadata_builders(
-                        draft_vllm_config,
+                    attn_group.create_metadata_builders(
+                        self.vllm_config,
                         self.device,
                         kernel_block_size=kernel_block_size,
                     )
                     self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
-                    self._per_group_manager_block_sizes[kv_cache_gid] = layer_kv_cache_spec.block_size
-                    if isinstance(
-                        layer_kv_cache_spec,
-                        AscendDCPReplicatedDraftAttentionSpec,
-                    ):
-                        self._per_group_replication_sizes[kv_cache_gid] = layer_kv_cache_spec.dcp_replication_size
                     attention_groups[key] = attn_group
                 else:
                     attention_groups[key].layer_names.append(layer_name)
@@ -242,7 +217,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
-        self._reserve_replicated_block_table(gid, block_table)
 
     def set_inputs_first_pass(
         self,
@@ -272,9 +246,7 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
-            attn_group.kv_cache_group_id: self._get_draft_block_table(
-                attn_group.kv_cache_group_id, batch_size, cad.seq_lens[:batch_size]
-            )
+            attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
             for attn_group in self.draft_attn_groups
         }
         self._context_slot_mapping_buffers = None
@@ -328,14 +300,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
                 DCP_RANK=dcp_rank,
                 CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
-            self._build_replicated_context_slot_mapping(
-                gid,
-                gid_block_table,
-                target_positions,
-                cad.query_start_loc,
-                batch_size,
-                self._dflash_num_context,
-            )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
@@ -378,7 +342,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
             cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        self._prepare_draft_cp_metadata(cad)
 
         if dcp_size > 1:
             if cad.is_prefilling is not None:
@@ -420,9 +383,6 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
 
-        # DP dummy iterations must never reuse the previous request's context
-        # slots: its blocks can still be pinned for asynchronous PD transfer.
-        self._context_slot_mapping_buffers = None
         self.token_indices_to_sample.fill_(0)
         self._pad_draft_buffers(num_query_total, num_input_tokens)
 

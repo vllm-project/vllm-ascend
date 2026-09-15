@@ -116,6 +116,7 @@ class TestNPUPlatform(TestBase):
             ),
         )
         config = SimpleNamespace(
+            use_v2_model_runner=True,
             parallel_config=target_parallel,
             model_config=SimpleNamespace(
                 architectures=["KimiLinearForCausalLM"],

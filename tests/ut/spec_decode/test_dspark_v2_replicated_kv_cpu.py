@@ -110,7 +110,7 @@ def test_mrv2_pd_config_isolates_recompute_and_preserves_target():
     from dataclasses import dataclass, replace
 
     root = Path(__file__).resolve().parents[3] / "vllm_ascend"
-    helper_tree = ast.parse((root / "spec_decode/utils.py").read_text())
+    helper_tree = ast.parse((root / "worker/v2/spec_decode/dcp_utils.py").read_text())
     helpers = [node for node in helper_tree.body if getattr(node, "name", None) == "draft_additional_config"]
     tree = ast.parse((root / "worker/v2/spec_decode/dspark/speculator.py").read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
@@ -332,3 +332,58 @@ def test_mixin_batch_refresh_dispatch(replicated, dummy, skip):
     if replicated and not (dummy and skip):
         expected = [batch]
     assert refreshed == expected
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_platform_replicated_draft_exception_requires_v2(use_v2):
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/platform.py"
+    function = next(
+        n
+        for n in ast.parse(source.read_text()).body
+        if getattr(n, "name", None) == "_validate_draft_decode_context_parallel_config"
+    )
+    scope = {}
+    exec(compile("from __future__ import annotations\n" + ast.unparse(function), str(source), "exec"), scope)
+    target = SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3"))
+    draft = SimpleNamespace(
+        hf_config=SimpleNamespace(model_type="qwen3", architectures=["Qwen3DSparkModel"]),
+        use_mla=False,
+        model_arch_config=SimpleNamespace(total_num_attention_heads=96),
+        get_total_num_kv_heads=lambda: 16,
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        model_config=target,
+        parallel_config=SimpleNamespace(tensor_parallel_size=8, decode_context_parallel_size=8),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens_per_batch_size=None,
+            use_dspark=lambda: True,
+            draft_model_config=draft,
+            draft_parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        ),
+    )
+    if use_v2:
+        scope[function.name](config)
+    else:
+        with pytest.raises(ValueError, match="must be greater than total num kv heads"):
+            scope[function.name](config)
+
+
+@pytest.mark.parametrize("scheduler", [None, {}, {"recompute_scheduler_enable": True, "other": 3}])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_draft_recompute_options_are_isolated(scheduler, legacy):
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/dcp_utils.py"
+    function = next(
+        n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "draft_additional_config"
+    )
+    scope = dict(copy=copy)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
+    target = dict(recompute_scheduler_enable=legacy, scheduler_config=scheduler, multistream_overlap_shared_expert=True)
+    original = copy.deepcopy(target)
+    draft = scope[function.name](target)
+    assert target == original
+    assert not draft["recompute_scheduler_enable"]
+    assert not draft["scheduler_config"]["recompute_scheduler_enable"]
+    assert draft["multistream_overlap_shared_expert"]
+    if scheduler and "other" in scheduler:
+        assert draft["scheduler_config"]["other"] == 3
