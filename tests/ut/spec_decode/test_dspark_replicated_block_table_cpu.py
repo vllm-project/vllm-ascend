@@ -20,7 +20,13 @@ def load_proposer(**overrides):
     tree = ast.parse(source.read_text())
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DCPReplicatedDraftMixin")
     namespace = {"torch": torch, "copy": copy, "replace": replace, "VllmConfig": object, **overrides}
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"uses_dcp_replicated_gqa_draft", "draft_additional_config"}
+    ]
+    exec(compile(ast.Module(body=[*helpers, cls], type_ignores=[]), str(source), "exec"), namespace)
     proposer_source = source.with_name("dspark_proposer.py")
     proposer_tree = ast.parse(proposer_source.read_text())
     proposer = next(
@@ -102,6 +108,7 @@ class TestReplicatedDraftHooks(unittest.TestCase):
             cache_config: object
             kv_transfer_config: object
             speculative_config: object
+            additional_config: object = None
 
         for replicated in (False, True):
             for fail in (False, True):
@@ -183,6 +190,131 @@ class TestReplicatedDraftHooks(unittest.TestCase):
                         self.assertEqual((proposer.dcp_size, proposer.dcp_rank), (2, 1))
                         self.assertIs(proposer.loaded_config, target)
 
+    def test_draft_disables_target_pd_recompute_before_validation(self):
+        source = Path(__file__).resolve().parents[3] / "vllm_ascend/platform.py"
+        tree = ast.parse(source.read_text())
+        check = next(node for node in tree.body if getattr(node, "name", None) == "_check_ascend_config")
+        recompute_check = next(
+            node
+            for node in check.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Attribute)
+            and node.test.attr == "recompute_scheduler_enable"
+        )
+        validation = compile(ast.Module(body=[recompute_check], type_ignores=[]), str(source), "exec")
+
+        @dataclass
+        class Config:
+            model_config: object
+            parallel_config: object
+            cache_config: object
+            kv_transfer_config: object
+            additional_config: object
+            scheduler_config: object = None
+            compilation_config: object = None
+
+            def __post_init__(self):
+                if self.kv_transfer_config is None:
+                    options = self.additional_config or {}
+                    scheduler_options = options.get("scheduler_config") or {}
+                    enabled = scheduler_options.get(
+                        "recompute_scheduler_enable", options.get("recompute_scheduler_enable", False)
+                    )
+                    exec(
+                        validation,
+                        {
+                            "scheduler_extension_config": SimpleNamespace(recompute_scheduler_enable=enabled),
+                            "vllm_config": self,
+                        },
+                    )
+
+        class Base:
+            def _create_draft_vllm_config(self):
+                return self.vllm_config
+
+        mixin = load_proposer()
+
+        class Proposer(mixin, Base):
+            def _uses_dcp_replicated_draft_kv(self):
+                return True
+
+        for options in (
+            None,
+            {},
+            {"recompute_scheduler_enable": True},
+            {"multistream_overlap_shared_expert": True, "recompute_scheduler_enable": True},
+            {"scheduler_config": {"recompute_scheduler_enable": True}},
+            {"recompute_scheduler_enable": True, "scheduler_config": {"recompute_scheduler_enable": False}},
+            {"recompute_scheduler_enable": False, "scheduler_config": {"recompute_scheduler_enable": True}},
+        ):
+            with self.subTest(options=options):
+                additional = copy.deepcopy(options)
+                if additional is not None:
+                    additional["other_option"] = {"values": [1, 2]}
+                original = copy.deepcopy(additional)
+                connector = SimpleNamespace(
+                    kv_connector="MooncakeConnectorV2",
+                    kv_role="kv_consumer",
+                    kv_port="30300",
+                    engine_id="3",
+                    kv_connector_extra_config={
+                        "prefill": {"dp_size": 4, "tp_size": 8, "dcp_size": 1},
+                        "decode": {"dp_size": 4, "tp_size": 8, "dcp_size": 8},
+                        "ascend_local_comm_res_path": "/etc/hixlep",
+                    },
+                )
+                target = Config(
+                    SimpleNamespace(
+                        model="/mnt/share/kimik3_0726/Kimi-K3-w4a8-mxfp-flex-quarot-0729", max_model_len=200000
+                    ),
+                    SimpleNamespace(
+                        rank=3,
+                        data_parallel_size=4,
+                        tensor_parallel_size=8,
+                        decode_context_parallel_size=8,
+                        cp_kv_cache_interleave_size=768,
+                    ),
+                    SimpleNamespace(block_size=768, enable_prefix_caching=True),
+                    connector,
+                    additional,
+                    SimpleNamespace(max_num_seqs=32, max_num_batched_tokens=768),
+                    SimpleNamespace(cudagraph_mode="FULL_DECODE_ONLY"),
+                )
+                proposer = Proposer()
+                proposer.vllm_config = target
+                proposer.speculative_config = SimpleNamespace(
+                    method="dspark",
+                    num_speculative_tokens=3,
+                    draft_tensor_parallel_size=8,
+                    enforce_eager=False,
+                    draft_sample_method="greedy",
+                    draft_parallel_config=SimpleNamespace(tensor_parallel_size=8, decode_context_parallel_size=8),
+                    draft_model_config=SimpleNamespace(model="/mnt/share/weights/Kimi-K3-DSpark", max_model_len=4096),
+                )
+                draft = proposer._create_draft_vllm_config()
+                self.assertIsNone(draft.kv_transfer_config)
+                self.assertEqual(draft.parallel_config.decode_context_parallel_size, 1)
+                self.assertEqual(draft.parallel_config.tensor_parallel_size, 8)
+                self.assertEqual(target.parallel_config.decode_context_parallel_size, 8)
+                self.assertEqual(draft.model_config.max_model_len, 4096)
+                self.assertEqual(target.model_config.max_model_len, 200000)
+                self.assertEqual(draft.cache_config.block_size, 768)
+                self.assertTrue(draft.cache_config.enable_prefix_caching)
+                self.assertEqual(draft.compilation_config.cudagraph_mode, "FULL_DECODE_ONLY")
+                self.assertEqual(draft.scheduler_config.max_num_batched_tokens, 768)
+                self.assertEqual(draft.scheduler_config.max_num_seqs, 32)
+                self.assertEqual(
+                    draft.additional_config.get("multistream_overlap_shared_expert"),
+                    (additional or {}).get("multistream_overlap_shared_expert"),
+                )
+                self.assertFalse(draft.additional_config["scheduler_config"]["recompute_scheduler_enable"])
+                self.assertFalse(draft.additional_config.get("recompute_scheduler_enable", False))
+                self.assertEqual(target.additional_config, original)
+                self.assertIs(target.kv_transfer_config, connector)
+                if additional is not None:
+                    draft.additional_config["other_option"]["values"].append(3)
+                    self.assertEqual(target.additional_config, original)
+
     def test_metadata_builder_proxy_preserves_group_spec(self):
         builder_cls = MagicMock(side_effect=lambda *args: SimpleNamespace(args=args))
         proposer_cls = load_proposer(AscendAttentionMetadataBuilder=builder_cls)
@@ -220,6 +352,7 @@ class TestReplicatedDraftHooks(unittest.TestCase):
         proposer = load_proposer()()
         proposer.device = torch.device("cpu")
         proposer._per_group_kernel_block_sizes = {0: 4}
+        proposer._per_group_replication_sizes = {0: 2}
         proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(8, dtype=torch.int32)}
         table = torch.tensor([[6, 7, 14, 15], [10, 11, 18, 19]], dtype=torch.int32)
         slots = proposer._build_replicated_context_slot_mapping(
