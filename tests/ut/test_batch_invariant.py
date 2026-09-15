@@ -267,6 +267,80 @@ class TestBatchInvariant:
         mock_torch_npu.npu_rms_norm.assert_called_once_with(x_plus_residual, weight, eps)
         mock_torch_npu.npu_add_rms_norm.assert_called_once_with(x, residual, weight, eps)
 
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_reduce_sum_supports_dtype_overload(self):
+        """torch.sum(x, dim, keepdim, dtype=...) is a valid overload, but the patched
+        torch.sum only accepted (x, dim, keepdim) and raised TypeError on it."""
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.float16
+        cast = MagicMock(spec=torch.Tensor)
+        cast.device.type = "npu"
+        cast.dtype = torch.float32
+        x.to.return_value = cast
+        expected = MagicMock(spec=torch.Tensor)
+
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+            create=True,
+        ) as mock_reduce:
+            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True, dtype=torch.float32)
+
+        x.to.assert_called_once_with(torch.float32)
+        # The cast dtype is supported, so the batch-invariant kernel still runs.
+        mock_reduce.assert_called_once_with(cast, -1, True)
+        assert result is expected
+
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_reduce_sum_dtype_overload_falls_back_for_unsupported_dtype(self):
+        """e.g. logits.isnan().sum(dim=-1, dtype=torch.int32) in the NaN metric."""
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.float16
+        cast = MagicMock(spec=torch.Tensor)
+        cast.device.type = "npu"
+        cast.dtype = torch.int32
+        x.to.return_value = cast
+        expected = MagicMock(spec=torch.Tensor)
+
+        with (
+            patch("vllm_ascend.batch_invariant.torch_sum", return_value=expected) as native_sum,
+            patch.object(
+                batch_invariant.torch.ops.batch_invariant_ops,
+                "npu_reduce_sum_batch_invariant",
+                create=True,
+            ) as custom_sum,
+        ):
+            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=False, dtype=torch.int32)
+
+        native_sum.assert_called_once_with(cast, -1, False)
+        custom_sum.assert_not_called()
+        assert result is expected
+
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_reduce_sum_skips_the_cast_when_dtype_matches(self):
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.bfloat16
+        expected = MagicMock(spec=torch.Tensor)
+
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+            create=True,
+        ) as mock_reduce:
+            result = batch_invariant.reduce_sum(x, dim=1, dtype=torch.bfloat16)
+
+        x.to.assert_not_called()
+        mock_reduce.assert_called_once_with(x, 1, False)
+        assert result is expected
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
