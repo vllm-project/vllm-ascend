@@ -45,7 +45,13 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
+from ..base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+    TPWeightRepeatSpec,
+)
 from ..registry import register_scheme
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
 
@@ -136,6 +142,20 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
     resolves those tiles and then either re-quantizes to MXFP8 (Ascend 950) or
     keeps the model dtype (everything else).
     """
+
+    supports_tp_weight_switch = True
+
+    def get_tp_weight_switch_specs(
+        self,
+        *,
+        input_sharded: bool,
+    ) -> tuple[tuple[TPWeightGatherSpec, ...], tuple[TPWeightRepeatSpec, ...]]:
+        if self.mxfp8_method is not None:
+            if input_sharded:
+                return self.mxfp8_method.tp_weight_gather_specs, self.mxfp8_method.tp_weight_repeat_specs
+            return self.mxfp8_method.tp_weight_output_gather_specs, self.mxfp8_method.tp_weight_output_repeat_specs
+        gather_dim = 1 if input_sharded else 0
+        return (TPWeightGatherSpec("weight", gather_dim=gather_dim),), ()
 
     def __init__(self, weight_block_size: tuple[int, int]):
         self.block_n, self.block_k = weight_block_size
