@@ -195,6 +195,61 @@ def mxfp_resolve_kv_cache_layout(
     return k_shape, v_shape, k_scale_shape, v_scale_shape
 
 
+def scatter_mxfp_pa_nz_kv_cache(
+    quant_key: torch.Tensor,
+    quant_value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_size: int,
+) -> None:
+    """Scatter quantized K/V into the paged caches in QFA's PA_NZ layout.
+
+    The caches keep the natural (num_blocks, block_size, num_kv_heads,
+    head_dim) storage; both this scatter and QFA (layout_kv=PA_NZ) go through
+    the 5-D view (num_blocks, num_kv_heads, head_dim//32, block_size, 32).
+    A token at in-block offset ``o`` lands at ``[block, :, :, o, :]`` and its
+    ``[N, D]`` payload needs only a reshape to ``[N, D//32, 32]`` -- the NZ
+    layout is exactly the natural token row re-fragmented along D, so no
+    permute is involved. npu_scatter_pa_kv_cache cannot be used here: its
+    shape contract requires key_cache.dim2 == num_kv_heads, which the PA_NZ
+    axis order (dim2 == head_dim//32) violates.
+
+    Byte views throughout: index_put on float8 either errors or falls back
+    to AICPU. Padded rows (slot -1) are clamped to slot 0 and rewrite the
+    cache's pre-read content, making them no-ops (same pattern as the K-scale
+    scatter).
+    """
+    slots = slot_mapping.to(torch.long)
+    if slots.numel() == 0:
+        return
+
+    valid = slots >= 0
+    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
+    block_ids = safe_slots // block_size
+    offsets = safe_slots % block_size
+
+    for src, cache in ((quant_key, key_cache), (quant_value, value_cache)):
+        num_tokens, num_kv_heads, head_dim = src.shape
+        src_bytes = src.view(torch.uint8) if src.dtype != torch.uint8 else src
+        nz = cache.view(
+            -1,
+            num_kv_heads,
+            head_dim // MXFP_KV_NZ_DIM_FRAG,
+            block_size,
+            MXFP_KV_NZ_DIM_FRAG,
+        )
+        payload = src_bytes.view(
+            num_tokens,
+            num_kv_heads,
+            head_dim // MXFP_KV_NZ_DIM_FRAG,
+            MXFP_KV_NZ_DIM_FRAG,
+        )
+        cached = nz[block_ids, :, :, offsets, :]
+        updates = torch.where(valid.view(-1, 1, 1, 1), payload, cached)
+        nz[block_ids, :, :, offsets, :] = updates
+
+
 def scatter_mxfp_k_scale_cache(
     key_scale: torch.Tensor,
     key_scale_cache: torch.Tensor,
