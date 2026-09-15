@@ -1404,6 +1404,36 @@ class AscendMLAImpl(MLAAttentionImpl):
         out_list = [prefix_output.reshape(num_tokens * H, D)]
         lse_list = [prefix_lse.reshape(num_tokens * H)]
 
+        if self.enable_kv_nz:
+            nope_nz, rope_nz = self._nz_cache_inputs(cache_kv_c, cache_k_pe)
+            ql_nope = torch.bmm(q_nope.transpose(0, 1), self.W_UK_T).transpose(0, 1)
+            for i in range(iters):
+                kvlen = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
+                co, cl = torch_npu.npu_fused_infer_attention_score_v2(
+                    ql_nope, nope_nz, nope_nz,
+                    query_rope=q_pe, key_rope=rope_nz,
+                    num_query_heads=H, num_key_value_heads=1,
+                    input_layout="TND_NTD", sparse_mode=0,
+                    block_table=prefill_metadata.block_table,
+                    block_size=cache_kv_c.shape[1],
+                    actual_seq_qlen=actual_seq_lengths_q,
+                    actual_seq_kvlen=kvlen,
+                    softmax_scale=self.scale, return_softmax_lse=True,
+                )
+                co = self._v_up_proj(co).reshape(num_tokens * H, D)
+                if cl.dim() == 2:
+                    cl = cl.transpose(0, 1).unsqueeze(-1)
+                out_list.append(co.to(torch.float32).reshape(num_tokens * H, D))
+                lse_list.append(cl.to(torch.float32).reshape(num_tokens * H))
+            output_final, _ = torch_npu.npu_attention_update(
+                tuple(lse_list), tuple(out_list), 0)
+            return output_final.view(num_tokens, H, D), None
+
+        attn_output, attn_lse = self._compute_prefill_context(
+        q_nope, q_pe, kv_c_and_k_pe_cache,
+        self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse,
+    )
+
         if self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
 
