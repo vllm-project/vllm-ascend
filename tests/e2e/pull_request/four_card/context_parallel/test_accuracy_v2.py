@@ -42,6 +42,11 @@ PCP_FULL_DECODE_GRAPH = {
     "cudagraph_capture_sizes": [4, 8],
 }
 
+MLA_DCP_MODEL = os.getenv("MLA_DCP_MODEL_PATH", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
+MLA_DCP_PROMPTS = [
+    "The capital of France is",
+    ("This is a long context for MLA DCP chunked-prefill validation. " * 16) + "Summarize the context.",
+]
 DSV3_2_MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
 DSV3_2_PROMPTS = [
     "The capital of France is",
@@ -254,6 +259,53 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
 def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP+DCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_DCP_CASE)
+
+
+@pytest.mark.e2e_model(MLA_DCP_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="chunked_prefill,prefix_caching",
+    parallel="TP,DCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="eager",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_deepseek_v2_lite_mla_dcp_model_runner_v2_eager() -> None:
+    """Guard MRV2 MLA DCP decode and chunked-prefill execution."""
+    with VllmRunner(
+        MLA_DCP_MODEL,
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        tensor_parallel_size=2,
+        decode_context_parallel_size=2,
+        distributed_executor_backend="mp",
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.8,
+        cp_kv_cache_interleave_size=128,
+        block_size=128,
+        quantization="ascend",
+        enforce_eager=True,
+    ) as runner:
+        outputs = runner.generate_greedy(MLA_DCP_PROMPTS, max_tokens=8)
+
+    assert len(outputs) == len(MLA_DCP_PROMPTS)
+    for prompt, (token_ids, output_text) in zip(MLA_DCP_PROMPTS, outputs):
+        assert token_ids, "Each request should return token ids"
+        assert len(output_text) > len(prompt), "Each request should return generated text"
 
 
 def _run_pcp_spec_decode(
