@@ -295,6 +295,9 @@ a3:
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
+      - name: Qwen3-0.6B-static-kernel
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3-0.6B-static-kernel.yaml
       - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
         os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml
