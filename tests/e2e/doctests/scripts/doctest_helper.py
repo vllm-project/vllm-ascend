@@ -168,9 +168,7 @@ INSTALLATION_SOURCE_MARKERS = ("installation-source-install",)
 
 SHARED_DOCTEST_PATHS = {
     ".github/workflows/schedule_doctest.yaml",
-    "tests/e2e/doctests/scripts/common.sh",
-    "tests/e2e/doctests/scripts/run_doctests.sh",
-    "tests/e2e/doctests/scripts/doctest_helper.py",
+    "tests/e2e/doctests/scripts",
 }
 QUICKSTART_TEST_SCRIPT = "tests/e2e/doctests/001-quickstart-test.sh"
 INSTALLATION_TEST_SCRIPT = "tests/e2e/doctests/002-installation-test.sh"
@@ -293,10 +291,24 @@ def doctest_block_changed(base_text: str | None, head_text: str | None, marker: 
     return base_block != head_block
 
 
-def get_changed_paths(base: str, head: str) -> set[str]:
-    """Return changed repository paths and fail if the Git refs cannot be compared."""
+def get_merge_base(base: str, head: str) -> str:
+    """Return the common ancestor used as the pull request comparison base."""
     result = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", base, head, "--"],
+        ["git", "merge-base", base, head],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise DoctestError(result.stderr.strip() or f"Cannot find a merge base for {base} and {head}.")
+    return result.stdout.strip()
+
+
+def get_changed_paths(base: str, head: str) -> set[str]:
+    """Return paths changed by the pull request using a three-dot comparison."""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}", "--"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -330,20 +342,23 @@ def any_doctest_blocks_changed(
 
 def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     """Select affected devices and installation methods using the fixed change rules."""
+    comparison_base = get_merge_base(base, head)
     changed_paths = get_changed_paths(base, head)
     content_cache: dict[str, tuple[str | None, str | None]] = {}
     run_a2 = run_310p = QUICKSTART_TEST_SCRIPT in changed_paths
-    if any_doctest_blocks_changed(base, head, QUICKSTART_COMMON_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_COMMON_MARKERS, content_cache):
         run_a2 = run_310p = True
-    if any_doctest_blocks_changed(base, head, QUICKSTART_A2_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_A2_MARKERS, content_cache):
         run_a2 = True
-    if any_doctest_blocks_changed(base, head, QUICKSTART_310P_MARKERS, content_cache):
+    if any_doctest_blocks_changed(comparison_base, head, QUICKSTART_310P_MARKERS, content_cache):
         run_310p = True
 
-    pip_changed = any_doctest_blocks_changed(base, head, INSTALLATION_PIP_MARKERS, content_cache)
-    uv_changed = any_doctest_blocks_changed(base, head, INSTALLATION_UV_MARKERS, content_cache)
-    source_changed = any_doctest_blocks_changed(base, head, INSTALLATION_SOURCE_MARKERS, content_cache)
-    installation_common_changed = any_doctest_blocks_changed(base, head, INSTALLATION_COMMON_MARKERS, content_cache)
+    pip_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_PIP_MARKERS, content_cache)
+    uv_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_UV_MARKERS, content_cache)
+    source_changed = any_doctest_blocks_changed(comparison_base, head, INSTALLATION_SOURCE_MARKERS, content_cache)
+    installation_common_changed = any_doctest_blocks_changed(
+        comparison_base, head, INSTALLATION_COMMON_MARKERS, content_cache
+    )
     installation_script_changed = INSTALLATION_TEST_SCRIPT in changed_paths
     run_pip = installation_script_changed or pip_changed
     run_uv = installation_script_changed or uv_changed
@@ -352,11 +367,16 @@ def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     if installation_common_changed and not (pip_changed or uv_changed or source_changed):
         run_pip = True
 
-    base_text = read_repo_text(MKDOCS_PATH, base)
+    base_text = read_repo_text(MKDOCS_PATH, comparison_base)
     head_text = read_repo_text(MKDOCS_PATH, head)
     assert base_text is not None and head_text is not None
     # Shared tooling or release changes add both devices and pip, retaining other selections.
-    if release_config_changed(base_text, head_text) or bool(changed_paths & SHARED_DOCTEST_PATHS):
+    shared_doctest_changed = any(
+        path == shared_path or path.startswith(f"{shared_path}/")
+        for path in changed_paths
+        for shared_path in SHARED_DOCTEST_PATHS
+    )
+    if release_config_changed(base_text, head_text) or shared_doctest_changed:
         run_a2 = run_310p = run_pip = True
 
     quickstart_devices = []

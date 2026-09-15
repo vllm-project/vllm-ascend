@@ -3,6 +3,7 @@
 
 import importlib.util
 import io
+import subprocess
 from http.client import HTTPMessage
 from pathlib import Path
 from urllib.error import HTTPError
@@ -78,6 +79,7 @@ def test_mkdocs_helpers(helper):
 )
 def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expected):
     changed_group = getattr(helper, group_name)
+    monkeypatch.setattr(helper, "get_merge_base", lambda base, head: "merge-base")
     monkeypatch.setattr(helper, "get_changed_paths", lambda base, head: set())
     monkeypatch.setattr(
         helper,
@@ -103,11 +105,17 @@ def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expect
             False,
             {"quickstart": ["a2", "310p"], "installation": ["pip"]},
         ),
+        (
+            {"tests/e2e/doctests/scripts/future_script.sh"},
+            False,
+            {"quickstart": ["a2", "310p"], "installation": ["pip"]},
+        ),
         (set(), True, {"quickstart": ["a2", "310p"], "installation": ["pip"]}),
         ({"README.md"}, False, {"quickstart": [], "installation": []}),
     ],
 )
 def test_select_doctests_by_path_or_release(helper, monkeypatch, paths, release_changed, expected):
+    monkeypatch.setattr(helper, "get_merge_base", lambda base, head: "merge-base")
     monkeypatch.setattr(helper, "get_changed_paths", lambda base, head: paths)
     monkeypatch.setattr(helper, "any_doctest_blocks_changed", lambda *args: False)
     monkeypatch.setattr(
@@ -117,6 +125,60 @@ def test_select_doctests_by_path_or_release(helper, monkeypatch, paths, release_
     )
 
     assert helper.select_doctests("base", "head") == expected
+
+
+def test_pr_selection_excludes_quickstart_changes_only_on_base(helper, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "Doctest")
+    git("config", "user.email", "doctest@example.com")
+    docs = repo / "docs"
+    docs.mkdir()
+    quickstart = docs / "quickstart.md"
+    quickstart.write_text("<!-- doctest: quickstart -->\n```bash\necho common\n```\n", encoding="utf-8")
+    (repo / "mkdocs.yml").write_text("extra:\n  vllm_ascend_version: v1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "common")
+    common = git("rev-parse", "HEAD")
+
+    git("checkout", "-b", "head")
+    (repo / "pr-only.txt").write_text("head\n", encoding="utf-8")
+    git("add", "pr-only.txt")
+    git("commit", "-m", "head change")
+    head = git("rev-parse", "HEAD")
+
+    git("checkout", "-b", "base", common)
+    quickstart.write_text("<!-- doctest: quickstart -->\n```bash\necho base\n```\n", encoding="utf-8")
+    git("add", "docs/quickstart.md")
+    git("commit", "-m", "base quickstart change")
+    base = git("rev-parse", "HEAD")
+
+    monkeypatch.setattr(helper, "REPO_ROOT", repo)
+    monkeypatch.setattr(helper, "MKDOCS_PATH", "mkdocs.yml")
+    monkeypatch.setattr(helper, "DOCTEST_FILE_BY_MARKER", {"quickstart": "docs/quickstart.md"})
+    monkeypatch.setattr(helper, "QUICKSTART_COMMON_MARKERS", ("quickstart",))
+    monkeypatch.setattr(helper, "QUICKSTART_A2_MARKERS", ())
+    monkeypatch.setattr(helper, "QUICKSTART_310P_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_COMMON_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_PIP_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_UV_MARKERS", ())
+    monkeypatch.setattr(helper, "INSTALLATION_SOURCE_MARKERS", ())
+    monkeypatch.setattr(helper, "SHARED_DOCTEST_PATHS", set())
+
+    assert helper.get_merge_base(base, head) == common
+    assert helper.get_changed_paths(base, head) == {"pr-only.txt"}
+    assert helper.select_doctests(base, head) == {"quickstart": [], "installation": []}
 
 
 def test_build_doctest_plan(helper, monkeypatch):

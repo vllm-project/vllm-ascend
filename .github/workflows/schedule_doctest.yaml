@@ -49,11 +49,7 @@ on:
       - '.github/workflows/schedule_doctest.yaml'
       - 'mkdocs.yml'
       - 'docs/source/getting_started/**'
-      - 'tests/e2e/doctests/scripts/common.sh'
-      - 'tests/e2e/doctests/scripts/run_doctests.sh'
-      - 'tests/e2e/doctests/001-quickstart-test.sh'
-      - 'tests/e2e/doctests/002-installation-test.sh'
-      - 'tests/e2e/doctests/scripts/doctest_helper.py'
+      - 'tests/e2e/doctests/**'
 
 permissions:
   contents: read
