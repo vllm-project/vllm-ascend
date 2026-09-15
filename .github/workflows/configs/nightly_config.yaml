@@ -226,6 +226,9 @@ a3:
       - name: glm-5.2-w4a8-mtp-v2
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
+      - name: glm-5.2-w4a8c8-sfa-prolog-v3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8C8-SFA-PrologV3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml

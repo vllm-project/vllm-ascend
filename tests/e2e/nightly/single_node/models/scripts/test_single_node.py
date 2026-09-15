@@ -351,6 +351,7 @@ _FEATURE_ENVS: dict[str, str] = {
 _FEATURE_CONFIGS: dict[str, str] = {
     "enable_fused_mc2": "fused_mc2",
     "enable_mlapo": "mlapo",
+    "enable_sfa_prolog_v3": "sfa_prolog_v3",
 }
 
 _PERF_METRIC_RENAME: dict[str, str] = {

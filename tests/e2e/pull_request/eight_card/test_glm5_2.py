@@ -30,6 +30,7 @@ from vllm.config import CompilationConfig
 from tests.e2e.pull_request.utils import _run_speculative_decoding
 
 MAIN_MODEL = "Eco-Tech/GLM-5.2-w4a8"
+PROLOG_V3_MODEL = "Eco-Tech/GLM-5.2-w4a8c8"
 SPECULATOR_MODEL = "RedHatAI/GLM-5.2-speculator.dspark"
 DSPARK_NUM_SPECULATIVE_TOKENS = 7
 MTP_NUM_SPECULATIVE_TOKENS = 3
@@ -114,5 +115,49 @@ def test_glm_5_2_mtp_acceptance_tp8() -> None:
             "tensor_parallel_size": 8,
             "max_model_len": 8192,
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
+        },
+    )
+
+
+@pytest.mark.e2e_model(PROLOG_V3_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="mtp,sfa_prolog_v3",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W4A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "512",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "LCCL_DETERMINISTIC": "1",
+        "HCCL_DETERMINISTIC": "true",
+        "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    },
+)
+def test_glm_5_2_mtp_acceptance_tp8_sfa_prolog_v3() -> None:
+    _run_speculative_decoding(
+        model_name=PROLOG_V3_MODEL,
+        speculative_config={
+            "method": "deepseek_mtp",
+            "num_speculative_tokens": MTP_NUM_SPECULATIVE_TOKENS,
+            "enforce_eager": True,
+        },
+        expected_acceptance_length=MTP_EXPECTED_ACCEPTANCE_LENGTH,
+        runner_kwargs={
+            "quantization": "ascend",
+            "tensor_parallel_size": 8,
+            "max_model_len": 8192,
+            "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
+            "additional_config": {
+                "enable_sfa_prolog_v3": True,
+                "enable_sparse_sfa_c8": True,
+                "enable_sparse_li_c8": True,
+            },
         },
     )

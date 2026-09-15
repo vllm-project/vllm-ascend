@@ -49,6 +49,7 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "eagle3",
         "sfa_dsa",
         "sfa_pcp",
+        "sfa_prolog_v3",
         "dsa_pcp",
         "dsa_cp",
         "prefix_caching",
