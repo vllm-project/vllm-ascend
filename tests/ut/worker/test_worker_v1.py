@@ -259,16 +259,28 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
             cache_config=cache_config,
-            kv_transfer_config=None,
+            kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV1"),
         )
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
-        for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
-            with self.subTest(supports_shared_backing=supports_shared_backing):
+        for (
+            supports_standardized_backing,
+            supports_connector_backing,
+            expected_budget,
+        ) in (
+            (True, True, 12345),
+            (True, False, 6172),
+            (False, True, 6172),
+        ):
+            with self.subTest(
+                supports_standardized_backing=supports_standardized_backing,
+                supports_connector_backing=supports_connector_backing,
+            ):
                 worker.model_runner = SimpleNamespace(
                     use_sparse=False,
                     use_compress=False,
-                    supports_standardized_shared_kv_backing=supports_shared_backing,
+                    supports_standardized_shared_kv_backing=supports_standardized_backing,
+                    supports_shared_backing_with_kv_transfer=supports_connector_backing,
                 )
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)

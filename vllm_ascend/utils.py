@@ -61,6 +61,15 @@ FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
+_SHARED_BACKING_KV_CONNECTORS = frozenset(
+    {
+        "ExampleHiddenStatesConnector",
+        "MooncakeConnectorV1",
+        "MooncakeConnectorV2",
+        "MooncakePullConnector",
+    }
+)
+
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
@@ -77,6 +86,15 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
+
+
+def kv_transfer_supports_shared_backing(kv_transfer_config: Any | None) -> bool:
+    """Whether a KV connector can consume standardized shared backing."""
+    if kv_transfer_config is None:
+        return True
+    return getattr(kv_transfer_config, "kv_connector", None) in _SHARED_BACKING_KV_CONNECTORS
+
+
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
