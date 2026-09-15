@@ -30,7 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_expert
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, dispose_tensor, maybe_trans_nz
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
@@ -190,9 +190,8 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        # Convert the packed uint8 [N, K/2] carrier before transposing.
-        # FP4 input_dtype with FP8 customize_dtype selects an A8W4 NZ layout.
-        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
+        # Keep packed MXFP4 weights in ND, even when weight_nz_mode is enabled.
+        layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
 
