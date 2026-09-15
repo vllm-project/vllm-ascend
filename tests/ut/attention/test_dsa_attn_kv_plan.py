@@ -98,16 +98,18 @@ def test_scatter_skips_none_updates():
 def _cpu_scatter_nd_update_(cache, indices, updates):
     """Apply npu_scatter_nd_update_ semantics on CPU for flat BF16 slots."""
     for row, update in zip(indices, updates, strict=True):
+        if int(row[0]) < 0:
+            continue
         cache[row[0]] = update
 
 
-def test_bf16_scatter_is_aclgraph_static_and_skips_pad_wrap():
-    """PAD_SLOT_ID rows must stay in-graph and must not wrap to the last slot.
+def test_bf16_scatter_is_aclgraph_static_and_keeps_pad_slots():
+    """PAD_SLOT_ID rows stay in-graph and must keep index -1.
 
     Evaluating ``torch.any(valid)`` as a Python bool calls LocalScalarDense
     and aborts ACLGraph capture (EE1016 / error 107027). Boolean-indexing the
-    valid rows is also illegal: it emits a data-dependent Nonzero. Passing raw
-    -1 indices is also wrong: advanced indexing wraps to the last live slot.
+    valid rows is also illegal: it emits a data-dependent Nonzero. Clamping
+    ``-1`` to ``0`` overwrites a live physical slot.
     """
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
@@ -115,6 +117,7 @@ def test_bf16_scatter_is_aclgraph_static_and_skips_pad_wrap():
         cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_dim)
         sentinel = torch.full((num_kv_heads, head_dim), 999.0)
         cache[num_blocks - 1, block_size - 1] = sentinel
+        slot_zero = cache[0, 0].clone()
 
         slot_mapping = torch.tensor([1, -1, -1], dtype=torch.int32)
         updates = torch.tensor([[[1.0, 2.0]], [[-7.0, -7.0]], [[-8.0, -8.0]]])
@@ -136,9 +139,12 @@ def test_bf16_scatter_is_aclgraph_static_and_skips_pad_wrap():
         any_spy.assert_not_called()
         assert captured["indices"].shape == (slot_mapping.shape[0], 1)
         assert captured["updates"].shape[0] == slot_mapping.shape[0]
-        assert bool((captured["indices"] >= 0).all())
-        torch.testing.assert_close(captured["indices"][0], torch.tensor([1], dtype=torch.int64))
+        torch.testing.assert_close(
+            captured["indices"],
+            torch.tensor([[1], [-1], [-1]], dtype=torch.int64),
+        )
         torch.testing.assert_close(cache[0, 1], updates[0])
+        torch.testing.assert_close(cache[0, 0], slot_zero)
         torch.testing.assert_close(cache[num_blocks - 1, block_size - 1], sentinel)
 
 
@@ -155,7 +161,7 @@ def test_bf16_scatter_does_not_early_return_on_all_padded_slots():
             scatter.assert_called_once()
             indices = scatter.call_args.args[1]
             assert indices.shape == (4, 1)
-            assert bool((indices == 0).all())
+            assert bool((indices == -1).all())
 
 
 def test_is_a5_bf16_kv_enabled_requires_vllm_config():
