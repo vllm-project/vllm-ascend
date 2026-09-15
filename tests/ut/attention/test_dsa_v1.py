@@ -1618,6 +1618,144 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     torch.testing.assert_close(output, projected.reshape(4, -1))
 
 
+def test_a5_bf16_keeps_multistream_overlap_enabled():
+    linear = MagicMock()
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.CVLinearWrapper",
+            side_effect=lambda layer: layer,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_config",
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=True),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
+            return_value=True,
+        ),
+    ):
+        impl = AscendDSAImpl(
+            n_heads=1,
+            scale=1.0,
+            n_local_heads=1,
+            q_lora_rank=2,
+            o_lora_rank=2,
+            head_dim=2,
+            rope_head_dim=1,
+            nope_head_dim=1,
+            n_groups=1,
+            n_local_groups=1,
+            window_size=16,
+            compress_ratio=1,
+            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16")),
+            wq_a=linear,
+            wq_b=linear,
+            wkv=linear,
+            q_norm=linear,
+            q_norm_without_weight=linear,
+            kv_norm=linear,
+            indexer=None,
+            compressor=None,
+            wo_a=linear,
+            wo_b=linear,
+            eps=1e-6,
+            attn_sink=None,
+            swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
+        )
+    assert impl.multistream_dsv4_dsa_overlap is True
+
+
+def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
+    impl = _make_impl()
+    hidden_states = torch.randn(2, 4)
+    cos = torch.ones(2, 1, 1, 1)
+    sin = torch.zeros(2, 1, 1, 1)
+    swa_kv_cache = torch.zeros(2, 2, 1, 2)
+    slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+    q_out = torch.randn(2, 2)
+
+    aux_depth = {"n": 0}
+    scatter_inside_aux: list[bool] = []
+
+    class _StreamSwitch:
+        def __enter__(self):
+            aux_depth["n"] += 1
+            return self
+
+        def __exit__(self, *args):
+            aux_depth["n"] -= 1
+            return False
+
+    def fake_switch(_stream, enabled=True):
+        assert enabled
+        return _StreamSwitch()
+
+    def fake_scatter(*_args, **_kwargs):
+        scatter_inside_aux.append(aux_depth["n"] > 0)
+
+    impl.cv_wq_a.quantize = MagicMock(return_value=(hidden_states, None))
+    impl.cv_wq_a.matmul = MagicMock(return_value=hidden_states)
+    impl.cv_wkv.quantize = MagicMock(return_value=(hidden_states, None))
+    impl.cv_wkv.matmul = MagicMock(return_value=hidden_states)
+    impl.kv_norm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.q_norm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.cv_wq_b.matmul = MagicMock(return_value=q_out)
+    plan = _mock_dsa_kv_plan()
+    plan.dsa_kv_compress_scatter.side_effect = fake_scatter
+    stream = MagicMock()
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=stream),
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=stream),
+        patch("vllm_ascend.attention.dsa_v1.npu_stream_switch", side_effect=fake_switch),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True),
+        patch.object(DeviceOperator, "apply_dsa_q_rms", side_effect=lambda query, *_args, **_kwargs: query),
+    ):
+        impl._mla_prolog_multistream(hidden_states, cos, sin, swa_kv_cache, slot_mapping)
+
+    assert scatter_inside_aux == [True]
+    plan.dsa_kv_compress_scatter.assert_called_once()
+    stream.wait_stream.assert_called()
+
+
+def test_indexer_overlap_keeps_aux_stream_for_flat_bf16_slots():
+    impl = _make_impl()
+    impl.compress_ratio = 4
+    impl.multistream_dsv4_dsa_overlap = True
+    impl.compressor = MagicMock(return_value=(torch.ones((1, 1, 4)), torch.zeros((1,), dtype=torch.int32)))
+    impl.indexer = MagicMock(return_value=torch.tensor([[[1, 2, 3]]], dtype=torch.int32))
+    compressor_metadata = AscendCompressorMetadata(
+        cache=cast(Any, object()),
+        state=cast(Any, object()),
+    )
+    layer_metadata = AscendDSALayerMetadata(
+        attention=cast(Any, object()),
+        swa=cast(Any, object()),
+        compressor=compressor_metadata,
+        indexer=AscendIndexerMetadata(compressor=compressor_metadata),
+    )
+    overlap_stream = object()
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=overlap_stream),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=_mock_dsa_kv_plan()),
+    ):
+        impl._maybe_update_compressed_caches_and_select_topk(
+            layer_name="model.layers.0.self_attn.attn",
+            hidden_states=torch.ones((1, 4)),
+            qr=torch.ones((1, 4)),
+            kv_cache=(torch.empty(0),),
+            layer_metadata=layer_metadata,
+            qr_pertoken_scale=None,
+            compress_kv_cache=torch.empty(0),
+            state_cache=torch.empty(0),
+        )
+
+    overlap_plan = impl.indexer.call_args.kwargs["overlap_plan"]
+    assert overlap_plan.aux_stream is overlap_stream
+
+
 def test_prepared_cache_rejects_multistream_before_cache_access():
     impl = _make_impl()
     impl.multistream_dsv4_dsa_overlap = True
