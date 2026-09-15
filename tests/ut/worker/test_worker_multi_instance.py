@@ -83,9 +83,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
     def _make_profile_result(free_memory_after: int, non_kv_cache_memory: int):
         """Return a mock profile_result compatible with memory_profiling output.
 
-        The worker consumes the upstream-computed values directly. Default the
-        persistent consumption to the full non-KV amount and leave no transient
-        peak headroom; individual tests override these fields when needed.
+        The worker code recomputes non_kv_cache_memory as:
+            total_consumed + transient_peak_headroom
+        We set total_consumed=non_kv_cache_memory, transient_peak_headroom=0, ensuring the
+        recomputed value equals the requested non_kv_cache_memory.
         """
         profile_result = MagicMock()
         profile_result.after_profile.free_memory = free_memory_after
@@ -146,9 +147,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_disabled_flag_skips_npugraph_memory_profile(
-        self, mock_logger, mock_get_ascend_config
-    ):
+    def test_disabled_flag_skips_npugraph_memory_profile(self, mock_logger, mock_get_ascend_config):
         """The opt-in flag must gate the graph memory profiling call itself."""
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
@@ -157,9 +156,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         non_kv_cache = int(1 * GiB_bytes)
 
         worker = self._make_worker(requested_memory, init_free, total)
-        worker.vllm_config.compilation_config.cudagraph_mode = (
-            CUDAGraphMode.FULL_DECODE_ONLY
-        )
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         worker.model_runner.profile_cudagraph_memory.side_effect = AssertionError(
             "graph memory profiling must remain disabled"
         )
@@ -182,9 +179,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
-    def test_enabled_flag_profiles_npugraph_memory(
-        self, mock_logger, mock_get_ascend_config
-    ):
+    def test_enabled_flag_profiles_npugraph_memory(self, mock_logger, mock_get_ascend_config):
         """The opt-in flag enables graph memory profiling and accounting."""
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
         total = int(64 * GiB_bytes)
@@ -194,9 +189,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         npugraph_memory = int(2 * GiB_bytes)
 
         worker = self._make_worker(requested_memory, init_free, total)
-        worker.vllm_config.compilation_config.cudagraph_mode = (
-            CUDAGraphMode.FULL_DECODE_ONLY
-        )
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         worker.model_runner.profile_cudagraph_memory.return_value = npugraph_memory
         profile_result = self._make_profile_result(
             free_memory_after=init_free - non_kv_cache,
@@ -239,20 +232,14 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         events = []
 
         worker = self._make_worker(requested_memory, init_free, total)
-        worker.vllm_config.compilation_config.cudagraph_mode = (
-            CUDAGraphMode.FULL_DECODE_ONLY
-        )
-        worker.model_runner.profile_run.side_effect = lambda: events.append(
-            "profile_run"
-        )
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.model_runner.profile_run.side_effect = lambda: events.append("profile_run")
 
         def profile_npugraph_memory():
             events.append("profile_npugraph_memory")
             return npugraph_memory
 
-        worker.model_runner.profile_cudagraph_memory.side_effect = (
-            profile_npugraph_memory
-        )
+        worker.model_runner.profile_cudagraph_memory.side_effect = profile_npugraph_memory
         profile_result = self._make_profile_result(
             free_memory_after=init_free - non_kv_cache,
             non_kv_cache_memory=non_kv_cache,

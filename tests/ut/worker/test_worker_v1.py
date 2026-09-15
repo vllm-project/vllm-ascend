@@ -1711,9 +1711,7 @@ class TestNPUWorker(TestBase):
         npugraph_memory = 256 << 20
         redundancy_buffer = 150 << 20
         expected_kv_cache_memory = (
-            requested_memory
-            - (total_consumed + peak_activation_memory + npugraph_memory)
-            - redundancy_buffer
+            requested_memory - (total_consumed + peak_activation_memory + npugraph_memory) - redundancy_buffer
         )
 
         with (

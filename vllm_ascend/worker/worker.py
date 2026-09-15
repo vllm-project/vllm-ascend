@@ -606,8 +606,7 @@ class NPUWorker(WorkerBase):
         npugraph_memory_estimate = 0
         should_profile_npugraph_memory = (
             envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            and self.vllm_config.compilation_config.cudagraph_mode
-            != CUDAGraphMode.NONE
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         )
         if should_profile_npugraph_memory:
             npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
@@ -618,9 +617,7 @@ class NPUWorker(WorkerBase):
 
         # Save per-category memory for use in compile_or_warm_up_model() (step 5).
         self.total_consumed = profile_result.total_consumed
-        self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + npugraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.transient_peak_headroom + npugraph_memory_estimate_applied
         self.npugraph_memory_estimate = npugraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -963,11 +960,7 @@ class NPUWorker(WorkerBase):
         # allocations (ACL context, HCCL buffers, driver layer, etc.).
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(self, "peak_activation_memory"):
             redundancy_buffer = 150 * (1 << 20)  # 150 MiB safety margin
-            non_kv_memory = (
-                self.total_consumed
-                + self.peak_activation_memory
-                + npugraph_memory_bytes
-            )
+            non_kv_memory = self.total_consumed + self.peak_activation_memory + npugraph_memory_bytes
             self.npugraph_memory_bytes = npugraph_memory_bytes
             suggested_to_requested = int(self.requested_memory) - non_kv_memory - redundancy_buffer
             suggested_to_gpu_limit = int(self.init_snapshot.free_memory) - non_kv_memory - redundancy_buffer
