@@ -56,10 +56,7 @@ class TestCacheLayoutHelpers(unittest.TestCase):
         )
         resolver.assert_called_once_with(kv_cache_config, vllm_config)
 
-    @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata.kv_cache_utils.resolve_kv_cache_block_sizes"
-    )
-    def test_resolve_request_hash_block_size_falls_back_without_config(self, resolver):
+        resolver.reset_mock()
         self.assertEqual(resolve_request_hash_block_size(object(), None, 128), 128)
         resolver.assert_not_called()
 

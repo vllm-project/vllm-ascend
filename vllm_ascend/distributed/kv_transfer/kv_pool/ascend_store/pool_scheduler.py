@@ -688,6 +688,7 @@ class KVPoolScheduler:
                 )
                 first_lookup_hash = num_computed_tokens // self.hash_block_size
                 suffix_block_hashes = request.block_hashes[first_lookup_hash:]
+                self._kv_stats.record_lookup_hashes(len(suffix_block_hashes), first_lookup_hash)
                 logger.debug(
                     "KV pool lookup request token_len=%d hbm_hit_tokens=%d omitted_hashes=%d suffix_hashes=%d",
                     token_len,

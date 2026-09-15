@@ -121,23 +121,6 @@ class _FakePrefixManager:
         return computed, len(computed[0]) * kv_cache_spec.block_size
 
 
-class TestHBMCachedBlockHashList(unittest.TestCase):
-    def test_hbm_prefix_preserves_suffix_coordinates(self):
-        hashes = HBMCachedBlockHashList([b"h2", b"h3"], num_hbm_cached_hashes=2)
-
-        self.assertEqual(len(hashes), 4)
-        self.assertIs(hashes[0], hashes[1])
-        self.assertEqual(hashes[2:], [b"h2", b"h3"])
-        self.assertEqual(hashes[-1], b"h3")
-
-    def test_hbm_marker_is_present_without_concrete_hash(self):
-        hashes = HBMCachedBlockHashList([b"remote"], num_hbm_cached_hashes=1)
-        pool = ExternalCachedBlockPool(hash_block_size=16, exists=set())
-
-        self.assertIsNotNone(pool.get_cached_block(hashes[0], [0, 1]))
-        self.assertIsNone(pool.get_cached_block(hashes[1], [0, 1]))
-
-
 class TestAscendStoreCoordinator(unittest.TestCase):
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
@@ -324,6 +307,9 @@ class TestFindReachableHitTokens(unittest.TestCase):
         def query_group_hits(group_id, group_block_hashes, lookup_mask):
             self.assertEqual(group_id, 0)
             self.assertIsNone(lookup_mask)
+            self.assertEqual(len(group_block_hashes), 4)
+            self.assertIs(group_block_hashes[0], group_block_hashes[1])
+            self.assertEqual(group_block_hashes[2:], [b"h2", b"h3"])
             return group_block_hashes[:3]
 
         hit = coord.find_reachable_hit_tokens(logical_hashes, 64, query_group_hits)

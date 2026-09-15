@@ -928,51 +928,56 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 16)
 
-    def test_lookup_scheduler_restores_absolute_suffix_coordinates(self):
-        worker = self._make_worker()
-        worker.cache_coordinator = None
-        worker.m_store.exists.return_value = [1, 0]
-
-        result = worker.lookup_scheduler(
-            64,
-            ["h2", "h3"],
-            use_layerwise=False,
-            hbm_hit_tokens=32,
-        )
-
-        self.assertEqual(result, 48)
-        keys = worker.m_store.exists.call_args.args[0]
-        self.assertEqual(len(keys), 2)
-        self.assertTrue(keys[0].endswith("@h2"))
-        self.assertTrue(keys[1].endswith("@h3"))
-
-    def test_lookup_scheduler_uses_terminal_hash_across_hbm_boundary(self):
+    def test_lookup_hash_suffix_round_trip_preserves_absolute_coordinates(self):
+        """Cover scheduler trimming through worker lookup as one contract."""
         worker = self._make_worker()
         worker.cache_coordinator = None
         worker.token_database.block_size = [64]
         worker.m_store.exists.return_value = [1]
 
-        result = worker.lookup_scheduler(
-            96,
-            ["h2", "h3", "h4", "h5"],
-            use_layerwise=False,
-            hbm_hit_tokens=32,
+        config = self._make_config(block_size=16)
+        config.parallel_config.prefill_context_parallel_size = 1
+        config.parallel_config.decode_context_parallel_size = 1
+        config.parallel_config.tensor_parallel_size = 1
+        config.parallel_config.world_size = 1
+        config.cache_config.hash_block_size = 16
+        config.kv_transfer_config.get_from_extra_config.return_value = True
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
+        with (
+            patch(f"{module}.importlib") as scheduler_importlib,
+            patch(f"{module}.LookupKeyClient"),
+        ):
+            scheduler_importlib.import_module.return_value = MagicMock()
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
+
+            scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        scheduler.client = MagicMock()
+        scheduler.client.lookup.side_effect = worker.lookup_scheduler
+        request = MagicMock(
+            prompt_token_ids=list(range(96)),
+            num_tokens=96,
+            request_id="r1",
+            block_hashes=["h0", "h1", "h2", "h3", "h4", "h5"],
         )
 
-        self.assertEqual(result, 64)
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 32), (32, False))
+        scheduler.client.lookup.assert_called_once_with(
+            96,
+            ["h2", "h3", "h4", "h5"],
+            [0],
+            hbm_hit_tokens=32,
+        )
         keys = worker.m_store.exists.call_args.args[0]
         self.assertEqual(len(keys), 1)
         self.assertTrue(keys[0].endswith("@h3"))
-
-    def test_lookup_scheduler_returns_hbm_hit_without_suffix_keys(self):
-        worker = self._make_worker()
-        worker.cache_coordinator = None
-
-        self.assertEqual(
-            worker.lookup_scheduler(32, [], use_layerwise=False, hbm_hit_tokens=32),
-            32,
-        )
-        worker.m_store.exists.assert_not_called()
+        load_spec = scheduler.load_specs[request.request_id]
+        self.assertEqual(load_spec.kvpool_cached_tokens, 64)
+        self.assertEqual(load_spec.vllm_cached_tokens, 32)
+        stats = scheduler.get_stats()
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats.data["lookup_hashes_sent"], 4)
+        self.assertEqual(stats.data["lookup_hashes_omitted"], 2)
 
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()

@@ -14,6 +14,14 @@ from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleN
 pytestmark = pytest.mark.e2e_model(MODEL)
 
 
+def metric_total(metrics_text: str, name: str) -> float:
+    return sum(
+        float(line.split()[-1])
+        for line in metrics_text.splitlines()
+        if line.startswith((f"{name}{{", f"{name} "))
+    )
+
+
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,chunked_prefill,prefix_caching",
@@ -24,7 +32,7 @@ pytestmark = pytest.mark.e2e_model(MODEL)
     graph_mode="eager",
 )
 @wait_until_npu_memory_free()
-def test_kvpp_memcache_reload(tmp_path):
+def test_kvpp_memcache_mixed_hbm_external_hit(tmp_path):
     pytest.importorskip("memcache_hybrid")
     config = MemcacheKVPoolConfig(
         meta_service_port=get_open_port(),
@@ -70,16 +78,35 @@ def test_kvpp_memcache_reload(tmp_path):
             auto_port=False,
             env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "0", "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
-            # Use a prompt spanning cache blocks so the replay exercises pool loading.
-            prompt = PROMPTS[1]
-            expected = output_texts(complete(server.url_root, prompt))
-            requests.post(server.url_for("reset_prefix_cache"), timeout=30).raise_for_status()
-            assert output_texts(complete(server.url_root, [prompt, prompt])) == expected * 2
-            metrics = requests.get(server.url_for("metrics"), timeout=30)
-            metrics.raise_for_status()
-            loaded_keys = sum(
-                float(line.split()[-1])
-                for line in metrics.text.splitlines()
-                if line.startswith("vllm:ascend_store_load_get_keys_total{")
+            tokenized = requests.post(
+                server.url_for("tokenize"),
+                json={"model": "kvpp-test", "prompt": PROMPTS[1]},
+                timeout=30,
             )
-            assert loaded_keys > 0
+            tokenized.raise_for_status()
+            block_size = 128
+            long_prompt = tokenized.json()["tokens"][: 3 * block_size]
+            assert len(long_prompt) == 3 * block_size
+            short_prefix = long_prompt[:block_size]
+
+            # First persist the complete prefix externally. Then rebuild only
+            # its first block in HBM, so the final request must combine a local
+            # hit with an AscendStore suffix lookup and load.
+            expected = output_texts(complete(server.url_root, long_prompt))
+            requests.post(server.url_for("reset_prefix_cache"), timeout=30).raise_for_status()
+            complete(server.url_root, short_prefix)
+
+            before = requests.get(server.url_for("metrics"), timeout=30)
+            before.raise_for_status()
+            assert output_texts(complete(server.url_root, long_prompt)) == expected
+            after = requests.get(server.url_for("metrics"), timeout=30)
+            after.raise_for_status()
+
+            def delta(name: str) -> float:
+                return metric_total(after.text, name) - metric_total(before.text, name)
+
+            assert delta("vllm:prefix_cache_hits_total") >= block_size
+            assert delta("vllm:external_prefix_cache_hits_total") > 0
+            assert delta("vllm:ascend_store_load_get_keys_total") > 0
+            assert delta("vllm:ascend_store_lookup_hashes_omitted_total") > 0
+            assert delta("vllm:ascend_store_lookup_hashes_sent_total") > 0
