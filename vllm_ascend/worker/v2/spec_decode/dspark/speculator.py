@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -124,6 +125,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.input_buffers.positions,
                 num_tokens_padded,
                 torch.from_numpy(self.input_batch.is_prefilling_np),
+                uniform_mla_query=True,
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -153,7 +155,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            if isinstance(metadata, AscendMLAMetadata):
+                assert metadata.decode is not None
+                metadata.decode.actual_seq_lengths_q = query_lens_list
+                metadata.query_lens = [self.num_query_per_req] * num_reqs_padded
+            else:
+                metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(
@@ -190,7 +197,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+                uniform_mla_query=True,
             ),
         ):
             return super().propose(

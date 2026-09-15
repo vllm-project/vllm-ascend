@@ -44,6 +44,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
@@ -67,6 +68,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
+from vllm_ascend.worker.v2.dcp import prepare_mla_dcp_metadata
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -221,7 +223,28 @@ def build_attn_metadata(
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
     # an error.
     if seq_lens_np is None:
-        seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
+        has_mla_dcp = any(
+            isinstance(group.get_metadata_builder(0), AscendMlaDCPMetadataBuilder)
+            for groups in attn_groups
+            for group in groups
+        )
+        if has_mla_dcp:
+            # Draft GPU lengths include rejection rollback. FIA needs host
+            # lists, so copy the whole batch once, shared across cache groups.
+            # Capture uses synthetic lengths and must never synchronize D2H.
+            if for_cudagraph_capture and seq_lens_cpu_upper_bound is None:
+                # DFlash/DSpark capture uses InputBatch.make_dummy: each
+                # request's synthetic sequence consists of its query only.
+                seq_lens_np = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy())
+            elif for_cudagraph_capture or torch.npu.is_current_stream_capturing():
+                assert seq_lens_cpu_upper_bound is not None
+                seq_lens_np = seq_lens_cpu_upper_bound[:num_reqs].numpy()
+            else:
+                seq_lens_np = seq_lens[:num_reqs].to("cpu").numpy()
+        else:
+            seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
+        if has_mla_dcp and for_cudagraph_capture and is_prefilling is None:
+            is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
@@ -284,6 +307,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if isinstance(attn_metadata_builder, AscendMlaDCPMetadataBuilder):
+                prepare_mla_dcp_metadata(common_attn_metadata, attn_metadata_builder)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             attn_metadata_extra_kwargs = (
@@ -1197,7 +1222,7 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, uniform_mla_query=False):
     """Wrap build_attn_metadata to forward rotary positions for the draft block.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1210,6 +1235,17 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        if uniform_mla_query and any(
+            isinstance(group.get_metadata_builder(0), AscendMlaDCPMetadataBuilder)
+            for groups in kwargs["attn_groups"]
+            for group in groups
+        ):
+            # FIA consumes the padded query tensor. Every graph request needs
+            # a query boundary even when its KV length is zero.
+            num_reqs = kwargs["num_reqs"]
+            width = kwargs["max_query_len"]
+            kwargs["query_start_loc_cpu"] = torch.arange(num_reqs + 1, dtype=torch.int32) * width
+            kwargs["is_prefilling"] = torch.zeros(num_reqs, dtype=torch.bool)
         return raw(*args, **kwargs)
 
     try:
