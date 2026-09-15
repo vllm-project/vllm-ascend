@@ -107,6 +107,25 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     assert result == 5
 
 
+def test_partial_hit_does_not_stop_at_shared_prefix_junction():
+    request = _request(
+        num_computed_tokens=0,
+        num_prompt_tokens=2000,
+        num_tokens=2000,
+    )
+    request.shared_prefix_boundary = 600
+
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False),
+        request,
+        num_new_tokens=1000,
+    )
+
+    # Normal alignment ends at 768. The upstream junction stop would cut this
+    # chunk at 384 and create a cold-path-absent recurrent-kernel boundary.
+    assert result == 768
+
+
 def test_pd_consumer_preserves_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=True),
