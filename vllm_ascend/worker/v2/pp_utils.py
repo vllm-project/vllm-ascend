@@ -7,11 +7,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
+
+from vllm_ascend.utils import should_reuse_topk
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -24,6 +26,16 @@ class _PPAuxHiddenStateModel(Protocol):
     config: "PretrainedConfig"
     start_layer: int
     aux_hidden_state_layers: tuple[int, ...]
+
+
+class _PPTopKModel(Protocol):
+    config: object
+    start_layer: int
+    end_layer: int
+    topk_indices_buffer: torch.Tensor | None
+    receive_pp_topk_indices: bool
+    send_pp_topk_indices: bool
+    make_empty_intermediate_tensors: Callable[[int, torch.dtype, torch.device], IntermediateTensors]
 
 
 @dataclass(frozen=True)
@@ -122,13 +134,40 @@ class PPTransportDataType(str, Enum):
     """Data types carried between PP ranks via ``IntermediateTensors``."""
 
     AUX_HIDDEN_STATES = "aux_hidden_states"
+    TOPK_INDICES = "topk_indices"
 
 
 def make_empty_intermediate_tensors(
-    model: _PPAuxHiddenStateModel,
+    model: _PPAuxHiddenStateModel | _PPTopKModel,
     tensor_factory: Callable[[int, torch.dtype, torch.device], IntermediateTensors],
+    data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.AUX_HIDDEN_STATES,),
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
-    """Wrap a model's PP tensor factory with auxiliary receive buffers."""
+    """Wrap a model's PP tensor factory with typed receive buffers."""
+    if len(set(data_types)) != len(data_types):
+        raise ValueError(f"Duplicate PP transport data types: {data_types}.")
+    supported_data_types = {
+        PPTransportDataType.AUX_HIDDEN_STATES,
+        PPTransportDataType.TOPK_INDICES,
+    }
+    unsupported_data_types = set(data_types) - supported_data_types
+    if unsupported_data_types:
+        raise ValueError(f"Unsupported PP transport data types: {unsupported_data_types}.")
+
+    topk_indices_buffer: torch.Tensor | None = None
+    receive_pp_topk_indices = False
+    if PPTransportDataType.TOPK_INDICES in data_types:
+        topk_model = cast(_PPTopKModel, model)
+        topk_model.receive_pp_topk_indices = False
+        topk_model.send_pp_topk_indices = False
+        topk_indices_buffer = topk_model.topk_indices_buffer
+        if topk_indices_buffer is not None:
+            receive_pp_topk_indices = pp_stage_requires_topk_indices(
+                topk_model.config, topk_model.start_layer
+            )
+            topk_model.receive_pp_topk_indices = receive_pp_topk_indices
+            topk_model.send_pp_topk_indices = pp_stage_requires_topk_indices(
+                topk_model.config, topk_model.end_layer
+            )
 
     def wrapped_tensor_factory(
         batch_size: int,
@@ -136,18 +175,35 @@ def make_empty_intermediate_tensors(
         device: torch.device,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
-        return add_pp_transport_buffers(
-            intermediate_tensors,
-            PPTransportDataType.AUX_HIDDEN_STATES,
-            num_incoming_aux_layers,
-            (batch_size, model.config.hidden_size),
-            dtype,
-            device,
-        )
+        for data_type in data_types:
+            if data_type == PPTransportDataType.AUX_HIDDEN_STATES:
+                aux_model = cast(_PPAuxHiddenStateModel, model)
+                num_incoming_aux_layers = sum(
+                    layer_idx <= aux_model.start_layer
+                    for layer_idx in aux_model.aux_hidden_state_layers
+                )
+                intermediate_tensors = add_pp_transport_buffers(
+                    intermediate_tensors,
+                    data_type,
+                    num_incoming_aux_layers,
+                    (batch_size, aux_model.config.hidden_size),
+                    dtype,
+                    device,
+                )
+            elif receive_pp_topk_indices:
+                assert topk_indices_buffer is not None
+                if batch_size > topk_indices_buffer.shape[0]:
+                    raise ValueError(
+                        "PP Top-K receive buffer exceeds the model buffer capacity: "
+                        f"requested {batch_size} tokens, capacity "
+                        f"{topk_indices_buffer.shape[0]}."
+                    )
+                intermediate_tensors = add_pp_transport_tensors(
+                    intermediate_tensors, data_type, [topk_indices_buffer[:batch_size]]
+                )
+        return intermediate_tensors
 
     return wrapped_tensor_factory
-
 
 def _get_transport_key_prefix(data_type: PPTransportDataType) -> str:
     return f"{_PP_TRANSPORT_PREFIX}_{data_type.value}_"
@@ -194,3 +250,34 @@ def add_pp_transport_buffers(
     """Add empty receive buffers for one PP transport data type."""
     tensors = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(count)]
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
+
+
+def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
+    """Return whether a PP stage needs Top-K indices from its predecessor."""
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0)
+    if start_layer <= 0 or start_layer >= num_hidden_layers:
+        return False
+
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None and start_layer < len(indexer_types):
+        return indexer_types[start_layer].lower() == "shared"
+
+    return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
+
+
+def add_pp_topk_indices(
+    intermediate_tensors: IntermediateTensors,
+    topk_indices_buffer: torch.Tensor,
+    num_tokens: int,
+) -> None:
+    """Append locally available Top-K indices to an outgoing PP payload."""
+    if num_tokens > topk_indices_buffer.shape[0]:
+        raise ValueError(
+            "PP Top-K indices exceed the local buffer capacity: "
+            f"requested {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
+        )
+    add_pp_transport_tensors(
+        intermediate_tensors,
+        PPTransportDataType.TOPK_INDICES,
+        [topk_indices_buffer[:num_tokens]],
+    )
