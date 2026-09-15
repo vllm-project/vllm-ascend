@@ -116,7 +116,9 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         else 1
     )
 
-    c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config)
+    c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+        vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
+    )
     if c8_k_cache_dtype == torch.float8_e4m3fn:
         c8_k_scale_cache_dtype = torch.float32
     elif c8_k_cache_dtype == torch.int8:
