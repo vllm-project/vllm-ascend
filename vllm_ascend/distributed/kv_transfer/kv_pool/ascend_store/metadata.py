@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -14,6 +15,17 @@ from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
+
+
+def resolve_request_hash_block_size(
+    vllm_config: Any,
+    kv_cache_config: Any | None,
+    fallback: int,
+) -> int:
+    """Return the granularity used to populate ``Request.block_hashes``."""
+    if kv_cache_config is None:
+        return fallback
+    return kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)[1]
 
 
 def make_layerwise_block_key(

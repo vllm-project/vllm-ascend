@@ -263,14 +263,16 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
 
 
 @pytest.mark.parametrize(
-    ("enable_prefix_caching", "expected_hash_block_size"),
+    ("enable_prefix_caching", "connector_enabled", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
+        pytest.param(False, False, math.lcm(16, 32) * 2, id="dcp-without-block-hashing"),
+        pytest.param(False, True, math.gcd(16, 32), id="dcp-with-kv-connector"),
+        pytest.param(True, False, math.gcd(16, 32), id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     enable_prefix_caching: bool,
+    connector_enabled: bool,
     expected_hash_block_size: int,
 ) -> None:
     kv_cache_config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=32)
@@ -278,6 +280,8 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
     )
+    if connector_enabled:
+        vllm_config.kv_transfer_config = object()
 
     scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
         kv_cache_config,
