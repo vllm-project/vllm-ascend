@@ -236,6 +236,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         context = get_encoder_forward_context()
         token_budget = context.token_budget
         path = context.path
+        axis_keys = context.axis_keys
         is_capturing = context.capturing
         params = get_encoder_graph_params()
         if token_budget is None or params is None:
@@ -252,7 +253,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         out = torch.empty_like(q)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
 
-        graph_key = (path, token_budget)
+        graph_key = (path, token_budget, axis_keys) if axis_keys else (path, token_budget)
         workspace = params.workspaces.get(graph_key)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
@@ -272,7 +273,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 pre_tokens=SWA_INT_MAX,
                 next_tokens=SWA_INT_MAX,
             )
-            update_encoder_graph_workspace(token_budget, workspace, path=path)
+            update_encoder_graph_workspace(token_budget, workspace, path=path, axis_keys=axis_keys)
 
         stream = torch_npu.npu.current_stream()
         event = torch.npu.ExternalEvent()

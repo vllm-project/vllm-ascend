@@ -16,6 +16,7 @@ from vllm_ascend.worker.encoder_acl_graph import (
     maybe_compute_actual_seq_lengths,
     set_encoder_graph_params,
     update_encoder_graph_params,
+    update_encoder_graph_workspace,
 )
 
 
@@ -171,6 +172,21 @@ def test_capture_graph_params():
     assert get_encoder_graph_params() is None
 
 
+def test_capture_failure_clears_graph_state():
+    mgr, _ = _make_manager()
+    with (
+        patch(
+            "vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager.capture",
+            side_effect=RuntimeError("capture failed"),
+        ),
+        pytest.raises(RuntimeError, match="capture failed"),
+    ):
+        mgr.capture()
+
+    assert not mgr.is_captured()
+    assert get_encoder_graph_params() is None
+
+
 def test_dual_path_graph_params_are_isolated():
     set_encoder_graph_params({"global": [128, 256], "local": [0, 128]})
 
@@ -184,6 +200,24 @@ def test_dual_path_graph_params_are_isolated():
     assert params.handles[("global", 128)] is not params.handles[("local", 128)]
 
 
+def test_capture_axis_graph_params_are_isolated():
+    set_encoder_graph_params({"default": [128]})
+    key_a = ("default", 128, ((14, 14),))
+    key_b = ("default", 128, ((28, 28),))
+    encoder_acl_graph._ensure_graph_params(key_a)
+    encoder_acl_graph._ensure_graph_params(key_b)
+
+    params = get_encoder_graph_params()
+    assert params is not None
+    assert params.handles[key_a] is not params.handles[key_b]
+    assert params.workspaces[key_a] is None
+    assert params.workspaces[key_b] is None
+    workspace_a = torch.empty(1)
+    update_encoder_graph_workspace(128, workspace_a, axis_keys=((14, 14),))
+    assert params.workspaces[key_a] is workspace_a
+    assert params.workspaces[key_b] is None
+
+
 def test_mrv2_model_state_uses_ascend_encoder_graph_manager():
     # Importing the MRV2 patch replaces the binding used inside ModelState,
     # rather than only the source encoder_cudagraph module.
@@ -194,6 +228,7 @@ def test_mrv2_model_state_uses_ascend_encoder_graph_manager():
 
 def test_capture_budget_graph_npu():
     mgr, model = _make_manager()
+    set_encoder_graph_params({"default": [2048]})
     mgr.max_batch_size = 2
     mgr.max_frames_per_batch = 0
     capture_values = {"cu_seqlens": torch.zeros(3, dtype=torch.int32)}
@@ -216,3 +251,52 @@ def test_capture_budget_graph_npu():
     graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values
+
+
+@pytest.mark.skipif(
+    not encoder_acl_graph._ENCODER_SUPPORTS_CAPTURE_AXES,
+    reason="This vLLM version does not support encoder capture axes",
+)
+def test_capture_budget_graph_with_axis_keys():
+    mgr, model = _make_manager()
+    set_encoder_graph_params({"default": [128]})
+    axis_keys = ((14, 14),)
+    model.prepare_encoder_cudagraph_capture_inputs.return_value = MagicMock(
+        values={"cu_seqlens": torch.zeros(3, dtype=torch.int32)},
+    )
+    model.encoder_cudagraph_forward.return_value = torch.zeros(2, 64)
+
+    with (
+        patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.NPUGraph"),
+        patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.graph"),
+        patch("vllm_ascend.worker.encoder_acl_graph.weak_ref_tensors", side_effect=lambda value: value),
+    ):
+        mgr._capture_budget_graph(128, axis_keys=axis_keys)
+
+    key = ("default", 128, axis_keys)
+    assert key in get_encoder_graph_params().handles
+    assert mgr._get_graph_set("default")[(128, axis_keys)].axis_keys == axis_keys
+    assert model.prepare_encoder_cudagraph_capture_inputs.call_args.args[-1] == axis_keys
+
+
+def test_replay_selects_capture_axis_graph():
+    mgr, model = _make_manager()
+    axis_keys = ((14, 14),)
+    graph_meta = MagicMock()
+    graph_meta.input_buffers = {"cu_seqlens": torch.zeros(3, dtype=torch.int32)}
+    graph_meta.output_buffer = torch.zeros(2, 64)
+    mgr._get_graph_set("default")[(128, axis_keys)] = graph_meta
+    mgr._get_item_specs = MagicMock(return_value=[MagicMock()])
+    model.prepare_encoder_cudagraph_replay_buffers.return_value = MagicMock(
+        values={"cu_seqlens": torch.tensor([0, 4, 8], dtype=torch.int32)},
+    )
+
+    with (
+        patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.Stream"),
+        patch("vllm_ascend.worker.encoder_acl_graph.update_encoder_graph_params") as update,
+    ):
+        result = mgr._run_budget_graph({}, 128, axis_keys=axis_keys)
+
+    graph_meta.graph.replay.assert_called_once()
+    update.assert_called_once_with(mgr.update_stream, 128, path="default", axis_keys=axis_keys)
+    assert result is graph_meta.output_buffer
