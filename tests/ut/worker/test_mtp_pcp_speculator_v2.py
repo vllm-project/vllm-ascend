@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
@@ -179,7 +180,7 @@ def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pc
     group = SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
     with (
         patch.object(speculator_module.AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
-        patch.object(speculator_module, "get_pcp_group", return_value=group) as get_group,
+        patch.object(pcp_manager_module, "get_pcp_group", return_value=group) as get_group,
     ):
         result_last, result_hidden = speculator._run_model(4, None, None, None)
 
