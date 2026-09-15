@@ -29,6 +29,7 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
     return runner
