@@ -10,8 +10,9 @@ from vllm.v1.worker.gpu.sample import gumbel, sampler
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
 
+from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
-from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("consumer", [gumbel, sampler, base_speculator, dspark_speculator])
@@ -22,7 +23,9 @@ def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
 
     importlib.reload(patch_triton)
 
-    assert consumer.gumbel_sample is gumbel_sample
+    # vLLM-Ascend replaces gumbel_sample with categorical_sample for NPU performance.
+    # Verify that pre-imported consumers are rebound to the version-compatible entry.
+    assert consumer.gumbel_sample is categorical_sample
     stale_gumbel.assert_not_called()
 
 
@@ -37,11 +40,16 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
     speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
     speculator.use_fp64_gumbel = False
+    if not vllm_version_is("0.28.0"):
+        # Newer upstream DSpark initializes this in __init__. This fixture uses
+        # __new__ directly, so provide the real default explicitly.
+        speculator.draft_watermarker = None
+
     logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 1.0]])
     idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
     sample_pos = torch.tensor([8, 12])
     sampled = torch.tensor([2, 1])
-    sample = create_autospec(gumbel_sample, return_value=sampled)
+    sample = create_autospec(categorical_sample, return_value=sampled)
     monkeypatch.setattr(dspark_speculator, "gumbel_sample", sample)
 
     result = speculator._sample_logits(logits, idx_mapping, sample_pos, step=1)
@@ -54,6 +62,10 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         assert args[1] is idx_mapping
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
+        if vllm_version_is("0.28.0"):
+            assert "is_drafting" not in kwargs
+        else:
+            assert kwargs["is_drafting"] is True
         assert kwargs["logits_cache"] is speculator.draft_logits
         torch.testing.assert_close(kwargs["logits_cache_col"], speculator._step_cols[1])
         assert kwargs["use_fp64"] is False
