@@ -69,9 +69,9 @@ _benchmarks: &benchmarks
     dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 8
+    num_prompts: 16
     max_out_len: 1024
-    batch_size: 2
+    batch_size: 4
     trust_remote_code: true
     request_rate: 0
     baseline: 1
