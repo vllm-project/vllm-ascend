@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.dflash_cache import wrap_dflash_cache_planner
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -635,3 +636,9 @@ if not vllm_version_is("0.28.0"):
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+
+# Keep both call sites on the same allocation-time safety plan. This wrapper
+# leaves non-mixed DFlash and all target-only configurations unchanged.
+_dflash_cache_planner = wrap_dflash_cache_planner(vllm.v1.core.kv_cache_utils.get_kv_cache_configs)
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _dflash_cache_planner
+vllm.v1.engine.core.get_kv_cache_configs = _dflash_cache_planner

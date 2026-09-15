@@ -267,6 +267,19 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_configs`
+#      `vllm.v1.engine.core.get_kv_cache_configs`
+#    Why:
+#       Mixed Full/SWA DFlash with Mamba uses contiguous shared planes on
+#       Ascend. Large pools can reach a reproduced FIA addressing boundary;
+#       an explicit block override can also exceed the profiled memory budget.
+#    How:
+#       Re-plan this configuration before allocation using the aligned physical
+#       geometry, the FIA address bound and the real per-worker memory budget.
+#       Admission and descriptor offsets are rebuilt at the resulting capacity.
+#    Future Plan:
+#       Remove the FIA bound after the underlying operator is fixed and tested
+#       above the boundary. Keep shared-plane layout validation for this backend.
 #
 # ** 10. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
