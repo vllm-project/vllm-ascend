@@ -6,16 +6,24 @@
 from typing import Any
 
 import torch
+from vllm.logger import logger
 
 SWIFT_BALANCER_POLICY_TYPE = 2
+DEFAULT_MAX_REBALANCED_LAYERS_PER_CYCLE = 2
 
 
 class AscendV2EplbPolicy:
     """Adapt Ascend SwiftBalancer to the upstream vLLM policy contract."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_rebalanced_layers_per_cycle: int = DEFAULT_MAX_REBALANCED_LAYERS_PER_CYCLE,
+    ) -> None:
         from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
+        if max_rebalanced_layers_per_cycle <= 0:
+            raise ValueError("max_rebalanced_layers_per_cycle must be greater than 0")
+        self.max_rebalanced_layers_per_cycle = max_rebalanced_layers_per_cycle
         self._policy: Any = PolicyFactory.generate_policy(SWIFT_BALANCER_POLICY_TYPE)
 
     @staticmethod
@@ -43,6 +51,42 @@ class AscendV2EplbPolicy:
         )
         slot_replica_count = replica_count.gather(1, mapping)
         return load.gather(1, mapping) / slot_replica_count
+
+    def _limit_rebalanced_layers(
+        self,
+        old_mapping: torch.Tensor,
+        new_mapping: torch.Tensor,
+        per_layer_priority: Any,
+    ) -> torch.Tensor:
+        """Keep only the highest-priority changed layers for this cycle."""
+        changed_mask = torch.any(new_mapping != old_mapping, dim=1)
+        changed_layers = torch.nonzero(changed_mask, as_tuple=False).flatten()
+        num_changed_layers = changed_layers.numel()
+        if num_changed_layers <= self.max_rebalanced_layers_per_cycle:
+            return new_mapping
+
+        if per_layer_priority is None:
+            ordered_layers = changed_layers
+        else:
+            priority = torch.as_tensor(per_layer_priority, dtype=torch.long).flatten()
+            if (
+                priority.numel() != old_mapping.shape[0]
+                or bool((priority < 0).any())
+                or bool((priority >= old_mapping.shape[0]).any())
+            ):
+                raise ValueError("Ascend V2 EPLB policy returned invalid per-layer priorities")
+            ordered_layers = priority[changed_mask[priority]]
+
+        selected_layers = ordered_layers[: self.max_rebalanced_layers_per_cycle]
+        limited_mapping = old_mapping.clone()
+        limited_mapping[selected_layers] = new_mapping[selected_layers]
+        logger.info(
+            "Ascend V2 EPLB limits this cycle from %d changed layers to %d high-priority layers: %s",
+            num_changed_layers,
+            selected_layers.numel(),
+            selected_layers.tolist(),
+        )
+        return limited_mapping
 
     def rebalance_experts(
         self,
@@ -77,7 +121,7 @@ class AscendV2EplbPolicy:
         )
         workload_table = physical_load.reshape_as(current_table)
 
-        changed, _, new_deployment = self._policy.rebalance_experts(
+        changed, per_layer_priority, new_deployment = self._policy.rebalance_experts(
             current_table,
             workload_table,
         )
@@ -91,4 +135,9 @@ class AscendV2EplbPolicy:
         ).reshape(num_layers, num_replicas)
         if bool((new_mapping < 0).any()) or bool((new_mapping >= weight.shape[1]).any()):
             raise ValueError("Ascend V2 EPLB policy returned an invalid expert mapping")
+        new_mapping = self._limit_rebalanced_layers(
+            old_mapping,
+            new_mapping,
+            per_layer_priority,
+        )
         return new_mapping.contiguous()
