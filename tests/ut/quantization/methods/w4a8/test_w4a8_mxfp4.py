@@ -103,8 +103,10 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_process_weights_transposes_weights(self, mock_npu):
+    def test_process_weights_transposes_weights(self, mock_npu, mock_use_cann_megamoe, mock_vllm):
         # npu_format_cast returns the input tensor (mocked as identity)
         mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
         layer = nn.Module()
