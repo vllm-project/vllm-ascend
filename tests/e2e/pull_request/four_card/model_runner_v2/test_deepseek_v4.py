@@ -24,9 +24,11 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+from tests.e2e.pull_request.utils import _run_speculative_decoding
 
 os.environ["HCCL_BUFFSIZE"] = "2048"
 DSPARK_MAIN_MODEL = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
+DSPARK_EXPECTED_ACCEPTANCE_LENGTH = 3.34
 
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
@@ -127,42 +129,22 @@ def test_dspark_spec_decoding(
     enable_adaptive_verification: bool,
     compilation_config: dict,
 ) -> None:
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
     num_speculative_tokens = 5
-    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-        model,
-        max_model_len=4096,
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-        enforce_eager=enforce_eager,
-        disable_log_stats=False,
-        async_scheduling=True,
+    _run_speculative_decoding(
+        model_name=model,
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
             **({"enable_adaptive_verification": True} if enable_adaptive_verification else {}),
         },
-        compilation_config=compilation_config,
-    ) as runner:
-        runner.model.generate(prompts, sampling_params)
-        metrics = runner.model.get_metrics()
-
-    if enable_adaptive_verification:
-        return
-
-    acceptance_per_pos = calculate_acceptance_per_pos(
-        metrics,
-        num_speculative_tokens,
-        Counter,
-        Vector,
+        expected_acceptance_length=DSPARK_EXPECTED_ACCEPTANCE_LENGTH,
+        acceptance_length_rtol=0.1,
+        runner_kwargs={
+            "max_model_len": 8192,
+            "tensor_parallel_size": 4,
+            "enforce_eager": enforce_eager,
+            "async_scheduling": True,
+            "compilation_config": compilation_config,
+        },
+        max_tokens=max_tokens,
     )
-    golden = [0.73, 0.64, 0.55, 0.49, 0.42]
-    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
