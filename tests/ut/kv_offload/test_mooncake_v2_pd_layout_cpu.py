@@ -45,7 +45,6 @@ def helpers():
         {
             "RegisterRegions",
             "tensor_storage_key",
-            "split_kv_cache_head_slots",
         },
         scope,
     )
@@ -68,43 +67,6 @@ def helpers():
     return SimpleNamespace(**scope)
 
 
-def test_head_slot_aliases_and_transfer_do_not_overwrite_neighbor_layers(helpers):
-    # Each physical page contains target MLA, draft GQA and Mamba payloads.
-    pages, heads, tokens, dim = 5, 2, 16, 64
-    payload = 2 * heads * tokens * dim
-    page_stride = payload + 3072
-    source = torch.arange(pages * page_stride, dtype=torch.float32)
-    dest = torch.full_like(source, -1)
-    source_cache = source.as_strided((pages, 2 * heads, tokens, dim), (page_stride, tokens * dim, dim, 1), 512)
-    dest_cache = dest.as_strided(source_cache.shape, source_cache.stride(), 512)
-    source_planes = helpers.split_kv_cache_head_slots(source_cache, heads)
-    dest_planes = helpers.split_kv_cache_head_slots(dest_cache, heads)
-    for source_plane, dest_plane in zip(source_planes, dest_planes):
-        assert source_plane.stride(0) == page_stride
-        assert source_plane.untyped_storage().data_ptr() == source.untyped_storage().data_ptr()
-        # Emulate Mooncake's payload-sized, stride-addressed copy for reordered blocks.
-        for local_block, remote_block in [(1, 3), (2, 4)]:
-            dest_plane[local_block].copy_(source_plane[remote_block])
-    assert torch.equal(dest_cache[1], source_cache[3])
-    assert torch.equal(dest_cache[2], source_cache[4])
-    changed = dest != -1
-    expected = torch.zeros_like(changed)
-    for page in (1, 2):
-        expected[page * page_stride + 512 : page * page_stride + 512 + payload] = True
-    assert torch.equal(changed, expected)
-    config = SimpleNamespace(kv_cache_tensors=[SimpleNamespace(layers=["draft"], size=source.nbytes)])
-    regions = helpers.collect_configured_register_regions(config, {"draft": source_planes})
-    last_byte = source_planes[1][-1, -1, -1, -1].data_ptr() + source.element_size()
-    assert len(regions.ptrs) == 1
-    assert regions.ptrs[0] + regions.lengths[0] >= last_byte
-
-
-@pytest.mark.parametrize("bad", [torch.empty(3, 3, 16, 64), torch.empty(3, 4, 64, 16).transpose(2, 3)])
-def test_head_slot_rejects_incompatible_inner_layout(helpers, bad):
-    with pytest.raises(ValueError, match="head-slot"):
-        helpers.split_kv_cache_head_slots(bad, 2)
-
-
 def test_single_mla_view_is_not_a_whole_shared_page(helpers):
     backing = torch.empty(4, 3, 16, 576)
     cache = backing[:, 0]
@@ -124,7 +86,7 @@ def test_packed_multi_component_mla_keeps_existing_whole_page_contract(helpers):
     assert result == (backing.data_ptr(), 128, (32,), 1)
 
 
-@pytest.mark.parametrize("layout", ["head_slots", "planar", "single_mla", "packed_mla", "replicated_gqa"])
+@pytest.mark.parametrize("layout", ["planar", "single_mla", "packed_mla", "replicated_gqa"])
 def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, layout):
     class FullSpec:
         num_kv_heads = 2
@@ -159,12 +121,9 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
     )
     backing = torch.empty(4, 6, 16, 64)
     spec = FullSpec()
-    if layout in ("head_slots", "replicated_gqa"):
+    if layout in ("planar", "replicated_gqa"):
         if layout == "replicated_gqa":
             spec = ReplicatedSpec()
-        cache = backing[:, :4]
-        expected_planes = (backing[:, :2], backing[:, 2:4])
-    elif layout == "planar":
         cache = (backing[:, :2], backing[:, 2:4])
         expected_planes = cache
     elif layout == "single_mla":
@@ -194,7 +153,7 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
     worker._get_shared_page_metadata = lambda caches: helpers._get_shared_page_metadata(worker, caches)
     scope["register_kv_caches"](worker, canonical)
     assert canonical["layer"] is cache
-    assert worker.kv_caches is not canonical
+    assert worker.kv_caches is canonical
     metadata = worker.transfer_metadata
     assert metadata.layer_block_sizes == [32 if layout == "replicated_gqa" else 16]
     if layout == "packed_mla":
