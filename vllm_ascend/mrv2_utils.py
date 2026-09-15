@@ -33,6 +33,7 @@ from vllm_ascend.utils import is_310p
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
         "MiniMaxM2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "GlmMoeDsaForCausalLM",
