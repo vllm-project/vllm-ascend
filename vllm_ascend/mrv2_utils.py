@@ -93,10 +93,32 @@ def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
 
 
 def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
-    """Feature whitelist: only whitelisted features may be enabled with a whitelisted model."""
+    """Feature whitelist: only whitelisted features may be enabled with a whitelisted model.
+
+    LoRA and batch-size-based dynamic speculative decoding
+    (``num_speculative_tokens_per_batch_size``) are excluded from the
+    default-V2 feature whitelist. Static ``eagle3`` / ``mtp`` / ``dflash``
+    remain supported. ``VLLM_USE_V2_MODEL_RUNNER`` still overrides this
+    default decision.
+    """
+    if getattr(vllm_config, "lora_config", None) is not None:
+        logger.warning_once(
+            "Model Runner V2 default is disabled because LoRA is enabled; using the V1 model runner instead."
+        )
+        return False
+
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return True
+
+    if getattr(speculative_config, "num_speculative_tokens_per_batch_size", None):
+        logger.warning_once(
+            "Model Runner V2 default is disabled because dynamic speculative "
+            "decoding (num_speculative_tokens_per_batch_size) is enabled; "
+            "using the V1 model runner instead."
+        )
+        return False
+
     if speculative_config.method in ("eagle3", "mtp", "dflash"):
         logger.info_once(
             "Model Runner V2 is enabled by default for speculative method '%s'.",
