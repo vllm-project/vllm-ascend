@@ -527,7 +527,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config):
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
@@ -535,6 +535,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
     with (
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.normalize_mamba_kv_cache_config",
+            side_effect=lambda cfg: cfg,
+        ),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
         patch(
             "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
