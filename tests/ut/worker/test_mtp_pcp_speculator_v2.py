@@ -47,12 +47,13 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "expected_execution_pcp_size"),
-    [(2, 1), (1, 1)],
+    ("target_pcp_size", "expected_execution_pcp_size", "dcp_size"),
+    [(2, 1, 4), (2, 1, 8), (1, 1, 4)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
     expected_execution_pcp_size: int,
+    dcp_size: int,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
@@ -65,7 +66,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     target_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=target_pcp_size,
         cp_kv_cache_interleave_size=128,
-        decode_context_parallel_size=4,
+        decode_context_parallel_size=dcp_size,
         enable_expert_parallel=True,
         enable_eplb=True,
         rank=7,
@@ -89,6 +90,10 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
+        if "pipeline_parallel_size" in changes:
+            assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
+        if "model_config" in changes:
+            assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
             captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
@@ -133,8 +138,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
     assert execution_parallel_config.cp_kv_cache_interleave_size == 128
-    assert execution_parallel_config.decode_context_parallel_size == 4
-    assert target_parallel_config.decode_context_parallel_size == 4
+    assert execution_parallel_config.decode_context_parallel_size == dcp_size
+    assert target_parallel_config.decode_context_parallel_size == dcp_size
     if target_pcp_size > 1:
         assert captured["reconstruction_dcp_size"] == 1
     else:
@@ -158,7 +163,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert draft_config.parallel_config.decode_context_parallel_size == 4
+    assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
 
 
 @pytest.mark.parametrize("replicated_pcp", [False, True])
