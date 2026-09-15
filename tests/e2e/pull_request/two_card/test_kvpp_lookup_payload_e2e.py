@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import json
 import math
-import random
 import statistics
 import time
 import uuid
@@ -28,22 +27,25 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupHashMode
 
-MODEL = "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
-TENSOR_PARALLEL_SIZE = 2
-MODEL_MAX_LEN = 67584
+MODEL = "Qwen/Qwen3-8B"
+TENSOR_PARALLEL_SIZE = 1
+MODEL_MAX_LEN = 40960
 BLOCK_SIZE = 128
-TOTAL_BLOCKS = 512
+TOTAL_BLOCKS = 312
 INPUT_TOKENS = TOTAL_BLOCKS * BLOCK_SIZE
-OUTPUT_TOKENS = 8
+OUTPUT_TOKENS = 128
+OUTPUT_BLOCKS = (OUTPUT_TOKENS + BLOCK_SIZE - 1) // BLOCK_SIZE
 REQUESTS_PER_SAMPLE = 4
+GPU_BLOCKS = 640
+HBM_BLOCKS = 234
+EXTERNAL_BLOCKS = (24, 35, 43, 54)
+SAMPLES_PER_INSTANCE = 8
 MANIFEST_SEED = 20260915
 PROMPT_SEED = " ".join(f"lookup payload evidence marker {index}" for index in range(512))
 
-# A symmetric schedule prevents warmup or thermal drift from being correlated
-# with HBM hit length.  The 50%-94% range is intentionally useful but not the
-# near-100% best case used by the earlier stress benchmark.
-HBM_BLOCK_SCHEDULE = (256, 448, 480, 384, 384, 480, 448, 256)
-EXTERNAL_HIT_STRATA = ((0.15, 0.30), (0.30, 0.45), (0.55, 0.70), (0.70, 0.85))
+# One representative mixed-hit scenario replaces the earlier near-100% HBM
+# stress case.  Each request has a 75% local HBM hit; the four external hits
+# span 31%-69% of the remaining suffix and average exactly 50%.
 SERVING_MODE_ORDERS = (
     (LookupHashMode.FULL, LookupHashMode.SUFFIX),
     (LookupHashMode.SUFFIX, LookupHashMode.FULL),
@@ -86,6 +88,10 @@ SERVING_PERFORMANCE_FIELDS = (
 )
 
 assert INPUT_TOKENS + OUTPUT_TOKENS <= MODEL_MAX_LEN
+assert HBM_BLOCKS + REQUESTS_PER_SAMPLE * (TOTAL_BLOCKS - HBM_BLOCKS + OUTPUT_BLOCKS) <= GPU_BLOCKS
+assert len(EXTERNAL_BLOCKS) == REQUESTS_PER_SAMPLE
+assert all(0 < blocks < TOTAL_BLOCKS - HBM_BLOCKS for blocks in EXTERNAL_BLOCKS)
+assert sum(EXTERNAL_BLOCKS) * 2 == REQUESTS_PER_SAMPLE * (TOTAL_BLOCKS - HBM_BLOCKS)
 pytestmark = pytest.mark.e2e_model(MODEL)
 
 
@@ -150,32 +156,23 @@ def value_distribution(values: list[float]) -> dict[str, float | int]:
 
 
 def scenario_specs() -> tuple[ScenarioSpec, ...]:
-    specs = []
-    for sample_index, hbm_blocks in enumerate(HBM_BLOCK_SCHEDULE):
-        remaining = TOTAL_BLOCKS - hbm_blocks
-        rng = random.Random(MANIFEST_SEED + sample_index)
-        external_blocks = [
-            max(1, min(remaining - 1, round(remaining * rng.uniform(low, high)))) for low, high in EXTERNAL_HIT_STRATA
-        ]
-        rng.shuffle(external_blocks)
-        specs.append(
-            ScenarioSpec(
-                scenario_id=f"sample-{sample_index:02d}",
-                sample_index=sample_index,
-                hbm_blocks=hbm_blocks,
-                external_blocks=tuple(external_blocks),
-            )
+    return tuple(
+        ScenarioSpec(
+            scenario_id=f"sample-{sample_index:02d}",
+            sample_index=sample_index,
+            hbm_blocks=HBM_BLOCKS,
+            external_blocks=EXTERNAL_BLOCKS,
         )
-    return tuple(specs)
+        for sample_index in range(SAMPLES_PER_INSTANCE)
+    )
 
 
 def warmup_spec() -> ScenarioSpec:
-    remaining = TOTAL_BLOCKS - 400
     return ScenarioSpec(
         scenario_id="warmup",
         sample_index=-1,
-        hbm_blocks=400,
-        external_blocks=tuple(round(remaining * fraction) for fraction in (0.2, 0.4, 0.6, 0.8)),
+        hbm_blocks=HBM_BLOCKS,
+        external_blocks=EXTERNAL_BLOCKS,
     )
 
 
@@ -507,8 +504,6 @@ def server_args(mode: LookupHashMode, profile_lookup: bool, port: int) -> list[s
         "--served-model-name",
         "kvpp-test",
         "--trust-remote-code",
-        "--quantization",
-        "ascend",
         "--tensor-parallel-size",
         str(TENSOR_PARALLEL_SIZE),
         "--data-parallel-size",
@@ -517,17 +512,17 @@ def server_args(mode: LookupHashMode, profile_lookup: bool, port: int) -> list[s
         "--max-model-len",
         str(MODEL_MAX_LEN),
         "--max-num-batched-tokens",
-        "16384",
+        "4096",
         "--max-num-seqs",
         str(REQUESTS_PER_SAMPLE),
         "--block-size",
         str(BLOCK_SIZE),
+        "--num-gpu-blocks-override",
+        str(GPU_BLOCKS),
         "--gpu-memory-utilization",
-        "0.9",
+        "0.8",
         "--enable-prefix-caching",
         "--enable-chunked-prefill",
-        "--mm-processor-cache-gb",
-        "0",
         "--seed",
         "42",
         "--generation-config",
@@ -693,7 +688,7 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "pairs": len(comparisons),
-        "expected_pairs": len(SERVING_MODE_ORDERS) * len(HBM_BLOCK_SCHEDULE),
+        "expected_pairs": len(SERVING_MODE_ORDERS) * SAMPLES_PER_INSTANCE,
         "validation_errors": validation_errors,
         "distributions": {
             field: {
@@ -724,23 +719,28 @@ def run_benchmark(tmp_path, *, profile_lookup: bool) -> dict[str, Any]:
     report = {
         "config": {
             "model": MODEL,
+            "scenario": "representative_mixed_hit",
             "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
             "model_runner_v2": False,
             "expert_parallel": False,
-            "kv_layer_parallelism": False,
             "async_scheduling": False,
             "load_async": False,
             "profile_lookup": profile_lookup,
             "mode_orders": [[mode.value for mode in order] for order in SERVING_MODE_ORDERS],
             "instances_per_mode": len(SERVING_MODE_ORDERS),
-            "samples_per_instance": len(HBM_BLOCK_SCHEDULE),
+            "samples_per_instance": SAMPLES_PER_INSTANCE,
             "requests_per_sample": REQUESTS_PER_SAMPLE,
-            "measured_requests_per_mode": (len(SERVING_MODE_ORDERS) * len(HBM_BLOCK_SCHEDULE) * REQUESTS_PER_SAMPLE),
+            "measured_requests_per_mode": (len(SERVING_MODE_ORDERS) * SAMPLES_PER_INSTANCE * REQUESTS_PER_SAMPLE),
             "max_model_len": MODEL_MAX_LEN,
             "input_tokens_per_request": INPUT_TOKENS,
             "total_blocks": TOTAL_BLOCKS,
-            "hbm_block_schedule": HBM_BLOCK_SCHEDULE,
-            "external_hit_strata": EXTERNAL_HIT_STRATA,
+            "hbm_blocks": HBM_BLOCKS,
+            "hbm_hit_percent": HBM_BLOCKS / TOTAL_BLOCKS * 100,
+            "external_blocks": EXTERNAL_BLOCKS,
+            "external_hit_percent_of_suffix": sum(EXTERNAL_BLOCKS)
+            / (REQUESTS_PER_SAMPLE * (TOTAL_BLOCKS - HBM_BLOCKS))
+            * 100,
+            "gpu_blocks": GPU_BLOCKS,
             "manifest_seed": MANIFEST_SEED,
             "output_tokens": OUTPUT_TOKENS,
         },

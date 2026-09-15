@@ -948,7 +948,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
         for configured_mode, profile_lookup, mode, expected_payload, expected_sent, expected_omitted in cases:
             with self.subTest(mode=mode.value):
-                extra_config = {"profile_lookup": profile_lookup}
+                extra_config: dict[str, bool | str] = {"profile_lookup": profile_lookup}
                 if configured_mode is not None:
                     extra_config["lookup_hash_mode"] = configured_mode
                 config = self._make_config(

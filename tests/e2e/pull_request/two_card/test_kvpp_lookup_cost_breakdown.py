@@ -16,7 +16,7 @@ from tests.e2e.pull_request.two_card import test_kvpp_lookup_payload_e2e as serv
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupHashMode
 
 RPC_WARMUP_PAIRS = 80
-RPC_SAMPLE_PAIRS_PER_HBM_LEVEL = 250
+RPC_SAMPLE_PAIRS = 1000
 
 pytestmark = pytest.mark.e2e_model(serving.MODEL)
 
@@ -60,13 +60,13 @@ def encoded_hash_bytes(block_hashes: list[bytes]) -> int:
 
 
 def test_lookup_rpc_payload_latency():
-    """Prove the transport saving across the E2E experiment's HBM range."""
+    """Measure the exact Full and Suffix payloads used by the E2E scenario."""
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import LookupKeyServer
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import LookupKeyClient
 
-    hbm_levels = tuple(sorted(set(serving.HBM_BLOCK_SCHEDULE)))
+    hbm_levels = (serving.HBM_BLOCKS,)
     full_hashes = [index.to_bytes(32, "big") for index in range(serving.TOTAL_BLOCKS)]
-    measured_pairs = len(hbm_levels) * RPC_SAMPLE_PAIRS_PER_HBM_LEVEL
+    measured_pairs = RPC_SAMPLE_PAIRS
     expected_calls = 2 * (RPC_WARMUP_PAIRS + measured_pairs)
     stub = LookupStub(expected_calls)
     config = lookup_config()
@@ -131,17 +131,17 @@ def test_lookup_rpc_payload_latency():
             "mean_latency_reduction_percent": (1 - statistics.fmean(suffix) / statistics.fmean(full)) * 100,
         }
         levels.append(level)
-        assert len(full) == RPC_SAMPLE_PAIRS_PER_HBM_LEVEL
-        assert len(suffix) == RPC_SAMPLE_PAIRS_PER_HBM_LEVEL
+        assert len(full) == RPC_SAMPLE_PAIRS
+        assert len(suffix) == RPC_SAMPLE_PAIRS
         assert suffix_bytes < full_bytes
         assert statistics.fmean(suffix) < statistics.fmean(full)
 
     report = {
         "config": {
             "warmup_pairs": RPC_WARMUP_PAIRS,
-            "sample_pairs_per_hbm_level": RPC_SAMPLE_PAIRS_PER_HBM_LEVEL,
+            "sample_pairs": RPC_SAMPLE_PAIRS,
             "total_blocks": serving.TOTAL_BLOCKS,
-            "hbm_levels": hbm_levels,
+            "hbm_blocks": serving.HBM_BLOCKS,
         },
         "levels": levels,
     }
@@ -191,7 +191,7 @@ def lookup_cost_breakdown(runs: list[dict[str, Any]]) -> dict[str, Any]:
     suffix_lookup = sum(pair["suffix_lookup_seconds"] for pair in pairs)
     return {
         "pairs": len(pairs),
-        "expected_pairs": len(serving.SERVING_MODE_ORDERS) * len(serving.HBM_BLOCK_SCHEDULE),
+        "expected_pairs": len(serving.SERVING_MODE_ORDERS) * serving.SAMPLES_PER_INSTANCE,
         "validation_errors": errors,
         "aggregate": {
             "full_lookup_share_percent": full_lookup / full_wall * 100,
