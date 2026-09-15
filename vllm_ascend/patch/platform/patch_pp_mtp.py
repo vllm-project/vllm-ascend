@@ -30,6 +30,8 @@ from itertools import chain
 
 from vllm.logger import logger
 
+from vllm_ascend.dynamic_spec import install_scheduler_policy
+
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
 
@@ -273,7 +275,6 @@ def _patch_scheduler_update_from_output() -> None:
             scheduler_output,
             model_runner_output,
         )
-
         if use_pp_ipc_runtime_patch:
             for req_id in scheduler_output.num_scheduled_tokens:
                 request = self.requests.get(req_id)
@@ -338,6 +339,7 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
+    install_scheduler_policy()
     _patch_model_runner_output()
     _patch_engine_core()
     _patch_scheduler_update_after_schedule()
