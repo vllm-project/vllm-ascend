@@ -47,7 +47,10 @@ def init_ascend_model_parallel(
     global _KVPP
     assert _KVPP is None, "KV layer parallel group is already initialized"
     if kvpp_size > 1:
-        kvpp_group_ranks = all_ranks.reshape(-1, kvpp_size).unbind(0)
+        # One cache-replica domain per DP replica and PP stage. PCP's
+        # prefill gather replicates MLA KV across PCP as well as TP ranks.
+        assert kvpp_size == global_pcp_size * global_tp_size
+        kvpp_group_ranks = all_ranks.flatten(-2).reshape(-1, kvpp_size).unbind(0)
         _KVPP = init_model_parallel_group(
             [ranks.tolist() for ranks in kvpp_group_ranks],
             get_world_group().local_rank,

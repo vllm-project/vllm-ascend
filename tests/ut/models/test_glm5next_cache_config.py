@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolStateSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -65,11 +65,12 @@ def make_specs(pool: int = 16):
             model_version="glm5_next",
             **_ratio_kwargs(pool),
         ),
-        "model.layers.3.indexer.state_cache": AscendIndexerKPoolStateSpec(
+        "model.layers.3.indexer.tail_cache": AscendIndexerKPoolTailSpec(
             block_size=pool,
             sliding_window=pool,
+            compress_ratio=pool,
             num_kv_heads=1,
-            head_size=256,
+            head_size=128,
             dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -127,7 +128,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
     main = placements[layout.mla_names[0]]
     indexer = placements[layout.indexer_names[0]]
-    state = placements[layout.state_names[0]]
+    state = placements[layout.tail_names[0]]
     assert main.offset == 0
     assert indexer.offset == 0
     assert state is indexer
@@ -137,7 +138,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     }
     assert set(get_kv_cache_tensor_layers(indexer)) == {
         layout.indexer_names[0],
-        layout.state_names[0],
+        layout.tail_names[0],
     }
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
@@ -173,7 +174,7 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
 
     layout = _get_glm5_next_cache_layout(projected_groups)
     assert layout is not None
-    assert layout.mla_names == layout.indexer_names == layout.state_names == ()
+    assert layout.mla_names == layout.indexer_names == layout.tail_names == ()
     assert layout.main_slot_count == 1
     assert layout.small_slot_count == 0
 
@@ -186,7 +187,7 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
 
 def test_missing_paired_cache_is_rejected():
     specs = make_specs()
-    del specs["model.layers.3.indexer.state_cache"]
+    del specs["model.layers.3.indexer.tail_cache"]
     with pytest.raises(ValueError, match="requires"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
 

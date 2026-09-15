@@ -502,6 +502,10 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
     def setUp(self):
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher.start()
+        self.addCleanup(dcp_patcher.stop)
+
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
         def mock_parent_init(
@@ -834,6 +838,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 class TestAscendMLAMetadataBuilderBuild(TestBase):
     def setUp(self):
+        dcp_patcher = patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False)
+        dcp_patcher.start()
+        self.addCleanup(dcp_patcher.stop)
+
         # Mock parent class __init__ to avoid complex initialization,
         # but still set the essential attributes that child class needs
         def mock_parent_init(
@@ -1059,6 +1067,57 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.num_actual_tokens, base_inputs["num_actual_tokens"])
         self.assertTrue(torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+
+        # PD recomputes the last prompt token (N-1 computed). Metadata building
+        # runs outside set_current_vllm_config, unlike DCP manager initialization.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 16
+        self.mock_vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+        common_attn_metadata.is_prefilling = torch.ones(3, dtype=torch.bool)
+        with patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=True) as mock_enable_dcp:
+            builder = AscendMLAMetadataBuilder(
+                self.kv_cache_spec, ["layer_0", "layer_1"], self.mock_vllm_config, self.mock_device
+            )
+        mock_enable_dcp.assert_called_once_with()
+        self.assertTrue(builder.dcp_enabled)
+        ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=True))
+        with (
+            patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+            patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
+            patch(
+                "vllm_ascend.attention.mla_v1.enable_dcp",
+                side_effect=AssertionError("DCP state must be cached during initialization"),
+            ),
+        ):
+            metadata = builder.build(0, common_attn_metadata)
+        self.assertEqual(metadata.num_decodes, 3)
+        self.assertEqual(metadata.num_prefills, 0)
+        self.assertEqual(metadata.num_decode_tokens, 3)
+        self.assertIsNone(metadata.prefill)
+        self.assertEqual(metadata.decode.seq_lens_list, [4, 5, 6])
+
+        # Without DCP, preserve the original classification even on a PD consumer.
+        self.mock_vllm_config.parallel_config.decode_context_parallel_size = 1
+        builder.dcp_enabled = False
+        for pcp_size in (1, 2):
+            with (
+                self.subTest(pcp_size=pcp_size),
+                patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+                patch(
+                    "vllm_ascend.attention.mla_v1.is_pd_decode_recompute_scheduler_enabled",
+                    side_effect=AssertionError("DCP-only override must not run without DCP"),
+                ),
+                patch.object(builder, "build_prefill_metadata", return_value=MagicMock()),
+            ):
+                self.mock_vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+                builder.pcp_size = pcp_size
+                builder.pcp_enabled = pcp_size > 1
+                common_attn_metadata.slot_mapping = torch.arange(3 * pcp_size)
+                metadata = builder.build(0, common_attn_metadata)
+                expected_decodes = 3 if pcp_size == 1 else 0
+                self.assertEqual(metadata.num_decodes, expected_decodes)
+                self.assertEqual(metadata.num_prefills, 3 - expected_decodes)
+                self.assertEqual(metadata.num_decode_tokens, expected_decodes)
+                self.assertEqual(builder.num_prefill_tokens, 3 - expected_decodes)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     def test_build_decode_metadata_without_disable_padded_drafter_batch(self, mock_get_cos_and_sin_mla):
@@ -2267,7 +2326,16 @@ class TestAscendMLAImpl(TestBase):
         ]
         mock_up_proj.return_value = torch.randn(num_tokens, self.impl.num_heads, self.impl.v_head_dim)
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, block_size, metadata)
+        result = self.impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+            ),
+            block_size,
+            metadata,
+        )
         self.assertEqual(result.shape[0], num_tokens)
         self.assertEqual(result.shape[1], self.impl.num_heads)
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
@@ -2566,7 +2634,16 @@ class TestAscendMLAImpl(TestBase):
 
         mock_npu_fused_infer_attention_score_v2.return_value = [torch.randn(B, N, self.impl.kv_lora_rank), None]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata)
+        result = self.impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+            ),
+            BS,
+            attn_metadata,
+        )
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], N)
@@ -2638,7 +2715,16 @@ class TestAscendMLAImpl(TestBase):
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata)
+        result = impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+            ),
+            BS,
+            attn_metadata,
+        )
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], num_heads)
@@ -2716,7 +2802,16 @@ class TestAscendMLAImpl(TestBase):
             None,
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata)
+        result = impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+            ),
+            BS,
+            attn_metadata,
+        )
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], num_heads)
@@ -2759,8 +2854,43 @@ class TestAscendMLAImpl(TestBase):
         ]
         mock_get_forward_context.return_value = MagicMock(capturing=False)
         dequant_scale_q_nope = torch.randn(B, N)  # shape is [B, num_heads]
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS, attn_metadata, dequant_scale_q_nope)
+        result = self.impl._forward_decode(
+            DecodeMLAPreprocessResult(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+                dequant_scale_q_nope=dequant_scale_q_nope,
+            ),
+            BS,
+            attn_metadata,
+        )
 
         self.assertEqual(result.shape[0], B)
         self.assertEqual(result.shape[1], self.impl.num_kv_heads)
         self.assertEqual(result.shape[2], HD)
+        fia_kwargs = mock_npu_fused_infer_attention_score_v2.call_args.kwargs
+        self.assertEqual(fia_kwargs["query_quant_mode"], 3)
+        torch.testing.assert_close(fia_kwargs["dequant_scale_query"].reshape(B, N), dequant_scale_q_nope)
+
+
+def test_mla_nope_decode_preserves_current_kv_contract():
+    """DCP needs current KV tensors in addition to the paged NoPE cache."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.use_mla_rope = True
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 0
+    impl.kv_a_layernorm = MagicMock(side_effect=lambda x: x)
+    tokens = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    slots = torch.tensor([0, 2])
+    for return_current_kv in (False, True):
+        cache = (torch.zeros(2, 2, 1, 4), torch.empty(2, 2, 1, 0))
+        result = impl.exec_kv_decode(tokens, None, None, cache, slots, return_current_kv=return_current_kv)
+        assert result[0] is cache[1]
+        assert result[1] is cache[0]
+        torch.testing.assert_close(cache[0].view(-1, 4)[slots], tokens)
+        assert len(result) == (4 if return_current_kv else 2)
+        if return_current_kv:
+            assert result[2].shape == (2, 1, 1, 0)
+            torch.testing.assert_close(result[3].reshape(2, 4), tokens)
