@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import torch
 
@@ -20,7 +21,21 @@ def load_proposer(**overrides):
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DCPReplicatedDraftMixin")
     namespace = {"torch": torch, "copy": copy, "replace": replace, "VllmConfig": object, **overrides}
     exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
-    return namespace["DCPReplicatedDraftMixin"]
+    proposer_source = source.with_name("dspark_proposer.py")
+    proposer_tree = ast.parse(proposer_source.read_text())
+    proposer = next(
+        node for node in proposer_tree.body if isinstance(node, ast.ClassDef) and node.name == "AscendDSparkProposer"
+    )
+    assert isinstance(proposer.bases[0], ast.Name) and proposer.bases[0].id == "DCPReplicatedDraftMixin"
+    proposer.bases = proposer.bases[:1]
+    proposer.body = [
+        node
+        for node in proposer.body
+        if isinstance(node, ast.FunctionDef) and node.name == "set_per_group_attn_metadata"
+    ]
+    assert len(proposer.body) == 1
+    exec(compile(ast.Module(body=[proposer], type_ignores=[]), str(proposer_source), "exec"), namespace)
+    return namespace["AscendDSparkProposer"]
 
 
 class TestReplicatedBlockTable(unittest.TestCase):
@@ -167,6 +182,32 @@ class TestReplicatedDraftHooks(unittest.TestCase):
                     else:
                         self.assertEqual((proposer.dcp_size, proposer.dcp_rank), (2, 1))
                         self.assertIs(proposer.loaded_config, target)
+
+    def test_metadata_builder_proxy_preserves_group_spec(self):
+        builder_cls = MagicMock(side_effect=lambda *args: SimpleNamespace(args=args))
+        proposer_cls = load_proposer(AscendAttentionMetadataBuilder=builder_cls)
+        config = object()
+        device = torch.device("cpu")
+        for kernel_block_size in (None, 128):
+            for num_builders in (1, 3):
+                with self.subTest(kernel_block_size=kernel_block_size, num_builders=num_builders):
+                    original_spec = MagicMock(block_size=384)
+                    copied_spec = SimpleNamespace(block_size=128)
+                    original_spec.copy_with_new_block_size.return_value = copied_spec
+                    group = SimpleNamespace(kv_cache_spec=original_spec, layer_names=["draft.0"])
+                    proxy = proposer_cls.MetadataBuilderProxy(group)
+                    proxy.create_metadata_builders(config, device, kernel_block_size, num_builders)
+                    self.assertIs(group.kv_cache_spec, original_spec)
+                    self.assertEqual(original_spec.block_size, 384)
+                    self.assertEqual(len(group.metadata_builders), num_builders)
+                    self.assertEqual(len({id(builder) for builder in group.metadata_builders}), num_builders)
+                    expected_spec = original_spec if kernel_block_size is None else copied_spec
+                    for builder in group.metadata_builders:
+                        self.assertEqual(builder.args, (expected_spec, group.layer_names, config, device))
+                    if kernel_block_size is None:
+                        original_spec.copy_with_new_block_size.assert_not_called()
+                    else:
+                        original_spec.copy_with_new_block_size.assert_called_once_with(kernel_block_size)
 
     def test_nonreplicated_table_is_forwarded(self):
         proposer = load_proposer()()

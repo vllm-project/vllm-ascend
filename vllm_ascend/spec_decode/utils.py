@@ -11,6 +11,7 @@ import torch
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode, VllmConfig, set_current_vllm_config
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
 from vllm_ascend.attention.utils import enable_dcp
 
 
@@ -23,6 +24,28 @@ class DCPReplicatedDraftMixin:
     sizes and context-slot buffers. Attention-group setup and forward execution
     remain with the host proposer.
     """
+
+    class MetadataBuilderProxy:
+        """Build local GQA metadata on behalf of the original attention group."""
+
+        def __init__(self, attn_group):
+            self.attn_group = attn_group
+
+        def create_metadata_builders(
+            self,
+            vllm_config,
+            device,
+            kernel_block_size: int | None = None,
+            num_metadata_builders: int = 1,
+        ):
+            attn_group = self.attn_group
+            builder_spec = attn_group.kv_cache_spec
+            if kernel_block_size is not None:
+                builder_spec = builder_spec.copy_with_new_block_size(kernel_block_size)
+            attn_group.metadata_builders = [
+                AscendAttentionMetadataBuilder(builder_spec, attn_group.layer_names, vllm_config, device)
+                for _ in range(num_metadata_builders)
+            ]
 
     def _init_dcp_replicated_draft(self) -> None:
         self.replicated_draft_kv = self._uses_dcp_replicated_draft_kv()
@@ -195,22 +218,6 @@ class DCPReplicatedDraftMixin:
         block_numbers = block_table.flatten()[flat_indices]
         result[:num_tokens] = block_numbers * kernel_block_size + token_positions % kernel_block_size
         return result
-
-    def set_per_group_attn_metadata(
-        self,
-        gid: int,
-        block_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> None:
-        self._per_group_block_tables[gid] = block_table
-        self._per_group_slot_mappings[gid] = slot_mapping
-        if gid in self._per_group_replication_sizes:
-            # Reserve the expanded table before capture; refresh live rows in
-            # the first pass while keeping the backing storage stable.
-            self._build_replicated_block_table(
-                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
-            )
-            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
 
     def _get_draft_block_table(self, gid: int, num_reqs: int, seq_lens: torch.Tensor) -> torch.Tensor:
         block_table = self._per_group_block_tables[gid]

@@ -17,7 +17,6 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionMetadataBuilder,
     AscendAttentionState,
 )
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -183,22 +182,14 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
                         layer_kv_cache_spec,
                         kv_cache_gid,
                     )
+                    builder_proxy = attn_group
                     if getattr(self, "replicated_draft_kv", False):
-                        builder_spec = layer_kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-                        attn_group.metadata_builders = [
-                            AscendAttentionMetadataBuilder(
-                                builder_spec,
-                                attn_group.layer_names,
-                                draft_vllm_config,
-                                self.device,
-                            )
-                        ]
-                    else:
-                        attn_group.create_metadata_builders(
-                            draft_vllm_config,
-                            self.device,
-                            kernel_block_size=kernel_block_size,
-                        )
+                        builder_proxy = self.MetadataBuilderProxy(attn_group)
+                    builder_proxy.create_metadata_builders(
+                        draft_vllm_config,
+                        self.device,
+                        kernel_block_size=kernel_block_size,
+                    )
                     self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
                     self._per_group_manager_block_sizes[kv_cache_gid] = layer_kv_cache_spec.block_size
                     if isinstance(
@@ -242,6 +233,22 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
             attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
             for attn_group in self.draft_attn_groups
         }
+
+    def set_per_group_attn_metadata(
+        self,
+        gid: int,
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        self._per_group_block_tables[gid] = block_table
+        self._per_group_slot_mappings[gid] = slot_mapping
+        if gid in self._per_group_replication_sizes:
+            # Reserve the expanded table before capture; refresh live rows in
+            # the first pass while keeping the backing storage stable.
+            self._build_replicated_block_table(
+                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
+            )
+            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
 
     def set_inputs_first_pass(
         self,
