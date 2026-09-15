@@ -402,6 +402,19 @@ static ge::graphStatus Tiling4AddRmsNormBias(gert::TilingContext* context)
     uint32_t dtype_key;
     uint32_t data_per_block;
     ge::DataType data_type = SetDataTypeParameters(context, dtype_key, data_per_block);
+    if (addRmsNormBiasSocVersion == platform_ascendc::SocVersion::ASCEND950) {
+        // Initial A5 row kernel: aligned widths that fit the UB, including GLM's 6144.
+        const uint64_t required = uint64_t(num_col) * (24 + 2 * (dtype_key == DTYPE_KEY_FP32 ? 4 : 2));
+        if (num_col == 0 || num_col % 16 != 0 || num_col > 6144 || required + 1024 > ub_size) {
+            OP_LOGE(context, "A5 AddRmsNormBias requires aligned width <=6144 fitting UB.");
+            return ge::GRAPH_FAILED;
+        }
+        SetTilingParameters(&tiling, num_row, num_col, num_col, block_factor,
+            latsBlockFactor, 1, num_col, epsilon);
+        SaveTilingData(context, &tiling, dtype_key, 5);
+        SetWorkspaceSize(context);
+        return ge::GRAPH_SUCCESS;
+    }
     uint32_t mode_key = MODE_NORMAL;
     uint32_t row_factor = 64;
     uint32_t ub_factor = betaDesc == nullptr ? ((dtype_key == DTYPE_KEY_FP32) ? UB_FACTOR_B32 : UB_FACTOR_B16) : ((dtype_key == DTYPE_KEY_FP32) ? UB_FACTOR_B32_WITH_BETA : UB_FACTOR_B16_WITH_BETA);
