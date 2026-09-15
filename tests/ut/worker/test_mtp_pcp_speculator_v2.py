@@ -455,7 +455,6 @@ def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: 
     speculator._build_draft_attn_metadata.assert_not_called()
 
 
-@pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")
 @pytest.mark.parametrize(
     ("speculator_cls", "parent_cls", "replicated_pcp", "batch_kind"),
     [
@@ -535,17 +534,16 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
-def test_propose_preserves_v028_dp_token_counts() -> None:
+def test_propose_preserves_dp_sync_state() -> None:
     speculator = object.__new__(AscendMTPSpeculator)
-    speculator.replicated_pcp = True
+    speculator.replicated_pcp = False
     input_batch = object()
-    token_counts = torch.tensor([4, 8])
+    dp_sync = object()
     with (
-        patch.object(speculator_module, "vllm_version_is", return_value=True),
         patch.object(speculator_module, "disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
         patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose") as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
-    assert parent.call_args.args[11] is token_counts
+        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
+    assert parent.call_args.args[11] is dp_sync
