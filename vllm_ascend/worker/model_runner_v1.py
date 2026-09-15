@@ -3102,11 +3102,17 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        # Variable Engram routing must run on every DP before ACLGraph capture
-        # or replay; only its persistent BF16 inputs enter the model graph.
+        # Routing runs before replay on every DP, never inside capture.
         prepare_engram = getattr(self.model, "prepare_engram_inputs", None)
         if prepare_engram is not None:
-            model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded))
+            if (
+                getattr(self, "_engram_capture_active", False)
+                or getattr(forward_context, "capturing", False)
+                or torch.npu.is_current_stream_capturing()
+            ):
+                model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
+            else:
+                model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded))
         run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
@@ -6079,8 +6085,12 @@ class NPUModelRunner(GPUModelRunner):
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            cuda_graph_size = GPUModelRunner.capture_model(self)
+        self._engram_capture_active = True
+        try:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+                cuda_graph_size = GPUModelRunner.capture_model(self)
+        finally:
+            self._engram_capture_active = False
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:

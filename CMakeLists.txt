@@ -114,9 +114,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
-  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)

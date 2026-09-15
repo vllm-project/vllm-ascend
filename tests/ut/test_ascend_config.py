@@ -1115,6 +1115,35 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_engram_offload_storage_and_validation(self, mock_fix):
+        for storage, expected in (
+            (None, "fp8"),
+            ("bf16", "bf16"),
+            ("fp8", "fp8"),
+            ("int8", "int8"),
+            ("mxfp8", "mxfp8"),
+        ):
+            clear_ascend_config()
+            vc = VllmConfig()
+            vc.additional_config = {"enable_engram_ple_offload": "true"}
+            if storage is not None:
+                vc.additional_config["engram_storage"] = storage
+            config = init_ascend_config(vc)
+            self.assertTrue(config.enable_engram_ple_offload)
+            self.assertEqual(config.engram_storage, expected)
+            self.assertEqual("engram_storage" in vc.additional_config, storage is not None)
+        for settings in (
+            {"enable_engram_ple_offload": True, "enable_engram": False},
+            {"engram_model_path": "/tmp/engram"},
+        ):
+            clear_ascend_config()
+            vc = VllmConfig()
+            vc.additional_config = settings
+            with self.assertRaises(ValueError):
+                init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {
