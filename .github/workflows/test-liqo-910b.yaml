@@ -1,0 +1,11 @@
+name: Test Liqo 910b
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Hello from 910b runner"
