@@ -16,10 +16,13 @@ What is guarded here (everything reachable from CPU UT):
   upstream's ``Scheduler.__init__`` (upstream constructs ``Scheduler(...)``
   with kwargs, which after the swap constructs our subclass);
 * upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
-  module-global name -- the whole reason we can swap the module-level symbol
-  instead of copying ``run_engine_core``;
-* the module-level class swaps and the DyntraLB -> balance wrapper chain
-  actually took effect;
+  module-global name -- the whole reason the consolidated engine-core patch
+  (``patch_engine_core.py``) can swap the module-level symbol instead of
+  copying ``run_engine_core``;
+* the module-level class swaps and the consolidated engine-core patch
+  (``patch_engine_core._run_engine_core_patch_func`` plus the eager watchdog
+  ``_process_engine_step`` / ``_process_input_queue`` patches) actually took
+  effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
 * the Mamba-aligned waiting path can schedule a request through the real
@@ -76,24 +79,30 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 # NOTE: vllm-ascend applies ALL platform patches at ``vllm_ascend`` import
 # time (the platform-patch registry), which runs BEFORE this test module's
 # body. So by the time we can execute anything, ``EngineCoreProc.run_engine_core``
-# is ALREADY the patched ``_balance_run_engine_core`` wrapper -- we cannot
-# recover the upstream original from the live object. Instead we read the
-# original the patch itself stashed: ``_OriginalRunEngineCore`` is bound to
+# is ALREADY the patched ``_run_engine_core_patch_func`` wrapper (installed by
+# the consolidated ``patch_engine_core`` module) -- we cannot recover the
+# upstream original from the live object. Instead we read the original the
+# patch itself stashed: ``_OriginalRunEngineCore`` is bound to
 # ``EngineCoreProc.run_engine_core`` at the patch module's FIRST import, i.e.
 # before the overwrite line runs (modules are imported once), so it is the
 # genuine upstream original regardless of import ordering.
 
 # Importing this module applies the production monkeypatches:
 #   vllm.v1.core.sched.scheduler.Scheduler = BalanceScheduler            (eager)
-#   EngineCoreProc.run_engine_core = _balance_run_engine_core            (eager)
+#   EngineCoreProc.run_engine_core = _run_engine_core_patch_func         (eager,
+#       installed by patch_engine_core; all run_engine_core wrappers were
+#       consolidated there)
+#   EngineCoreProc._process_engine_step / _process_input_queue =
+#       watchdog-feed patches                                            (eager,
+#       installed by patch_engine_core; previously patch_engine_watchdog
+#       self-patched at its own module level)
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
-#       swapped inside _balance_run_engine_core only when balance is enabled)
-from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
+#       swapped by patch_engine_core._patch_dp_engine_core_proc only when
+#       balance is enabled)
+import vllm_ascend.patch.platform.patch_engine_core as _engine_core_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
-    _balance_run_engine_core,
     _balance_scheduling_enabled,
-    _OriginalRunEngineCore,
 )
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
@@ -551,13 +560,14 @@ def test_upstream_run_engine_core_instantiates_dp_proc_by_name():
     call time. If upstream switches to ``self.__class__(...)`` or a factory, the
     swap silently stops instantiating our subclass (balance off, no error)."""
     # Read the upstream ORIGINAL run_engine_core (the live
-    # EngineCoreProc.run_engine_core is already our _balance_run_engine_core
-    # wrapper by test time -- see _OriginalRunEngineCore import note above).
-    src = inspect.getsource(_OriginalRunEngineCore)
+    # EngineCoreProc.run_engine_core is already the patch_engine_core
+    # _run_engine_core_patch_func wrapper by test time -- see the
+    # _OriginalRunEngineCore import note above).
+    src = inspect.getsource(_engine_core_patch._OriginalRunEngineCore)
     assert "DPEngineCoreProc(" in src, (
         "upstream run_engine_core no longer instantiates DPEngineCoreProc by "
         "module-global name; the _engine_core_mod.DPEngineCoreProc swap in "
-        "patch_balance_schedule.py would silently break."
+        "patch_engine_core.py would silently break."
     )
 
 
@@ -566,14 +576,12 @@ def test_upstream_run_engine_core_instantiates_dp_proc_by_name():
 # ---------------------------------------------------------------------------
 
 
-def test_module_level_swaps_and_wrapper_chain_take_effect():
-    """The balance patch rebinds ``Scheduler`` eagerly and installs its
-    ``run_engine_core`` wrapper, while the subsequently loaded DyntraLB patch
-    becomes the outer wrapper. DyntraLB delegates to the balance wrapper when
-    disabled; the two features are rejected by configuration validation when
-    both are enabled. The ``DPEngineCoreProc`` swap remains deferred until the
-    selected wrapper runs, so at import time the engine-core class must still
-    be the pristine upstream one.
+def test_module_level_swaps_and_engine_core_entrypoint_take_effect():
+    """The balance patch rebinds ``Scheduler`` eagerly; the consolidated
+    ``patch_engine_core`` module installs the single ``run_engine_core``
+    wrapper. The ``DPEngineCoreProc`` swap remains deferred until the wrapper
+    runs (in the engine-core child process), so at import time the engine-core
+    class must still be the pristine upstream one.
     (``Scheduler`` propagating into ``vllm.v1.engine.core.Scheduler``
     additionally depends on the platform patch loading before engine.core is
     imported -- that ordering is enforced by the platform patch system and is
@@ -583,16 +591,23 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
         "patch did not rebind vllm.v1.core.sched.scheduler.Scheduler"
     )
     # DPEngineCoreProc is NOT swapped at import -- it stays pristine and is
-    # swapped inside _balance_run_engine_core only when balance is enabled.
+    # swapped by patch_engine_core._patch_dp_engine_core_proc only when
+    # balance (or dyntra-lb) is enabled.
     assert _upstream_engine_mod.DPEngineCoreProc is _UpstreamDPEngineCoreProc, (
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
-        "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
+    assert _UpstreamEngineCoreProc.run_engine_core is _engine_core_patch._run_engine_core_patch_func, (
+        "patch_engine_core must install the single EngineCoreProc.run_engine_core wrapper"
     )
-    assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (
-        "DyntraLB must delegate to the balance wrapper when DyntraLB is disabled"
+    assert _engine_core_patch._OriginalRunEngineCore is not _engine_core_patch._run_engine_core_patch_func, (
+        "patch_engine_core._OriginalRunEngineCore must stash the pristine upstream run_engine_core"
+    )
+    assert _UpstreamEngineCoreProc._process_engine_step is _engine_core_patch._patched_process_engine_step, (
+        "patch_engine_core must install the watchdog _process_engine_step patch"
+    )
+    assert _UpstreamEngineCoreProc._process_input_queue is _engine_core_patch._patched_process_input_queue, (
+        "patch_engine_core must install the watchdog _process_input_queue patch"
     )
 
 
@@ -918,20 +933,40 @@ def test_balance_engine_core_hooks(monkeypatch):
     assert proc.scheduler.dp_group == "dp"
     proc.scheduler.balance_gather.assert_called_once()
 
-    orig = pbs._engine_core_mod.DPEngineCoreProc
+    # The conditional DPEngineCoreProc activation now lives in the
+    # consolidated patch_engine_core wrapper (the per-feature
+    # _balance_run_engine_core wrapper was removed by the refactor).
+    from vllm_ascend.patch.platform import patch_engine_core as pe
+
+    orig = pe._engine_core_mod.DPEngineCoreProc
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            profiling_chunk_config=SimpleNamespace(enabled=False),
+        )
+    )
     try:
         with (
-            patch.object(pbs, "_OriginalRunEngineCore", return_value="ok") as mock_orig,
-            patch.object(pbs, "_balance_scheduling_enabled", return_value=True),
+            patch.object(pe, "_OriginalRunEngineCore", return_value="ok") as mock_orig,
+            patch.object(pe, "_balance_scheduling_enabled", return_value=True),
+            patch.object(pe, "_get_dyntra_lb_config", return_value=SimpleNamespace(enabled=False)),
+            patch.object(pe, "init_ascend_config", return_value=ascend_config),
+            # The wrapper now configures/starts the watchdog on every entry;
+            # mock it so the real singleton watchdog thread is never started.
+            patch.object(pe, "get_watch_dog"),
         ):
-            assert _balance_run_engine_core(vllm_config=object(), dp_rank=1) == "ok"
-            assert pbs._engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
+            assert pe._run_engine_core_patch_func(vllm_config=object(), dp_rank=1) == "ok"
+            assert pe._engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
             mock_orig.assert_called_once()
+
+        pe._engine_core_mod.DPEngineCoreProc = orig
         with (
-            patch.object(pbs, "_OriginalRunEngineCore", return_value="off"),
-            patch.object(pbs, "_balance_scheduling_enabled", return_value=False),
+            patch.object(pe, "_OriginalRunEngineCore", return_value="off"),
+            patch.object(pe, "_balance_scheduling_enabled", return_value=False),
+            patch.object(pe, "_get_dyntra_lb_config", return_value=SimpleNamespace(enabled=False)),
+            patch.object(pe, "init_ascend_config", return_value=ascend_config),
+            patch.object(pe, "get_watch_dog"),
         ):
-            assert _balance_run_engine_core() == "off"
-            assert pbs._engine_core_mod.DPEngineCoreProc is pbs._OriginalDPEngineCoreProc
+            assert pe._run_engine_core_patch_func() == "off"
+            assert pe._engine_core_mod.DPEngineCoreProc is orig
     finally:
-        pbs._engine_core_mod.DPEngineCoreProc = orig
+        pe._engine_core_mod.DPEngineCoreProc = orig
