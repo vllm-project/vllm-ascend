@@ -98,7 +98,7 @@ RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
       rm /tmp/rustup-init.sh && \
       . "$HOME/.cargo/env"; \
     fi
-ENV PATH="$HOME/.cargo/bin:$PATH"
+ENV PATH="/root/.cargo/bin:$PATH"
 # Configure cargo only for internal (CI) builds: route git dependencies through
 # GIT_PROXY and the crates.io sparse index through an internal mirror. External
 # builds leave these build-args empty and keep the default public endpoints.
