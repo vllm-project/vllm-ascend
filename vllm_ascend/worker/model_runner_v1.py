@@ -76,6 +76,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -149,6 +150,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.ops.gdn_state import canonicalize_folded_prefill_state
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -227,6 +229,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -701,14 +704,34 @@ class NPUModelRunner(GPUModelRunner):
 
     def _draft_uses_qwen3_gqa_dspark(self) -> bool:
         """Return whether the draft expects Kimi's materialized residual."""
-        if self.speculative_config is None or not self.speculative_config.use_dspark():
+        speculative_config = getattr(self, "speculative_config", None)
+        if speculative_config is None or not speculative_config.use_dspark():
             return False
-        draft_model_config = self.speculative_config.draft_model_config
+        draft_model_config = speculative_config.draft_model_config
         if draft_model_config is None:
             return False
         hf_config = draft_model_config.hf_config
         architectures = getattr(hf_config, "architectures", ()) or ()
-        return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
+        return getattr(hf_config, "model_type", None) == "qwen3" and any(
+            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
+            for architecture in architectures
+        )
+
+    def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
+        """Whether this runner uses the K3 target and GQA DSpark KV layout."""
+        if not self._draft_uses_qwen3_gqa_dspark():
+            return False
+        hf_config = getattr(self.model_config, "hf_config", None)
+        architectures = {
+            *(getattr(self.model_config, "architectures", ()) or ()),
+            *(getattr(hf_config, "architectures", ()) or ()),
+        }
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture:
+            architectures.add(architecture)
+        return getattr(hf_config, "model_type", None) == "kimi_k3" or any(
+            "KimiK3" in architecture for architecture in architectures
+        )
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -854,10 +877,33 @@ class NPUModelRunner(GPUModelRunner):
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
+    def _canonicalize_folded_prefill_states(self, attn_metadata) -> None:
+        """Commit folded prompt outputs before KV finalization and sampling."""
+        self._folded_prefill_rows = ()
+        if not isinstance(attn_metadata, dict):
+            # GDN speculative execution does not support ubatching.
+            return
+        rows: set[int] = set()
+        for group in self.kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                metadata = attn_metadata.get(layer_name)
+                copies = getattr(metadata, "folded_prefill_state_copies", ())
+                if not copies:
+                    continue
+                conv_state, recurrent_state = self.compilation_config.static_forward_context[layer_name].kv_cache
+                for row, spec_row, count in copies:
+                    canonicalize_folded_prefill_state(
+                        conv_state, recurrent_state, metadata.spec_state_indices_tensor[spec_row], count
+                    )
+                    rows.add(row)
+        # Publish only after both state tensors have been copied on the model
+        # stream. These are state selectors, not sampler acceptance statistics.
+        self._folded_prefill_rows = tuple(sorted(rows))
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
-        if not self.use_async_scheduling:
+        if not self.use_async_scheduling and not getattr(self, "_folded_prefill_rows", ()):
             return super()._update_states_after_model_execute(output_token_ids, scheduler_output)
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
@@ -867,19 +913,29 @@ class NPUModelRunner(GPUModelRunner):
         # independently of InputBatch, until the existing event is synchronized.
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+        for row in getattr(self, "_folded_prefill_rows", ()):
+            # A folded prompt has already been committed to slot/offset zero.
+            # Even an intermediate chunk whose sampled token is discarded
+            # must carry state selector 1 into state-copy and the next build.
+            self.num_accepted_tokens.gpu[row] = 1
+        accepted_cpu = (
+            self.num_accepted_tokens.cpu
+            if self.use_async_scheduling
+            else self.input_batch.num_accepted_tokens_cpu_tensor
+        )
         if self.cache_config.mamba_cache_mode == "align":
             mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
-                num_accepted_tokens_cpu_tensor=self.num_accepted_tokens.cpu,
+                num_accepted_tokens_cpu_tensor=accepted_cpu,
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
                 mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
             )
         else:
-            self.num_accepted_tokens.copy_to_cpu(num_reqs)
+            accepted_cpu[:num_reqs].copy_(self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True)
             if self.cache_config.mamba_cache_mode == "all":
                 mamba_utils.postprocess_mamba_all(
                     scheduler_output,
@@ -2428,6 +2484,7 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            self._canonicalize_folded_prefill_states(attn_metadata)
             # Verify every scheduled layer executed its deferred copy.
             if self.cache_config.mamba_cache_mode == "align" and mamba_copy_connector is not None:
                 mamba_copy_connector.finish_mamba_state_copy()
@@ -4767,8 +4824,20 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+                    physical_page_size_bytes = current_kv_cache_spec.page_size_bytes
+                    if isinstance(
+                        current_kv_cache_spec,
+                        AscendDCPReplicatedDraftAttentionSpec,
+                    ):
+                        # The custom spec reports the aggregate bytes backing one
+                        # target-DCP logical block. The draft backend still sees
+                        # the original per-lane page layout, only with D times as
+                        # many physical blocks.
+                        physical_page_size_bytes = (
+                            current_kv_cache_spec.lane_page_size_bytes
+                        )
+                    assert sum_page_size_bytes % physical_page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // physical_page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -5143,6 +5212,11 @@ class NPUModelRunner(GPUModelRunner):
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
+        replicated_draft_layer_names = (
+            set(getattr(self.drafter, "_draft_attn_layer_names", ()))
+            if self._uses_dcp_replicated_dspark_draft_kv()
+            else set()
+        )
         for layer_name, attn_module in attn_layers.items():
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
@@ -5262,6 +5336,24 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in attn_layer_names:
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+
+        # Preserve the non-DCP target/Mamba layout. Only effective draft K/V
+        # bytes are replicated; from_full_attention_spec removes the target
+        # padding because the mixed planner allocates draft tensors separately.
+        for layer_name in replicated_draft_layer_names:
+            spec = kv_cache_spec[layer_name]
+            if not isinstance(spec, FullAttentionSpec):
+                raise TypeError(
+                    "Kimi K3's DCP-replicated GQA DSpark cache requires "
+                    f"FullAttentionSpec, got {type(spec).__name__} for "
+                    f"{layer_name}."
+                )
+            kv_cache_spec[layer_name] = (
+                AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                    spec,
+                    self.dcp_size,
+                )
+            )
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage

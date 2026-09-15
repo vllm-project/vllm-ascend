@@ -42,6 +42,41 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetada
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
 MULTI_DP_PADDING_SIZES = [0, 8, 32]
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+def test_draft_config_keeps_pd_connector_owned_by_target(replicated):
+    proposer = object.__new__(AscendDSparkProposer)
+    connector = SimpleNamespace(prefill_dp_size=2)
+    cache = SimpleNamespace(block_size=3072)
+    base = SimpleNamespace(kv_transfer_config=connector, cache_config=cache)
+    parallel = SimpleNamespace(rank=0, decode_context_parallel_size=2)
+    proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=3))
+    proposer.speculative_config = SimpleNamespace(draft_parallel_config=parallel, draft_model_config=object())
+    with (
+        patch.object(AscendSpecDecodeBaseProposer, "_create_draft_vllm_config", return_value=base),
+        patch.object(AscendDSparkProposer, "_uses_dcp_replicated_draft_kv", return_value=replicated),
+        patch("vllm_ascend.spec_decode.dspark_proposer.replace") as replace_config,
+    ):
+        result = proposer._create_draft_vllm_config()
+    if replicated:
+        assert result is replace_config.return_value
+        overrides = replace_config.call_args.kwargs
+        assert overrides["cache_config"] is not cache
+        overrides["cache_config"].block_size = 128
+        assert overrides["kv_transfer_config"] is None
+        assert overrides["parallel_config"].decode_context_parallel_size == 1
+        assert overrides["parallel_config"].rank == 3
+    else:
+        assert result is base
+        replace_config.assert_not_called()
+    assert cache.block_size == 3072
+    assert base.kv_transfer_config is connector
+    assert connector.prefill_dp_size == 2
+    assert parallel.decode_context_parallel_size == 2
+    assert parallel.rank == 0
+
+
 _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
@@ -437,6 +472,79 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
             treat_short_extends_as_decodes=False,
         ) == ((2, 0, 10, 0) if dcp_size > 1 else (1, 1, 5, 5))
         assert manager.prepare_dspark_first_pass_cp_metadata.call_count == (dcp_size > 1)
+
+
+@pytest.mark.parametrize(
+    ("manager_block_size", "kernel_block_size", "local_blocks", "expected"),
+    [
+        (4, 4, [[3, 7]], [[6, 7, 14, 15]]),
+        (8, 4, [[6, 7]], [[12, 13, 14, 15]]),
+    ],
+)
+def test_dcp_replicated_dspark_block_table_and_slot_mapping(
+    manager_block_size,
+    kernel_block_size,
+    local_blocks,
+    expected,
+) -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: manager_block_size}
+    proposer._per_group_kernel_block_sizes = {0: kernel_block_size}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+    proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(16, dtype=torch.int32)}
+
+    replicated = proposer._build_replicated_block_table(
+        0,
+        torch.tensor(local_blocks, dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor(expected, dtype=torch.int32),
+    )
+    slots = proposer._build_replicated_context_slot_mapping(
+        0,
+        replicated,
+        torch.arange(8, dtype=torch.int32),
+        torch.tensor([0, 8], dtype=torch.int32),
+        num_reqs=1,
+        num_tokens=8,
+    )
+    expected_slots = torch.arange(
+        expected[0][0] * kernel_block_size,
+        expected[0][0] * kernel_block_size + 8,
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(slots[:8], expected_slots)
+    assert torch.all(slots[8:] == -1)
+
+
+def test_dcp_replicated_dspark_uses_only_active_block_table_rows() -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: 4}
+    proposer._per_group_kernel_block_sizes = {0: 4}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+
+    block_table_capacity = torch.tensor([[3, 7], [5, 9]], dtype=torch.int32)
+    active_batch_size = 1
+    replicated = proposer._build_replicated_block_table(
+        0,
+        block_table_capacity[:active_batch_size],
+        torch.tensor([8], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor([[6, 7, 14, 15]], dtype=torch.int32),
+    )
 
 
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):

@@ -123,20 +123,31 @@ class AscendAttentionDCPMetadataBuilder(
         dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
         prefill_metadata = None
         if num_prefills > 0:
-            prefill_query_lens = query_lens[num_decodes:]
-            context_lens_cpu = (seq_lens - query_lens)[num_decodes:]
+            # Parallel drafting keeps seq_lens on the accelerator, while
+            # query_lens_cpu is derived from query_start_loc_cpu. Copy it
+            # asynchronously and keep the metadata arithmetic on device.
+            query_lens_cpu = query_lens
+            num_prefill_tokens = int(query_lens_cpu[num_decodes:].sum().item())
+            prefill_query_lens = query_lens_cpu[num_decodes:].to(seq_lens.device, non_blocking=True)
             chunked_context_metadata = None
-            if self.chunked_prefill_enabled and context_lens_cpu.numel() > 0 and context_lens_cpu.max().item() > 0:
-                local_context_lens_allranks = self._get_dcp_context_lens(
-                    common_attn_metadata,
-                    start=num_decodes,
-                    device=self.device,
+            local_context_lens_allranks_cpu = self._get_dcp_context_lens(
+                common_attn_metadata,
+                start=num_decodes,
+            )
+            if (
+                self.chunked_prefill_enabled
+                and local_context_lens_allranks_cpu.numel() > 0
+                and local_context_lens_allranks_cpu.max().item() > 0
+            ):
+                local_context_lens_allranks = local_context_lens_allranks_cpu.pin_memory().to(
+                    self.device,
+                    non_blocking=True,
                 )
-                local_chunked_kv_lens = local_context_lens_allranks[:, self.dcp_rank]
-                chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks)
+                local_chunked_kv_lens_cpu = local_context_lens_allranks_cpu[:, self.dcp_rank]
+                chunked_req_mask = self._get_chunked_req_mask(local_context_lens_allranks_cpu)
                 chunked_context_metadata = AscendMetadataForPrefill.ChunkedContextMetadata(
                     actual_chunk_seq_lengths=torch.cumsum(prefill_query_lens, dim=0),
-                    actual_seq_lengths_kv=torch.cumsum(local_chunked_kv_lens, dim=0).tolist(),
+                    actual_seq_lengths_kv=torch.cumsum(local_chunked_kv_lens_cpu, dim=0).tolist(),
                     chunked_req_mask=chunked_req_mask,
                     starts=torch.zeros(
                         len(local_context_lens_allranks),
@@ -147,8 +158,9 @@ class AscendAttentionDCPMetadataBuilder(
                     chunk_seq_mask_filtered_indices=filter_chunked_req_indices(
                         prefill_query_lens,
                         chunked_req_mask,
-                    ).to(self.device),
-                    local_total_toks=local_chunked_kv_lens.sum().item(),
+                        total_tokens=num_prefill_tokens,
+                    ),
+                    local_total_toks=int(local_chunked_kv_lens_cpu.sum().item()),
                 )
             prefill_metadata = AscendMetadataForPrefill(
                 chunked_context=chunked_context_metadata,
@@ -389,7 +401,6 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         return self._merge_dcp_attention_output(
             attn_out,
             attn_lse,
-            self.head_size,
         )
 
     def _update_chunk_attn_out_lse_with_current_attn_out_lse(

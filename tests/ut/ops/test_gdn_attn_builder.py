@@ -316,6 +316,28 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
+def test_dspark_reorder_threshold_includes_target_token():
+    vllm_config = _make_vllm_config(num_speculative_tokens=7)
+    vllm_config.speculative_config.method = "dspark"
+    vllm_config.parallel_config.decode_context_parallel_size = 16
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+    )
+
+    builder = AscendGDNAttentionMetadataBuilder(
+        spec,
+        ["layer0"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+    assert builder.reorder_batch_threshold == 8
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -845,7 +867,7 @@ def test_one_token_prefill_selection_respects_recurrent_state(
         (16, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
     ],
 )
-def test_spec_width_prompt_chunk_folds_only_without_dcp(
+def test_spec_width_prompt_chunk_preserves_input_state_selector(
     monkeypatch: pytest.MonkeyPatch,
     dcp_size: int,
     num_spec: int,
@@ -883,27 +905,39 @@ def test_spec_width_prompt_chunk_folds_only_without_dcp(
     )
 
     assert accepted.tolist() == ([2, 1] if mixed_spec else [1])
-    if dcp_size == 1 and context_len > 0:
-        assert metadata.num_prefills == 0
-        assert metadata.num_prefill_tokens == 0
-        assert metadata.num_spec_decodes == 1 + int(mixed_spec)
-        assert metadata.spec_sequence_masks.tolist() == ([True, True] if mixed_spec else [True])
-        assert metadata.num_accepted_tokens.tolist() == ([2, width] if mixed_spec else [width])
-        return
-
-    # DCP retains prefill state semantics regardless of the prompt chunk width.
-    assert metadata.num_prefills == 1
-    assert metadata.num_prefill_tokens == width
-    assert metadata.num_spec_decodes == int(mixed_spec)
-    assert metadata.prefill_has_initial_state.tolist() == [context_len > 0]
-    expected_slot = (10 if mixed_spec else 0) + (seq_lens[-1] - 1) // 384
-    assert metadata.prefill_state_indices.tolist() == [expected_slot]
-    if mixed_spec:
-        assert metadata.spec_sequence_masks.tolist() == [True, False]
-        assert metadata.num_accepted_tokens.tolist() == [2]
+    folded = context_len > 0
+    assert metadata.num_prefills == int(not folded)
+    assert metadata.num_prefill_tokens == (0 if folded else width)
+    assert metadata.num_spec_decodes == int(mixed_spec) + int(folded)
+    expected_column = (seq_lens[-1] - 1) // 384
+    assert metadata.folded_prefill_state_copies == (((int(mixed_spec), int(mixed_spec), width),) if folded else ())
+    if folded:
+        # The current chunk width must never replace the previous state slot.
+        assert metadata.num_accepted_tokens[: len(query_lens)].tolist() == accepted.tolist()
+        assert metadata.spec_state_indices_tensor[int(mixed_spec), 0].item() == (
+            (10 if mixed_spec else 0) + expected_column
+        )
     else:
-        assert metadata.spec_sequence_masks is None
-        assert metadata.num_accepted_tokens is None
+        assert metadata.prefill_has_initial_state.tolist() == [False]
+
+
+@pytest.mark.parametrize("accepted_count", [1, 2, 8])
+def test_fold_preserves_state_selector_after_copy_or_without_copy(accepted_count):
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder)
+    builder.num_spec = 7
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[21, 29, 8], query_lens=[8, 8, 8]),
+        block_size=128,
+        device=torch.device("cpu"),
+    )
+    common.is_prefilling = torch.tensor([True, False, True])
+    masks = torch.tensor([False, True, False])
+    accepted = torch.tensor([accepted_count, 3, 1], dtype=torch.int32)
+    folded, selected = builder._fold_spec_sized_prefill_chunks_into_spec(common, masks, accepted)
+    assert folded.tolist() == [True, True, False]
+    assert masks.tolist() == [False, True, False]
+    assert selected is accepted
+    assert selected.tolist() == [accepted_count, 3, 1]
 
 
 def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():

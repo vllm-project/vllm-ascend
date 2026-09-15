@@ -4,6 +4,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -143,7 +144,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     impl.qk_rope_head_dim = 2
     impl.scale = 1.0
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
+    impl._merge_dcp_attention_output = lambda output, _lse: output
     impl._v_up_proj_batch_major = lambda output: output
 
     decode = AscendMLADCPDecodeMetadata(
@@ -207,7 +208,7 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
     merged = {}
 
-    def merge(output, softmax_lse, _rank):
+    def merge(output, softmax_lse):
         merged["output_shape"] = output.shape
         merged["softmax_lse_shape"] = softmax_lse.shape
         return output
@@ -257,3 +258,17 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     assert call_kwargs["num_heads"] == 96
     assert merged["output_shape"] == (4, 96, 3)
     assert merged["softmax_lse_shape"] == (4, 96, 1)
+
+
+@pytest.mark.parametrize("supports_varlen", [False, True])
+def test_mla_dcp_builder_preserves_varlen_capability(supports_varlen):
+    def initialize_base(builder, *args):
+        builder.dcp_size = 2
+        builder.block_size = 128
+
+    config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    with patch.object(AscendMLAMetadataBuilder, "__init__", autospec=True, side_effect=initialize_base) as init:
+        AscendMlaDCPMetadataBuilder(
+            SimpleNamespace(), ["layer"], config, torch.device("cpu"), supports_dcp_with_varlen=supports_varlen
+        )
+    assert init.call_args.args[-1] is supports_varlen
