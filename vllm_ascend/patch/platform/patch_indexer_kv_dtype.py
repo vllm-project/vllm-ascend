@@ -53,9 +53,11 @@ from vllm.logger import logger
 # field (including the default ``indexer_kv_dtype="auto"``) explicitly, so a
 # Literal without ``"auto"`` raises a pydantic ``literal_error`` at engine
 # startup. Deriving from the current upstream members keeps this patch in sync
-# if upstream adds more formats.
+# if upstream adds more formats. (The starred-subscript Literal is only
+# analyzable at runtime, so mypy flags it as an invalid type alias -- the
+# explicit ignore below is the same pattern used elsewhere in this package.)
 _ORIG_INDEXER_KV_DTYPE = _attention_mod.IndexerKVDType
-_INDEXER_KV_DTYPE_WITH_INT8 = typing.Literal[*_ORIG_INDEXER_KV_DTYPE.__args__ + ("int8",)]  # noqa
+_INDEXER_KV_DTYPE_WITH_INT8 = typing.Literal[*_ORIG_INDEXER_KV_DTYPE.__args__ + ("int8",)]  # type: ignore[valid-type]
 
 
 def _apply_indexer_kv_dtype_int8_patch() -> None:
