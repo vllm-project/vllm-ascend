@@ -296,7 +296,6 @@ static ge::graphStatus DispatchFFNCombineTilingFuncImpl(gert::TilingContext *con
 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
-
     // The C workspace is shared by GMM1 (writes N cols/row) and GMM2 (writes K cols/row),
     // so its row stride must be max(N, K); the A workspace is shared by x (K/row) and
     // the permuted intermediate (N/2 per row).
