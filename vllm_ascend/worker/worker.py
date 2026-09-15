@@ -368,6 +368,7 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
+        self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
