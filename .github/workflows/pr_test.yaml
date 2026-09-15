@@ -661,8 +661,6 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
@@ -796,8 +794,10 @@ jobs:
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
-            if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
-              echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
+            if [ "${HAS_READY_A5_LABEL}" != "true" ]; then
+              echo "::notice::run-selected-tests-a5 ignored: ready-a5 label not present, skip A5 result check"
+            elif [ "${TESTS_A5_RESULT}" = "skipped" ]; then
+              echo "::notice::run-selected-tests-a5 was skipped"
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
               echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
