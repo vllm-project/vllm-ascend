@@ -21,7 +21,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
 - `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
-- `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA). [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
+- `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency (16× smaller draft KV cache) and compatibility with the target model. Applicable to all A2/A3 and 950DT deployment scenarios in this document. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
 
 It is recommended to place the model weight in a shared cache directory.
 
@@ -100,7 +100,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The bfloat(MiniMax-M3) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The W8A8 quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MXFP8 quantized model can be deployed on 1 950DT products (96GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
 === "A3 series(BF16)"
 
@@ -509,7 +509,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "A3 series"
 
-    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with EAGLE3.
+    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
 
     **Deployment topology:**
 
@@ -692,7 +692,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
+    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
 
     **Deployment topology:**
 
@@ -877,7 +877,7 @@ Key Parameter Descriptions:
 
 - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
+- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
 
@@ -1013,7 +1013,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "A3 series"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with EAGLE3.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
 
     1. Prefill node
 
@@ -1023,7 +1023,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
 
     export VLLM_PP_LAYER_PARTITION="30,30"
     export HCCL_BUFFSIZE=1024
@@ -1078,7 +1078,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
@@ -1128,7 +1128,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
 
 === "950DT products"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
 
     1. Prefill node
 
@@ -1139,7 +1139,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
@@ -1196,7 +1196,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
