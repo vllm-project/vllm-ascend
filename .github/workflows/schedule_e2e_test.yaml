@@ -63,102 +63,102 @@ env:
   DAILY_CONFIG: '.github/workflows/configs/daily_config.yaml'
   
 jobs:
-  select-all-tests:
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
-    outputs:
-      has_tests: ${{ steps.full-scope.outputs.has_tests }}
-      test_groups: ${{ steps.full-scope.outputs.test_groups }}
-      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
-      csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
-      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
-      base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
-      base_ref: ${{ steps.resolve-refs.outputs.base_ref }}
-      main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
-      release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
-    steps:
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          ref: >-
-            ${{
-              github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
-            }}
-          fetch-depth: 0
-      - name: Resolve refs
-        id: resolve-refs
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          WD_BRANCH_RAW: ${{ inputs.vllm_ascend_branch }}
-          PR_SHA_RAW: ${{ github.sha }}
-          # 完整event路径，actionlint类型识别
-          PR_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
+  # select-all-tests:
+  #   runs-on: linux-amd64-cpu-8-hk
+  #   container:
+  #     image: quay.io/ascend-ci/vllm-ascend:lint
+  #   outputs:
+  #     has_tests: ${{ steps.full-scope.outputs.has_tests }}
+  #     test_groups: ${{ steps.full-scope.outputs.test_groups }}
+  #     matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+  #     csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
+  #     vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+  #     base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
+  #     base_ref: ${{ steps.resolve-refs.outputs.base_ref }}
+  #     main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
+  #     release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
+  #   steps:
+  #     - name: Checkout vllm-project/vllm-ascend repo
+  #       uses: actions/checkout@v7
+  #       with:
+  #         ref: >-
+  #           ${{
+  #             github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
+  #           }}
+  #         fetch-depth: 0
+  #     - name: Resolve refs
+  #       id: resolve-refs
+  #       env:
+  #         EVENT_NAME: ${{ github.event_name }}
+  #         WD_BRANCH_RAW: ${{ inputs.vllm_ascend_branch }}
+  #         PR_SHA_RAW: ${{ github.sha }}
+  #         # 完整event路径，actionlint类型识别
+  #         PR_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  #         PR_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+  #         REF_NAME: ${{ github.ref_name }}
+  #       run: |
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         cd "$GITHUB_WORKSPACE"
 
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            # pull_request 事件
-            git fetch origin "${PR_SHA_RAW}"
-            {
-              echo "vllm_ascend_ref=${PR_SHA_RAW}"
-              echo "base_sha=${PR_EVENT_BASE_SHA}"
-              echo "base_ref=${PR_EVENT_BASE_REF}"
-            } >> "$GITHUB_OUTPUT"
-          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${WD_BRANCH_RAW}" ]]; then
-            # workflow_dispatch 手动触发
-            TARGET_BRANCH="${WD_BRANCH_RAW}"
-            git fetch origin "$TARGET_BRANCH"
-            {
-              echo "vllm_ascend_ref=$(git rev-parse HEAD)"
-              echo "base_sha=$(git rev-parse FETCH_HEAD)"
-              echo "base_ref=${TARGET_BRANCH}"
-            } >> "$GITHUB_OUTPUT"
-          else
-            # schedule(cron) / push
-            TARGET_BRANCH="${REF_NAME}"
-            git fetch origin "$TARGET_BRANCH"
-            {
-              echo "vllm_ascend_ref=$(git rev-parse HEAD)"
-              echo "base_sha=$(git rev-parse FETCH_HEAD)"
-              echo "base_ref=${TARGET_BRANCH}"
-            } >> "$GITHUB_OUTPUT"
-          fi
+  #         if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+  #           # pull_request 事件
+  #           git fetch origin "${PR_SHA_RAW}"
+  #           {
+  #             echo "vllm_ascend_ref=${PR_SHA_RAW}"
+  #             echo "base_sha=${PR_EVENT_BASE_SHA}"
+  #             echo "base_ref=${PR_EVENT_BASE_REF}"
+  #           } >> "$GITHUB_OUTPUT"
+  #         elif [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${WD_BRANCH_RAW}" ]]; then
+  #           # workflow_dispatch 手动触发
+  #           TARGET_BRANCH="${WD_BRANCH_RAW}"
+  #           git fetch origin "$TARGET_BRANCH"
+  #           {
+  #             echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+  #             echo "base_sha=$(git rev-parse FETCH_HEAD)"
+  #             echo "base_ref=${TARGET_BRANCH}"
+  #           } >> "$GITHUB_OUTPUT"
+  #         else
+  #           # schedule(cron) / push
+  #           TARGET_BRANCH="${REF_NAME}"
+  #           git fetch origin "$TARGET_BRANCH"
+  #           {
+  #             echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+  #             echo "base_sha=$(git rev-parse FETCH_HEAD)"
+  #             echo "base_ref=${TARGET_BRANCH}"
+  #           } >> "$GITHUB_OUTPUT"
+  #         fi
 
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
-            exit 1
-          }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+  #         main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+  #         release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+  #         [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+  #           echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+  #           exit 1
+  #         }
+  #         [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+  #           echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+  #           exit 1
+  #         }
+  #         {
+  #           echo "main_commit=${main_commit}"
+  #           echo "release_tag=${release_tag}"
+  #         } >> "$GITHUB_OUTPUT"
 
-      - name: Select all tests
-        id: full-scope
-        run: |
-          pip install regex pyyaml
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          python3 .github/workflows/scripts/select_tests.py --all-tests
+  #     - name: Select all tests
+  #       id: full-scope
+  #       run: |
+  #         pip install regex pyyaml
+  #         git config --global --add safe.directory "$GITHUB_WORKSPACE"
+  #         python3 .github/workflows/scripts/select_tests.py --all-tests
 
-  ensure-csrc-cache:
-    needs: select-all-tests
-    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
-    uses: ./.github/workflows/_ensure_csrc_cache.yaml
-    with:
-      target_ids: ${{ needs.select-all-tests.outputs.csrc_cache_target_ids }}
-      source_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
-      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
-      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
+  # ensure-csrc-cache:
+  #   needs: select-all-tests
+  #   if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+  #   uses: ./.github/workflows/_ensure_csrc_cache.yaml
+  #   with:
+  #     target_ids: ${{ needs.select-all-tests.outputs.csrc_cache_target_ids }}
+  #     source_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+  #     base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+  #     base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
 
   # run-all-tests:
   #   needs: [select-all-tests, ensure-csrc-cache]
