@@ -44,6 +44,8 @@ class AscendPCPAttentionContext:
     hidden_restore_idx: torch.Tensor
     padded_gather_idx: torch.Tensor | None = None
     gathered_kv_write_mask: torch.Tensor | None = None
+    # CPU snapshot of allocated kernel-block counts in global request order.
+    global_block_table_num_blocks: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -470,6 +472,11 @@ class AscendPCPManager(PCPManager):
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
+        global_block_table_num_blocks = None
+        if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
+            global_block_table_num_blocks = torch.from_numpy(
+                self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
+            )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
@@ -480,4 +487,5 @@ class AscendPCPManager(PCPManager):
             hidden_restore_idx=hidden_restore_idx,
             padded_gather_idx=self._padded_gather_idx,
             gathered_kv_write_mask=self._gathered_kv_write_mask,
+            global_block_table_num_blocks=global_block_table_num_blocks,
         )

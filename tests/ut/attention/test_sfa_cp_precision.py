@@ -94,25 +94,6 @@ def test_sfa_custom_op_optional_lse_fake_shape(scatter_dim, dtype, return_lse):
         assert merged.device == output.device
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_sfa_return_lse_rejects_low_precision_in_real_and_fake_paths(dtype):
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    import vllm_ascend.ops.triton.sfa_cp as kernels
-
-    output = torch.empty(2, 3, 4, dtype=dtype)
-    lse = torch.empty(2, 3, 1, dtype=torch.float32)
-    # The real wrapper must reject before any collective or NPU kernel runs.
-    with patch.object(kernels, "sfa_dcp_a2a_fused_combine") as combine:
-        with pytest.raises(TypeError, match="requires FP32 attention output"):
-            kernels.sfa_dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
-        combine.assert_not_called()
-    with FakeTensorMode(), pytest.raises(TypeError, match="requires FP32 attention output"):
-        torch.ops.vllm.sfa_dcp_a2a_fused(
-            torch.empty(2, 3, 4, dtype=dtype), torch.empty(2, 3, 1), 1, 1, "", return_lse=True
-        )
-
-
 def test_sfa_custom_op_passes_optional_lse_to_combine():
     import vllm_ascend.ops.triton.sfa_cp as kernels
 

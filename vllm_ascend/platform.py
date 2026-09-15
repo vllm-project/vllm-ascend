@@ -1493,6 +1493,17 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     if kvpp_config.size > 1:
         kvpp_config.validate(vllm_config)
 
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and vllm_config.model_config is spec_cfg.draft_model_config
+        and vllm_config.model_config is not spec_cfg.target_model_config
+    ):
+        return
+
     sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
     if sfa_dcp_replicated_indexer:
         pcp_size = parallel_config.prefill_context_parallel_size
