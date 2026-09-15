@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import weakref
 from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -75,6 +76,34 @@ logger.info_once(
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_REDUCED_CAPTURE_SIZES = 4
+
+# Ceilings injected by apply_config_platform_defaults(), consumed by
+# _restore_default_capture_ceiling(). Upstream overwrites
+# max_cudagraph_capture_size with the truncated value in between, so the
+# injected value has to be carried rather than recomputed.
+#
+# Keyed per config, because a process can build several VllmConfig instances
+# and a nested one built inside another's __post_init__ would otherwise
+# overwrite the outer config's entry and lose its ceiling. The weak reference
+# stored with each value is what makes an id() key safe: CPython reuses an
+# object's id once it is collected, so the key alone cannot tell a stale entry
+# apart from a live one.
+_injected_max_cudagraph_capture_sizes: dict[int, tuple[weakref.ReferenceType[VllmConfig], int]] = {}
+
+
+def _record_injected_capture_ceiling(vllm_config: VllmConfig, ceiling: int | None) -> None:
+    """Remember the ceiling injected for this config, or forget a stale one."""
+    # Entries are normally popped when consumed; a config that never reaches
+    # _restore_default_capture_ceiling() leaves one behind, so drop the dead
+    # ones here rather than letting the map grow for the life of the process.
+    for key, (config_ref, _) in list(_injected_max_cudagraph_capture_sizes.items()):
+        if config_ref() is None:
+            del _injected_max_cudagraph_capture_sizes[key]
+
+    if ceiling is None:
+        _injected_max_cudagraph_capture_sizes.pop(id(vllm_config), None)
+        return
+    _injected_max_cudagraph_capture_sizes[id(vllm_config)] = (weakref.ref(vllm_config), ceiling)
 
 
 class NPUPlatform(Platform):
@@ -322,10 +351,12 @@ class NPUPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
-
         default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
             vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        # Recorded either way, so re-initializing a config that now carries a
+        # user ceiling clears the entry left by an earlier pass.
+        _record_injected_capture_ceiling(vllm_config, default_max_cg_capture_size)
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
@@ -1143,6 +1174,9 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
+    # Before the TP alignment below, so sequence parallelism can still drop the
+    # restored size when it is not TP divisible.
+    _restore_default_capture_ceiling(vllm_config)
     additional_config = vllm_config.additional_config or {}
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
@@ -1409,6 +1443,64 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
         decode_query_len += speculative_config.num_speculative_tokens
 
     return min(max_num_seqs * decode_query_len, 512)
+
+
+def _restore_default_capture_ceiling(vllm_config: VllmConfig) -> None:
+    """Keep the Ascend default capture ceiling inside the capture size list.
+
+    Upstream builds that list on a fixed grid -- 1, 2, 4, then multiples of 8 --
+    and the only off-grid value it adds is `max_num_batched_tokens`, so the
+    largest entry is the last grid point at or below
+    `max_cudagraph_capture_size`. Upstream's own default overshoots
+    (`max_num_seqs * decode_query_len * 2`), which leaves the configured
+    maximum comfortably inside the list. Ascend drops that `* 2` to save
+    capture memory, which puts the ceiling at the very end of the list, where
+    an off-grid value is unreachable: `max_num_seqs=12` stops the list at 8,
+    upstream truncates the ceiling to match, and decode batches of 9-12 find no
+    graph to replay and fall back to eager -- about 7.5x slower, with nothing in
+    the log that names the cause (vllm-project/vllm-ascend#16049).
+
+    Appending the ceiling costs one captured graph and restores the property
+    upstream already relies on for `max_num_batched_tokens`. Only a ceiling
+    Ascend injected is restored; one the user asked for is left exactly as
+    asked, which is why `apply_config_platform_defaults()` hands the value over
+    rather than recomputing it here -- upstream overwrites
+    `max_cudagraph_capture_size` with the truncated value in between, erasing
+    the difference.
+    """
+    injected = _injected_max_cudagraph_capture_sizes.pop(id(vllm_config), None)
+    if injected is None or injected[0]() is not vllm_config:
+        # No ceiling of ours for this config, or the id belonged to one that has
+        # since been collected. Either way, leave the configured value alone.
+        return
+    ceiling = injected[1]
+
+    compilation_config = vllm_config.compilation_config
+    capture_sizes = compilation_config.cudagraph_capture_sizes
+    # None until the list is built, and empty when capture is off.
+    if not isinstance(capture_sizes, list) or not capture_sizes:
+        return
+    if ceiling <= capture_sizes[-1]:
+        # On-grid ceiling, or one a later pass already lowered; nothing missing.
+        return
+    if ceiling > vllm_config.scheduler_config.max_num_batched_tokens:
+        # Upstream clips the ceiling to the token budget. Respect that clip.
+        return
+
+    restored_sizes = sorted({*capture_sizes, ceiling})
+    # update_cudagraph_capture_sizes() raises when the max disagrees with the
+    # list it is given, so move both together.
+    compilation_config.max_cudagraph_capture_size = ceiling
+    compilation_config.cudagraph_capture_sizes = restored_sizes
+    update_cudagraph_capture_sizes(vllm_config, restored_sizes)
+    logger.debug(
+        "Restored off-grid cudagraph capture size %d; the capture list stopped at %d, "
+        "so decode batches of %d-%d would have run eager.",
+        ceiling,
+        capture_sizes[-1],
+        capture_sizes[-1] + 1,
+        ceiling,
+    )
 
 
 def _config_deprecated_logging():
