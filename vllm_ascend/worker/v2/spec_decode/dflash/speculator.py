@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+    def build_draft_attn_metadata_for_graph(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
             attn_metadata = self._build_draft_attn_metadata(
