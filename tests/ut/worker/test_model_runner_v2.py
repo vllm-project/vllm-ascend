@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -28,6 +29,8 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.adaptive_verification = None
+    runner.use_fia = False
     return runner
 
 
@@ -518,9 +521,15 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer = MagicMock()
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
 
     def _super(self, kv_cache_config):
         self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -532,10 +541,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
             return_value="kvpp",
         ) as create_kvpp,
     ):
-        runner.initialize_kv_cache("kv")
+        runner.initialize_kv_cache(kv_cache_config)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
-    assert seen["cfg"] == "kv"
+    assert seen["cfg"] == kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
     create_kvpp.assert_called_once()
