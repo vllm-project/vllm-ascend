@@ -440,9 +440,15 @@ def test_shared_output_reduction_depends_on_weight_layout(
     shared_output = torch.ones(2, 4)
     reduced_output = shared_output + 1
     all_reduce = MagicMock(return_value=reduced_output)
+    device_group = object()
     monkeypatch.setattr(
         fused_moe_module,
-        "tensor_model_parallel_all_reduce",
+        "get_tp_group",
+        MagicMock(return_value=SimpleNamespace(device_group=device_group)),
+    )
+    monkeypatch.setattr(
+        fused_moe_module.funcol,
+        "all_reduce",
         all_reduce,
     )
 
@@ -453,7 +459,7 @@ def test_shared_output_reduction_depends_on_weight_layout(
 
     if reduce_shared:
         assert result is reduced_output
-        all_reduce.assert_called_once_with(shared_output)
+        all_reduce.assert_called_once_with(shared_output, "sum", device_group)
     else:
         assert result is shared_output
         all_reduce.assert_not_called()
