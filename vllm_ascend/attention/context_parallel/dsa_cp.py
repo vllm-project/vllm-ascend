@@ -26,6 +26,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
@@ -1404,8 +1405,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
@@ -1419,7 +1418,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
+
+        hidden_states_handle = None
+        overlap_hidden_states_gather = (
+            has_prefill and need_gather_q_kv and _EXTRA_CTX.flash_comm_v1_enabled
+        )
+        if overlap_hidden_states_gather:
+            hidden_states, hidden_states_handle = all_gather_async(hidden_states_local, self.tp_group)
+        else:
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states_local, need_gather_q_kv
+            )
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1481,6 +1490,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
+        if hidden_states_handle is not None:
+            hidden_states_handle.wait()
+            if _EXTRA_CTX.pad_size > 0:
+                hidden_states = hidden_states[: -_EXTRA_CTX.pad_size]
+        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
         kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
