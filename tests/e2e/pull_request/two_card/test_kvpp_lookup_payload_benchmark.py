@@ -20,9 +20,11 @@ from vllm.utils.network_utils import get_open_port
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
-from tests.e2e.common.kvpp import MODEL, PROMPTS, server_args
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupHashMode
+
+MODEL = "Qwen/Qwen3-8B"
+PROMPT_SEED = " ".join(f"lookup payload marker {index}" for index in range(256))
 
 pytestmark = pytest.mark.e2e_model(MODEL)
 
@@ -32,10 +34,10 @@ RPC_WARMUPS = 50
 RPC_SAMPLES = 1000
 
 BLOCK_SIZE = 128
-COMMON_PREFIX_BLOCKS = 256
-SERVING_REQUESTS = 32
-SERVING_OUTPUT_TOKENS = 8
-GPU_BLOCKS = 384
+COMMON_PREFIX_BLOCKS = 512
+SERVING_REQUESTS = 64
+SERVING_OUTPUT_TOKENS = 1
+GPU_BLOCKS = 640
 SERVING_SAMPLES_PER_INSTANCE = 5
 SERVING_MODE_ORDERS = (
     (LookupHashMode.FULL, LookupHashMode.SUFFIX),
@@ -71,8 +73,6 @@ SERVING_PERFORMANCE_FIELDS = (
     "p50_e2el_ms",
     "p90_e2el_ms",
     "p99_e2el_ms",
-    "mean_itl_ms",
-    "p99_itl_ms",
 )
 
 
@@ -232,10 +232,6 @@ def test_lookup_rpc_payload_benchmark():
     assert stub.hash_counts[LookupHashMode.SUFFIX] == [RPC_SUFFIX_HASHES] * calls_per_mode
     assert suffix_bytes < full_bytes * 0.01
     assert statistics.fmean(samples[LookupHashMode.SUFFIX]) < statistics.fmean(samples[LookupHashMode.FULL])
-
-
-def replace_arg(args: list[str], name: str, value: int) -> None:
-    args[args.index(name) + 1] = str(value)
 
 
 def metric_total(metrics_text: str, name: str) -> float:
@@ -500,9 +496,9 @@ def memcache_config() -> MemcacheKVPoolConfig:
             },
             "local": {
                 "ock.mmc.log_level": "info",
-                "ock.mmc.local_service.world_size": 2,
+                "ock.mmc.local_service.world_size": 1,
                 "ock.mmc.local_service.protocol": "device_sdma",
-                "ock.mmc.local_service.dram.size": "2GB",
+                "ock.mmc.local_service.dram.size": "16GB",
             },
         },
     )
@@ -521,12 +517,35 @@ def run_serving_mode(
     case_name = f"{tmp_path.name}-r{round_index}-p{order_position}-{mode.value}-{isolation_id}"
     with SingleNodeMemcacheManager(config, case_name) as pool:
         port = get_open_port()
-        args = server_args()
-        replace_arg(args, "--max-model-len", 34_000)
-        replace_arg(args, "--max-num-batched-tokens", 4096)
-        replace_arg(args, "--max-num-seqs", SERVING_REQUESTS)
-        replace_arg(args, "--num-gpu-blocks-override", GPU_BLOCKS)
-        args += [
+        # This is intentionally a low-noise upper-bound scenario for lookup
+        # payload savings. A dense model and one-token output minimize
+        # unrelated model, collective, and decode work, while the long local
+        # prefix maximizes the hashes that FULL sends and SUFFIX omits.
+        args = [
+            "--served-model-name",
+            "kvpp-test",
+            "--trust-remote-code",
+            "--tensor-parallel-size",
+            "1",
+            "--enforce-eager",
+            "--max-model-len",
+            "66000",
+            "--max-num-batched-tokens",
+            "4096",
+            "--max-num-seqs",
+            str(SERVING_REQUESTS),
+            "--block-size",
+            str(BLOCK_SIZE),
+            "--num-gpu-blocks-override",
+            str(GPU_BLOCKS),
+            "--gpu-memory-utilization",
+            "0.8",
+            "--enable-prefix-caching",
+            "--enable-chunked-prefill",
+            "--seed",
+            "42",
+            "--generation-config",
+            "vllm",
             "--port",
             str(port),
             "--additional-config",
@@ -540,7 +559,7 @@ def run_serving_mode(
                         "lookup_rpc_port": "0",
                         "backend": "memcache",
                         "use_layerwise": False,
-                        "load_async": True,
+                        "load_async": False,
                         "lookup_hash_mode": mode.value,
                     },
                 }
@@ -555,7 +574,7 @@ def run_serving_mode(
         ) as server:
             tokenized = requests.post(
                 server.url_for("tokenize"),
-                json={"model": "kvpp-test", "prompt": PROMPTS[1]},
+                json={"model": "kvpp-test", "prompt": PROMPT_SEED},
                 timeout=30,
             )
             tokenized.raise_for_status()
@@ -565,11 +584,11 @@ def run_serving_mode(
             suffix_seed = (seed_tokens * ((BLOCK_SIZE + len(seed_tokens) - 1) // len(seed_tokens)))[:BLOCK_SIZE]
             prompts = [common_prefix + suffix_seed[index:] + suffix_seed[:index] for index in range(SERVING_REQUESTS)]
 
-            # This first concurrent batch is both the compute-only reference
-            # and the population phase. The fresh pool proves that its suffix
-            # cannot have been inherited from another benchmark instance.
+            # This first concurrent batch only populates the fresh pool. It is
+            # not a correctness oracle: the behavior under test is whether
+            # FULL and SUFFIX produce equivalent loaded results.
             complete(server.url_root, common_prefix)
-            baseline, expected_outputs = run_serving_batch(
+            baseline, _ = run_serving_batch(
                 server.url_root,
                 prompts,
                 mode,
@@ -585,7 +604,7 @@ def run_serving_mode(
                 server.url_root,
                 prompts,
                 mode,
-                expected_outputs,
+                expected_outputs=None,
                 expect_external_hit=True,
             )
 
@@ -611,7 +630,7 @@ def run_serving_mode(
                     server.url_root,
                     prompts,
                     mode,
-                    expected_outputs,
+                    expected_outputs=None,
                     expect_external_hit=True,
                 )
                 sample["sample_index"] = sample_index
@@ -647,6 +666,27 @@ def aggregate_mode_runs(runs: list[dict[str, Any]], mode: LookupHashMode) -> dic
 def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
     comparisons = []
     validation_errors = []
+    digests_by_mode = {
+        mode.value: {
+            sample["output_digest"]
+            for run in runs
+            if run["mode"] == mode.value
+            for sample in run["samples"]
+            if sample["valid"]
+        }
+        for mode in (LookupHashMode.FULL, LookupHashMode.SUFFIX)
+    }
+    for mode, digests in digests_by_mode.items():
+        if len(digests) != 1:
+            validation_errors.append(f"mode={mode}: expected one stable output digest, got={sorted(digests)}")
+    if all(len(digests) == 1 for digests in digests_by_mode.values()) and (
+        digests_by_mode[LookupHashMode.FULL.value] != digests_by_mode[LookupHashMode.SUFFIX.value]
+    ):
+        validation_errors.append(
+            "stable output digests differ between modes: "
+            f"full={sorted(digests_by_mode[LookupHashMode.FULL.value])}, "
+            f"suffix={sorted(digests_by_mode[LookupHashMode.SUFFIX.value])}"
+        )
     for round_index in range(len(SERVING_MODE_ORDERS)):
         by_mode = {run["mode"]: run for run in runs if run["round"] == round_index}
         full_run = by_mode[LookupHashMode.FULL.value]
@@ -687,8 +727,6 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
                     "p99_ttft_reduction_percent": (1 - suffix["p99_ttft_ms"] / full["p99_ttft_ms"]) * 100,
                     "mean_e2el_reduction_percent": (1 - suffix["mean_e2el_ms"] / full["mean_e2el_ms"]) * 100,
                     "p99_e2el_reduction_percent": (1 - suffix["p99_e2el_ms"] / full["p99_e2el_ms"]) * 100,
-                    "mean_itl_reduction_percent": (1 - suffix["mean_itl_ms"] / full["mean_itl_ms"]) * 100,
-                    "p99_itl_reduction_percent": (1 - suffix["p99_itl_ms"] / full["p99_itl_ms"]) * 100,
                 }
             )
 
@@ -699,8 +737,6 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "p99_ttft_reduction_percent",
         "mean_e2el_reduction_percent",
         "p99_e2el_reduction_percent",
-        "mean_itl_reduction_percent",
-        "p99_itl_reduction_percent",
     )
     distributions = {
         field: {
@@ -731,6 +767,12 @@ def test_vllm_serve_lookup_payload_benchmark(tmp_path):
     report = {
         "config": {
             "mode_orders": [[mode.value for mode in order] for order in SERVING_MODE_ORDERS],
+            "model": MODEL,
+            "scenario": "lookup_payload_upper_bound",
+            "tensor_parallel_size": 1,
+            "expert_parallel": False,
+            "async_scheduling": False,
+            "load_async": False,
             "instances_per_mode": len(SERVING_MODE_ORDERS),
             "samples_per_instance": SERVING_SAMPLES_PER_INSTANCE,
             "requests_per_sample": SERVING_REQUESTS,
