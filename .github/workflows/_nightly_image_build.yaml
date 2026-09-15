@@ -130,6 +130,7 @@ jobs:
         env:
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         shell: bash
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
@@ -192,6 +193,7 @@ jobs:
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"
             --build-arg GITEE_USERNAME="${GITEE_USERNAME}"
             --build-arg GITEE_TOKEN="${GITEE_TOKEN}"
+            --build-arg GIT_PROXY="${GIT_PROXY}"
           )
 
           if [ -n "$TAG_SUFFIX" ]; then
