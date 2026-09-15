@@ -24,7 +24,7 @@ from vllm_ascend.attention.mla_v1 import (
 )
 # isort: on
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_acl_full_graph_capturing
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
@@ -715,7 +715,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             stream = torch_npu.npu.current_stream()
             event = torch.npu.ExternalEvent()
             event.wait(stream)
