@@ -51,6 +51,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `xlite_graph_config`                | dict | `{}`    | Configuration options for Xlite graph mode                                                                |
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
+| `blasst_config`                     | dict | `{}`    | Configuration options for the BlasstAttentionScore (BlasST) attention op.                                 |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
@@ -111,6 +112,17 @@ The details of each configuration option are as follows:
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
+
+**blasst_config**
+
+Controls the BlasstAttentionScore (BlasST) op, an AscendC attention kernel that replaces the torch_npu FIA call for eligible attention layers. Eligibility is gated automatically: TND layout, head size 128 or 256, fp16/bf16 KV cache, causal mask (sparse_mode 0/3), no sliding window / learnable sink, and batch size ≤ 256; non-eligible calls fall back to the torch_npu baseline path. The op is only available on Ascend 910_93 (A3).
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to route eligible attention calls to the custom BlasST op instead of torch_npu FIA. |
+| `sparse_lambda` | float | `-99.0` | BlasST block-sparse threshold. `-99.0` means dense (no block skipping). |
+| `full_graph` | bool | `False` | Whether to allow ACL-Graph capture of the custom op through the host-list task-update path (decode-only buckets). |
+| `flash_decode` | bool | `True` | Whether to enable the FlashDecode split path inside the custom op (small decode batches over long KV). |
 
 **eplb_config**
 
