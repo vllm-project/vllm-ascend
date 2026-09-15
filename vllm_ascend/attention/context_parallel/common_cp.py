@@ -3,8 +3,12 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
@@ -27,6 +31,166 @@ def get_dcp_local_seq_lens(
         0,
         interleave_size,
     )
+
+
+class ReplicatedKVMetadataMixin:
+    """Build full-cache addresses using the consumer's own spec and buffers."""
+
+    def _init_replicated_view(
+        self,
+        kv_cache_spec: AttentionSpec,
+        kernel_block_size: int,
+        dcp_size: int,
+        max_num_reqs: int,
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        self.dcp_size = dcp_size
+        self.device = device
+        self.replicated_view_block_size = kernel_block_size
+        if kv_cache_spec.block_size % self.replicated_view_block_size != 0:
+            raise RuntimeError(
+                "SFA replicated view requires the KV cache block size "
+                f"({kv_cache_spec.block_size}) to be divisible by "
+                f"{self.replicated_view_block_size}."
+            )
+        self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
+        max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_model_len = vllm_config.model_config.max_model_len
+        total_cp_size = self.dcp_size
+        # The generic vLLM BlockTable may expose global-width storage, while
+        # the DCP physical KV layout only populates rank-local block columns.
+        self.max_local_block_table_cols = (
+            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
+        )
+        max_replicated_block_table_cols = self.max_local_block_table_cols * total_cp_size
+        self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
+            (max_num_reqs, max_replicated_block_table_cols),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.arange_buffer: torch.Tensor = torch.arange(
+            max_replicated_block_table_cols,
+            dtype=torch.int32,
+            device=device,
+        )
+        self.slot_mapping_replicated_view_buf: torch.Tensor = torch.empty(
+            (max_num_input_tokens,),
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def _get_dcp_local_block_table(self, block_table: torch.Tensor, num_reqs: int) -> torch.Tensor:
+        local_cols = min(block_table.shape[1], self.max_local_block_table_cols)
+        return block_table[:num_reqs, :local_cols]
+
+    def _ensure_replicated_view_buffers(
+        self,
+        num_reqs: int,
+        num_input_tokens: int,
+        local_block_table_cols: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        block_table_cols = local_block_table_cols * self.dcp_size
+        if (
+            self.block_table_replicated_view_buf.shape[0] < num_reqs
+            or self.block_table_replicated_view_buf.shape[1] < block_table_cols
+        ):
+            raise RuntimeError(
+                f"Replicated view buffer is too small: "
+                f"block_table_replicated_view_buf.shape={self.block_table_replicated_view_buf.shape}, "
+                f"num_reqs={num_reqs}, block_table_cols={block_table_cols}"
+            )
+        if self.slot_mapping_replicated_view_buf.shape[0] < num_input_tokens:
+            raise RuntimeError(
+                f"Replicated view buffer is too small: "
+                f"slot_mapping_replicated_view_buf.shape={self.slot_mapping_replicated_view_buf.shape}, "
+                f"num_input_tokens={num_input_tokens}"
+            )
+        return (
+            self.block_table_replicated_view_buf[:num_reqs, :block_table_cols],
+            self.arange_buffer[:block_table_cols],
+            self.slot_mapping_replicated_view_buf[:num_input_tokens],
+        )
+
+    def _build_block_table_replicated_view(
+        self,
+        dcp_block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = dcp_block_table.shape[0]
+        local_block_table_cols = dcp_block_table.shape[1]
+        block_table_replicated_view, replicated_col_idx, _ = self._ensure_replicated_view_buffers(
+            num_reqs,
+            0,
+            local_block_table_cols,
+        )
+
+        total_cp_size = self.dcp_size
+        blocks_per_phys_block = self.blocks_per_phys_block
+        local_col_idx = (
+            replicated_col_idx // (total_cp_size * blocks_per_phys_block) * blocks_per_phys_block
+            + replicated_col_idx % blocks_per_phys_block
+        )
+        rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
+
+        local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
+        if blocks_per_phys_block == 1:
+            replicated_blocks = local_logical_blocks * total_cp_size + rank_in_replicated_view
+        else:
+            local_sub_blocks = local_logical_blocks % blocks_per_phys_block
+            local_phys_blocks = local_logical_blocks // blocks_per_phys_block
+            replicated_blocks = (
+                local_phys_blocks * total_cp_size + rank_in_replicated_view
+            ) * blocks_per_phys_block + local_sub_blocks
+
+        valid_req_mask = (seq_lens[:num_reqs].to(device=self.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
+        replicated_blocks = replicated_blocks * valid_req_mask
+        block_table_replicated_view.copy_(replicated_blocks)
+        return block_table_replicated_view
+
+    def _build_slot_mapping_replicated_view(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        block_table_replicated_view: torch.Tensor,
+    ) -> torch.Tensor:
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+        local_block_table_cols = block_table_replicated_view.shape[1] // self.dcp_size
+        _, _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
+            num_reqs,
+            num_input_tokens,
+            local_block_table_cols,
+        )
+        slot_mapping_replicated_view.fill_(-1)
+        if num_actual_tokens == 0:
+            return slot_mapping_replicated_view
+
+        query_lens = (
+            common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
+        )
+        req_indices = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            query_lens.to(device=self.device),
+            output_size=num_input_tokens,
+        )[:num_actual_tokens]
+        if req_indices.numel() == 0:
+            return slot_mapping_replicated_view
+
+        num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
+        req_indices = req_indices[:num_actual_tokens]
+        positions = common_attn_metadata.positions[:num_actual_tokens].to(
+            device=self.device,
+            dtype=torch.int32,
+        )
+        logical_block_idx = positions // self.replicated_view_block_size
+        block_offsets = positions % self.replicated_view_block_size
+        block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
+        block_numbers = block_table_replicated_view.flatten()[block_table_indices]
+        slot_mapping_replicated_view[:num_actual_tokens] = (
+            block_numbers * self.replicated_view_block_size + block_offsets
+        )
+        return slot_mapping_replicated_view
 
 
 class DCPMetadataBuilderMixin:

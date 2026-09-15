@@ -13,6 +13,7 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
 )
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
 _KERNEL_BLOCK_SIZE = 128
 
@@ -66,6 +67,49 @@ def test_sfa_indexer_backend_contract():
         160,
     )
     assert AscendSFAIndexerBackend.get_supported_kernel_block_sizes() == [128]
+
+
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_replicated_indexer_builds_own_full_addresses(mock_cos_sin, mock_get_ascend_config):
+    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    mock_cos_sin.return_value = (torch.zeros(6, 1, 1, 8), torch.zeros(6, 1, 1, 8))
+    spec = AscendSFAIndexerCacheSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=160,
+        dtype=torch.uint8,
+        sfa_dcp_replicated_indexer_size=8,
+    )
+    config = MagicMock()
+    config.parallel_config.prefill_context_parallel_size = 1
+    config.scheduler_config.max_num_seqs = 2
+    config.scheduler_config.max_num_batched_tokens = 8
+    config.model_config.max_model_len = 2048
+    with patch("vllm_ascend.attention.indexer.select_common_block_size", return_value=128):
+        builder = AscendSFAIndexerMetadataBuilder(spec, ["indexer.k_cache"], config, torch.device("cpu"))
+    common = _make_common_metadata()
+    common.num_actual_tokens = 5
+    common.num_input_tokens = 6
+    common.positions = torch.tensor([0, 127, 128, 1023, 1024, 0])
+    common.query_start_loc = torch.tensor([0, 5, 6])
+    common.seq_lens = torch.tensor([1025, 0])
+    common.block_table_tensor = torch.tensor([[3, 7], [0, 0]], dtype=torch.int32)
+    common.slot_mapping = torch.tensor([384, 511, -1, -1, 896, -1], dtype=torch.int32)
+    original_table = common.block_table_tensor
+    original_slots = common.slot_mapping
+
+    metadata = builder.build(0, common)
+
+    assert metadata.block_table.tolist() == [list(range(24, 32)) + list(range(56, 64)), [0] * 16]
+    assert metadata.slot_mapping.tolist() == [3072, 3199, 3200, 4095, 7168, -1]
+    assert common.block_table_tensor is original_table
+    assert common.slot_mapping is original_slots
+    assert original_table.tolist() == [[3, 7], [0, 0]]
+    assert original_slots.tolist() == [384, 511, -1, -1, 896, -1]
+    repeated = builder.build(0, common)
+    assert repeated.block_table.data_ptr() == metadata.block_table.data_ptr()
+    assert repeated.slot_mapping.data_ptr() == metadata.slot_mapping.data_ptr()
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
