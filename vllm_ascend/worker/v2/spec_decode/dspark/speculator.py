@@ -197,6 +197,7 @@ class AscendDSparkSpeculator(DCPDraftReplicatedMixin, DSparkSpeculator):
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
         with (
+            self._draft_dcp_context(),
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,

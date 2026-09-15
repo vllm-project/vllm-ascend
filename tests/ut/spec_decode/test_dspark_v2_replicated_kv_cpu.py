@@ -438,3 +438,51 @@ def test_replicated_planner_single_layer_descriptors(layer_count, layer_stride, 
     if layer_count > 1:
         assert caches["target1"].storage_offset() == 16
         assert not caches["target1"].any()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_propose_keeps_draft_dcp_context_through_graph_replay(fail):
+    root = Path(__file__).resolve().parents[3] / "vllm_ascend"
+    tree = ast.parse((root / "worker/v2/spec_decode/dspark/speculator.py").read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
+    cls.body = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "propose"]
+    cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
+    active = [False]
+    calls = []
+
+    class Parent:
+        def propose(self, *args, **kwargs):
+            assert active[0], "Graph replay selected the target DCP implementation"
+            calls.append(args)
+            if fail:
+                raise RuntimeError("replay failed")
+            return "draft"
+
+    @contextmanager
+    def draft_context():
+        active[0] = True
+        try:
+            yield
+        finally:
+            active[0] = False
+
+    scope = dict(
+        Parent=Parent,
+        vllm_version_is=lambda _: False,
+        build_attn_metadata_wrapper=nullcontext,
+        build_draft_attn_metadata_factory=lambda *args, **kwargs: nullcontext(),
+        torch=SimpleNamespace(from_numpy=lambda x: x),
+    )
+    exec(compile("from __future__ import annotations\n" + ast.unparse(cls), "propose", "exec"), scope)
+    host = scope[cls.name]()
+    host._draft_dcp_context = draft_context
+    host._prepare_dcp_draft_batch = lambda *args: None
+    host.input_buffers = SimpleNamespace(positions=None)
+    host.max_num_tokens = 16
+    batch = SimpleNamespace(is_prefilling_np=[False])
+    if fail:
+        with pytest.raises(RuntimeError, match="replay failed"):
+            host.propose(batch, *([None] * 11))
+    else:
+        assert host.propose(batch, *([None] * 11)) == "draft"
+    assert calls and not active[0]
