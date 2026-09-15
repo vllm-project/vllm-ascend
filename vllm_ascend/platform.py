@@ -1581,7 +1581,7 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
         and getattr(draft_model_config.hf_config, "model_type", None) == "qwen3"
         and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
     )
-    if uses_kimi_k3_gqa_dspark:
+    if uses_kimi_k3_gqa_dspark and vllm_config.use_v2_model_runner:
         draft_parallel_config = speculative_config.draft_parallel_config
         if draft_parallel_config is not None and (
             draft_parallel_config.tensor_parallel_size != parallel_config.tensor_parallel_size

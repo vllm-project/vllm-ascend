@@ -15,7 +15,46 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm_ascend.attention.context_parallel.common_cp import expand_dcp_replicated_block_table
 from vllm_ascend.attention.utils import enable_dcp
 from vllm_ascend.core.kv_cache_interface import AscendDCPReplicatedDraftAttentionSpec
-from vllm_ascend.spec_decode.utils import draft_additional_config, uses_dcp_replicated_gqa_draft
+
+
+def uses_dcp_replicated_gqa_draft(config: VllmConfig) -> bool:
+    spec_config = config.speculative_config
+    if spec_config is None:
+        return False
+    target_model_config = config.model_config
+    target_architectures = {
+        *(getattr(target_model_config, "architectures", ()) or ()),
+        *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
+    }
+    target_architecture = getattr(target_model_config, "architecture", None)
+    if target_architecture:
+        target_architectures.add(target_architecture)
+    draft_hf_config = spec_config.draft_model_config.hf_config
+    draft_architectures = {
+        *(getattr(spec_config.draft_model_config, "architectures", ()) or ()),
+        *(getattr(draft_hf_config, "architectures", ()) or ()),
+    }
+    return (
+        (
+            getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
+            or any("KimiK3" in architecture for architecture in target_architectures)
+        )
+        and getattr(draft_hf_config, "model_type", None) == "qwen3"
+        and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
+    )
+
+
+def draft_additional_config(additional_config: dict | None) -> dict:
+    """Isolate the model-only draft from target PD scheduler options."""
+    result = copy.deepcopy(additional_config or {})
+    if "recompute_scheduler_enable" in result:
+        result["recompute_scheduler_enable"] = False
+    draft_scheduler_config = result.get("scheduler_config")
+    if draft_scheduler_config is None:
+        draft_scheduler_config = {}
+        result["scheduler_config"] = draft_scheduler_config
+    draft_scheduler_config["recompute_scheduler_enable"] = False
+    return result
 
 
 class DCPDraftReplicatedMixin:
