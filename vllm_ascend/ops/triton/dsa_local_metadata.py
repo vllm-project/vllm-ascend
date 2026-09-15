@@ -32,6 +32,7 @@ Ascend-specific lowering (910B):
   prefix of the preceding columns' totals.
 """
 
+import torch
 from vllm.triton_utils import tl, triton
 
 # max_num_seqs capacity from the production scheduler contract
@@ -136,10 +137,10 @@ def build_local_metadata_kernel(
 
 
 def build_local_metadata(
-    query_start_loc: "torch.Tensor",
-    seq_lens: "torch.Tensor",
-    local_query_start_loc: "torch.Tensor",
-    local_seq_lens: "torch.Tensor",
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    local_query_start_loc: torch.Tensor,
+    local_seq_lens: torch.Tensor,
     local_start: int,
     local_end: int,
     num_reqs: int,
