@@ -17,6 +17,8 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
     GDNDecodeMetadata,
     GDNPrefillMetadata,
+    GDNSpecCausalConv1dMetadata,
+    GDNSpecDecodeMetadata,
 )
 
 
@@ -254,4 +256,95 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
                 [[25.0, 26.0]],
             ]
         ),
+    )
+
+
+def test_spec_decode_uses_triton_recurrence_with_prefix_caching() -> None:
+    layer = _make_layer()
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=1,
+        num_spec_decode_tokens=2,
+        num_actual_tokens=2,
+        spec_sequence_masks=torch.tensor([True]),
+        spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
+    )
+    metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+        spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            cache_indices=torch.tensor([0], dtype=torch.int32),
+            num_accepted_tokens=torch.tensor([2], dtype=torch.int32),
+        ),
+        actual_seq_lengths=torch.tensor([0, 2], dtype=torch.int32),
+    )
+
+    mixed_qkv = torch.tensor(
+        [
+            [1.0, 2.0, 11.0, 12.0, 21.0, 22.0],
+            [3.0, 4.0, 13.0, 14.0, 23.0, 24.0],
+        ]
+    )
+    a = torch.zeros(2, 1)
+    b = torch.zeros(2, 1)
+    core_attn_out = torch.empty(2, 1, 2)
+    forward_context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+
+    def causal_conv1d(
+        output: torch.Tensor,
+        input_tensor: torch.Tensor,
+        conv_weights: torch.Tensor,
+        **kwargs,
+    ) -> None:
+        del conv_weights, kwargs
+        output.copy_(input_tensor)
+
+    def triton_recurrence(**kwargs):
+        return kwargs["v"].clone(), kwargs["initial_state"]
+
+    with (
+        override_forward_context(forward_context),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=(torch.zeros(1, 2, 1), torch.ones(1, 2, 1)),
+        ),
+        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=triton_recurrence) as triton_mock,
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_causal_conv1d_custom",
+            side_effect=causal_conv1d,
+            create=True,
+        ),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_recurrent_gated_delta_rule",
+            side_effect=AssertionError("APC speculative decode must not use the AscendC recurrence"),
+            create=True,
+        ),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(
+            layer,
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+        )
+
+    assert triton_mock.call_count == 1
+    call = triton_mock.call_args.kwargs
+    assert call["initial_state"] is layer.kv_cache[1]
+    assert call["inplace_final_state"] is True
+    torch.testing.assert_close(call["cu_seqlens"], torch.tensor([0, 2], dtype=torch.int32))
+    torch.testing.assert_close(call["ssm_state_indices"], torch.tensor([0], dtype=torch.int32))
+    torch.testing.assert_close(call["num_accepted_tokens"], torch.tensor([2], dtype=torch.int32))
+    torch.testing.assert_close(
+        core_attn_out,
+        torch.tensor([[[21.0, 22.0]], [[23.0, 24.0]]]),
     )
