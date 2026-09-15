@@ -103,8 +103,7 @@ RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
       curl -fsSL "${RUSTUP_UPDATE_ROOT}/rustup-init.sh" -o /tmp/rustup-init.sh && \
       sed -i "s/--proto '=https'//g; s/--https-only//g" /tmp/rustup-init.sh && \
       sh /tmp/rustup-init.sh -y --default-toolchain "${TOOLCHAIN:-stable}" && \
-      rm /tmp/rustup-init.sh && \
-      . "$HOME/.cargo/env"; \
+      rm /tmp/rustup-init.sh; \
     fi
 ENV PATH="/root/.cargo/bin:$PATH"
 # Configure cargo only for internal (CI) builds: route git dependencies through
