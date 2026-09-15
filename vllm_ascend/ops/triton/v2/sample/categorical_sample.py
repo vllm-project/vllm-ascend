@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton categorical sampling operator for Ascend NPU."""
 
+from collections.abc import Callable
+
 import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+from vllm_ascend.utils import vllm_version_is
 
 # Hierarchical sampling: prepare 8K coarse-block masses once, then sample
 # from one 1K fine block. The two granularities are tuned independently.
@@ -298,37 +301,24 @@ def _categorical_sample_kernel(
         tl.store(sampled_ptr + token_idx, sampled_token)
 
 
-def categorical_sample(
+def _categorical_sample(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
     temperature: torch.Tensor,
     seed: torch.Tensor,
     pos: torch.Tensor,
     apply_temperature: bool,
-    is_drafting: bool = False,
     logits_cache: torch.Tensor | None = None,
     logits_cache_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    *,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     """Sample token ids from logits with categorical sampling.
 
-    Args:
-        logits: Logits tensor with shape [num_tokens, vocab_size].
-        expanded_idx_mapping: Mapping from token index to request index,
-            shape [num_tokens].
-        temperature: Per-request temperature, shape [max_num_reqs].
-        seed: Per-request random seed, shape [max_num_reqs].
-        pos: Per-token random position, shape [num_tokens].
-        apply_temperature: Whether to divide logits by non-zero temperature.
-        is_drafting: Whether to salt the random position for draft sampling.
-        logits_cache: Optional raw-logits cache with shape
-            [max_num_reqs, num_cols, vocab_size].
-        logits_cache_col: Optional scalar or per-token cache column index.
-        use_fp64: Reserved compatibility argument. FP64 sampling is not
-            supported on NPU.
-
-    Returns:
-        int64 tensor with shape [num_tokens] containing sampled token ids.
+    This internal entry keeps the v0.28 positional argument order. On newer
+    vLLM versions the public wrapper exposes `is_drafting` immediately after
+    `apply_temperature`, matching the upstream gumbel_sample contract.
     """
     if use_fp64:
         raise NotImplementedError("FP64 categorical sampling is not supported on NPU.")
@@ -417,3 +407,37 @@ def categorical_sample(
         IS_DRAFTING=is_drafting,
     )
     return sampled
+
+
+categorical_sample: Callable[..., torch.Tensor]
+if vllm_version_is("0.28.0"):
+    # Preserve the legacy positional order; vLLM #54282 inserted is_drafting on main.
+    categorical_sample = _categorical_sample
+else:
+
+    def _categorical_sample_main(
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        apply_temperature: bool,
+        is_drafting: bool,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        return _categorical_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature,
+            logits_cache,
+            logits_cache_col,
+            use_fp64,
+            is_drafting=is_drafting,
+        )
+
+    categorical_sample = _categorical_sample_main
