@@ -21,14 +21,13 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridAttnMetadata,
     MambaHybridModelState,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -41,32 +40,6 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     :class:`MambaHybridModelState`. ``AscendModelState`` remains the second
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
     """
-
-    if vllm_version_is("0.28.0"):
-        _mamba_group_ids: list[int]
-        _mamba_spec: MambaSpec | None
-
-    def _get_mamba_group_info(self, kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
-        if self._mamba_spec is None:
-            group_ids: list[int] = []
-            specs: list[MambaSpec] = []
-            for i, group in enumerate(kv_cache_config.kv_cache_groups):
-                spec = group.kv_cache_spec
-                if isinstance(spec, MambaSpec):
-                    group_ids.append(i)
-                    specs.append(spec)
-                elif isinstance(spec, UniformTypeKVCacheSpecs):
-                    mamba_specs = [s for s in spec.kv_cache_specs.values() if isinstance(s, MambaSpec)]
-                    if mamba_specs and len(mamba_specs) == len(spec.kv_cache_specs):
-                        # Preserve the original group index once, while checking
-                        # every wrapped layer against the upstream invariant.
-                        group_ids.append(i)
-                        specs.extend(mamba_specs)
-            assert specs, "no mamba layers in the model"
-            assert all(specs[0] == s for s in specs), "Mamba specs are inconsistent across layers"
-            self._mamba_group_ids = group_ids
-            self._mamba_spec = specs[0]
-        return self._mamba_group_ids, self._mamba_spec
 
     def prepare_attn(
         self,
