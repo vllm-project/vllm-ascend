@@ -102,6 +102,25 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     assert result == 5
 
 
+def test_partial_hit_does_not_stop_at_shared_prefix_junction():
+    request = _request(
+        num_computed_tokens=0,
+        num_prompt_tokens=2000,
+        num_tokens=2000,
+    )
+    request.shared_prefix_boundary = 600
+
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False),
+        request,
+        num_new_tokens=1000,
+    )
+
+    # Normal alignment ends at 768. The upstream junction stop would cut this
+    # chunk at 384 and create a cold-path-absent recurrent-kernel boundary.
+    assert result == 768
+
+
 def test_pd_consumer_preserves_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=True),
@@ -111,6 +130,21 @@ def test_pd_consumer_preserves_window_after_external_cache_hit():
     )
 
     assert result == 8
+
+
+def test_kv_both_cold_prefill_retains_mamba_boundary_split():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True),
+        _request(
+            num_computed_tokens=0,
+            num_prompt_tokens=4800,
+            num_tokens=4800,
+        ),
+        num_new_tokens=4800,
+    )
+
+    # 4800 rounds down to 4608; EAGLE keeps one 384-token verifier block.
+    assert result == 4224
 
 
 def test_producer_splits_window_after_external_cache_hit():
@@ -187,5 +221,10 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
 
 
 def test_patch_is_registered_with_upstream_signature():
-    assert scheduler_module.Scheduler._mamba_block_aligned_split is _mamba_block_aligned_split
+    registered = scheduler_module.Scheduler._mamba_block_aligned_split
+    # The producer-role companion patch is loaded later and must stay
+    # outermost so this wrapper's sparse-index early-return path observes its
+    # temporary EAGLE-drop override.
+    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
+    assert registered.__wrapped__ is _mamba_block_aligned_split
     assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)

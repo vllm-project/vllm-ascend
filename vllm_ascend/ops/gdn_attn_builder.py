@@ -512,6 +512,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_accepted_tokens: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Advance stateful spec-width prompt chunks through live spec inputs."""
+        # This fold is required by the Kimi DSpark/DFlash state handoff. Qwen
+        # MTP must keep a short stateful prompt tail on the
+        # prefill path: treating it as accepted draft tokens advances recurrent
+        # state with speculative-decode semantics and corrupts Qwen GDN output.
+        speculative_config = self.vllm_config.speculative_config
+        method = getattr(speculative_config, "method", None)
+        if method == "mtp":
+            return spec_sequence_masks_cpu, num_accepted_tokens
+
         is_prefilling = common_attn_metadata.is_prefilling
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         if is_prefilling is None or seq_lens_cpu is None or num_accepted_tokens is None:
