@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -4386,7 +4387,10 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
-        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+        if isinstance(
+            kv_cache_spec,
+            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+        ):
             attn_layers = get_layers_from_vllm_config(
                 self.vllm_config,
                 AttentionLayerBase,
@@ -4832,7 +4836,10 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
+                    current_sparse = self.use_sparse and isinstance(
+                        current_kv_cache_spec, AscendMLAAttentionSpec
+                    )
+                    current_sparse_sfa_c8 = current_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
 
@@ -4856,7 +4863,7 @@ class NPUModelRunner(GPUModelRunner):
                             k_dim,
                             v_dim,
                         ]
-                        if not self.use_sparse and enable_fa_quant(self.vllm_config):
+                        if not current_sparse and enable_fa_quant(self.vllm_config):
                             k_tensor_split_factor, v_tensor_split_factor = (
                                 self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
                             )
@@ -4864,8 +4871,8 @@ class NPUModelRunner(GPUModelRunner):
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
-                    if self.sparse_kv_offload_enabled:
-                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
+                        assert current_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None
                         if use_legacy_shared_by_layout:
@@ -5005,6 +5012,9 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+                current_sparse = self.use_sparse and isinstance(
+                    current_kv_cache_spec, AscendMLAAttentionSpec
+                )
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
@@ -5125,11 +5135,11 @@ class NPUModelRunner(GPUModelRunner):
                     # _allocate_kv_cache_tensors; route them to the dedicated
                     # elif branch below before the sparse branch tries to
                     # unpack them as a K/V tuple.
-                    current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
+                    current_sparse_sfa_c8 = current_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    if self.sparse_kv_offload_enabled:
-                        assert self.use_sparse, "Sparse KV offload only support sparse attention."
+                    if getattr(current_kv_cache_spec, "store_on_host", False):
+                        assert current_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         reshaped_tensors = reshape_kv_cache_tensors_for_sparse_kv_offload(
                             kv_cache_raw_tensors[layer_name],
@@ -5142,7 +5152,7 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = reshaped_tensors
                         continue
                     raw_kv_is_combined = False
-                    if self.use_sparse and "cache_only_layers" not in layer_name:
+                    if current_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         if not isinstance(raw_cache, tuple):
                             raw_k_tensor = raw_v_tensor = raw_cache
@@ -5266,7 +5276,7 @@ class NPUModelRunner(GPUModelRunner):
                         # even though its page is padded to the hybrid common
                         # size. Use the main-lane page contract, rather than the
                         # legacy shared-layer heuristic, to strip that padding.
-                        if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                        if not isinstance(current_kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                             attn_tensor_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                 current_kv_cache_spec.dtype
                             )
@@ -5307,7 +5317,7 @@ class NPUModelRunner(GPUModelRunner):
                                 assert raw_v_tensor.numel() >= rope_size
                                 raw_k_tensor = raw_k_tensor[:nope_size]
                                 raw_v_tensor = raw_v_tensor[:rope_size]
-                    if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                    if not isinstance(current_kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
                             v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
@@ -5668,21 +5678,21 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
-                if self.use_sparse:
+                if self.use_sparse and attn_module.use_sparse:
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
                         getattr(impl, "enable_sparse_sfa_c8", False)
                     )
                     if cache_sparse_sfa_c8:
                         head_size = get_sfa_qsfa_packed_head_dim(
-                            self.model_config.hf_text_config.kv_lora_rank,
-                            self.model_config.hf_text_config.qk_rope_head_dim,
+                            attn_module.kv_lora_rank,
+                            attn_module.qk_rope_head_dim,
                         )
                         dtype = self.c8_k_cache_dtype
                     else:
                         head_size = (
-                            self.model_config.hf_text_config.kv_lora_rank
-                            + self.model_config.hf_text_config.qk_rope_head_dim
+                            attn_module.kv_lora_rank
+                            + attn_module.qk_rope_head_dim
                         )
                         dtype = self.kv_cache_dtype
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
@@ -5700,34 +5710,45 @@ class NPUModelRunner(GPUModelRunner):
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
-                    # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
-                    # evenly divide. Ascend binds KV as block-first views
-                    # and indexes padded pages by runtime block stride, so
-                    # unify_kv_cache_spec_page_size may pad them.
-                    model_version = getattr(spec, "model_version", None) or getattr(
-                        attn_module, "model_version", None
-                    )
-                    indexes_kv_by_block_stride = bool(
-                        getattr(spec, "indexes_kv_by_block_stride", False)
-                        or getattr(attn_module, "indexes_kv_by_block_stride", False)
-                    )
-                    compression_ratio = get_kv_cache_compression_ratio(spec)
-                    ratio_kwargs: dict[str, Any] = (
-                        {"compress_ratio": compression_ratio}
-                        if vllm_version_is("0.28.0")
-                        else {"tokens_per_state": compression_ratio}
-                    )
-                    kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
-                        block_size=spec.block_size,
-                        num_kv_heads=spec.num_kv_heads,
-                        head_size=head_size,
-                        dtype=dtype,
-                        cache_dtype_str=cache_dtype_str,
-                        non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
-                        model_version=model_version,
-                        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
-                        **ratio_kwargs,
-                    )
+                    if isinstance(spec, SlidingWindowMLASpec):
+                        kv_cache_spec[layer_name] = AscendSlidingWindowMLASpec(
+                            block_size=spec.block_size,
+                            num_kv_heads=spec.num_kv_heads,
+                            head_size=head_size,
+                            dtype=dtype,
+                            page_size_padded=spec.page_size_padded,
+                            sliding_window=spec.sliding_window,
+                            cache_dtype_str=cache_dtype_str,
+                        )
+                    else:
+                        # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
+                        # evenly divide. Ascend binds KV as block-first views
+                        # and indexes padded pages by runtime block stride, so
+                        # unify_kv_cache_spec_page_size may pad them.
+                        model_version = getattr(spec, "model_version", None) or getattr(
+                            attn_module, "model_version", None
+                        )
+                        indexes_kv_by_block_stride = bool(
+                            getattr(spec, "indexes_kv_by_block_stride", False)
+                            or getattr(attn_module, "indexes_kv_by_block_stride", False)
+                        )
+                        compression_ratio = get_kv_cache_compression_ratio(spec)
+                        ratio_kwargs: dict[str, Any] = (
+                            {"compress_ratio": compression_ratio}
+                            if vllm_version_is("0.28.0")
+                            else {"tokens_per_state": compression_ratio}
+                        )
+                        kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
+                            block_size=spec.block_size,
+                            num_kv_heads=spec.num_kv_heads,
+                            head_size=head_size,
+                            dtype=dtype,
+                            cache_dtype_str=cache_dtype_str,
+                            non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+                            model_version=model_version,
+                            indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                            **ratio_kwargs,
+                        )
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, DeepseekV32IndexerCache):

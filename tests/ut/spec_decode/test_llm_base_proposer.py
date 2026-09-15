@@ -390,3 +390,21 @@ class TestDraftEmbedMmSupport:
             fake_inspect.signature.side_effect = error
 
             assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+
+@pytest.mark.parametrize("owns_embedding", [True, False, None])
+def test_mtp_preserves_checkpoint_owned_embedding(monkeypatch, owns_embedding):
+    from vllm_ascend.spec_decode import llm_base_proposer
+
+    monkeypatch.setattr(llm_base_proposer, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    target_embedding = torch.nn.Embedding(4, 2)
+    draft_embedding = torch.nn.Embedding(4, 2)
+    draft = torch.nn.Module()
+    draft.model = torch.nn.Module()
+    draft.model.embed_tokens = draft_embedding
+    if owns_embedding is not None:
+        draft.has_own_embed_tokens = owns_embedding
+    proposer = SimpleNamespace(method="mtp", model=draft, use_compress=False)
+    target = SimpleNamespace(model=SimpleNamespace(embed_tokens=target_embedding))
+    AscendSpecDecodeBaseProposer._maybe_share_embeddings(proposer, target)
+    assert draft.model.embed_tokens is (draft_embedding if owns_embedding else target_embedding)
