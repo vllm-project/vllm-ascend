@@ -608,4 +608,3 @@ class AscendApplyRotaryEmb(ApplyRotaryEmb):
         output = self._post_process(output, origin_shape, origin_dtype)
 
         return output
-

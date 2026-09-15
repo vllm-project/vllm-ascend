@@ -637,4 +637,3 @@ def test_split_qkv_rmsnorm_mrope_inline_cos_sin_invalid_args(device: str):
         op(positions=good_pos, inv_freq=make_mrope_inv_freq(rope_dim, "cpu").to(torch.float64), **base)
     with pytest.raises(ValueError):
         op(positions=good_pos, inv_freq=good_inv.repeat(2)[::2], **base)
-

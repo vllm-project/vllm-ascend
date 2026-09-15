@@ -10,4 +10,3 @@ def get_rotary_inv_freq(rotary_emb: AscendMRotaryEmbedding, device: torch.device
         inv_freq = rotary_emb._compute_inv_freq(rotary_emb.base).to(device=device, dtype=torch.float32)
         rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
     return inv_freq.contiguous()
-

@@ -38,9 +38,7 @@ def _pow2_floor(value: int, lo: int, hi: int) -> int:
     return block
 
 
-@triton.jit(
-    do_not_specialize=["num_tokens", "positions_stride_0", "positions_stride_1", "tokens_per_core"]
-)
+@triton.jit(do_not_specialize=["num_tokens", "positions_stride_0", "positions_stride_1", "tokens_per_core"])
 def split_qkv_rmsnorm_mrope_kernel(
     in_qkv_ptr: torch.Tensor,
     q_weight_ptr: torch.Tensor,
@@ -78,7 +76,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     in_width: tl.constexpr,
     q_head_tile: tl.constexpr,
     kv_head_tile: tl.constexpr,
-block_v: tl.constexpr,
+    block_v: tl.constexpr,
     cos_block: tl.constexpr,
 ):
     core_idx = tl.program_id(0)
@@ -188,9 +186,9 @@ block_v: tl.constexpr,
             for g in range(0, num_q_heads // q_head_tile):
                 head_idx = tl.arange(0, q_head_tile)
                 if gate_size > 0:
-                    in_q_gate = tl.load(in_row + g * (2 * q_head_tile * head_size) + tl.arange(0, 2 * q_head_tile * head_size)).reshape(
-                        q_head_tile, 2 * head_size
-                    )
+                    in_q_gate = tl.load(
+                        in_row + g * (2 * q_head_tile * head_size) + tl.arange(0, 2 * q_head_tile * head_size)
+                    ).reshape(q_head_tile, 2 * head_size)
                     in_q_tensor = extract_slice(
                         in_q_gate,
                         offsets=(0, 0),
@@ -204,13 +202,18 @@ block_v: tl.constexpr,
                         strides=(1, 1),
                     ).reshape(q_head_tile * head_size)
                     tl.store(
-                        out_gate_ptr + tok * gate_size + g * q_head_tile * head_size + tl.arange(0, q_head_tile * head_size),
+                        out_gate_ptr
+                        + tok * gate_size
+                        + g * q_head_tile * head_size
+                        + tl.arange(0, q_head_tile * head_size),
                         in_gate_tensor,
                     )
                 else:
-                    in_q_tensor = tl.load(in_row + g * q_head_tile * head_size + tl.arange(0, q_head_tile * head_size)).to(
-                        tl.float32
-                    ).reshape(q_head_tile, head_size)
+                    in_q_tensor = (
+                        tl.load(in_row + g * q_head_tile * head_size + tl.arange(0, q_head_tile * head_size))
+                        .to(tl.float32)
+                        .reshape(q_head_tile, head_size)
+                    )
 
                 # q-rmsnorm
                 squares = in_q_tensor * in_q_tensor
@@ -273,9 +276,17 @@ block_v: tl.constexpr,
 
             ## k: one head group per inner iteration ##
             for g in range(0, num_kv_heads // kv_head_tile):
-                in_k_tensor = tl.load(
-                    in_row + q_size + gate_size + g * kv_head_tile * head_size + tl.arange(0, kv_head_tile * head_size)
-                ).to(tl.float32).reshape(kv_head_tile, head_size)
+                in_k_tensor = (
+                    tl.load(
+                        in_row
+                        + q_size
+                        + gate_size
+                        + g * kv_head_tile * head_size
+                        + tl.arange(0, kv_head_tile * head_size)
+                    )
+                    .to(tl.float32)
+                    .reshape(kv_head_tile, head_size)
+                )
 
                 # k-rmsnorm
                 squares = in_k_tensor * in_k_tensor
@@ -331,7 +342,6 @@ block_v: tl.constexpr,
                         out_k_head + half_rope_dim + tl.arange(0, half_rope_dim)[None, :],
                         k2 * cos_half + k1 * sin_half,
                     )
-
 
 
 def triton_split_qkv_rmsnorm_mrope(
@@ -539,4 +549,3 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
-
