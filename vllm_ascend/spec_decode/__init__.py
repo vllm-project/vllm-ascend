@@ -84,10 +84,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
                 "AscendDominoProposer for method='dflash'."
             )
             return AscendDominoProposer(vllm_config, device, runner)
-        logger.info(
-            "[spec_decode] Dispatching to AscendDflashProposer (DFlash) for "
-            "method='dflash'."
-        )
+        logger.info("[spec_decode] Dispatching to AscendDflashProposer (DFlash) for method='dflash'.")
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)

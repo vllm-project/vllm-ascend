@@ -61,9 +61,9 @@ class DominoQwen3ForCausalLM(DFlashQwen3ForCausalLM):
             )
 
         self.shift_label = drafter_config.get("shift_label")
-        if self.shift_label is not True:
+        if not isinstance(self.shift_label, bool):
             raise ValueError(
-                "Domino checkpoints require dflash_config.shift_label=true; "
+                "Domino checkpoints must explicitly set dflash_config.shift_label to a boolean; "
                 f"got {self.shift_label!r}."
             )
 

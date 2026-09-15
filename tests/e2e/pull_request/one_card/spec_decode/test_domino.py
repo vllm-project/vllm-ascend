@@ -66,9 +66,7 @@ def test_domino_acceptance(
         "model": spec_model_name,
         "num_speculative_tokens": num_speculative_tokens,
     }
-    compilation_config = CompilationConfig(
-        cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[9, 18]
-    )
+    compilation_config = CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[9, 18])
 
     results = {}
     for candidate_topk in (0, 64):
@@ -93,19 +91,14 @@ def test_domino_acceptance(
             metrics = llm.model.get_metrics()
 
         output_token_ids = [tuple(output.outputs[0].token_ids) for output in outputs]
-        acceptance_per_pos = calculate_acceptance_per_pos(
-            metrics, num_speculative_tokens, Counter, Vector
-        )
+        acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
         results[candidate_topk] = (output_token_ids, acceptance_per_pos)
 
         for output in outputs:
             print(f"candidate_topk={candidate_topk}, prompt={output.prompt!r}")
             print(f"Generated text: {output.outputs[0].text!r}")
             print(f"Output tokens: {output.outputs[0].token_ids}")
-        print(
-            f"candidate_topk={candidate_topk}, "
-            f"acceptance_per_pos={acceptance_per_pos}"
-        )
+        print(f"candidate_topk={candidate_topk}, acceptance_per_pos={acceptance_per_pos}")
 
     full_output_ids, full_acceptance = results[0]
     candidate_output_ids, candidate_acceptance = results[64]
@@ -116,10 +109,7 @@ def test_domino_acceptance(
 
     full_acceptance_length = sum(full_acceptance)
     candidate_acceptance_length = sum(candidate_acceptance)
-    assert (
-        candidate_acceptance_length
-        >= full_acceptance_length - CANDIDATE_ACCEPTANCE_LENGTH_TOLERANCE
-    ), (
+    assert candidate_acceptance_length >= full_acceptance_length - CANDIDATE_ACCEPTANCE_LENGTH_TOLERANCE, (
         "Top-64 Domino acceptance length regressed relative to full-vocabulary "
         f"Domino: full={full_acceptance_length:.3f}, "
         f"candidate={candidate_acceptance_length:.3f}."

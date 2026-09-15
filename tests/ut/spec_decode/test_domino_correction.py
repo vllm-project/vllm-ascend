@@ -24,11 +24,10 @@ _MODULE_PATH = _REPO_ROOT / "vllm_ascend" / "spec_decode" / "domino_correction.p
 def _load_domino_correct():
     try:
         from vllm_ascend.spec_decode.domino_correction import domino_correct  # type: ignore
+
         return domino_correct
     except Exception:
-        spec = importlib.util.spec_from_file_location(
-            "vllm_ascend_domino_correction", _MODULE_PATH
-        )
+        spec = importlib.util.spec_from_file_location("vllm_ascend_domino_correction", _MODULE_PATH)
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
         spec.loader.exec_module(module)
@@ -69,9 +68,7 @@ class StubDominoModel(nn.Module):
         self.embed_tokens = nn.Embedding(vocab_size, hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
         self.logits_processor = _LogitsProcessor()
-        self.prefix_gru = nn.GRU(
-            hidden_size, gru_hidden_dim, num_layers=1, batch_first=True, bias=False
-        )
+        self.prefix_gru = nn.GRU(hidden_size, gru_hidden_dim, num_layers=1, batch_first=True, bias=False)
         self.embed_proj = nn.Sequential(
             nn.Linear(hidden_size + gru_hidden_dim, emb_dim, bias=False),
             nn.SiLU(),
@@ -148,8 +145,7 @@ def test_domino_correct_matches_reference(deterministic):
     domino_correct = _load_domino_correct()
     k = 5
     batch_size = 3
-    model = StubDominoModel(vocab_size=64, hidden_size=16, gru_hidden_dim=8, emb_dim=12,
-                            pure_draft_prefix_len=1)
+    model = StubDominoModel(vocab_size=64, hidden_size=16, gru_hidden_dim=8, emb_dim=12, pure_draft_prefix_len=1)
     model.eval()
     hidden = torch.randn(batch_size * k, model.hidden_size, dtype=torch.float32)
     bonus = torch.randint(0, model.vocab_size, (batch_size,))
@@ -347,9 +343,7 @@ def test_domino_correct_fused_runs_on_npu(deterministic):
     batch_size = 2
     model = StubDominoModel(pure_draft_prefix_len=1)
     model = model.to(device).to(torch.bfloat16).eval()
-    hidden = torch.randn(
-        batch_size * k, model.hidden_size, dtype=torch.bfloat16, device=device
-    )
+    hidden = torch.randn(batch_size * k, model.hidden_size, dtype=torch.bfloat16, device=device)
     bonus = torch.randint(0, model.vocab_size, (batch_size,), device=device)
 
     with torch.no_grad():

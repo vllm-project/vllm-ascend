@@ -117,11 +117,7 @@ def fused_candidate_mlp_argmax(
     if out_tokens is None:
         output = torch.empty(batch_size, dtype=torch.int64, device=z_proj.device)
     else:
-        if (
-            out_tokens.shape != (batch_size,)
-            or out_tokens.dtype != torch.int64
-            or out_tokens.device != z_proj.device
-        ):
+        if out_tokens.shape != (batch_size,) or out_tokens.dtype != torch.int64 or out_tokens.device != z_proj.device:
             raise ValueError("out_tokens must be an int64 [B] tensor on z_proj.device")
         output = out_tokens
     bias_ptr = fc2_bias if fc2_bias is not None else output

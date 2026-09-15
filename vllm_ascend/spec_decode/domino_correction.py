@@ -13,9 +13,9 @@
 #
 # Algorithm (mirrors domino-hf-code/code/dflash.py spec_generate):
 #   * ``base_logits[i] = lm_head(parallel_hiddens[:, i])`` predicts draft token
-#     i+1 (the Domino checkpoint is trained with shift_label=true, i.e. next-token
-#     prediction, and the proposer samples [bonus, mask_1..mask_{k-1}] so position
-#     0 is the bonus/root).
+#     i+1. The proposer already selects [bonus, mask_1..mask_{k-1}] for
+#     shift_label=true or [mask_1..mask_k] for false. Correction is identical
+#     after this alignment, including the bonus token used to seed the GRU.
 #   * A pure-draft prefix of length ``pure_draft_prefix_len`` is sampled greedily
 #     from ``base_logits`` and, together with the bonus token, seeds the GRU.
 #   * Remaining positions are refined: ``token_i = argmax(base_logits[i] +
@@ -25,6 +25,44 @@
 from __future__ import annotations
 
 import torch
+
+_GI_TABLE_CHUNK_SIZE = 4096
+
+
+def _domino_base_logits(model, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Return global vocabulary logits on every TP rank, regardless of reduce sampling."""
+    if getattr(model.lm_head, "tp_size", 1) == 1:
+        return model.logits_processor(model.lm_head, hidden_states)
+
+    # AscendLogitsProcessor intentionally leaves logits sharded when reduce
+    # sampling is enabled. Domino needs all scores BEFORE adding correction.
+    from vllm.distributed import tensor_model_parallel_all_gather
+
+    processor = model.logits_processor
+    logits = model.lm_head.quant_method.apply(model.lm_head, hidden_states)
+    logits = tensor_model_parallel_all_gather(logits, dim=-1)
+    logits = logits[..., : processor.org_vocab_size].contiguous()
+    if processor.soft_cap is not None:
+        logits = torch.tanh(logits / processor.soft_cap) * processor.soft_cap
+    if processor.scale != 1.0:
+        logits *= processor.scale
+    return logits
+
+
+@torch.no_grad()
+def _build_domino_gi_table(model, embed_tokens, gru_w_ih, vocab_size):
+    if getattr(embed_tokens, "tp_size", 1) == 1:
+        return torch.nn.functional.linear(embed_tokens.weight, gru_w_ih).contiguous()
+
+    # Use the parallel embedding API to resolve global IDs and padding. Build
+    # in chunks so no full [V,H] embedding replica is ever materialized.
+    table = torch.empty((vocab_size, gru_w_ih.shape[0]), device=gru_w_ih.device, dtype=gru_w_ih.dtype)
+    for start in range(0, vocab_size, _GI_TABLE_CHUNK_SIZE):
+        end = min(start + _GI_TABLE_CHUNK_SIZE, vocab_size)
+        ids = torch.arange(start, end, device=gru_w_ih.device)
+        embeddings = model.embed_input_ids(ids)
+        table[start:end].copy_(torch.nn.functional.linear(embeddings, gru_w_ih))
+    return table
 
 
 def _candidate_greedy_argmax(
@@ -48,8 +86,8 @@ def domino_correct(
     """Run the Domino recurrent correction over parallel draft hidden states.
 
     Args:
-        hidden_states: ``[B*k, H]`` parallel draft hidden states (after the
-            shift_label shift, position 0 per request is the bonus/root hidden).
+        hidden_states: ``[B*k, H]`` parallel draft hidden states, already
+            aligned by the proposer so row i predicts draft token i+1.
         num_speculative_tokens: ``k``, the number of draft tokens per request.
         model: duck-typed draft model exposing ``lm_head``, ``logits_processor``,
             ``embed_input_ids``, ``embed_proj``, ``_run_prefix_gru`` and
@@ -71,7 +109,7 @@ def domino_correct(
     h = hidden_states.view(batch_size, k, -1)  # [B, k, H]
 
     # base_logits via the (target-shared) lm_head. [B*k, V] -> [B, k, V]
-    base_logits = model.logits_processor(model.lm_head, hidden_states)
+    base_logits = _domino_base_logits(model, hidden_states)
     base_logits = base_logits.view(batch_size, k, -1)
 
     prefix_len = int(getattr(model, "pure_draft_prefix_len", 0))
@@ -105,9 +143,7 @@ def domino_correct(
         bias = model.embed_proj(torch.cat([z_i, s], dim=-1))  # [B, V]
         corrected_logits = base_logits[:, i, :] + bias
         if candidate_topk:
-            base_top_values, candidate_ids = torch.topk(
-                base_logits[:, i, :], k=candidate_topk, dim=-1
-            )
+            base_top_values, candidate_ids = torch.topk(base_logits[:, i, :], k=candidate_topk, dim=-1)
             candidate_bias = bias.gather(dim=-1, index=candidate_ids)
             token = _candidate_greedy_argmax(
                 base_top_values + candidate_bias,
@@ -179,8 +215,6 @@ def _get_domino_correction_weights(model) -> _DominoCorrectionWeights:
     if cached is not None:
         return cached
 
-    import torch.nn.functional as F
-
     fc1 = model.embed_proj[0]  # Linear(H+gru -> M, bias=False)
     fc2 = model.embed_proj[2]  # Linear(M -> V, bias=False)
     # ``config`` is the hf_config on the real model; the UT stub exposes
@@ -203,8 +237,7 @@ def _get_domino_correction_weights(model) -> _DominoCorrectionWeights:
     # embed_tokens lives on the inner DFlashQwen3Model (model.model.embed_tokens)
     # for the real model; the UT stub exposes it directly on `model`.
     inner = getattr(model, "model", model)
-    embed_weight = inner.embed_tokens.weight  # target-shared
-    gi_table = F.linear(embed_weight, gru_w_ih).contiguous()
+    gi_table = _build_domino_gi_table(model, inner.embed_tokens, gru_w_ih, fc2_weight.shape[0])
 
     weights = _DominoCorrectionWeights(w_z, w_s, fc1_bias, fc2_weight, fc2_bias, gru_w_hh, gi_table, gru_hidden_dim)
     model._domino_corr_weights = weights
@@ -232,6 +265,7 @@ def domino_correct_fused(
         fused_gru_cell_from_tokens,
         fused_mlp_bias_argmax,
     )
+
     if candidate_topk:
         from vllm_ascend.ops.triton.spec_decode.domino_candidate import (
             fused_candidate_mlp_argmax,
@@ -246,7 +280,7 @@ def domino_correct_fused(
 
     weights = _get_domino_correction_weights(model)
 
-    base_logits = model.logits_processor(model.lm_head, hidden_states)
+    base_logits = _domino_base_logits(model, hidden_states)
     base_logits = base_logits.view(batch_size, k, -1)  # [B, k, V]
     if candidate_topk:
         if candidate_topk > base_logits.shape[-1]:
@@ -255,10 +289,7 @@ def domino_correct_fused(
                 f"got {candidate_topk} for vocab_size={base_logits.shape[-1]}."
             )
         if candidate_topk & (candidate_topk - 1):
-            raise ValueError(
-                "Domino candidate_topk must be a positive power of two; "
-                f"got {candidate_topk}."
-            )
+            raise ValueError(f"Domino candidate_topk must be a positive power of two; got {candidate_topk}.")
 
     # Precompute the z-branch for ALL steps at once (z is known up front).
     z_part_all = F.linear(h, weights.w_z, weights.fc1_bias)  # [B, k, M]
@@ -289,9 +320,7 @@ def domino_correct_fused(
     for i in range(prefix_len, k):
         s_proj = F.linear(gru_state, weights.w_s)  # [B, M]
         if candidate_topk:
-            base_top_values, candidate_ids = torch.topk(
-                base_logits[:, i, :], k=candidate_topk, dim=-1
-            )
+            base_top_values, candidate_ids = torch.topk(base_logits[:, i, :], k=candidate_topk, dim=-1)
             token = fused_candidate_mlp_argmax(
                 z_part_all[:, i, :],
                 s_proj,

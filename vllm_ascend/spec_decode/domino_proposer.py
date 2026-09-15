@@ -7,9 +7,9 @@
 # Domino extends DFlash (parallel drafting) with a recurrent GRU correction head.
 # It reuses the entire DFlash path (parallel-draft input preparation, context-KV
 # precompute, draft forward, dummy_run/aclgraph) unchanged and only:
-#   1. shifts ``token_indices_to_sample`` by one so the bonus (root) position is
+#   1. for shift_label=true, shifts ``token_indices_to_sample`` by one so the bonus (root) position is
 #      sampled too (``shift_label=true`` semantics: the root position contributes
-#      the first draft token via next-token prediction), and
+#      the first draft token via next-token prediction); false keeps the mask positions, and
 #   2. overrides ``compute_draft_token_ids`` to refine the parallel drafts with
 #      the GRU correction head before emitting the final proposal.
 #
@@ -46,13 +46,14 @@ class AscendDominoProposer(AscendDflashProposer):
 
         parallel_config = getattr(vllm_config, "parallel_config", None)
         target_tp = getattr(parallel_config, "tensor_parallel_size", 1) or 1
-        draft_tp = getattr(self.speculative_config, "draft_tensor_parallel_size", 1) or 1
-        if target_tp != 1 or draft_tp != 1:
+        draft_tp = getattr(self.speculative_config, "draft_tensor_parallel_size", None) or target_tp
+        if target_tp != draft_tp:
             raise ValueError(
-                "Domino currently requires target and draft tensor_parallel_size=1; "
-                f"got target_tp={target_tp}, draft_tp={draft_tp}. The correction "
-                "head is not vocab-sharded and cannot index a TP-local embedding safely."
+                "Domino requires equal target and draft tensor_parallel_size; "
+                f"got target_tp={target_tp}, draft_tp={draft_tp}."
             )
+        if getattr(parallel_config, "pipeline_parallel_size", 1) != 1:
+            raise ValueError("Domino currently requires pipeline_parallel_size=1.")
 
         self._domino_shift_label = None
         additional_config = getattr(vllm_config, "additional_config", None) or {}
@@ -79,20 +80,27 @@ class AscendDominoProposer(AscendDflashProposer):
         # NOTE: ``self.model`` (the draft) is not loaded yet at __init__ time -
         # it is populated later by ``load_model()``. Do not touch it here.
         logger.info(
-            "[spec_decode/domino] AscendDominoProposer initialized: "
-            "num_speculative_tokens=%s, candidate_topk=%s.",
+            "[spec_decode/domino] AscendDominoProposer initialized: num_speculative_tokens=%s, candidate_topk=%s.",
             self.num_speculative_tokens,
             self.domino_candidate_topk,
         )
 
     def load_model(self, model: nn.Module) -> None:
+        from vllm_ascend.utils import lmhead_tp_enable
+
+        if lmhead_tp_enable():
+            raise ValueError("Domino does not support the separate lmhead TP group; use standard tensor parallelism.")
         super().load_model(model)
         self._domino_shift_label = getattr(self.model, "shift_label", None)
-        if self._domino_shift_label is not True:
+        if not isinstance(self._domino_shift_label, bool):
             raise ValueError(
-                "Domino requires dflash_config.shift_label=true because its "
-                "proposal positions are shifted to include the bonus token."
+                f"Domino requires an explicit boolean dflash_config.shift_label; got {self._domino_shift_label!r}."
             )
+        logger.info(
+            "[spec_decode/domino] Checkpoint alignment: shift_label=%s, sampling_source=%s.",
+            self._domino_shift_label,
+            "root and preceding masks" if self._domino_shift_label else "mask positions",
+        )
         # Precompute the gi lookup table (and split fc1 into w_z/w_s) BEFORE
         # aclgraph capture (dummy_run), so these are cached on the draft model
         # and not re-recorded on every graph replay. super().load_model has
@@ -101,9 +109,19 @@ class AscendDominoProposer(AscendDflashProposer):
             _get_domino_correction_weights,
         )
 
+        if getattr(self.model, "draft_id_to_target_id", None) is not None:
+            raise ValueError("Domino requires the full target vocabulary; reduced draft vocabulary is unsupported.")
+        for vocab_module in (self.model.lm_head, self.model.model.embed_tokens):
+            if getattr(vocab_module, "num_added_embeddings", 0):
+                raise ValueError("Domino does not support added-vocabulary/LoRA embedding layouts.")
         _get_domino_correction_weights(self.model)
+        logger.info(
+            "[spec_decode/domino] Correction ready: tp_size=%s, vocab_size=%s, replicated head and gi_table.",
+            getattr(self.model.lm_head, "tp_size", 1),
+            self.model.embed_proj[2].weight.shape[0],
+        )
         if self.domino_candidate_topk:
-            vocab_size = self.model.lm_head.weight.shape[0]
+            vocab_size = self.model.embed_proj[2].weight.shape[0]
             if self.domino_candidate_topk > vocab_size:
                 raise ValueError(
                     "additional_config.domino_candidate_topk must not exceed "
@@ -139,10 +157,8 @@ class AscendDominoProposer(AscendDflashProposer):
             num_decode_reqs=num_decode_reqs,
         )
 
-        if self._domino_shift_label is not True:
-            raise RuntimeError(
-                "Domino proposal requested without validated shift_label=true."
-            )
+        if not isinstance(self._domino_shift_label, bool):
+            raise RuntimeError("Domino proposal requested without a validated boolean shift_label.")
 
         # shift_label=true: the bonus (root) position (q_idx=0) contributes the
         # first draft token via next-token prediction. The DFlash kernel wrote
@@ -150,7 +166,10 @@ class AscendDominoProposer(AscendDflashProposer):
         # them by -1 so we sample [bonus, mask_1, ..., mask_{k-1}] instead of
         # [mask_1, ..., mask_k]. The draft-token positions (C+1..C+k) are
         # unchanged, so the verifier alignment is identical to DFlash.
-        token_indices_to_sample = token_indices_to_sample - 1
+        # shift_label=false uses same-position prediction, so keep DFlash's
+        # mask indices [mask_1, ..., mask_k]. Both modes emit exactly k tokens.
+        if self._domino_shift_label:
+            token_indices_to_sample = token_indices_to_sample - 1
 
         # Copy the bonus (last accepted) token into the fixed buffer; the
         # aclgraph-replayed compute_draft_token_ids reads from this buffer.
@@ -161,11 +180,10 @@ class AscendDominoProposer(AscendDflashProposer):
     def compute_draft_token_ids(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Produce draft tokens via DFlash parallel logits + GRU correction.
 
-        ``hidden_states`` is ``sample_hidden_states`` = ``[B*k, H]`` where, after
-        the shift_label shift, position 0 is the bonus (root) hidden and
-        positions 1..k-1 are the first k-1 mask hiddens. With the Domino
-        checkpoint (``shift_label=true``, next-token prediction), ``base_logits``
-        at position i predicts draft token i+1.
+        ``hidden_states`` is ``sample_hidden_states`` = ``[B*k, H]``. With
+        shift_label=true these are the root and first k-1 mask hiddens; with
+        false they are the k mask hiddens. In both cases row i predicts draft
+        token i+1, and the GRU is seeded with the bonus and pure-draft prefix.
 
         Uses the fused triton path (``domino_correct_fused``) by default; falls
         back to the eager pure-torch path (``domino_correct``, unit-tested on

@@ -20,6 +20,4 @@ def register_model():
     # DFlashDraftModel -> DFlashDominoDraftModel for domino checkpoints, and
     # vllm's EAGLEConfig preserves it (it starts with "DFlash"). See the
     # override's comment for why this exact name is stable.
-    ModelRegistry.register_model(
-        "DFlashDominoDraftModel", "vllm_ascend.models.qwen3_domino:DominoQwen3ForCausalLM"
-    )
+    ModelRegistry.register_model("DFlashDominoDraftModel", "vllm_ascend.models.qwen3_domino:DominoQwen3ForCausalLM")
