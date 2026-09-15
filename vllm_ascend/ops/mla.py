@@ -44,7 +44,12 @@ class IndexerWrapper(nn.Module):
     ``AscendSFAIndexerBackend`` instance it owns.
     """
 
-    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
+    def __init__(
+        self,
+        vllm_indexer: nn.Module,
+        qk_rope_head_dim: int,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
+    ) -> None:
         super().__init__()
         # Register the indexer weights directly on the wrapper so module-tree
         # paths keep the pre-backend layout ("...indexer.<name>") that weight
@@ -66,7 +71,14 @@ class IndexerWrapper(nn.Module):
 
         backend_factory = getattr(type(vllm_indexer), "get_ascend_indexer_backend_cls", None)
         backend_cls = backend_factory(vllm_indexer) if backend_factory is not None else AscendSFAIndexerBackend
-        self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
+        if backend_cls is AscendSFAIndexerBackend:
+            self.impl = backend_cls(
+                vllm_indexer,
+                qk_rope_head_dim,
+                allow_short_prefill_indexer_scoring_skip=allow_short_prefill_indexer_scoring_skip,
+            )
+        else:
+            self.impl = backend_cls(vllm_indexer, qk_rope_head_dim)
 
     # Interface consumed by the SFA impl - delegated to the backend impl.
     @property
@@ -177,14 +189,15 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # so only the backing value is stored here. MLAAttention below receives
         # the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
-        # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
-        # constructor compatibility, but its indexer does not consume it.
-        del allow_short_prefill_indexer_scoring_skip
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
-            ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
+            ascend_indexer = IndexerWrapper(
+                mla_modules.indexer,
+                self.qk_rope_head_dim,
+                allow_short_prefill_indexer_scoring_skip=allow_short_prefill_indexer_scoring_skip,
+            )
         else:
             ascend_indexer = None
         self.mla_attn = MLAAttention(
