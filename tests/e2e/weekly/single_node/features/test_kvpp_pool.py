@@ -16,9 +16,7 @@ pytestmark = pytest.mark.e2e_model(MODEL)
 
 def metric_total(metrics_text: str, name: str) -> float:
     return sum(
-        float(line.split()[-1])
-        for line in metrics_text.splitlines()
-        if line.startswith((f"{name}{{", f"{name} "))
+        float(line.split()[-1]) for line in metrics_text.splitlines() if line.startswith((f"{name}{{", f"{name} "))
     )
 
 
