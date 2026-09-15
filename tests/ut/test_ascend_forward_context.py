@@ -529,6 +529,22 @@ def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
     assert forward_context.additional_kwargs["capturing"] is False
 
 
+def test_extra_ctx_gpu_v2_forward_context_reads_moe_comm_from_additional_kwargs(monkeypatch):
+    """GPU V2 ForwardContext has no vllm_config; extras live in additional_kwargs."""
+    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    dummy_comm_method = SimpleNamespace(prepare=lambda *args, **kwargs: "prepared")
+    forward_context = SimpleNamespace(
+        additional_kwargs={"moe_comm_method": dummy_comm_method},
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._extra_ctx_uses_additional_kwargs(forward_context) is True
+    assert afc._EXTRA_CTX.moe_comm_method is dummy_comm_method
+    assert afc._EXTRA_CTX.capturing is None
+    assert dummy_comm_method.prepare() == "prepared"
+
+
 def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
     forward_context = SimpleNamespace(

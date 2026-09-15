@@ -419,10 +419,21 @@ def _extra_ctx_uses_additional_kwargs(ctx: Any) -> bool:
     ``VLLM_USE_V2_MODEL_RUNNER=1`` already isolated extras in
     ``additional_kwargs``. The Ascend whitelist can enable V2 with the env
     unset, so also follow ``VllmConfig.use_v2_model_runner``.
+
+    Upstream GPU V2 ``ForwardContext`` has no ``vllm_config`` field. In that
+    case extras still land in ``additional_kwargs`` via
+    ``NPUPlatform.set_additional_forward_context`` (the dict always includes
+    ``moe_comm_method``). Read them from there so whitelist-default V2 dummy
+    / profile runs do not see ``moe_comm_method is None``.
     """
     env = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
     if env is not None:
         return bool(env)
+    additional_kwargs = getattr(ctx, "additional_kwargs", None)
+    # Require a real dict. MagicMock fixtures auto-create keys and would
+    # otherwise hide attrs like capturing behind additional_kwargs.get().
+    if isinstance(additional_kwargs, dict) and "moe_comm_method" in additional_kwargs:
+        return True
     vllm_config = getattr(ctx, "vllm_config", None)
     # Require an actual bool. MagicMock forward-context fixtures auto-create a
     # truthy use_v2_model_runner and would otherwise hide attrs like capturing
