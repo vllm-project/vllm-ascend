@@ -160,6 +160,30 @@ class KVPoolWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
+        # Global layer addressing for layerwise keys under pipeline parallel:
+        # get_num_layers returns the per-stage layer count, so record the
+        # stage's global layer offset and the model-wide total layers used by
+        # the layerwise key space.
+        self.pp_layer_offset = 0
+        self.total_layers = None
+        try:
+            start, _ = model_config.get_layers_start_end_indices(parallel_config)
+            self.pp_layer_offset = start
+            self.total_layers = model_config.get_total_num_hidden_layers()
+        except AttributeError:
+            # Older vLLM without PP layer-index APIs: fall back to the
+            # non-PP layout (offset 0, total == local).
+            self.pp_layer_offset = 0
+            self.total_layers = None
+        except Exception as e:
+            logger.warning(
+                "Failed to get PP layer indices (pp_size=%d), falling back to local layer addressing: %s",
+                self.pp_size,
+                e,
+            )
+            self.pp_layer_offset = 0
+            self.total_layers = None
+
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
         self.use_layerwise = use_layerwise
@@ -390,6 +414,32 @@ class KVPoolWorker:
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        # Defaults for partial initialization (unit tests construct the worker
+        # without the full _init_parallelism_info path).
+        if not hasattr(self, "layerwise_key_layers"):
+            self.layerwise_key_layers = 0
+            self.layerwise_key_layer_offset = 0
+
+        # Layerwise pool-key layer addressing. Without pipeline parallel the
+        # key space is the local layer range [0, num_layers) with offset 0
+        # (identical to previous releases). With PP>1 each stage emits global
+        # layer ids derived from its actual stage start, so producers and
+        # consumers share one global layer key space regardless of which
+        # stage computed the layer.
+        if getattr(self, "pp_size", 1) > 1 and getattr(self, "total_layers", None) is not None:
+            self.layerwise_key_layers = self.num_layers
+            self.layerwise_key_layer_offset = self.pp_layer_offset
+            logger.info(
+                "Layerwise PP key space: stage %d/%d writes global layers [%d, %d) (total %d).",
+                self.pp_rank,
+                self.pp_size,
+                self.layerwise_key_layer_offset,
+                self.layerwise_key_layer_offset + self.num_layers,
+                self.total_layers,
+            )
+        else:
+            self.layerwise_key_layers = self.num_layers
+            self.layerwise_key_layer_offset = 0
 
         if self.kv_cache_config is not None:
             base_layers = getattr(
@@ -514,16 +564,49 @@ class KVPoolWorker:
 
     def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
         builders = []
+        # Sync layerwise_key_layers with the (possibly updated) num_layers.
+        # When num_kv_cache_groups == 1 and extra layers (e.g. MTP or
+        # spec-decode draft layers) are present, num_layers is updated in
+        # register_kv_caches to include them; the key layer count must follow
+        # or those extra layers are skipped during the save/load lifecycle.
+        # Guard with pp_size == 1: under PP>1, num_layers holds the GLOBAL
+        # layer count after the cache-group layout update, while
+        # layerwise_key_layers must stay at the per-stage LOCAL count.
+        if self.num_kv_cache_groups == 1:
+            self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
-            group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-            group_page_size = sum(group_block_len) if group_block_len else self.page_size_bytes
+            group_page_size = self._global_group_alloc_size(group_id)
+            # Global byte offsets for the shared GVA region:
+            #   PP: each stage writes its local layers at
+            #       (pp_layer_offset + local_layer) * per_layer_bytes.
+            #   DCP (shard-major): ranks sharing head_or_tp_rank (put_step>1)
+            #       hold different context shards of the same logical block
+            #       and share ONE region; shard d occupies the byte range
+            #       [d * shard_stride, (d+1) * shard_stride) where the stride
+            #       is the group byte total aligned up to the GVA hugepage
+            #       size (unaligned strides yield misaligned GVA addresses).
+            #       With put_step == 1 every rank owns a distinct region key
+            #       and no shard separation is needed.
+            layer_byte_offset = 0
+            gbl = self.group_block_len.get(group_id) or []
+            if gbl and group_num_layers > 0:
+                per_layer = sum(gbl) // group_num_layers
+                if getattr(self, "pp_size", 1) > 1:
+                    layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
+                cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
+                if cp_scale > 1 and self.put_step > 1:
+                    gva_align = 2 * 1024 * 1024
+                    shard_stride = (sum(gbl) + gva_align - 1) // gva_align * gva_align
+                    shard_idx = getattr(self, "pcp_rank", 0) * self.dcp_size + getattr(self, "dcp_rank", 0)
+                    layer_byte_offset += shard_idx * shard_stride
             builders.append(
                 LayerBatchBuilder(
                     self.token_database,
                     group_page_size,
                     group_num_layers,
                     group_id=group_id,
+                    layer_byte_offset=layer_byte_offset,
                 )
             )
         return builders
@@ -592,6 +675,7 @@ class KVPoolWorker:
                     self.num_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
+                    layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -636,6 +720,7 @@ class KVPoolWorker:
                     self.layer_load_finished_events,
                     self.layer_save_finished_events,
                     self.num_layers,
+                    layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
                 )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -758,6 +843,41 @@ class KVPoolWorker:
             self.num_layers,
         )
         return get_layerwise_physical_layer_index(layer_name, base_layers)
+
+    def _global_group_alloc_size(self, group_id: int) -> int:
+        # GLOBAL region size: per-layer bytes x TOTAL model layers.
+        # Under PP each stage sees a LOCAL group view (non-uniform splits make
+        # the per-stage layer counts differ) but all stages plus the decode
+        # side share ONE region per pool key, so the region must cover the
+        # union of all writers. vllm groups layers by identical cache spec,
+        # so per-layer bytes are uniform within a group.
+        gbl = self.group_block_len.get(group_id) or []
+        if not gbl:
+            return self.page_size_bytes
+        # Backward compatibility: when total_layers is not set (unit tests,
+        # partial init), fall back to the LOCAL sum (pre-PP behavior).
+        total_layers = getattr(self, "total_layers", None)
+        if not total_layers or not isinstance(total_layers, int):
+            return sum(gbl)
+        n_local = int(self.group_num_layers.get(group_id, 0))
+        if n_local <= 0:
+            return sum(gbl)
+        per_layer = sum(gbl) // n_local
+        n_global = max(total_layers, int(self.num_layers), n_local)
+        # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
+        # e.g. MLA) hold different context shards of the same logical block
+        # and share ONE region, so the region must cover all shards. The
+        # per-shard stride is the group byte total aligned up to the GVA
+        # hugepage size: hybrid DSA groups have non-uniform per-layer bytes,
+        # and an unaligned stride would yield misaligned GVA addresses that
+        # SDMA rejects. With put_step == 1 every rank owns a distinct region
+        # key and no shard separation is needed.
+        cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
+        if self.put_step > 1 and cp_scale > 1:
+            gva_align = 2 * 1024 * 1024
+            shard_stride = (sum(gbl) + gva_align - 1) // gva_align * gva_align
+            return shard_stride * cp_scale
+        return per_layer * n_global
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
@@ -1098,6 +1218,26 @@ class KVPoolWorker:
             self._kv_stats = AscendStoreKVConnectorStats()
             return stats
 
+    def _is_layerwise_save_leader(self) -> bool:
+        """Exactly one rank per (pcp, dcp, head_or_tp) group saves/allocates.
+
+        Without DCP the plain ``tp_rank % put_step == 0`` dedup is correct
+        because all TP ranks hold identical KV. With DCP the context is
+        sharded: ranks sharing (dcp_rank, head_or_tp_rank) hold the same
+        shard, while the put_step groups span DIFFERENT shards -- the plain
+        dedup would drop every non-zero DCP shard from the pool. The leader
+        is the smallest tp_rank inside the rank's own (dcp, head) group.
+        """
+        if self.dcp_size <= 1:
+            return self.tp_rank % self.put_step == 0
+        head = self.tp_rank // self.put_step
+        peers = [
+            t for t in range(head * self.put_step, (head + 1) * self.put_step) if t % self.dcp_size == self.dcp_rank
+        ]
+        if not peers:
+            return True
+        return self.tp_rank == min(peers)
+
     def _process_save_for_layer_batch(
         self,
         requests: list[ReqMeta],
@@ -1105,11 +1245,13 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
-        if self.tp_rank % self.put_step != 0:
+        # Only one rank in each (pcp, dcp, head_or_tp) group saves to the
+        # pool. Other ranks in the same group share the same KV shard
+        # (e.g. MLA latent replicated across the non-DCP TP ranks), so they
+        # skip save to avoid redundant writes. With DCP>1 the plain put_step
+        # dedup would drop every non-zero DCP shard (see
+        # _is_layerwise_save_leader).
+        if not self._is_layerwise_save_leader():
             return
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
@@ -1358,7 +1500,7 @@ class KVPoolWorker:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        if self.tp_rank % self.put_step != 0:
+        if not self._is_layerwise_save_leader():
             return
         for request in requests:
             if request.can_save is None or not request.can_save:
@@ -1372,8 +1514,7 @@ class KVPoolWorker:
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
                 effective_block_size = group_block_size
-                group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-                alloc_size = sum(group_block_len) if group_block_len else self.page_size_bytes
+                alloc_size = self._global_group_alloc_size(group_id)
 
                 group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
                 block_ids_by_group = (
@@ -2150,24 +2291,41 @@ class KVPoolWorker:
             return
         # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
+        # PP fix: num_layers may be widened to the GLOBAL layer count by the
+        # cache-group layout update, but only the per-stage LOCAL layers are
+        # forwarded. Map the local layer counter to the global physical layer
+        # via the PP offset so task lists are indexed by LOCAL layer id
+        # (matching save_kv_layer's current_layer) while group lookups hit the
+        # real physical_layer_to_group_layers entries.
+        # Under PP>1 use the per-stage LOCAL layer count; otherwise keep the
+        # legacy self.num_layers so post-init mutations are respected.
+        if getattr(self, "pp_size", 1) > 1:
+            num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
+        else:
+            num_local = self.num_layers
+        layer_offset = getattr(self, "layerwise_key_layer_offset", 0)
+        if not isinstance(layer_offset, int):
+            layer_offset = 0
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         if self.backend_name == "mooncake" and self.use_block_key_layerwise:
             self._prepare_mooncake_layerwise_sessions(requests)
         for request in requests:
             request.store_masks = self._compute_reachable_store_masks(request)
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(num_local):
+            physical_layer = local_layer + layer_offset
+            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_save_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         # Protect the previous partial before allocating the next snapshot.
         self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
-        for physical_layer in range(self.num_layers):
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
+        for local_layer in range(num_local):
+            physical_layer = local_layer + layer_offset
+            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
             for group_id, layer_idx_in_group in group_layers:
-                self._process_load_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+                self._process_load_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         self._build_shared_load_data()
 
     def _submit_ready_layer_loads(self) -> None:
@@ -2241,7 +2399,14 @@ class KVPoolWorker:
         return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
-        if self.current_layer >= self.num_layers:
+        # PP fix: num_layers may be widened to the GLOBAL layer count by the
+        # cache-group layout update, but only the per-stage LOCAL layers are
+        # forwarded. Use the local count for the save lifecycle.
+        if getattr(self, "pp_size", 1) > 1:
+            num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
+        else:
+            num_local = self.num_layers
+        if self.current_layer >= num_local:
             return
         assert self.sync_save_events is not None
         assert self.layer_save_finished_events is not None
@@ -2256,13 +2421,13 @@ class KVPoolWorker:
             send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
         else:
             self.layer_save_finished_events[self.current_layer].set()
-        if self.current_layer == self.num_layers - 1:
-            while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
+        if self.current_layer == num_local - 1:
+            while not self.layer_save_finished_events[num_local - 1].wait(timeout=10):
                 send_thread.raise_if_failed()
                 logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
             send_thread.raise_if_failed()
             reuse_source_layers = set(self.prefetch_layer_map.values())
-            for layer_id in range(self.num_layers):
+            for layer_id in range(num_local):
                 if layer_id in reuse_source_layers:
                     continue
                 if self.layer_save_finished_events[layer_id].is_set():
@@ -2325,7 +2490,10 @@ class KVPoolWorker:
         keys = []
         first_flag = True
         for start, end, key in self.token_database.process_tokens(token_len, request.block_hashes, mask_num):
-            keys_multi_layer = key.split_layers(self.num_layers)
+            keys_multi_layer = key.split_layers(
+                getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+                getattr(self, "layerwise_key_layer_offset", 0),
+            )
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)
@@ -2398,7 +2566,10 @@ class KVPoolWorker:
         group_block_size = self.grouped_block_size[group_id]
         group_block_hashes = get_block_hashes(request.block_hashes, group_block_size, self.hash_block_size)
         for start, end, key in self.token_database.process_tokens(request.token_len_chunk, request.block_hashes):
-            keys_multi_layer = key.split_layers(self.num_layers)
+            keys_multi_layer = key.split_layers(
+                getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+                getattr(self, "layerwise_key_layer_offset", 0),
+            )
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)  # [block_num,layer_num]
@@ -2653,7 +2824,13 @@ class KVPoolWorker:
             for start, end, pool_key in self.token_database.process_tokens(
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
-                keys.extend(item.to_string() for item in pool_key.split_layers(self.num_layers))
+                keys.extend(
+                    item.to_string()
+                    for item in pool_key.split_layers(
+                        getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+                        getattr(self, "layerwise_key_layer_offset", 0),
+                    )
+                )
                 starts.append(start)
                 ends.append(end)
         else:
@@ -2699,7 +2876,10 @@ class KVPoolWorker:
                 res = self.m_store.exists(keys)  # type: ignore[assignment]
 
                 if use_layerwise:
-                    res = self.check_all_layers_exists(res, self.num_layers)
+                    res = self.check_all_layers_exists(
+                        res,
+                        getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+                    )
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
                     hit_end = 0
                     for index in range(len(ends) - 1, -1, -1):
@@ -2891,8 +3071,11 @@ class KVPoolWorker:
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
                 if use_layerwise:
-                    res = self.check_all_layers_exists(res, self.num_layers)
-                    num_block = len(keys) // self.num_layers
+                    res = self.check_all_layers_exists(
+                        res,
+                        getattr(self, "layerwise_key_layers", 0) or self.num_layers,
+                    )
+                    num_block = len(keys) // (getattr(self, "layerwise_key_layers", 0) or self.num_layers)
                 multi_tp_values = [
                     res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
                     for i in range(num_ranks)
