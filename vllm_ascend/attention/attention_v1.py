@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_acl_full_graph_capturing
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1235,7 +1235,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -1354,10 +1354,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
-        # we inherit ForwardContext in model runner v2, when enable model
-        # runner v2, there is not capturing attribute in forward_context,
-        # just use getattr to avoid attribute error.
-        if _EXTRA_CTX.capturing:
+        # GPU V2's ctx.capturing is not ACL stream capture; require the live
+        # stream check so piecewise/warmup cannot call graph_task_group_begin.
+        if is_acl_full_graph_capturing():
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1574,7 +1573,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,
@@ -1857,7 +1856,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
             # therefore, the graph-mode condition needs to be evaluated earlier.
-            if _EXTRA_CTX.capturing:
+            if is_acl_full_graph_capturing():
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
@@ -1902,7 +1901,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
-                if _EXTRA_CTX.capturing:
+                if is_acl_full_graph_capturing():
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output

@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_acl_full_graph_capturing
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -343,7 +343,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         else:
             num_tokens = query.shape[0] * query.shape[1]
 
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
