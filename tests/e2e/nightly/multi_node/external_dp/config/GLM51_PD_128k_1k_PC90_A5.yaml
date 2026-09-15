@@ -56,13 +56,13 @@ templates:
       - --port
       - $SERVER_PORT
       - --data-parallel-size
-      - "1"
+      - ${DP_SIZE}
       - --tensor-parallel-size
-      - "8"
+      - ${TP_SIZE}
       - --data-parallel-rpc-port
       - ${DP_RPC_PORT}
       - --data-parallel-address
-      - "12321"
+      - ${DP_ADDRESS}
       - --max-model-len
       - "202752"
       - --max-num-batched-tokens
