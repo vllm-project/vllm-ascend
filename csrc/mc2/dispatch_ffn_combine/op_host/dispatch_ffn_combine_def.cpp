@@ -78,6 +78,8 @@ class DispatchFFNCombine : public OpDef {
     this->Attr("transB").AttrType(OPTIONAL).Bool(false);
     this->Attr("weightNz").AttrType(OPTIONAL).Bool(false);
     this->Attr("swigluLimit").AttrType(OPTIONAL).Float(0.0f);
+    // SwigluOAI alpha: >0 uses (up+1)*gate*sigmoid(gate*alpha); ==0 falls back to standard swiglu (M2.7 compatible)
+    this->Attr("swigluAlpha").AttrType(OPTIONAL).Float(0.0f);
 
     OpAICoreConfig aicore_config;
     aicore_config.DynamicCompileStaticFlag(true)
