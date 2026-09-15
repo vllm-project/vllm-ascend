@@ -1144,6 +1144,25 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@partial@r1@0@1@20@3",
         )
 
+    def test_pipeline_parallel_keys_include_stage(self):
+        self.assertEqual(
+            make_full_key("model", 2, "hash0", 3, 4, 1, 2),
+            "model@2@pp1@hash0@3",
+        )
+        self.assertEqual(
+            make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2),
+            "model@partial@r1@0@1@20@pp1@3",
+        )
+        self.assertEqual(
+            make_hit_check_keys("model", 0, "hash0", 2, 1, 2),
+            [
+                "model@pp0@hash0@0",
+                "model@pp0@hash0@1",
+                "model@pp1@hash0@0",
+                "model@pp1@hash0@1",
+            ],
+        )
+
     def test_hit_check_keys_single_group_one_key_per_rank(self):
         self.assertEqual(
             make_hit_check_keys("model", 0, "hash0", 4, 1),

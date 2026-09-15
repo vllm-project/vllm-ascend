@@ -7,8 +7,18 @@ import torch
 from vllm.model_executor.layers.attention import MLAAttention
 
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_kvpp_config, make_kvpp_specs
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core import kv_cache_placement as placement
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+
+
+@pytest.mark.parametrize("tp,pcp,expected", [(2, 2, 4), (4, 2, 8)])
+def test_kvpp_size_covers_pcp_replicas(tp, pcp, expected):
+    config = make_kvpp_config(tp)
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.pipeline_parallel_size = 2
+    config.parallel_config.data_parallel_size = 2
+    assert KVPPConfig.from_vllm_config(config).size == expected
 
 
 @pytest.mark.parametrize("tp,owners", [(3, [0, 0, 0, 1, 1, 1, 2, 2]), (10, list(range(8)))])

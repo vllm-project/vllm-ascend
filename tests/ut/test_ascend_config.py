@@ -1521,9 +1521,7 @@ class TestKVPPConfig(TestBase):
         config.speculative_config = None
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
-            ("parallel_config", "prefill_context_parallel_size", 2, "PCP"),
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            (None, "kv_transfer_config", object(), "transfer"),
             ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
