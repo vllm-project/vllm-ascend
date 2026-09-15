@@ -30,10 +30,12 @@ class TestBatchInvariant:
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
-    def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self, dtype):
+    @pytest.mark.parametrize("dim", [-1, 2])
+    def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self, dtype, dim):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "npu"
         x.dtype = dtype
+        x.dim.return_value = 3
         expected = MagicMock(spec=torch.Tensor)
 
         with patch.object(
@@ -42,9 +44,31 @@ class TestBatchInvariant:
             return_value=expected,
             create=True,
         ) as mock_reduce:
-            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True)
+            result = batch_invariant.reduce_sum(x, dim=dim, keepdim=True)
 
-        mock_reduce.assert_called_once_with(x, -1, True)
+        # Both spellings of the last dim are forwarded as the normalized index.
+        mock_reduce.assert_called_once_with(x, 2, True)
+        assert result is expected
+
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    def test_reduce_sum_defaults_one_dim_tensor_to_last_dim(self):
+        """torch.sum(x) carries no dim, so the wrapper supplies the normalized last dim."""
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.float32
+        x.dim.return_value = 1
+        expected = MagicMock(spec=torch.Tensor)
+
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+            create=True,
+        ) as mock_reduce:
+            result = batch_invariant.reduce_sum(x)
+
+        mock_reduce.assert_called_once_with(x, 0, False)
         assert result is expected
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
@@ -83,6 +107,61 @@ class TestBatchInvariant:
 
         native_sum.assert_called_once_with(x, dim, keepdim)
         custom_sum.assert_not_called()
+        assert result is expected
+
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    @pytest.mark.parametrize("dim,keepdim", [(0, False), (1, True), (-2, False)])
+    def test_reduce_sum_falls_back_for_non_last_dim(self, dim, keepdim):
+        """aclnnReduceSumBatchInvariant raises EZ1001 for every dim but the last one."""
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.float16
+        x.dim.return_value = 3
+        expected = MagicMock(spec=torch.Tensor)
+
+        with (
+            patch("vllm_ascend.batch_invariant.torch_sum", return_value=expected) as native_sum,
+            patch.object(
+                batch_invariant.torch.ops.batch_invariant_ops,
+                "npu_reduce_sum_batch_invariant",
+                create=True,
+            ) as custom_sum,
+            patch("vllm_ascend.batch_invariant.logger") as mock_logger,
+        ):
+            result = batch_invariant.reduce_sum(x, dim=dim, keepdim=keepdim)
+
+        native_sum.assert_called_once_with(x, dim, keepdim)
+        custom_sum.assert_not_called()
+        # The reduction is not batch-invariant anymore, so the fallback is announced
+        # instead of happening silently.
+        mock_logger.warning_once.assert_called_once()
+        assert result is expected
+
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
+    @pytest.mark.parametrize("dim", [(0, 1), None])
+    def test_reduce_sum_falls_back_for_multi_dim_reduction(self, dim):
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dtype = torch.bfloat16
+        x.dim.return_value = 3
+        expected = MagicMock(spec=torch.Tensor)
+
+        with (
+            patch("vllm_ascend.batch_invariant.torch_sum", return_value=expected) as native_sum,
+            patch.object(
+                batch_invariant.torch.ops.batch_invariant_ops,
+                "npu_reduce_sum_batch_invariant",
+                create=True,
+            ) as custom_sum,
+            patch("vllm_ascend.batch_invariant.logger") as mock_logger,
+        ):
+            result = batch_invariant.reduce_sum(x, dim=dim)
+
+        native_sum.assert_called_once_with(x, dim, False)
+        custom_sum.assert_not_called()
+        mock_logger.warning_once.assert_called_once()
         assert result is expected
 
     def test_override_envs_for_invariance(self):

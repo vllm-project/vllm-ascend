@@ -79,6 +79,17 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
     # back to the saved native torch.sum.
     if x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, x.dim() - 1, keepdim)
+    if x.device.type == "npu" and x.dtype in _SUPPORTED_DTYPES:
+        # Only the last dim can run on the batch-invariant kernel, so this NPU float
+        # reduction is served by native torch.sum and is no longer covered by the
+        # batch-invariant guarantee. Warn once per (dim, dtype) so the gap is visible
+        # instead of silently returning a possibly batch-dependent result.
+        logger.warning_once(
+            "Batch-invariant reduce_sum falls back to native torch.sum for dim=%s on a %s NPU tensor; "
+            "this reduction is not guaranteed to be batch-invariant.",
+            dim,
+            x.dtype,
+        )
     return torch_sum(x, dim, keepdim)
 
 
