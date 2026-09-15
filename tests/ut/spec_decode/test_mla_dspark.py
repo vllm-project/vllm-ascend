@@ -117,8 +117,6 @@ def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, metadata_cls, conf
     assert type(selected) is AscendDSparkSpeculator
     assert selected.attn_architecture is None
     selected.num_query_per_req = 5
-    # Use the backend's actual type: neither DSA nor SFA has a dense decode
-    # object. Only the fields touched by the shared update are needed here.
     metadata = metadata_cls.__new__(metadata_cls)
     assert not hasattr(metadata, "decode")
     layers = {"draft": metadata}
@@ -138,8 +136,6 @@ def test_shared_loader_configures_mla_model(monkeypatch, wrapped, rotation_path)
         assert config._ascend_target_rotation_path == rotation_path
         return draft
 
-    # Keep the actual shared loader: only skip upstream weight construction.
-    # This exercises shared rotation injection and its model configuration hook.
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     outer = SimpleNamespace(get_language_model=lambda: target) if wrapped else target
     assert spec.load_draft_model(outer, set()) is draft
@@ -176,7 +172,6 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
     target.config = SimpleNamespace(attn_res_block_size=2)
     target.aux_hidden_state_layers = (1, 3)
 
-    # Exercise the inherited Kimi implementation, including its AttnRes guard.
     captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
     if layer_idx in target.aux_hidden_state_layers:
         assert len(captured) == 1

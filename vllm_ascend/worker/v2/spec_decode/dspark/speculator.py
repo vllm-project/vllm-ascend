@@ -52,8 +52,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         draft_config = self.draft_model_config
-        # Compressed MLA and SFA use their own metadata without a dense
-        # MLA decode object. Select by draft capability, not model name.
+        # Compressed MLA and SFA metadata have no dense MLA decode object.
         uses_compressed_mla = any(
             hasattr(config, "compress_ratios") for config in (draft_config.hf_config, draft_config.hf_text_config)
         )
@@ -151,8 +150,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        # A dense MLA query graph contains only the speculative block, even
-        # when its context came from target prefill. Include padded rows.
+        # Dense MLA queries, including padded rows, must not inherit target prefill flags.
         is_prefilling = (
             torch.zeros(num_reqs_padded, dtype=torch.bool)
             if self.attn_architecture == "MLA"
@@ -191,19 +189,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         return metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
-        mirroring Eagle's ``_update_decode_attn_metadata``.
+        """Extend query boundaries through padded requests.
 
-        DSpark inherits DFlash's full-graph path, and upstream
-        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
-        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
-        when a batch is padded to a capture size (``num_reqs_padded >
-        num_reqs``) the cumulative query lengths stop at
-        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
-        Ascend FIA operator requires, in TND layout, that the last element of
-        ``actual_seq_lengths_q`` equals the query token count of the graph
-        being replayed; otherwise tiling fails with
-        ``queryT != last element of actualSequenceLengthQ``.
+        FIA requires the last boundary to equal the query token count in TND layout.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
