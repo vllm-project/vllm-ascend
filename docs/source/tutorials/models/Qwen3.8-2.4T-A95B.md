@@ -31,9 +31,9 @@ configuration details.
 The following model weights are available:
 
 - `Qwen3.8-2.4T-A95B` (FP16/BF16): approximately 4.89 TB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
+  memory. [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3.8-2.4T-A95B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
 - `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
+  memory. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
 - `Qwen3.8-2.4T-A95B-w4a8`: approximately 1.21 TiB of storage and weight
   memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
 
@@ -553,7 +553,7 @@ evaluation environment and dataset preparation.
    of
    [Qwen3.8-2.4T-A95B-w4a8](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8)
    and
-   [Qwen3.8-2.4T-A95B-w8a8](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8)
+   [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8)
    for reference only.
 
 | dataset | model | metric | mode | vllm-api-general-chat |

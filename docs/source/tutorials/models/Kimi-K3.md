@@ -26,10 +26,10 @@ This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
 
 | Model | Download | Purpose | Requirements |
 | --- | --- | --- | --- |
-| Eco-Tech/Kimi-K3-w4a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
+| Eco-Tech/Kimi-K3-w4a8 | [AtomGit](https://ai.atomgit.com/Eco-Tech/Kimi-K3-w4a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
 | RadixArk/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/RadixArk/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft | Set `num_speculative_tokens` to `7` |
-| Inferact/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
-| Inferact/Kimi-K3-DSpark-Block5 | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
+| Inferact/Kimi-K3-DSpark | [AtomGit](https://ai.atomgit.com/hf_mirrors/Inferact/Kimi-K3-DSpark) / [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
+| Inferact/Kimi-K3-DSpark-Block5 | [AtomGit](https://ai.atomgit.com/hf_mirrors/Inferact/Kimi-K3-DSpark-Block5) / [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
 
 Download weights, tokenizer, and processor files before starting the service.
 Mount them at identical paths on every node, for example under `/path/to/models`.

@@ -24,9 +24,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
-- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
+- `DeepSeek-V3.1`(BF16 version): [AtomGit](https://ai.atomgit.com/hf_mirrors/deepseek-ai/DeepSeek-V3.1) / [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
+- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [AtomGit](https://ai.atomgit.com/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
+- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [AtomGit](https://ai.atomgit.com/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
 - `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
 - `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.

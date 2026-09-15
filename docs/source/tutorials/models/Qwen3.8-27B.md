@@ -22,9 +22,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 The following model weights are available:
 
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
-- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
-- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
+- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3.8-27B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
+- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.8-27B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
+- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node. [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
 - `Qwen3.8-27B-w8a8-310p` (Quantized version): requires 1 Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
