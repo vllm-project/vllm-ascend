@@ -1,5 +1,6 @@
 import importlib
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.additional_config = {}
         mock_vllm_config.compilation_config.pass_config.enable_sp = False
         mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        mock_vllm_config.performance_mode = "balanced"
         return mock_vllm_config
 
     @staticmethod
@@ -389,10 +391,68 @@ class TestNPUPlatform(TestBase):
 
                 self.platform.apply_config_platform_defaults(vllm_config)
 
-                self.assertEqual(
-                    vllm_config.compilation_config.max_cudagraph_capture_size,
-                    expected_max,
-                )
+                # The default is seeded into the size list; upstream takes
+                # max_cudagraph_capture_size from it.
+                capture_sizes = cast(list[int], vllm_config.compilation_config.cudagraph_capture_sizes)
+                self.assertEqual(capture_sizes[-1], expected_max)
+                self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
+
+    def test_apply_config_platform_defaults_captures_off_grid_max_num_seqs(self):
+        # The capture grid is 1, 2, 4 then multiples of 8, so an off-grid
+        # max_num_seqs is only reachable if it is added to the grid.
+        test_cases = [
+            (3, [1, 2, 3]),
+            (8, [1, 2, 4, 8]),
+            (12, [1, 2, 4, 8, 12]),
+            (16, [1, 2, 4, 8, 16]),
+            (20, [1, 2, 4, 8, 16, 20]),
+        ]
+
+        for max_num_seqs, expected_sizes in test_cases:
+            with self.subTest(max_num_seqs=max_num_seqs):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+                vllm_config.compilation_config.max_cudagraph_capture_size = None
+                vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+                self.platform.apply_config_platform_defaults(vllm_config)
+
+                self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, expected_sizes)
+
+    def test_apply_config_platform_defaults_keeps_sizes_reachable(self):
+        # A uniform decode batch is one token per request, so a captured size
+        # above max_num_seqs has no batch that can fill it and is never
+        # dispatched. Rounding the maximum up onto the grid would produce one.
+        for max_num_seqs in (1, 2, 3, 5, 7, 12, 20, 31, 100, 300, 512, 600):
+            with self.subTest(max_num_seqs=max_num_seqs):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+                vllm_config.compilation_config.max_cudagraph_capture_size = None
+                vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+                self.platform.apply_config_platform_defaults(vllm_config)
+
+                sizes = cast(list[int], vllm_config.compilation_config.cudagraph_capture_sizes)
+                expected_max = min(max_num_seqs, 512)
+                self.assertEqual(sizes[-1], expected_max)
+                self.assertTrue(all(size <= expected_max for size in sizes))
+                self.assertEqual(sizes, sorted(set(sizes)))
+
+    def test_apply_config_platform_defaults_leaves_interactivity_to_upstream(self):
+        # In this mode upstream builds a contiguous 1..min(max, 32) list, which
+        # has no grid to fall off. Seeding a list here would replace the
+        # fine-grained sizes the mode exists to provide, so only the ceiling is
+        # set and the list is left for upstream to build.
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.performance_mode = "interactivity"
+        vllm_config.scheduler_config.max_num_seqs = 12
+        vllm_config.compilation_config.max_cudagraph_capture_size = None
+        vllm_config.compilation_config.cudagraph_capture_sizes = None
+
+        self.platform.apply_config_platform_defaults(vllm_config)
+
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 12)
+        self.assertIsNone(vllm_config.compilation_config.cudagraph_capture_sizes)
 
     def test_apply_config_platform_defaults_respects_explicit_max(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -540,7 +600,9 @@ class TestNPUPlatform(TestBase):
 
         observed_inputs: list[int | None] = []
         vllm_config._set_cudagraph_sizes = MagicMock(
-            side_effect=lambda: observed_inputs.append(vllm_config.compilation_config.max_cudagraph_capture_size)
+            side_effect=lambda: observed_inputs.append(
+                cast(list[int], vllm_config.compilation_config.cudagraph_capture_sizes)[-1]
+            )
         )
 
         with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend) as mock_setup:
