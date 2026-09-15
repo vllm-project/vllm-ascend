@@ -154,6 +154,8 @@ def _make_rejection_tensors(
             device=device,
         ),
         "target_argmax": torch.zeros(num_tokens, dtype=torch.int64, device=device),
+        "fly_entropy": torch.zeros(num_tokens, dtype=torch.float32, device=device),
+        "fly_draft_allowed": torch.ones(num_tokens, dtype=torch.bool, device=device),
         "global_vocab_size": global_vocab_size,
         "prob_vocab_size": prob_vocab,
     }
@@ -225,6 +227,8 @@ def _warm_greedy(
         with_draft_probs=False,
         enable_reduce_sampling=False,
     )
+    rejection_config = get_ascend_config().rejection_sampler_config
+    fly_verify = bool(rejection_config.enable_fly_verify)
     rejection_greedy_sample_with_triton(
         tensors["output_token_ids"],
         [max_spec_len] * batch_size,
@@ -236,6 +240,10 @@ def _warm_greedy(
         max_spec_len,
         grid,
         block_size,
+        fly_entropy=tensors["fly_entropy"] if fly_verify else None,
+        fly_draft_allowed=tensors["fly_draft_allowed"] if fly_verify else None,
+        fly_entropy_threshold=rejection_config.fly_entropy_threshold,
+        fly_window_size=rejection_config.fly_window_size or 0,
     )
 
 
