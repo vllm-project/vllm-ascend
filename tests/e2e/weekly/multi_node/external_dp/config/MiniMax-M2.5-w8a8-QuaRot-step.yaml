@@ -74,7 +74,7 @@ templates:
       - --enforce-eager
       - --no-enable-prefix_caching
       - --speculative_config
-      - '{"method":"eagle3", "model":"popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"/root/.cache/modelscope/hub/models/popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
@@ -127,7 +127,7 @@ templates:
       - --quantization
       - "ascend"
       - --speculative_config
-      - '{"method":"eagle3", "model":"popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
+      - '{"method":"eagle3", "model":"/root/.cache/modelscope/hub/models/popowww/MiniMax-M2.5-Eagle3", "num_speculative_tokens":3}'
       - --async-scheduling
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
