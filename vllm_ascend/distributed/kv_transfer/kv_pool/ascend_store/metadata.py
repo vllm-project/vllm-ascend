@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, cast
 
 import numpy as np
@@ -26,6 +27,13 @@ def resolve_request_hash_block_size(
     if kv_cache_config is None:
         return fallback
     return kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)[1]
+
+
+class LookupHashMode(str, Enum):
+    """Block-hash representation carried by the scheduler lookup RPC."""
+
+    FULL = "full"
+    SUFFIX = "suffix"
 
 
 def make_layerwise_block_key(

@@ -65,6 +65,7 @@ def test_kvpp_memcache_mixed_hbm_external_hit(tmp_path):
                         "backend": "memcache",
                         "use_layerwise": False,
                         "load_async": True,
+                        "lookup_hash_mode": "suffix",
                     },
                 }
             ),

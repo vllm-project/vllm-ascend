@@ -70,6 +70,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerTransferTask,
+    LookupHashMode,
     ReqMeta,
     block_hash_to_str,
     get_block_hashes,
@@ -3013,26 +3014,32 @@ class KVPoolWorker:
     def lookup_scheduler(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
         hbm_hit_tokens: int = 0,
+        lookup_hash_mode: LookupHashMode = LookupHashMode.FULL,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
-        :param block_hashes: Hashes after the HBM-cached prefix. The omitted
-            prefix length is derived from ``hbm_hit_tokens``.
+        :param block_hashes: The complete request hash list in FULL mode, or
+            the hashes after the HBM-cached prefix in SUFFIX mode.
+        :param lookup_hash_mode: How ``block_hashes`` should be interpreted.
         :return: An int indicating how many prefix tokens are cached.
         """
         try:
             assert 0 <= hbm_hit_tokens <= token_len
-            assert hbm_hit_tokens % self.hash_block_size == 0, (
-                "hbm_hit_tokens must align to the request hash block size"
-            )
-            lookup_block_hashes: Sequence[BlockHash | str] = HBMCachedBlockHashList(
-                block_hashes,
-                hbm_hit_tokens // self.hash_block_size,
-            )
+            lookup_block_hashes: Sequence[BlockHash | str]
+            if lookup_hash_mode is LookupHashMode.SUFFIX:
+                assert hbm_hit_tokens % self.hash_block_size == 0, (
+                    "hbm_hit_tokens must align to the request hash block size"
+                )
+                lookup_block_hashes = HBMCachedBlockHashList(
+                    block_hashes,
+                    hbm_hit_tokens // self.hash_block_size,
+                )
+            else:
+                lookup_block_hashes = block_hashes
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
