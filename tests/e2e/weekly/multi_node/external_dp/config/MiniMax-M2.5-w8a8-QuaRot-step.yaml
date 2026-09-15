@@ -10,6 +10,7 @@ env_common: &env_common
     VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
     ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    VLLM_USE_MODELSCOPE: "true"
     SERVER_PORT: "${PORT}"
 
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
