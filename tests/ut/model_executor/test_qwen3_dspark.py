@@ -37,11 +37,11 @@ class TestQwen3DSparkWeightLoading:
         """Rotate FC weights and preserve all other weights before delegation."""
         model_cls = qwen3_dspark.AscendQwen3DSparkForCausalLM
 
-        # ``load_weights`` only reads ``rotation_path`` / ``enable_confidence_head``
-        # from the model. Bypass the full model constructor and nn.Module
-        # attribute handling to keep this a focused CPU unit test.
+        # Supply the loader configuration while bypassing the full model
+        # constructor to keep this a focused CPU unit test.
         model = model_cls.__new__(model_cls)
         rotation_path = "quarot.safetensors"
+        object.__setattr__(model, "config", SimpleNamespace())
         object.__setattr__(model, "rotation_path", rotation_path)
         object.__setattr__(model, "enable_confidence_head", False)
 
@@ -91,6 +91,7 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path) -> None:
     model_cls = qwen3_dspark.AscendQwen3DSparkForCausalLM
     model = model_cls.__new__(model_cls)
     nn.Module.__init__(model)
+    model.config = SimpleNamespace()
     model.rotation_path = rotation_path
     model.target_model_path = tmp_path
     model.enable_confidence_head = False

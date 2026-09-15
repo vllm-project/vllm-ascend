@@ -206,6 +206,16 @@ class KVPoolScheduler:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        # Global layer offset for layerwise pool keys under PP (matches the
+        # pool worker's pp_layer_offset).
+        self.pp_layer_offset = 0
+        try:
+            start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
+            self.pp_layer_offset = start
+        except AttributeError:
+            self.pp_layer_offset = 0
+        except Exception:
+            self.pp_layer_offset = 0
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -284,7 +294,8 @@ class KVPoolScheduler:
                             )
                             if include_layers:
                                 block_keys.extend(
-                                    layer_key.to_string() for layer_key in pool_key.split_layers(self.num_layers)
+                                    layer_key.to_string()
+                                    for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
                                 )
                             else:
                                 block_keys.append(pool_key.to_string())
@@ -353,8 +364,8 @@ class KVPoolScheduler:
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
+        A block is a hit only when every PP stage has saved it, so the
+        protocol helper enumerates all stages and head/TP ranks.
         """
         head_or_tp_ranks = self.tp_size // self.put_step
         return self.layerwise_protocol.make_hit_check_keys(
@@ -363,6 +374,7 @@ class KVPoolScheduler:
             block_hash_hex,
             head_or_tp_ranks,
             len(self.kv_cache_group_ids),
+            self.pp_size,
         )
 
     def _get_layerwise_hit_tokens(
@@ -645,13 +657,6 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
-        if (
-            self.retention_interval is not None
-            and not self.use_layerwise
-            and prompt_token_len < 2 * self.retention_interval
-        ):
-            return 0, False
-
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:

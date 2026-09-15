@@ -272,14 +272,14 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --seed 1024 \
         --served-model-name glm \
         --safetensors-load-strategy prefetch \
-        --max-num-seqs 128 \
+        --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --quantization ascend \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":2,"method":"deepseek_mtp","enforce_eager":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,96,128,256,384]}' \
+        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}' \
         --api-server-count 1
     ```
 
@@ -322,14 +322,14 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --seed 1024 \
         --served-model-name glm \
         --safetensors-load-strategy prefetch \
-        --max-num-seqs 128 \
+        --max-num-seqs 32 \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --quantization ascend \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":2,"method":"deepseek_mtp","enforce_eager":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,96,128,256,384]}'
+        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
     ```
 
 #### Key Parameter Descriptions

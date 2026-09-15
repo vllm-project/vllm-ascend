@@ -21,8 +21,10 @@ def gather_initial_states(
     """Read the cache rows at ``indices``, zeroing sequences that start fresh."""
     idx = indices.to(torch.int64) * has_initial_state.to(torch.int64)
     out = state.index_select(0, idx)
-    keep = has_initial_state.view([-1] + [1] * (state.dim() - 1)).to(out.dtype)
-    return out * keep
+    keep = has_initial_state.view([-1] + [1] * (state.dim() - 1)).to(torch.bool)
+    # Fresh requests must ignore stale cache values, including NaN/Inf:
+    # multiplying such values by zero would still produce NaN.
+    return torch.where(keep, out, 0)
 
 
 def scatter_states(

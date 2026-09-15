@@ -164,6 +164,9 @@ jobs:
               # CI pipeline files: a PR that touches the test selection or
               # execution pipeline itself must run the full suite, because
               # the precise-selection result can no longer be trusted.
+              # estimated_times.yaml is intentionally omitted: it only
+              # affects load-balanced partitioning, not which tests are
+              # recommended, so timing-only PRs keep ready-precise.
             ci_pipeline:
               - '.github/workflows/pr_test.yaml'
               - '.github/workflows/_selected_tests.yaml'

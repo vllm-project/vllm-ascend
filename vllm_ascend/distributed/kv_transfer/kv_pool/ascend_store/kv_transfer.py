@@ -113,10 +113,12 @@ class LayerBatchBuilder:
         page_size_bytes: int,
         num_layers: int,
         group_id: int = 0,
+        layer_byte_offset: int = 0,
     ) -> None:
         self.page_size_bytes = page_size_bytes
         self.num_layers = num_layers
         self.group_id = group_id
+        self.layer_byte_offset = layer_byte_offset
         self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
             token_database.group_kv_caches_base_addr[group_id],
@@ -178,7 +180,7 @@ class LayerBatchBuilder:
         layer_inner_offsets = np.concatenate(
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
-        rank_layer_offset = int(self._block_len_np[:base_offset].sum())
+        rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
             zero_count = int(np.sum(base_gvas_arr <= 0))
             logger.warning(
@@ -1296,6 +1298,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
+        layer_offset: int = 0,
     ):
         super().__init__(
             m_store,
@@ -1308,6 +1311,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             name="KVCacheStoreKeyLayerSendingThread",
         )
         self.final_layer_id = num_layers - 1
+        self.layer_offset = layer_offset
         self.put_step = put_step
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
@@ -1337,7 +1341,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                 block_index = start // group_block_size
                 if block_index < block_range.start_block or block_index >= block_range.end_block:
                     continue
-                key_all = key.split_layers(self.final_layer_id + 1)
+                key_all = key.split_layers(self.final_layer_id + 1, self.layer_offset)
                 entries.append((start, end, key_all))
             cache[br_idx] = entries
 
@@ -1393,7 +1397,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                         continue
                     starts.append(start)
                     ends.append(end)
-                    keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
+                    keys.append(key.split_layers(self.final_layer_id + 1, self.layer_offset)[layer_id])
 
             if not self.dcp_size > 1:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
@@ -1449,6 +1453,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
         num_layers: int,
+        layer_offset: int = 0,
     ):
         super().__init__(
             m_store,
@@ -1464,6 +1469,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
+        self.layer_offset = layer_offset
 
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
@@ -1503,7 +1509,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
                     key = self.token_database._make_key_by_hash(
                         chunk_hash,
-                    ).split_layers(self.final_layer_id + 1)[layer_id]
+                    ).split_layers(self.final_layer_id + 1, self.layer_offset)[layer_id]
                     group_block_size = self._get_block_size(0)
                     start = block_index * group_block_size
                     end = start + group_block_size
