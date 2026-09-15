@@ -2916,92 +2916,62 @@ class MooncakeConnectorWorker:
         r_blk = self.block_size // remote_block_size if self.block_size > remote_block_size else 1
         return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
 
-    @staticmethod
-    def _is_global_block_mapping_supported(group_spec: dict[str, Any]) -> bool:
-        """Whether token-block positions index this group's complete block table."""
-        spec = group_spec.get("kv_cache_spec", {})
-        if not isinstance(spec, dict):
-            return True
-        # Uniform groups serialize layer specs inside the outer dictionary.
-        specs = [spec, *(value for value in spec.values() if isinstance(value, dict))]
-        return all(
-            not layer_spec.get("sliding_window") and layer_spec.get("compress_ratio", 1) in (None, 1)
-            for layer_spec in specs
-        )
-
-    def _get_dcp_block_ids(
+    def _get_decode_only_dcp_metadata(
         self,
+        req_id: str,
         meta: ReqMeta,
-        remote_dcp_ranks: list[int],
-    ) -> tuple[list[BlockIds], list[BlockIds]]:
-        """Map global attention blocks; a DCP size of one is an unsharded cache."""
-        if self.dcp_size > 1 or meta.remote_dcp_size > 1:
-            assert (meta.remote_block_size or self.block_size) == self.block_size, (
-                "DCP block mapping requires equal P/D block sizes."
-            )
-        is_using_transfer_group_ids = transfer_groups_need_independent_block_ids(
+        prefill_tp_size: int,
+    ) -> tuple[list[list[int]], list[BlockIds], list[BlockIds]]:
+        assert (meta.remote_block_size or self.block_size) == self.block_size, (
+            "Decode-only DCP requires equal P/D block sizes."
+        )
+        if self._is_hma_required:
+            chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
+        else:
+            chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+        pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
+        remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+        use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
             self.kv_group2layeridx, self.block_size_scale
         )
-        local_block_ids_list: list[BlockIds] = []
-        remote_block_ids_list: list[BlockIds] = []
-        for shard_idx, remote_dcp_rank in enumerate(remote_dcp_ranks):
-            local_block_ids: list[list[int]] = [
-                [] for _ in (self.kv_group2layeridx if is_using_transfer_group_ids else meta.local_block_ids)
-            ]
-            remote_block_ids: list[list[int]] = [
-                [] for _ in (self.kv_group2layeridx if is_using_transfer_group_ids else meta.remote_block_ids)
-            ]
-            for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-                spec_type = group_spec["kv_cache_spec_type"]
-                group_id = self._get_kv_cache_group_id(group_idx, group_spec)
-                block_id_idx = group_idx if is_using_transfer_group_ids else group_id
-                if self.dcp_size == meta.remote_dcp_size == 1:
-                    # Preserve kernel-level prefix skipping and layout-specific expansion.
-                    local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_kernel_block_ids(
-                        layer_indices, meta, group_idx, group_spec
-                    )
-                    continue
-                if spec_type == "MambaSpec":
-                    # State follows TP ownership and is transferred once, on the final shard.
-                    if shard_idx == len(remote_dcp_ranks) - 1:
-                        local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_kernel_block_ids(
-                            layer_indices, meta, group_idx, group_spec
-                        )
-                    continue
-                if spec_type == "AscendSFAIndexerCacheSpec":
-                    is_replicated_indexer = self.enable_sfa_dcp_replicated_indexer or (
-                        self.use_sfa_sparse and meta.remote_dcp_size > 1
-                    )
-                    if is_replicated_indexer:
-                        # The full indexer cache is transferred separately.
-                        continue
-                if not self._is_global_block_mapping_supported(group_spec):
-                    raise NotImplementedError(
-                        f"DCP global block mapping requires an uncompressed, complete block table "
-                        f"in transfer group {group_idx}."
-                    )
-                full_blocks = getattr(meta, "local_full_block_ids", None)
-                local_blocks = (full_blocks or meta.local_block_ids)[group_id]
-                num_prefix_blocks = meta.num_computed_tokens // self.block_size
-                local_first = 0 if full_blocks else len(range(self.dcp_rank, num_prefix_blocks, self.dcp_size))
-                remote_blocks = meta.remote_block_ids[group_id]
-                first_block = meta.num_computed_tokens // self.block_size
-                first_block += (remote_dcp_rank - first_block) % meta.remote_dcp_size
-                global_blocks = [
-                    block
-                    for block in range(first_block, meta.num_prompt_blocks, meta.remote_dcp_size)
-                    if block % self.dcp_size == self.dcp_rank
-                ]
-                scale = self._get_kernel_block_scale(layer_indices)
-                local_block_ids[block_id_idx] = self._expand_block_ids(
-                    [local_blocks[block // self.dcp_size - local_first] for block in global_blocks], scale
+        local_block_ids: list[list[int]] = [
+            [] for _ in (self.kv_group2layeridx if use_transfer_group_block_ids else meta.local_block_ids)
+        ]
+        remote_block_ids: list[list[int]] = [
+            [] for _ in (self.kv_group2layeridx if use_transfer_group_block_ids else meta.remote_block_ids)
+        ]
+        for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+            spec_type = group_spec["kv_cache_spec_type"]
+            group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+            block_id_idx = group_idx if use_transfer_group_block_ids else group_id
+            if spec_type == "MambaSpec":
+                # KDA keeps the full sequence state for this TP rank's heads.
+                local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_kernel_block_ids(
+                    layer_indices, meta, group_idx, group_spec
                 )
-                remote_block_ids[block_id_idx] = self._expand_block_ids(
-                    [remote_blocks[block // meta.remote_dcp_size] for block in global_blocks], scale
+                continue
+            if spec_type == "AscendSFAIndexerCacheSpec":
+                # The full indexer cache is transferred separately.
+                continue
+            if spec_type not in ("MLAAttentionSpec", "AscendMLAAttentionSpec"):
+                raise NotImplementedError(
+                    f"Decode-only DCP does not support cache type {spec_type} "
+                    f"in transfer group {group_idx} (layer indices {layer_indices})."
                 )
-            local_block_ids_list.append(tuple(local_block_ids))
-            remote_block_ids_list.append(tuple(remote_block_ids))
-        return local_block_ids_list, remote_block_ids_list
+            local_blocks = (meta.local_full_block_ids or meta.local_block_ids)[group_id]
+            remote_blocks = meta.remote_block_ids[group_id]
+            first_block = meta.num_computed_tokens // self.block_size
+            first_block += (self.dcp_rank - first_block) % self.dcp_size
+            # P owns the full sequence; D rank r owns r, r + DCP, ... .
+            global_blocks = range(first_block, min(meta.num_prompt_blocks, len(remote_blocks)), self.dcp_size)
+            scale = self._get_kernel_block_scale(layer_indices)
+            local_block_ids[block_id_idx] = self._expand_block_ids(
+                [local_blocks[block // self.dcp_size] for block in global_blocks], scale
+            )
+            remote_block_ids[block_id_idx] = self._expand_block_ids(
+                [remote_blocks[block] for block in global_blocks], scale
+            )
+        return remote_handshake_port_list, [tuple(local_block_ids)], [tuple(remote_block_ids)]
 
     def _get_kv_split_metadata(
         self,
@@ -3035,19 +3005,50 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        is_global_block_mapping = (
-            (meta.remote_block_size or self.block_size) == self.block_size
-            and all(self._is_global_block_mapping_supported(spec) for spec, _ in self.kv_group2layeridx.values())
-        )
-        if meta.remote_dcp_size == 1:
+        is_decode_only_dcp = self.dcp_size > 1 and meta.remote_dcp_size == 1
+        if is_decode_only_dcp:
+            return self._get_decode_only_dcp_metadata(req_id, meta, prefill_tp_size)
+
+        if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
+
+            # Select the same TP rank in the chosen PCP replica.
+            # E.g. TP2/PP1, PCP rank 1, TP rank 1: offset = 2, port = base + 3.
             pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
             remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
-            local_ids, remote_ids = self._get_dcp_block_ids(meta, [0])
-            return remote_handshake_port_list, local_ids, remote_ids
+            # Complete KV replicas use the same logical-to-kernel block mapping
+            # as the non-CP path.
+            use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
+                self.kv_group2layeridx,
+                self.block_size_scale,
+            )
+            local_block_ids: list[list[int]]
+            remote_block_ids: list[list[int]]
+            if use_transfer_group_block_ids:
+                local_block_ids = [[] for _ in self.kv_group2layeridx]
+                remote_block_ids = [[] for _ in self.kv_group2layeridx]
+            else:
+                local_block_ids = [[] for _ in meta.local_block_ids]
+                remote_block_ids = [[] for _ in meta.remote_block_ids]
+            for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
+                local_kernel_block_ids, remote_kernel_block_ids = self._get_kernel_block_ids(
+                    layer_indices, meta, group_idx, group_spec
+                )
+                block_id_idx = (
+                    group_idx if use_transfer_group_block_ids else self._get_kv_cache_group_id(group_idx, group_spec)
+                )
+                local_block_ids[block_id_idx] = local_kernel_block_ids
+                remote_block_ids[block_id_idx] = remote_kernel_block_ids
+            local_block_ids_list = [tuple(local_block_ids) for _ in remote_handshake_port_list]
+            remote_block_ids_list = [tuple(remote_block_ids) for _ in remote_handshake_port_list]
+            return (
+                remote_handshake_port_list,
+                local_block_ids_list,
+                remote_block_ids_list,
+            )
 
         def context_parallel_parameters_check():
             assert remote_cp_size % local_cp_size == 0 or local_cp_size % remote_cp_size == 0, (
@@ -3179,8 +3180,7 @@ class MooncakeConnectorWorker:
         def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
             """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
 
-            Applies to HMA non-MLA/non-sparse models and P-only DCP hybrid models.
-            It does two things:
+            Only applies to HMA (hybrid) non-MLA/non-sparse models. It does two things:
 
             1. Attention replica balancing. A remote attention port offset decomposes as
                ``kv_head_group_offset + dcp_repeat_offset + dcp_rank``. Within the same head
@@ -3193,7 +3193,7 @@ class MooncakeConnectorWorker:
                attention shards, so the matching Mamba ports are appended to the final shard
                (which carries the Mamba transfer); duplicates are skipped.
             """
-            if self._is_hma_required and (not (self.use_mla or self.use_sparse) or self.dcp_size == 1):
+            if self._is_hma_required and not (self.use_mla or self.use_sparse):
                 remote_dcp = max(meta.remote_dcp_size, 1)
                 group_span = prefill_tp_size // len(get_kv_head_groups(prefill_tp_size))
                 n_replica = max(group_span // remote_dcp, 1)
@@ -3326,10 +3326,6 @@ class MooncakeConnectorWorker:
         # strictly limited to the dcp_repeat (replica) dimension. The head group and dcp_rank parts
         # must be preserved as-is; otherwise, different DCP shards will end up fetching duplicated KV caches.
         remote_handshake_port_list = _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id)
-
-        if is_global_block_mapping:
-            local_ids, remote_ids = self._get_dcp_block_ids(meta, shard_cp_ranks)
-            return remote_handshake_port_list, local_ids, remote_ids
 
         # the local_block_ids_list and remote_block_ids_list are related with remote_handshake_port_list
         # such as: local_block_ids_list[[1],[2],[5],[6]], remote_block_ids_list[[1],[1],[1],[1]],
