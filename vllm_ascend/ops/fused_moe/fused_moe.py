@@ -24,7 +24,6 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
@@ -76,45 +75,6 @@ direct_register_custom_op(
     op_name="ascend_moe_forward_shared_sp",
     op_func=_moe_forward_shared,
     fake_impl=_ascend_moe_forward_shared_sp_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
-
-
-def _ascend_moe_forward_complete(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    input_ids: torch.Tensor | None,
-    layer_name: str,
-) -> torch.Tensor:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    # Keep the communication-dependent reduction decisions inside the same
-    # opaque boundary as dispatch/combine. vLLM reuses a single Dynamo trace
-    # across ALLGATHER and MC2/ALLTOALL batches.
-    return MoERunner.forward(
-        layer,
-        hidden_states,
-        router_logits,
-        input_ids=input_ids,
-        shared_experts_input=shared_experts_input,
-    )
-
-
-def _ascend_moe_forward_complete_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    input_ids: torch.Tensor | None,
-    layer_name: str,
-) -> torch.Tensor:
-    output_width = shared_experts_input.shape[-1] if shared_experts_input is not None else hidden_states.shape[-1]
-    return hidden_states.new_empty((*hidden_states.shape[:-1], output_width))
-
-
-direct_register_custom_op(
-    op_name="ascend_moe_forward_complete",
-    op_func=_ascend_moe_forward_complete,
-    fake_impl=_ascend_moe_forward_complete_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -186,21 +146,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-        shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return torch.ops.vllm.ascend_moe_forward_complete(
-            hidden_states,
-            router_logits,
-            shared_experts_input,
-            input_ids,
-            self.layer_name,
-        )
 
     @property
     def is_internal_router(self) -> bool:
