@@ -6,7 +6,7 @@
 - **Formula**: For query token `t`, head `h`, dimension `d`, and pool `j`, `qbar[t, d] = sum_h(weights[t, h] * query[t, h, d])` and `score[t, j] = sum_d(qbar[t, d] * cache[j, d])`. Only pools before `min((positions[t] + 1) // P, indexer_seq_lens[r])` are visible. Select up to `index_topk // P` pools by descending score, then expand pool `j` to `[j * P, ..., j * P + P - 1]`. Tail positions range from `((positions[t] + 1) // P) * P` through `positions[t]`.
 - **Algorithm flow**:
     1. Compute the head-weighted query in FP32. Split the token batch into chunks targeting a 256 MiB score-buffer budget.
-    2. A Triton kernel maps tokens to requests, gathers paged compressed keys, and writes FP32 scores in pool tiles. Invisible scores remain negative infinity.
+    2. A Triton kernel maps tokens to requests, gathers paged compressed keys, and writes FP32 scores in pool tiles. Invisible scores use the minimum finite FP32 value; the same sentinel identifies invalid top-k results.
     3. Apply `torch.topk`, expand pool IDs, pad missing history with `-1`, and write the incomplete tail at the fixed `index_topk` column. The result contains logical token indices, not physical cache slots.
 - **Supported modes**: Eager execution and fixed-shape NPU graph capture/replay on Atlas A2/A3 with Triton-Ascend. See Test Cases for validation scope. Ascend 950: N/A (not validated by this change).
 
@@ -54,3 +54,5 @@ Both eager and graph cases force several token chunks with a reduced scratch bud
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_pool_key_indexer_triton.py
 ```
+
+A regression case checks every score passed to `torch.topk` is finite before eager dispatch and after graph replay. Distinct negative scores exercise visible pool counts 0, 1, 127, 128, 129, 2047, 2048, 2049, and 2050, including token chunking, history padding, and shrinking visible lengths on replay.

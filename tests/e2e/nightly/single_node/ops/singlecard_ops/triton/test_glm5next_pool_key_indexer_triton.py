@@ -112,3 +112,79 @@ def test_empty_query():
     )
     assert result.shape == (0, 1, OUTPUT_WIDTH)
     assert result.dtype == torch.int32
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_topk_inputs_are_finite_with_invisible_pools(use_graph, monkeypatch):
+    # Exercise skipped sub-tiles, partial sub-tiles, and the second pool tile.
+    visible = torch.tensor([0, 1, 127, 128, 129, 2047, 2048, 2049, 2050])
+    max_pool_seq_len = 2050
+    num_tokens = visible.numel()
+    num_blocks = (max_pool_seq_len + CACHE_BLOCK_SIZE - 1) // CACHE_BLOCK_SIZE
+    cache = torch.zeros(num_blocks, CACHE_BLOCK_SIZE, 1, HEAD_DIM, dtype=torch.bfloat16)
+    ids = torch.arange(num_blocks * CACHE_BLOCK_SIZE)
+    # Two exactly representable BF16 components give distinct negative scores.
+    keys = cache.view(-1, HEAD_DIM)
+    keys[:, 0] = ids // HEAD_DIM + 1
+    keys[:, 1] = ids % HEAD_DIM
+    query = torch.zeros(num_tokens, NUM_HEADS, HEAD_DIM, dtype=torch.bfloat16)
+    query[:, 0, 0] = -HEAD_DIM
+    query[:, 0, 1] = -1
+    weights = torch.zeros(num_tokens, NUM_HEADS, dtype=torch.bfloat16)
+    weights[:, 0] = 1
+    tail_count = POOL_SIZE - 2
+    positions = visible * POOL_SIZE + tail_count - 1
+    device_positions = positions.npu()
+    original_topk = torch.topk
+    score_inputs = []
+
+    def finite_topk(scores, *args, **kwargs):
+        score_inputs.append(scores)
+        if not use_graph:
+            # Fail before dispatching non-finite input to the backend.
+            # Graph inputs are checked after replay; avoid capture-time sync.
+            assert torch.isfinite(scores).all().item()
+        return original_topk(scores, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", finite_topk)
+    monkeypatch.setattr(indexer, "TRITON_SCORES_CHUNK_BYTES", max_pool_seq_len * 4 * 3)
+    args = (
+        query.npu(),
+        cache.npu(),
+        weights.npu(),
+        torch.tensor([num_tokens], dtype=torch.int32, device="npu"),
+        torch.tensor([max_pool_seq_len], dtype=torch.int32, device="npu"),
+        torch.arange(num_blocks, dtype=torch.int32, device="npu").unsqueeze(0),
+        device_positions,
+    )
+    kwargs = dict(index_topk=INDEX_TOPK, index_kpool=POOL_SIZE, max_pool_seq_len=max_pool_seq_len)
+    if use_graph:
+        indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        torch.npu.synchronize()
+        score_inputs.clear()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+    for step in range(2):
+        if step:
+            visible //= 2
+            device_positions.copy_((visible * POOL_SIZE + tail_count - 1).npu())
+        if use_graph:
+            graph.replay()
+        else:
+            score_inputs.clear()
+            result = indexer.glm5_next_lightning_indexer_triton(*args, **kwargs)
+        assert sum(scores.shape[0] for scores in score_inputs) == num_tokens
+        for scores in score_inputs:
+            assert torch.isfinite(scores).all().item()
+        actual = result.cpu()
+        for row, count in enumerate(visible.tolist()):
+            expected = torch.full((OUTPUT_WIDTH,), -1, dtype=torch.int32)
+            history_tokens = min(count * POOL_SIZE, INDEX_TOPK)
+            expected[:history_tokens] = torch.arange(history_tokens, dtype=torch.int32)
+            tail_start = count * POOL_SIZE
+            expected[INDEX_TOPK : INDEX_TOPK + tail_count] = torch.arange(
+                tail_start, tail_start + tail_count, dtype=torch.int32
+            )
+            torch.testing.assert_close(actual[row, 0], expected, rtol=0, atol=0)
