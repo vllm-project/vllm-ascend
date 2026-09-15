@@ -11,6 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -92,7 +93,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
-        and 1 < get_ep_group().world_size <= 64
+        and 1 < get_ep_group().world_size <= 32
         and getattr(vllm_config, "lora_config", None) is None
     )
 
@@ -299,14 +300,101 @@ def _select_capacity_and_expert_density_moe_comm_method(
     return MoECommType.ALLGATHER
 
 
+def _mega_moe_worst_case_recv_tokens(num_tokens: int, vllm_config: VllmConfig) -> int:
+    """Worst-case per-rank received token count for the current forward.
+
+    Mirrors ``absolute_safe_max_recv_token_num`` in ``FusedMC2CommImpl`` but
+    uses the actual forward's token count instead of the compile-time capacity.
+    Collective-safe: mega_moe forces the DP all-reduce
+    (``should_skip_allreduce_across_dp_group`` returns False when
+    ``use_cann_megamoe`` is True), so ``num_tokens`` is uniform across all EP
+    ranks.
+    """
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    per_tp_rank = (num_tokens + tp_size - 1) // tp_size
+    ep_world_size = get_ep_group().world_size
+    hf = vllm_config.model_config.hf_text_config
+    num_topk = getattr(hf, "num_experts_per_tok", getattr(hf, "top_k_experts", 1))
+    num_experts = vllm_config.model_config.get_num_experts()
+    expert_per_rank = max(1, num_experts // ep_world_size)
+    return max(1, per_tp_rank * ep_world_size * min(num_topk, expert_per_rank))
+
+
+def _select_mega_moe_or_all2all(num_tokens: int, vllm_config: VllmConfig) -> MoECommType:
+    """Pick FUSED_MC2 (CANN mega_moe) or ALLTOALL fallback for the mega_moe path.
+
+    On non-decode-only nodes the symm buffer is sized by ``mega_moe_max_tokens``
+    (a reference value). If the worst-case per-rank received tokens, scaled by
+    ``mega_moe_threshold_ratio``, exceed the buffer, fall back to all2all to
+    avoid silent precision degradation. Decode-only nodes size the buffer to
+    the absolute safe bound and are exempt.
+    """
+    if _is_decode_only_node(vllm_config):
+        return MoECommType.FUSED_MC2
+    cfg = get_ascend_config()
+    worst_case = _mega_moe_worst_case_recv_tokens(num_tokens, vllm_config)
+    if worst_case * cfg.mega_moe_threshold_ratio > cfg.mega_moe_max_tokens:
+        logger.warning_once(
+            "MegaMoe falls back to all2all: worst-case per-rank received "
+            "tokens (%d) * ratio (%.2f) > mega_moe_max_tokens (%d). "
+            "Raise mega_moe_max_tokens or lower mega_moe_threshold_ratio "
+            "to keep using mega_moe.",
+            worst_case,
+            cfg.mega_moe_threshold_ratio,
+            cfg.mega_moe_max_tokens,
+        )
+        return MoECommType.ALLTOALL
+    return MoECommType.FUSED_MC2
+
+
+def _hccl_buffsize_would_overflow(num_tokens: int, vllm_config: VllmConfig) -> bool:
+    """Framework-side replica of the HCCL_BUFFSIZE check in
+    ``dispatch_ffn_combine_tiling.cpp`` (``M*topK*K*3+10MB > HCCL_BUFFSIZE``).
+
+    ``M`` is the per-TP-rank input token count the op actually sees: the MC2
+    prepare pads the DP-uniform batch to ``ceil(max/tp)*tp`` then splits by TP,
+    so ``M = ceil(num_tokens / tp_size)`` where ``num_tokens`` is the DP-max
+    value passed to the selector. ``K`` is ``hidden_size``, ``topK`` is
+    ``num_experts_per_tok``. Returns True when the dispatch_ffn_combine comm
+    buffer would exceed ``HCCL_BUFFSIZE`` so the caller can fall back to
+    all2all before the C++ op errors out.
+    """
+    if num_tokens is None:
+        return False
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    m = (num_tokens + tp_size - 1) // tp_size
+    hf = vllm_config.model_config.hf_text_config
+    topk = getattr(hf, "num_experts_per_tok", getattr(hf, "top_k_experts", 1))
+    k = hf.hidden_size
+    mb = 1 << 20
+    actual = m * topk * k * 3 + 10 * mb
+    hccl_mb = envs.HCCL_BUFFSIZE
+    return actual > hccl_mb * mb
+
+
 def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
-    if use_cann_megamoe(vllm_config):
-        return MoECommType.FUSED_MC2
     if get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        # dispatch_ffn_combine and mega_moe both select FUSED_MC2 here (both
+        # have enable_fused_mc2 == 1 after the =2->=1 remap, both support
+        # ep <= 32). They overflow different buffers, so the sub-branch picks
+        # the matching guard; the execution distinction stays in
+        # FusedMC2CommImpl.fused_experts via _EXTRA_CTX.use_mega_moe.
+        if use_cann_megamoe(vllm_config):
+            return _select_mega_moe_or_all2all(num_tokens, vllm_config)
+        if _hccl_buffsize_would_overflow(num_tokens, vllm_config):
+            logger.warning_once(
+                "dispatch_ffn_combine falls back to all2all: the per-TP-rank "
+                "comm buffer (M*topK*K*3+10MB, M=ceil(num_tokens/tp)) would "
+                "exceed HCCL_BUFFSIZE(%dMB) for num_tokens=%d. "
+                "Raise HCCL_BUFFSIZE to keep the fused path.",
+                envs.HCCL_BUFFSIZE,
+                num_tokens,
+            )
+            return MoECommType.ALLTOALL
         return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:
