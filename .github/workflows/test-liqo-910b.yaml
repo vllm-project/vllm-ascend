@@ -5,7 +5,43 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  test-1:
     runs-on: linux-aarch64-910b-1
     steps:
-      - run: echo "Hello from 910b runner"
+      - run: echo "Job 1 on 910b-1" && sleep 300
+  test-2:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 2 on 910b-1" && sleep 300
+  test-3:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 3 on 910b-1" && sleep 300
+  test-4:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 4 on 910b-1" && sleep 300
+  test-5:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 5 on 910b-1" && sleep 300
+  test-6:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 6 on 910b-1" && sleep 300
+  test-7:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 7 on 910b-1" && sleep 300
+  test-8:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 8 on 910b-1" && sleep 300
+  test-9:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 9 on 910b-1" && sleep 300
+  test-10:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Job 10 on 910b-1" && sleep 300
