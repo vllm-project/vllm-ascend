@@ -144,7 +144,7 @@ def test_bf16_scatter_is_aclgraph_static_and_keeps_pad_slots():
         assert captured["updates"].shape[0] == slot_mapping.shape[0]
         torch.testing.assert_close(
             captured["indices"],
-            torch.tensor([[1], [-1], [-1]], dtype=torch.int64),
+            torch.tensor([[1], [-1], [-1]], dtype=torch.int32),
         )
         torch.testing.assert_close(cache[0, 1], updates[0])
         torch.testing.assert_close(cache[0, 0], slot_zero)
