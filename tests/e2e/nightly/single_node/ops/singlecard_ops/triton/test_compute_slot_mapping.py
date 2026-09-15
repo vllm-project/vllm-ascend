@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 import torch
 from vllm.triton_utils import triton
@@ -11,8 +13,8 @@ from vllm.v1.worker.gpu.block_table import (
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import (
-    _MAX_STAGED_BLOCK_TABLE_PAD_SIZE,
     AscendBlockTables,
 )
 
@@ -23,18 +25,29 @@ from vllm_ascend.worker.v2.block_table import (
         pytest.param(1, 0, 1, id="cp1"),
         pytest.param(2, 1, 2, id="cp2_interleaved"),
         pytest.param(4, 2, 1, id="cp4_interleaved"),
+        pytest.param(4, 2, 128, id="cp4_logical_block_interleaved"),
     ],
 )
 def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_interleave: int) -> None:
     """Check the Ascend V2 kernel against the upstream kernel."""
     device = "npu"
     max_num_tokens = 8192
-    idx_mapping = torch.tensor([2, 0], dtype=torch.int32, device=device)
-    query_start_loc = torch.tensor([0, 5, 10], dtype=torch.int32, device=device)
-    positions = torch.tensor(
-        [0, 1, 63, 64, 127, 0, 2, 64, 128, 255],
-        dtype=torch.int64,
+    # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
+    # skip that row rather than resolving it while staging a block-table window.
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=device)
+    # Each non-empty request crosses a 1024-token tile boundary and starts one
+    # token before a block boundary. This exercises the window's largest span.
+    tokens_per_request = 1025
+    query_start_loc = torch.tensor(
+        [0, tokens_per_request, tokens_per_request, 2 * tokens_per_request],
+        dtype=torch.int32,
         device=device,
+    )
+    positions = torch.cat(
+        (
+            torch.arange(63, 63 + tokens_per_request, dtype=torch.int64, device=device),
+            torch.arange(127, 127 + tokens_per_request, dtype=torch.int64, device=device),
+        )
     )
 
     num_groups = 2
@@ -49,7 +62,14 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         dtype=torch.int64,
         device=device,
     )
-    block_sizes = torch.tensor([64, 128], dtype=torch.int32, device=device)
+    # The block table is expanded in kernel-block units. The allocation and
+    # kernel sizes deliberately differ to cover the V2 DCP mapping regression.
+    kv_block_sizes = torch.tensor([128, 256], dtype=torch.int32, device=device)
+    # Starting at positions 63 and 127 makes a 1024-token tile span the largest
+    # window for the 64-token group.
+    kernel_block_sizes = torch.tensor([64, 128], dtype=torch.int32, device=device)
+    min_kernel_block_size = min(kernel_block_sizes.tolist())
+    block_table_window_size = triton.next_power_of_2((1024 + min_kernel_block_size - 1) // min_kernel_block_size + 1)
     slot_mappings = torch.zeros((num_groups, max_num_tokens), dtype=torch.int32, device=device)
     ref_slot_mappings = torch.zeros_like(slot_mappings)
 
@@ -60,7 +80,8 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         positions,
         block_table_ptrs,
         block_table_strides,
-        block_sizes,
+        kv_block_sizes,
+        kernel_block_sizes,
     )
     grid = (num_groups, idx_mapping.shape[0] + 1)
     kernel_kwargs = {
@@ -75,75 +96,46 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         slot_mappings.stride(0),
         cp_rank,
         **kernel_kwargs,
-        BLOCK_TABLE_PAD_SIZE=triton.next_power_of_2(max(table.stride(0) for table in block_tables)),
-        USE_BLOCK_TABLE_STAGING=True,
+        BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
     )
-    ref_compute_slot_mappings_kernel[grid](
-        *kernel_args,
-        ref_slot_mappings,
-        ref_slot_mappings.stride(0),
-        cp_rank,
-        **kernel_kwargs,
-    )
-
-    torch.testing.assert_close(slot_mappings, ref_slot_mappings)
-
-
-@pytest.mark.parametrize(
-    ("block_table_width", "use_block_table_staging"),
-    [
-        pytest.param(_MAX_STAGED_BLOCK_TABLE_PAD_SIZE, True, id="staged-boundary"),
-        pytest.param(131072, False, id="long-row-direct-load"),
-    ],
-)
-def test_compute_slot_mapping_npu_kernel_long_block_table(
-    block_table_width: int, use_block_table_staging: bool
-) -> None:
-    """Long rows must compile without overflowing UB and match upstream."""
-    device = "npu"
-    max_num_tokens = 2048
-    idx_mapping = torch.tensor([1], dtype=torch.int32, device=device)
-    query_start_loc = torch.tensor([0, 1025], dtype=torch.int32, device=device)
-    positions = torch.arange(1025, dtype=torch.int64, device=device)
-    block_table = torch.arange(2 * block_table_width, dtype=torch.int32, device=device).reshape(2, block_table_width)
-    block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.uint64, device=device)
-    block_table_strides = torch.tensor([block_table.stride(0)], dtype=torch.int64, device=device)
-    block_sizes = torch.tensor([64], dtype=torch.int32, device=device)
-    slot_mappings = torch.zeros((1, max_num_tokens), dtype=torch.int32, device=device)
-    ref_slot_mappings = torch.zeros_like(slot_mappings)
-    kernel_args = (
-        max_num_tokens,
-        idx_mapping,
-        query_start_loc,
-        positions,
-        block_table_ptrs,
-        block_table_strides,
-        block_sizes,
-    )
-    kernel_kwargs = {
-        "CP_SIZE": 1,
-        "CP_INTERLEAVE": 1,
-        "PAD_ID": -1,
-        "TRITON_BLOCK_SIZE": 1024,
-    }
-    grid = (1, 2)
-
-    ascend_compute_slot_mappings_kernel[grid](
-        *kernel_args,
-        slot_mappings,
-        slot_mappings.stride(0),
-        0,
-        **kernel_kwargs,
-        BLOCK_TABLE_PAD_SIZE=triton.next_power_of_2(block_table_width),
-        USE_BLOCK_TABLE_STAGING=use_block_table_staging,
-    )
-    ref_compute_slot_mappings_kernel[grid](
-        *kernel_args,
-        ref_slot_mappings,
-        ref_slot_mappings.stride(0),
-        0,
-        **kernel_kwargs,
-    )
+    if vllm_version_is("0.28.0"):
+        # Release's reference kernel has no separate KV/kernel-size arguments.
+        # Resolve CP positions first, then use its CP=1 physical-slot mapping.
+        for group_id, kv_block_size in enumerate(kv_block_sizes.tolist()):
+            virtual_block_size = kv_block_size * cp_size
+            virtual_offsets = positions % virtual_block_size
+            is_local = virtual_offsets // cp_interleave % cp_size == cp_rank
+            local_positions = (
+                positions // virtual_block_size * kv_block_size
+                + virtual_offsets // (cp_interleave * cp_size) * cp_interleave
+                + virtual_offsets % cp_interleave
+            )
+            ref_compute_slot_mappings_kernel[(1, idx_mapping.shape[0] + 1)](
+                max_num_tokens,
+                idx_mapping,
+                query_start_loc,
+                local_positions,
+                block_table_ptrs[group_id:],
+                block_table_strides[group_id:],
+                kernel_block_sizes[group_id:],
+                ref_slot_mappings[group_id:],
+                ref_slot_mappings.stride(0),
+                0,
+                CP_SIZE=1,
+                CP_INTERLEAVE=1,
+                PAD_ID=-1,
+                TRITON_BLOCK_SIZE=1024,
+            )
+            ref_slot_mappings[group_id, : positions.numel()].masked_fill_(~is_local, -1)
+    else:
+        ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
+        ref_compute_slot_mappings_kernel[grid](
+            *ref_args,
+            ref_slot_mappings,
+            ref_slot_mappings.stride(0),
+            cp_rank,
+            **kernel_kwargs,
+        )
 
     torch.testing.assert_close(slot_mappings, ref_slot_mappings)
 
@@ -164,10 +156,14 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.uint64, device=device)
     block_tables.block_table_strides = torch.tensor([block_table.stride(0)], dtype=torch.int64, device=device)
     block_tables.block_sizes_tensor = torch.tensor([4], dtype=torch.int32, device=device)
+    block_tables.kernel_block_sizes_tensor = torch.tensor([4], dtype=torch.int32, device=device)
     block_tables.cp_rank = 0
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
-    block_tables._block_table_pad_size = triton.next_power_of_2(block_table.stride(0))
+    block_tables._triton_block_size = 1024
+    block_tables._block_table_window_size = 512
+    if not vllm_version_is("0.28.0"):
+        block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(

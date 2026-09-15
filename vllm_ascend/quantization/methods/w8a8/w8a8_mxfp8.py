@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -61,6 +62,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
     supports_weight_switch = True
+    supports_unaligned_tp_groups = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -95,6 +97,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
+            prefix_padding, suffix_padding = vars(layer).get("mxfp8_tp_padding", (0, 0))
+            if prefix_padding or suffix_padding:
+                x = F.pad(x, (prefix_padding, suffix_padding), mode="constant", value=0)
             quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 x,
                 dst_type=torch.float8_e4m3fn,
@@ -145,13 +150,28 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if getattr(layer, "_mxfp8_transformed", False):
             return
 
-        # Store original shapes for RL weight reloading
-        # Only store on first call (when shapes are in original format)
+        # Store the unpadded shapes expected by the checkpoint loader.
         if not hasattr(layer, "_mxfp8_original_shapes"):
             layer._mxfp8_original_shapes = {
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
+
+        prefix_padding = suffix_padding = 0
+        if isinstance(layer, RowParallelLinear):
+            global_start = layer.tp_rank * layer.input_size_per_partition
+            prefix_padding = global_start % self.group_size
+            suffix_padding = -(prefix_padding + layer.input_size_per_partition) % self.group_size
+        layer.mxfp8_tp_padding = (prefix_padding, suffix_padding)
+
+        padded_weight = layer.weight.data
+        if prefix_padding or suffix_padding:
+            padded_weight = F.pad(
+                padded_weight,
+                (prefix_padding, suffix_padding),
+                mode="constant",
+                value=0,
+            )
 
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
@@ -164,11 +184,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            layer._mxfp8_weight_buf = padded_weight.transpose(0, 1).contiguous()
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
-            layer._mxfp8_weight_buf.copy_(layer.weight.data.transpose(0, 1).contiguous())
+            layer._mxfp8_weight_buf.copy_(padded_weight.transpose(0, 1).contiguous())
             layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
 
         layer.weight.data = layer._mxfp8_weight_buf

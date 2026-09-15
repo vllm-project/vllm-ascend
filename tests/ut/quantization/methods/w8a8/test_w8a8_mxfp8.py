@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
@@ -115,6 +116,22 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertTrue(layer.weight.data.is_contiguous())
             self.assertTrue(layer.weight_scale.data.is_contiguous())
 
+    def test_process_weights_preserves_unaligned_tp_group_phase(self):
+        layer = RowParallelLinear.__new__(RowParallelLinear)
+        nn.Module.__init__(layer)
+        original_weight = torch.randn(2, 528).to(torch.float8_e4m3fn)
+        layer.weight = nn.Parameter(original_weight.clone(), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.randint(0, 255, (2, 17), dtype=torch.uint8), requires_grad=False)
+        layer.tp_rank = 3
+        layer.input_size_per_partition = 528
+
+        self.scheme.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.mxfp8_tp_padding, (16, 0))
+        self.assertEqual(layer.weight.shape, (544, 2))
+        torch.testing.assert_close(layer.weight[:16], torch.zeros(16, 2, dtype=torch.float8_e4m3fn))
+        torch.testing.assert_close(layer.weight[16:], original_weight.transpose(0, 1))
+
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
         dynamic_scale = torch.randint(0, 255, (32, 8), dtype=torch.uint8)
@@ -136,6 +153,26 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(call_kwargs["bias"].dtype, torch.float32)
         self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.scheme.group_size])
         self.assertEqual(call_kwargs["output_dtype"], torch.float16)
+
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
+    def test_apply_pads_activation_with_weight_group_phase(self, mock_torch_npu):
+        mock_torch_npu.npu_dynamic_mx_quant.return_value = (
+            torch.empty(2, 544, dtype=torch.float8_e4m3fn),
+            torch.empty(2, 17),
+        )
+        mock_torch_npu.npu_quant_matmul.return_value = torch.empty(2, 4)
+        layer = nn.Module()
+        layer.mxfp8_tp_padding = (16, 0)
+        layer.weight = nn.Parameter(torch.empty(544, 4, dtype=torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.empty(9, 4, 2, dtype=torch.uint8), requires_grad=False)
+        x = torch.randn(2, 528)
+
+        self.scheme.apply(layer, x)
+
+        padded_x = mock_torch_npu.npu_dynamic_mx_quant.call_args.args[0]
+        self.assertEqual(padded_x.shape, (2, 544))
+        torch.testing.assert_close(padded_x[:, :16], torch.zeros(2, 16))
+        torch.testing.assert_close(padded_x[:, 16:], x)
 
 
 class TestAscendW8A8MXFP8MoEMethod(TestBase):

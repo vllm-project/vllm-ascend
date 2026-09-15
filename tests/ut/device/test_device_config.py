@@ -27,6 +27,7 @@ def clear_device_config_cache():
     [
         ("ascend910b1", AscendDeviceType.A2),
         ("ASCEND910_9391", AscendDeviceType.A3),
+        ("ASCEND910_9363", AscendDeviceType.A3),
         ("ascend310p3vir08", AscendDeviceType._310P),
         ("ascend950_9599", AscendDeviceType.A5),
     ],
@@ -40,6 +41,7 @@ def test_device_type_from_soc_version(soc_version, expected):
     [
         (220, AscendDeviceType.A2),
         (255, AscendDeviceType.A3),
+        (256, AscendDeviceType.A3),
         (203, AscendDeviceType._310P),
         (260, AscendDeviceType.A5),
     ],
@@ -97,6 +99,7 @@ def test_unknown_build_soc_version_is_rejected(soc_version):
         device_type_from_soc_version(soc_version)
 
 
-def test_unknown_runtime_soc_version_is_rejected():
+@pytest.mark.parametrize("soc_version", [257, 999])
+def test_unknown_runtime_soc_version_is_rejected(soc_version):
     with pytest.raises(RuntimeError, match="Cannot support runtime soc_version"):
-        device_type_from_runtime_soc(999)
+        device_type_from_runtime_soc(soc_version)
