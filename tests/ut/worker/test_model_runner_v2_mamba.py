@@ -264,6 +264,18 @@ def test_deferred_copy_missing_layer_raises(mock_get_group):
 
     with pytest.raises(RuntimeError, match="linear_attn"):
         state._finish_previous_layerwise_mamba_copy()
+def test_mrv2_shared_backing_support_follows_connector_capability():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+
+    for kv_transfer_config, expected in (
+        (None, True),
+        (SimpleNamespace(kv_connector="MooncakeConnectorV1"), True),
+        (SimpleNamespace(kv_connector="MooncakeConnectorV2"), True),
+        (SimpleNamespace(kv_connector="MooncakePullConnector"), True),
+        (SimpleNamespace(kv_connector="UnsupportedConnector"), False),
+    ):
+        runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+        assert runner.supports_shared_backing_with_kv_transfer is expected
 
 
 def test_prepare_inputs_propagates_padded_request_count():
