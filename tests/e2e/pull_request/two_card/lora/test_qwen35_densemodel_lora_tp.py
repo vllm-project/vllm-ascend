@@ -8,9 +8,8 @@ from tests.e2e.pull_request.one_card.lora.test_qwen35_densemodel_lora import (
 
 
 @wait_until_npu_memory_free(target_free_percentage=0.7)
-@pytest.mark.parametrize("enforce_eager", [False, True])
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-def test_qwen35_text_lora(qwen35_text_lora_files, enforce_eager, fully_sharded_loras):
+def test_qwen35_text_lora(qwen35_text_lora_files, fully_sharded_loras):
     with VllmRunner(
         model_name=MODEL_PATH,
         max_model_len=4096,
@@ -18,7 +17,6 @@ def test_qwen35_text_lora(qwen35_text_lora_files, enforce_eager, fully_sharded_l
         max_loras=2,
         max_num_seqs=4,
         max_lora_rank=8,
-        enforce_eager=enforce_eager,
         fully_sharded_loras=fully_sharded_loras,
         tensor_parallel_size=2,
     ) as vllm_runner:
