@@ -147,7 +147,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         finally:
             dflash_cudagraph.build_attn_metadata = original
 
-    def build_draft_attn_metadata_for_graph(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
         # Dense MLA queries, including padded rows, must not inherit target prefill flags.
