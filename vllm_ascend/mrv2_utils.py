@@ -37,6 +37,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3MoeForCausalLM",
         "MiniMaxM2ForCausalLM",
         "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "GlmMoeDsaForCausalLM",
         "DeepseekV4ForCausalLM",
         "Qwen3_5MoeForCausalLM",
