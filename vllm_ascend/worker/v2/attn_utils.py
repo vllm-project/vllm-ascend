@@ -153,6 +153,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
+            if not getattr(
+                getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
+                "runtime_has_indexer",
+                True,
+            ):
+                continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
