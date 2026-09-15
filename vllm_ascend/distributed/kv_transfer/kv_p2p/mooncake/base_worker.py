@@ -29,7 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendDCPReplicatedDraftAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -165,9 +165,7 @@ class MooncakeBaseConnectorWorker:
         apart. A packed layout must place every view's first block inside one
         common page stride and use the same physical block count and stride.
         """
-        # A single strided layer does not own the gaps between its blocks.
-        # Those gaps can contain other attention layers or recurrent state.
-        if len(caches) < 2 or len({tensor_storage_key(cache) for cache in caches}) != 1:
+        if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
             return None
 
         tensor_num_blocks = {cache.shape[0] for cache in caches}
@@ -276,8 +274,6 @@ class MooncakeBaseConnectorWorker:
                     # so dividing it by the tensor block scale recovers the
                     # physical kernel block size.
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
-                if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
-                    layer_block_size *= spec.dcp_replication_size
                 layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
                 kv_caches_base_addr.append(base_addrs)
