@@ -52,12 +52,13 @@ def _patched_validate_v2_model_runner(self) -> None:
 VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner
 
 
-_original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_runner_unsupported_features
+if hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
+    # vllm >= 0.26 removed the v1-runner unsupported-features hook; only
+    # patch it when the method still exists.
+    _original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_runner_unsupported_features
 
+    def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
+        unsupported = _original_get_v1_model_runner_unsupported_features(self)
+        return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
 
-def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
-    unsupported = _original_get_v1_model_runner_unsupported_features(self)
-    return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
-
-
-VllmConfig._get_v1_model_runner_unsupported_features = _patched_get_v1_model_runner_unsupported_features
+    VllmConfig._get_v1_model_runner_unsupported_features = _patched_get_v1_model_runner_unsupported_features

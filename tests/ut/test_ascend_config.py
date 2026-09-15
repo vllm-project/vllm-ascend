@@ -30,6 +30,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    CustomFIAConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -105,6 +106,37 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestCustomFIAConfig(TestBase):
+    def test_defaults_and_explicit_values(self):
+        defaults = CustomFIAConfig()
+
+        self.assertFalse(defaults.enabled)
+        self.assertEqual(defaults.sparse_lambda, -99.0)
+        self.assertFalse(defaults.full_graph)
+        # Op-behavior switch defaults on (former env kill-switch VLLM_FIA_FD
+        # defaulted to enabled).
+        self.assertTrue(defaults.flash_decode)
+
+        explicit = CustomFIAConfig(
+            enabled=True, sparse_lambda=-3.0, full_graph=True,
+            flash_decode=False,
+        )
+        self.assertTrue(explicit.enabled)
+        self.assertEqual(explicit.sparse_lambda, -3.0)
+        self.assertTrue(explicit.full_graph)
+        self.assertFalse(explicit.flash_decode)
+
+    def test_lax_bool_and_unknown_key(self):
+        config = CustomFIAConfig(  # type: ignore[arg-type]
+            enabled="true", flash_decode="0"
+        )
+
+        self.assertTrue(config.enabled)
+        self.assertFalse(config.flash_decode)
+        with self.assertRaises(ValueError):
+            CustomFIAConfig(quant=False)  # type: ignore[call-arg]
 
 
 class TestAscendConfig(TestBase):
