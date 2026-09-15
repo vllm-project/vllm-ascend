@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -51,6 +52,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -182,6 +184,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
+    for layer_name, layer in attn_layers.items():
+        if not getattr(layer, "_ascend_dcp_replicated_draft", False):
+            continue
+        spec = kv_cache_spec[layer_name]
+        if not isinstance(spec, FullAttentionSpec) or isinstance(spec, MLAAttentionSpec):
+            raise TypeError("Replicated GQA draft requires a full-attention KV spec.")
+        kv_cache_spec[layer_name] = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+            spec, vllm_config.parallel_config.decode_context_parallel_size
+        )
     return kv_cache_spec
 
 
@@ -1112,6 +1123,8 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
+            if isinstance(kv_cache_spec, AscendDCPReplicatedDraftAttentionSpec):
+                num_blocks *= kv_cache_spec.dcp_replication_size
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
