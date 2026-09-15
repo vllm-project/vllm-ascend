@@ -259,7 +259,6 @@ class cmake_build_ext(build_ext):
     def configure(self, ext: CMakeExtension) -> None:
         build_temp = self.build_temp
         os.makedirs(build_temp, exist_ok=True)
-        source_dir = os.path.abspath(ROOT_DIR)
         python_executable = sys.executable
         cmake_args = ["cmake"]
         # Default use release mode to compile the csrc code
@@ -344,7 +343,7 @@ class cmake_build_ext(build_ext):
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
 
-        cmake_args += [source_dir]
+        cmake_args += [ext.cmake_lists_dir]
         logging.info("cmake config command: %s", cmake_args)
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
