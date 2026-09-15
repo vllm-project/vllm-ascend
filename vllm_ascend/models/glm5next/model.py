@@ -1001,8 +1001,9 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.
         # Ignore the standalone QuaRot tensor to avoid applying it a second time.
-        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loader = AutoWeightsLoader(self)
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(orig_to_new_prefix={"rot.": None})
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding

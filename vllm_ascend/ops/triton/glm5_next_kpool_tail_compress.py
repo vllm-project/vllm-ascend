@@ -5,12 +5,13 @@
 Two ordered launches per sparse layer perform the following:
 
 1. For tokens that complete a pool (valid indexer slot), gather the
-   ``index_kpool`` window of states ending at the token's position. Window
+   ``index_kpool`` window of raw K/gate vectors ending at the token's position. Window
    entries covered by the current query chunk are read straight from the
-   ``k``/``gate_score`` inputs; older entries come from the paged state cache.
+   ``k``/``gate_score`` inputs; older entries come from the request-owned tail ring.
 2. Compress the window with ``softmax(gate_score + ape)`` over the pool axis
    and write the BF16 vector into the paged indexer cache.
-3. A second launch writes each valid token to its scheduler-provided state slot.
+3. A second launch seeds the last at most C query tokens per request, giving
+   every circular tail slot exactly one writer.
    This ordering keeps long prefills from overwriting historical rows while
    another program is still reading them to complete the first pool.
 
@@ -30,8 +31,8 @@ TRITON_MAX_BLOCK_D = 128
 # Keep batch-varying inputs unspecialized to avoid recompiling per step.
 # REQ_POW2 stays constexpr for tl.arange; warm up its power-of-two variants.
 @triton.jit(do_not_specialize=["num_reqs", "num_tokens"])
-def _glm5_next_kpool_state_compress_kernel(
-    state_cache_ptr,
+def _glm5_next_kpool_tail_compress_kernel(
+    tail_cache_ptr,
     indexer_cache_ptr,
     k_ptr,
     gate_score_ptr,
@@ -39,27 +40,24 @@ def _glm5_next_kpool_state_compress_kernel(
     positions_ptr,
     cum_query_lens_ptr,
     seq_lens_ptr,
-    state_slot_mapping_ptr,
-    state_block_table_ptr,
+    tail_block_table_ptr,
     indexer_slot_mapping_ptr,
     num_reqs,
     num_tokens,
     k_stride_t: tl.constexpr,
     gate_score_stride_t: tl.constexpr,
     ape_stride_p: tl.constexpr,
-    state_cache_stride_block: tl.constexpr,
-    state_cache_stride_offset: tl.constexpr,
-    state_cache_stride_d: tl.constexpr,
+    tail_cache_stride_block: tl.constexpr,
+    tail_cache_stride_plane: tl.constexpr,
+    tail_cache_stride_offset: tl.constexpr,
+    tail_cache_stride_d: tl.constexpr,
     indexer_cache_stride_block: tl.constexpr,
     indexer_cache_stride_offset: tl.constexpr,
     indexer_cache_stride_d: tl.constexpr,
-    state_block_table_stride_req: tl.constexpr,
-    state_block_table_stride_page: tl.constexpr,
-    state_num_slots: tl.constexpr,
+    tail_block_table_stride_req: tl.constexpr,
     indexer_num_slots: tl.constexpr,
-    state_num_blocks: tl.constexpr,
-    state_max_pages: tl.constexpr,
-    state_block_size: tl.constexpr,
+    tail_num_blocks: tl.constexpr,
+    tail_block_size: tl.constexpr,
     indexer_block_size: tl.constexpr,
     REQ_POW2: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -89,6 +87,7 @@ def _glm5_next_kpool_state_compress_kernel(
     indexer_valid = (indexer_slot >= 0) & (indexer_slot < indexer_num_slots) & (token_idx < last_query_end)
 
     pos = tl.load(positions_ptr + token_idx).to(tl.int32)
+    indexer_valid = indexer_valid & (pos >= 0) & ((pos + 1) % POOL_SIZE == 0)
     query_end = tl.load(cum_query_lens_ptr + req_id)
     prev_query_end = tl.load(cum_query_lens_ptr + req_id - 1, mask=req_id > 0, other=0)
     seq_len = tl.load(seq_lens_ptr + req_id)
@@ -96,16 +95,16 @@ def _glm5_next_kpool_state_compress_kernel(
 
     pool_offsets = tl.arange(0, BLOCK_P)
     pool_mask = pool_offsets < POOL_SIZE
-    # Column j holds the state at position pos - (POOL_SIZE - 1 - j).
+    # Column j holds the raw K/gate at position pos - (POOL_SIZE - 1 - j).
     pool_pos = pos - (POOL_SIZE - 1 - pool_offsets)
     eff_pos = tl.maximum(pool_pos, 0)
-    in_window = pool_mask & (pool_pos >= request_query_start)
+    in_window = pool_mask & (pool_pos >= request_query_start) & (pool_pos < seq_len)
 
     # In-window rows live in this launch's k/gate_score inputs; the matching
     # input row is the batch row of the token at that position.
     src_row = prev_query_end + eff_pos - request_query_start
     src_row = tl.minimum(tl.maximum(src_row, 0), num_tokens - 1)
-    window_mask = in_window[:, None] & dim_mask[None, :]
+    window_mask = indexer_valid & in_window[:, None] & dim_mask[None, :]
     pool_k_in = tl.load(
         k_ptr + src_row[:, None] * k_stride_t + dim_offsets[None, :],
         mask=window_mask,
@@ -117,26 +116,23 @@ def _glm5_next_kpool_state_compress_kernel(
         other=0.0,
     ).to(tl.float32)
 
-    # Older rows come from the paged state cache (written by earlier steps).
-    page = eff_pos // state_block_size
-    history_valid = indexer_valid & pool_mask & (pool_pos >= 0) & (~in_window) & (page < state_max_pages)
-    page_offset = eff_pos % state_block_size
+    # Older rows belong to this request's fixed block, addressed modulo C.
+    history_valid = indexer_valid & pool_mask & (pool_pos >= 0) & (~in_window)
+    page_offset = eff_pos % tail_block_size
     physical = tl.load(
-        state_block_table_ptr + req_id * state_block_table_stride_req + page * state_block_table_stride_page,
-        mask=history_valid,
-        other=-1,
+        tail_block_table_ptr + req_id * tail_block_table_stride_req,
     ).to(tl.int64)
-    history_valid = history_valid & (physical >= 0) & (physical < state_num_blocks)
+    history_valid = history_valid & (physical >= 0) & (physical < tail_num_blocks)
     physical = tl.where(history_valid, physical, 0)
-    hist_addr = physical[:, None] * state_cache_stride_block + page_offset[:, None] * state_cache_stride_offset
+    hist_addr = physical[:, None] * tail_cache_stride_block + page_offset[:, None] * tail_cache_stride_offset
     hist_mask = history_valid[:, None] & dim_mask[None, :]
     pool_k_hist = tl.load(
-        state_cache_ptr + hist_addr + dim_offsets[None, :] * state_cache_stride_d,
+        tail_cache_ptr + hist_addr + dim_offsets[None, :] * tail_cache_stride_d,
         mask=hist_mask,
         other=0.0,
     ).to(tl.float32)
     pool_g_hist = tl.load(
-        state_cache_ptr + hist_addr + (HEAD_DIM + dim_offsets[None, :]) * state_cache_stride_d,
+        tail_cache_ptr + hist_addr + tail_cache_stride_plane + dim_offsets[None, :] * tail_cache_stride_d,
         mask=hist_mask,
         other=0.0,
     ).to(tl.float32)
@@ -169,17 +165,19 @@ def _glm5_next_kpool_state_compress_kernel(
     )
 
 
-@triton.jit(do_not_specialize=["num_reqs"])
-def _store_kpool_state_kernel(
-    state,
+@triton.jit(do_not_specialize=["num_tokens"])
+def _store_kpool_tail_kernel(
+    tail,
     k,
     gate,
     query_ends,
-    state_slots,
-    num_reqs,
-    state_stride_b: tl.constexpr,
-    state_stride_t: tl.constexpr,
-    state_stride_d: tl.constexpr,
+    tail_slots,
+    positions,
+    num_tokens,
+    tail_stride_b: tl.constexpr,
+    tail_stride_plane: tl.constexpr,
+    tail_stride_t: tl.constexpr,
+    tail_stride_d: tl.constexpr,
     k_stride_t: tl.constexpr,
     gate_stride_t: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
@@ -187,23 +185,30 @@ def _store_kpool_state_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    dims = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
-    end = tl.load(query_ends + num_reqs - 1)
-    slot = tl.load(state_slots + row).to(tl.int64)
-    valid = (row < end) & (slot >= 0) & (slot < NUM_BLOCKS * BLOCK_SIZE)
+    # One program per retained row: cost is bounded by requests * C even for
+    # long prefills. Distinct final C positions have distinct circular slots.
+    req_id = tl.program_id(0) // BLOCK_SIZE
+    retained_offset = tl.program_id(0) % BLOCK_SIZE
+    end = tl.load(query_ends + req_id)
+    start = tl.load(query_ends + req_id - 1, mask=req_id > 0, other=0)
+    row = end - 1 - retained_offset
+    row_valid = (row >= start) & (row >= 0) & (row < num_tokens)
+    pos = tl.load(positions + row, mask=row_valid, other=-1)
+    slot = tl.load(tail_slots + row, mask=row_valid, other=-1).to(tl.int64)
+    valid = row_valid & (pos >= 0) & (slot >= 0) & (slot < NUM_BLOCKS * BLOCK_SIZE)
     safe_slot = tl.where(valid, slot, 0)
     block, offset = safe_slot // BLOCK_SIZE, safe_slot % BLOCK_SIZE
+    dims = tl.program_id(1) * BLOCK_D + tl.arange(0, BLOCK_D)
     mask = valid & (dims < HEAD_DIM)
     key = tl.load(k + row * k_stride_t + dims, mask=mask, other=0)
     score = tl.load(gate + row * gate_stride_t + dims, mask=mask, other=0)
-    addr = state + block * state_stride_b + offset * state_stride_t
-    tl.store(addr + dims * state_stride_d, key, mask=mask)
-    tl.store(addr + (HEAD_DIM + dims) * state_stride_d, score, mask=mask)
+    addr = tail + block * tail_stride_b + offset * tail_stride_t
+    tl.store(addr + dims * tail_stride_d, key, mask=mask)
+    tl.store(addr + tail_stride_plane + dims * tail_stride_d, score, mask=mask)
 
 
-def glm5_next_kpool_state_compress_and_write_cache_triton(
-    state_cache: torch.Tensor,
+def glm5_next_kpool_tail_compress_and_write_cache_triton(
+    tail_cache: torch.Tensor,
     indexer_cache: torch.Tensor,
     k: torch.Tensor,
     gate_score: torch.Tensor,
@@ -211,17 +216,30 @@ def glm5_next_kpool_state_compress_and_write_cache_triton(
     positions: torch.Tensor,
     cum_query_lens: torch.Tensor,
     seq_lens: torch.Tensor,
-    state_slot_mapping: torch.Tensor,
-    state_block_table: torch.Tensor,
+    tail_slot_mapping: torch.Tensor,
+    tail_block_table: torch.Tensor,
     indexer_slot_mapping: torch.Tensor,
     index_kpool: int,
 ) -> None:
-    """Compress pools, then write states using the original paged slot mapping."""
+    """Compress from old tail + current input, then seed unique circular slots.
+
+    tail_cache is [blocks, 2, capacity, head_dim], including physical padding.
+    Query positions must be contiguous within each request. Speculative replay
+    needs a separately proven retention capacity; C=R covers non-MTP execution.
+    """
     num_tokens, head_dim = k.shape
     if num_tokens == 0 or cum_query_lens.numel() == 0:
         return
-    if state_block_table.shape[1] == 0 or state_cache.shape[1] < index_kpool:
-        raise ValueError("KPool requires a nonempty state page table and block size >= pool size.")
+    if index_kpool <= 0:
+        raise ValueError("KPool requires a positive pool size.")
+    if (
+        tail_cache.ndim != 4
+        or tail_cache.shape[1] != 2
+        or tail_cache.shape[2] < index_kpool
+        or tail_cache.shape[3] != head_dim
+        or tail_block_table.shape[1] == 0
+    ):
+        raise ValueError("KPool requires [blocks, 2, capacity, head_dim] tail and a nonempty block table.")
 
     if not k.is_contiguous():
         k = k.contiguous()
@@ -235,18 +253,16 @@ def glm5_next_kpool_state_compress_and_write_cache_triton(
         cum_query_lens = cum_query_lens.contiguous()
     if not seq_lens.is_contiguous():
         seq_lens = seq_lens.contiguous()
-    if not state_slot_mapping.is_contiguous():
-        state_slot_mapping = state_slot_mapping.contiguous()
-    if not state_block_table.is_contiguous():
-        state_block_table = state_block_table.contiguous()
+    if not tail_slot_mapping.is_contiguous():
+        tail_slot_mapping = tail_slot_mapping.contiguous()
     if not indexer_slot_mapping.is_contiguous():
         indexer_slot_mapping = indexer_slot_mapping.contiguous()
 
     block_p = next_power_of_2(index_kpool)
     block_d = min(next_power_of_2(head_dim), TRITON_MAX_BLOCK_D)
     num_reqs = cum_query_lens.shape[0]
-    _glm5_next_kpool_state_compress_kernel[(num_tokens, triton.cdiv(head_dim, block_d))](
-        state_cache,
+    _glm5_next_kpool_tail_compress_kernel[(num_tokens, triton.cdiv(head_dim, block_d))](
+        tail_cache,
         indexer_cache,
         k,
         gate_score,
@@ -254,27 +270,24 @@ def glm5_next_kpool_state_compress_and_write_cache_triton(
         positions,
         cum_query_lens,
         seq_lens,
-        state_slot_mapping,
-        state_block_table,
+        tail_block_table,
         indexer_slot_mapping,
         num_reqs,
         num_tokens,
         k.stride(0),
         gate_score.stride(0),
         ape.stride(0),
-        state_cache.stride(0),
-        state_cache.stride(1),
-        state_cache.stride(2),
+        tail_cache.stride(0),
+        tail_cache.stride(1),
+        tail_cache.stride(2),
+        tail_cache.stride(3),
         indexer_cache.stride(0),
         indexer_cache.stride(1),
         indexer_cache.stride(3),
-        state_block_table.stride(0),
-        state_block_table.stride(1),
-        state_cache.shape[0] * state_cache.shape[1],
+        tail_block_table.stride(0),
         indexer_cache.shape[0] * indexer_cache.shape[1],
-        state_cache.shape[0],
-        state_block_table.shape[1],
-        state_cache.shape[1],
+        tail_cache.shape[0],
+        tail_cache.shape[2],
         indexer_cache.shape[1],
         next_power_of_2(max(1, num_reqs)),
         head_dim,
@@ -282,20 +295,22 @@ def glm5_next_kpool_state_compress_and_write_cache_triton(
         block_p,
         block_d,
     )
-    _store_kpool_state_kernel[(num_tokens, triton.cdiv(head_dim, block_d))](
-        state_cache,
+    _store_kpool_tail_kernel[(num_reqs * tail_cache.shape[2], triton.cdiv(head_dim, block_d))](
+        tail_cache,
         k,
         gate_score,
         cum_query_lens,
-        state_slot_mapping,
-        num_reqs,
-        state_cache.stride(0),
-        state_cache.stride(1),
-        state_cache.stride(2),
+        tail_slot_mapping,
+        positions,
+        num_tokens,
+        tail_cache.stride(0),
+        tail_cache.stride(1),
+        tail_cache.stride(2),
+        tail_cache.stride(3),
         k.stride(0),
         gate_score.stride(0),
-        state_cache.shape[0],
-        state_cache.shape[1],
+        tail_cache.shape[0],
+        tail_cache.shape[2],
         head_dim,
         block_d,
     )
