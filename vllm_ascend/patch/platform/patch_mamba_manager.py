@@ -15,7 +15,49 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
     MambaSpec,
+    SingleTypeKVCacheManager,
 )
+from vllm.utils.math_utils import cdiv
+
+
+def _allocate_new_blocks_after_growing_request(
+    self: SingleTypeKVCacheManager,
+    request_id: str,
+    num_tokens: int,
+    num_tokens_main_model: int,
+) -> list[KVCacheBlock]:
+    """Grow the request block table before resolving partial-hit CoW.
+
+    Partial-prefix registrations are owned by the common single-type manager,
+    not only by Mamba managers.  Patch the base implementation so attention
+    and recurrent cache groups observe the same safe allocation order.
+    """
+    partial_hit_info = self._partial_hit_reqs.pop(request_id, None)
+
+    req_blocks = self.req_to_blocks[request_id]
+    num_required_blocks = cdiv(num_tokens, self.block_size)
+    num_new_blocks = num_required_blocks - len(req_blocks)
+    new_blocks: list[KVCacheBlock] = []
+    if num_new_blocks > 0:
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+
+    cow_blocks: list[KVCacheBlock] = []
+    if partial_hit_info is not None:
+        block_idx, source_block = partial_hit_info
+        if (
+            block_idx < len(req_blocks)
+            and req_blocks[block_idx] is source_block
+            and not source_block.is_null
+        ):
+            cow_block = self.block_pool.get_new_blocks(1)[0]
+            self._apply_cow(request_id, block_idx, source_block, cow_block)
+            self.new_block_ids.append(cow_block.block_id)
+            cow_blocks.append(cow_block)
+
+    return cow_blocks + new_blocks
 
 
 class AscendMambaManager(MambaManager):
@@ -139,4 +181,7 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
+SingleTypeKVCacheManager.allocate_new_blocks = (
+    _allocate_new_blocks_after_growing_request
+)
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
