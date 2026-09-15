@@ -72,6 +72,14 @@ logger.info_once(
     scope="process",
 )
 
+# Keep graph memory profiling opt-in on Ascend. Upstream enables it by default.
+value = os.environ.setdefault("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0")
+logger.info_once(
+    "Graph memory profiling on Ascend is opt-in; using VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=%s.",
+    value,
+    scope="process",
+)
+
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_REDUCED_CAPTURE_SIZES = 4
