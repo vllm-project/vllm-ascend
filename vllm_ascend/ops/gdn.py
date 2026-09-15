@@ -21,6 +21,7 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
@@ -43,6 +44,7 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 DMA_ALIGNMENT_ELEMENTS = 16
 SUPPORTS_REARRANGE_QKV_DMA = get_current_hardware_profile().supports(HardwareCapability.REARRANGE_QKV_DMA)
+_ORIGINAL_REARRANGE_MIXED_QKV = QwenGatedDeltaNetAttention.rearrange_mixed_qkv
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -189,13 +191,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             or mixed_qkv.dtype not in (torch.bfloat16, torch.float16)
             or not mixed_qkv.is_contiguous()
         ):
-            return GatedDeltaNetAttention.rearrange_mixed_qkv(self, mixed_qkv)
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
 
         q_dim = self.key_dim // self.tp_size
         k_dim = q_dim
         v_dim = self.value_dim // self.tp_size
         if q_dim % DMA_ALIGNMENT_ELEMENTS != 0 or v_dim % DMA_ALIGNMENT_ELEMENTS != 0:
-            return GatedDeltaNetAttention.rearrange_mixed_qkv(self, mixed_qkv)
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
 
         num_tokens = mixed_qkv.shape[0]
         packed_qkv = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)

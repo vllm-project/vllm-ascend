@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
+from vllm_ascend.ops import gdn as gdn_module
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -60,7 +60,7 @@ def test_gdn_dispatch(q_dim, v_dim, tp_size, dtype):
         head_k_dim=128,
         head_v_dim=128,
     )
-    with patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", unexpected_fallback):
+    with patch.object(gdn_module, "_ORIGINAL_REARRANGE_MIXED_QKV", unexpected_fallback):
         outputs = AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
     expected_parts = mixed_qkv.split([q_dim, q_dim, v_dim], dim=-1)
     expected_heads = (q_dim // 128, q_dim // 128, v_dim // 128)

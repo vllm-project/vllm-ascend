@@ -6,7 +6,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
 from vllm_ascend.ops import gdn as gdn_module
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -40,7 +39,7 @@ def test_supported_layout_uses_custom_op(dtype):
 
     with (
         patch.object(gdn_module, "SUPPORTS_REARRANGE_QKV_DMA", True),
-        patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", fallback),
+        patch.object(gdn_module, "_ORIGINAL_REARRANGE_MIXED_QKV", fallback),
         patch.object(torch.ops, "_C_ascend", SimpleNamespace(npu_rearrange_qkv=custom_op)),
     ):
         outputs = AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
@@ -58,7 +57,7 @@ def test_profile_without_capability_uses_original_implementation():
     fallback = Mock(return_value=(None, None, None))
     with (
         patch.object(gdn_module, "SUPPORTS_REARRANGE_QKV_DMA", False),
-        patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", fallback),
+        patch.object(gdn_module, "_ORIGINAL_REARRANGE_MIXED_QKV", fallback),
     ):
         result = AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
 
@@ -81,7 +80,7 @@ def test_unsupported_layout_uses_original_implementation(layer_attributes, dtype
     fallback = Mock(return_value=(None, None, None))
     with (
         patch.object(gdn_module, "SUPPORTS_REARRANGE_QKV_DMA", True),
-        patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", fallback),
+        patch.object(gdn_module, "_ORIGINAL_REARRANGE_MIXED_QKV", fallback),
     ):
         result = AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
 
@@ -92,6 +91,6 @@ def test_unsupported_layout_uses_original_implementation(layer_attributes, dtype
 def test_none_uses_original_implementation():
     layer = make_layer()
     fallback = Mock(return_value=(None, None, None))
-    with patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", fallback):
+    with patch.object(gdn_module, "_ORIGINAL_REARRANGE_MIXED_QKV", fallback):
         assert AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, None) == (None, None, None)
     fallback.assert_called_once_with(layer, None)
