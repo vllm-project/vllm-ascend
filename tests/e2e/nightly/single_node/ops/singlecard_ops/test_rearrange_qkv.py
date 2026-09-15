@@ -2,12 +2,14 @@
 # Copyright contributors to the vllm-ascend project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 
-from vllm_ascend.ops.rearrange_qkv import rearrange_mixed_qkv
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
@@ -48,7 +50,7 @@ def test_bitwise_copy(tokens, offset, dtype):
 def test_gdn_dispatch(q_dim, v_dim, tp_size, dtype):
     mixed_qkv = torch.randn(37, 2 * q_dim + v_dim, device="npu", dtype=dtype)
 
-    def unexpected_fallback(_):
+    def unexpected_fallback(self, mixed_qkv):
         pytest.fail("Supported GDN layout did not use npu_rearrange_qkv")
 
     layer = SimpleNamespace(
@@ -57,9 +59,9 @@ def test_gdn_dispatch(q_dim, v_dim, tp_size, dtype):
         tp_size=tp_size,
         head_k_dim=128,
         head_v_dim=128,
-        rearrange_mixed_qkv=unexpected_fallback,
     )
-    outputs = rearrange_mixed_qkv(layer, mixed_qkv)
+    with patch.object(GatedDeltaNetAttention, "rearrange_mixed_qkv", unexpected_fallback):
+        outputs = AscendGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
     expected_parts = mixed_qkv.split([q_dim, q_dim, v_dim], dim=-1)
     expected_heads = (q_dim // 128, q_dim // 128, v_dim // 128)
     for output, expected, heads in zip(outputs, expected_parts, expected_heads):

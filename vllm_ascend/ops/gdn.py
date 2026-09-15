@@ -33,13 +33,16 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
-from vllm_ascend.ops.rearrange_qkv import rearrange_mixed_qkv
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+DMA_ALIGNMENT_ELEMENTS = 16
+SUPPORTS_REARRANGE_QKV_DMA = get_current_hardware_profile().supports(HardwareCapability.REARRANGE_QKV_DMA)
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -178,6 +181,30 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
+
+    def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
+        if (
+            mixed_qkv is None
+            or not SUPPORTS_REARRANGE_QKV_DMA
+            or mixed_qkv.dtype not in (torch.bfloat16, torch.float16)
+            or not mixed_qkv.is_contiguous()
+        ):
+            return GatedDeltaNetAttention.rearrange_mixed_qkv(self, mixed_qkv)
+
+        q_dim = self.key_dim // self.tp_size
+        k_dim = q_dim
+        v_dim = self.value_dim // self.tp_size
+        if q_dim % DMA_ALIGNMENT_ELEMENTS != 0 or v_dim % DMA_ALIGNMENT_ELEMENTS != 0:
+            return GatedDeltaNetAttention.rearrange_mixed_qkv(self, mixed_qkv)
+
+        num_tokens = mixed_qkv.shape[0]
+        packed_qkv = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)
+        query, key, value = packed_qkv.split([num_tokens * q_dim, num_tokens * k_dim, num_tokens * v_dim])
+        return (
+            query.view(1, num_tokens, q_dim // self.head_k_dim, self.head_k_dim),
+            key.view(1, num_tokens, k_dim // self.head_k_dim, self.head_k_dim),
+            value.view(1, num_tokens, v_dim // self.head_v_dim, self.head_v_dim),
+        )
 
     def forward(
         self,
@@ -431,8 +458,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = rearrange_mixed_qkv(self, mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = rearrange_mixed_qkv(self, mixed_qkv_non_spec)
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)

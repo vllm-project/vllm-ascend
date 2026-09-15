@@ -36,6 +36,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.REARRANGE_QKV_DMA,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
