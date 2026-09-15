@@ -52,6 +52,11 @@ on:
         required: false
         default: false
         type: boolean
+      profile_enabled:
+        description: 'Enable torch profiler and export profiling artifacts'
+        required: false
+        default: false
+        type: boolean
       build_type:
         description: 'Build type: daily or release.'
         required: false
@@ -65,8 +70,6 @@ on:
         required: false
         default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
         type: string
-      bisect_good_commit:
-        description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
@@ -216,6 +219,7 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      profile_enabled: ${{ inputs.profile_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
       bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
@@ -260,6 +264,7 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      profile_enabled: ${{ inputs.profile_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
       bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
