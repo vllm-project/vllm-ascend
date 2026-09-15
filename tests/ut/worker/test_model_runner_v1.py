@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -248,6 +249,21 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
+    def test_kimi_k3_gqa_dspark_uses_dedicated_layout_without_dcp(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dcp_size = 1
+        runner._draft_uses_qwen3_gqa_dspark = MagicMock(return_value=True)
+        runner.model_config = SimpleNamespace(
+            architecture="KimiK3ForConditionalGeneration",
+            architectures=["KimiK3ForConditionalGeneration"],
+            hf_config=SimpleNamespace(
+                model_type="kimi_k3",
+                architectures=["KimiK3ForConditionalGeneration"],
+            ),
+        )
+
+        self.assertTrue(runner._uses_dcp_replicated_dspark_draft_kv())
+
     def _build_runner(
         self,
         *,
@@ -271,6 +287,14 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         runner = self._build_runner(
             model_type="qwen3",
             architecture="Qwen3DSparkModel",
+        )
+
+        self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_legacy_qwen3_gqa_dspark_uses_materialized_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="DSparkDraftModel",
         )
 
         self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
@@ -1014,6 +1038,84 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_dcp_replicated_draft_cache_allocates_physical_lane_pages(self):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [16]
+        base_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+            page_size_padded=1024,
+        )
+        replication_size = 4
+        spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+            base_spec,
+            replication_size,
+        )
+        self.assertEqual(spec.lane_page_size_bytes, base_spec.unpadded_page_size_bytes)
+        self.assertEqual(
+            spec.page_size_bytes,
+            replication_size * base_spec.unpadded_page_size_bytes,
+        )
+        mamba_spec = MambaSpec(
+            block_size=16,
+            shapes=((256,),),
+            dtypes=(torch.float32,),
+            page_size_padded=base_spec.page_size_bytes,
+            mamba_cache_mode="align",
+        )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "target_attn": base_spec,
+                "draft_attn": spec,
+            }
+        )
+        self.assertIsNotNone(mixed_spec)
+        assert mixed_spec is not None
+        from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+            _get_kimi_k3_replicated_dspark_kv_cache_config,
+        )
+
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=["target_attn", "draft_attn"],
+                kv_cache_spec=mixed_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["target_mamba"],
+                kv_cache_spec=mamba_spec,
+            ),
+        ]
+        with patch(
+            "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks", side_effect=lambda _, n: n
+        ):
+            config = _get_kimi_k3_replicated_dspark_kv_cache_config(
+                SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
+                groups,
+                (base_spec.page_size_bytes + spec.page_size_bytes) * 2,
+            )
+        assert config is not None
+        raw = runner._allocate_kv_cache_tensors(config)
+        self.assertEqual(raw["target_attn"].data_ptr(), raw["target_mamba"].data_ptr())
+        self.assertIsInstance(raw["draft_attn"], torch.Tensor)
+        self.assertEqual(raw["draft_attn"].numel(), spec.page_size_bytes * 2)
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=["draft_attn"],
+            )
+        ]
+
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(config, raw)["draft_attn"]
+
+        expected_shape = (2 * replication_size, 16, 2, 4)
+        self.assertEqual(k_cache.shape, expected_shape)
+        self.assertEqual(v_cache.shape, expected_shape)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(

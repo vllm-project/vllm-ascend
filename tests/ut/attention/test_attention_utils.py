@@ -68,3 +68,13 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_filter_chunked_req_indices_uses_known_device_output_size() -> None:
+    indices = filter_chunked_req_indices(
+        torch.tensor([2, 1, 3]),
+        torch.tensor([True, False, True]),
+        total_tokens=6,
+    )
+
+    torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
