@@ -338,10 +338,20 @@ jobs:
         # are rebuilt on every install. Without this the save step packs
         # multi-GB garbage into the archive. The `du -sh` line surfaces
         # the pruned size in the log for verification.
+        #
+        # Non-blocking by design: sibling matrix shards can be scheduled
+        # onto runners that share one physical cache dir on the same
+        # host (observed: three a3-2 shards on one host all failing prune
+        # with ENOENT within the same minute). A concurrent shard's
+        # install mutates/removes entries mid-prune, and uv exits 2 on
+        # files already deleted. Retry once, then keep going: a partially
+        # pruned cache only inflates the save archive, it never breaks
+        # the tests. Hence continue-on-error + retry + || true.
         if: ${{ (matrix.group.npu_type == 'a3' || matrix.group.npu_type == '310p') && steps.uv-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
         run: |
           rm -rf /root/.cache/uv/builds-v0
-          uv cache prune --ci
+          uv cache prune --ci || { sleep 5; uv cache prune --ci; } || true
           du -sh /root/.cache/uv/* 2>/dev/null | sort -rh | head -20
 
       - name: Save uv wheel cache
