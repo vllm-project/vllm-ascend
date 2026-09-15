@@ -48,7 +48,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kimi_k3_replicated_dspark_kv_cache_config,
     _get_kv_cache_config_deepseek_v4,
     _get_kv_cache_config_deepseek_v4_main,
-    _unify_kv_cache_spec_page_size,
+    _get_replicated_draft_kv_cache_groups,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -802,11 +802,11 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
         for idx, name in enumerate(groups[0].layer_names[24:]):
             assert regions[name] == ((24 * page_size + idx * draft_page_size) * expected_num_blocks, draft_page_size)
     assert kv_cache_utils_patch._ascend_pool_bytes_per_block(groups) == bytes_per_block
-    if not vllm_version_is("0.28.0"):
-        with patch.object(kv_cache_utils_patch, "_orig_get_packed_kv_cache_groups", side_effect=AssertionError):
-            packed_groups = kv_cache_utils_patch._ascend_get_packed_kv_cache_groups(SimpleNamespace(), specs)
-        assert packed_groups is not None
-        assert [group.layer_names for group in packed_groups] == [group.layer_names for group in groups]
+    with patch.object(kv_cache_utils_patch, "_orig_get_kv_cache_groups", side_effect=AssertionError):
+        actual_groups = kv_cache_utils_patch._ascend_get_kv_cache_groups(
+            SimpleNamespace(scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False)), specs
+        )
+    assert [group.layer_names for group in actual_groups] == [group.layer_names for group in groups]
 
 
 def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
@@ -815,7 +815,9 @@ def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
         if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
             specs[name] = replace(spec, page_size_padded=122112)
 
-    unified = _unify_kv_cache_spec_page_size(specs)
+    groups = _get_replicated_draft_kv_cache_groups(specs)
+    assert groups is not None
+    unified = {name: spec for group in groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
 
     assert unified is not specs
     assert {spec.block_size for spec in unified.values()} == {384}
@@ -842,7 +844,9 @@ def test_kimi_k3_dcp_replicated_pages_allow_independent_mamba_block_size() -> No
         draft_replication_size=2,
     )
 
-    unified = _unify_kv_cache_spec_page_size(specs)
+    groups = _get_replicated_draft_kv_cache_groups(specs)
+    assert groups is not None
+    unified = {name: spec for group in groups for name, spec in group.kv_cache_spec.kv_cache_specs.items()}
 
     attention_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, FullAttentionSpec)}
     mamba_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, MambaSpec)}
@@ -1406,3 +1410,56 @@ def test_replicated_draft_page_sizes_match_base_spec(replication_size, block_siz
     assert spec.page_size_bytes == replication_size * base.unpadded_page_size_bytes
     assert spec.real_page_size_bytes == replication_size * base.real_page_size_bytes
     assert spec.unpadded_page_size_bytes == replication_size * base.unpadded_page_size_bytes
+
+
+def test_replicated_draft_grouping_keeps_upstream_unifier(monkeypatch):
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
+    original = vllm_kv_cache_utils.unify_kv_cache_spec_page_size
+    calls = []
+
+    def unify(target_specs):
+        assert not any(isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in target_specs.values())
+        calls.append(target_specs)
+        return original(target_specs)
+
+    monkeypatch.setattr(vllm_kv_cache_utils, "unify_kv_cache_spec_page_size", unify)
+    before = dict(specs)
+    assert _get_replicated_draft_kv_cache_groups(specs) is not None
+    assert len(calls) == 1
+    assert specs == before
+    assert vllm_kv_cache_utils.unify_kv_cache_spec_page_size is unify
+
+
+def test_replicated_draft_grouping_delegates_unrecognized_specs(monkeypatch):
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
+    specs["unknown.layer"] = next(iter(specs.values()))
+    expected = []
+    fallback = MagicMock(return_value=expected)
+    monkeypatch.setattr(kv_cache_utils_patch, "_orig_get_kv_cache_groups", fallback)
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False))
+    assert kv_cache_utils_patch._ascend_get_kv_cache_groups(config, specs) is expected
+    fallback.assert_called_once_with(config, specs)
+
+
+def test_replicated_draft_layout_rejects_states_without_target_slots(monkeypatch):
+    specs = _make_kimi_k3_dspark_kv_cache_specs(
+        target_layer_count=3, draft_layer_count=5, mamba_layer_count=9, draft_replication_size=8
+    )
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
+    assert groups is not None
+    assert kv_cache_utils_patch._get_replicated_draft_cache_layout(groups) is None
+    assert _get_kimi_k3_replicated_dspark_kv_cache_config(SimpleNamespace(), groups, 1000000) is None
+    monkeypatch.setattr(kv_cache_utils_patch, "_orig_pool_bytes_per_block", lambda _: 123)
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block(groups) == 123
+
+
+def test_replicated_draft_grouping_respects_disabled_hybrid_manager(monkeypatch):
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True))
+    fallback = MagicMock(return_value=[])
+    monkeypatch.setattr(kv_cache_utils_patch, "_orig_get_kv_cache_groups", fallback)
+    monkeypatch.setattr(
+        kv_cache_utils_patch, "_get_replicated_draft_kv_cache_groups", MagicMock(side_effect=AssertionError)
+    )
+    assert kv_cache_utils_patch._ascend_get_kv_cache_groups(config, specs) == []
+    fallback.assert_called_once_with(config, specs)
