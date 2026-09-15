@@ -248,6 +248,64 @@ class TestAscendModelSlimConfig(TestBase):
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
+    def test_mtp_does_not_inherit_target_c8_layer_by_index(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+
+        self.assertTrue(config.is_c8_quant_layer("model.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("model.mtp.layers.0.self_attn.attn"))
+        self.assertFalse(config.is_c8_quant_layer("language_model.mtp.layers.0.self_attn.attn"))
+
+    def test_mtp_c8_requires_its_own_kv_scale_metadata(self):
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "model.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+                "mtp.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+                "language_model.mtp.layers.1.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+
+        self.assertTrue(config.is_c8_quant_layer("mtp.layers.0.self_attn.attn"))
+        self.assertTrue(config.is_c8_quant_layer("language_model.mtp.layers.1.self_attn.attn"))
+
+    def test_mtp_layer_id_ignores_nested_numeric_segments(self):
+        layer_zero_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "language_model.mtp.layers.0.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+        layer_three_config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "C8",
+                "language_model.mtp.layers.3.self_attn.k_proj.kv_cache_scale": "C8",
+            }
+        )
+        nested_prefix = "language_model.mtp.layers.0.blocks.3.self_attn.attn"
+
+        self.assertTrue(layer_zero_config.is_c8_quant_layer(nested_prefix))
+        self.assertFalse(layer_three_config.is_c8_quant_layer(nested_prefix))
+
+    def test_qwen3_5_mtp_float_packed_layers_are_unquantized(self):
+        from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+
+        mapping = Qwen3_5MTP.packed_modules_mapping
+        quant_description = {
+            "mtp.layers.0.self_attn.q_proj.weight": "FLOAT",
+            "mtp.layers.0.self_attn.k_proj.weight": "FLOAT",
+            "mtp.layers.0.self_attn.v_proj.weight": "FLOAT",
+            "mtp.layers.0.mlp.gate_proj.weight": "FLOAT",
+            "mtp.layers.0.mlp.up_proj.weight": "FLOAT",
+        }
+        self.assertIsNone(get_quant_type_for_layer(quant_description, "mtp.layers.0.self_attn.qkv_proj", mapping))
+        self.assertIsNone(get_quant_type_for_layer(quant_description, "mtp.layers.0.mlp.gate_up_proj", mapping))
+
     def test_missing_k_eq_v_v_proj_shard_uses_present_shards(self):
         prefix = "model.layers.5.self_attn.qkv_proj"
         fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
