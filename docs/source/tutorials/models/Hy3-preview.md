@@ -16,11 +16,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
-- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
-- GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
+|  Weight Version | Download Links |
+|-----------------|----------------|
+| Hy3-preview     | [ModelScope](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview) \| [Hugging Face](https://huggingface.co/tencent/Hy3-preview) \| [GitCode](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview) |
 
 Download or mount the checkpoint to a path shared by the runtime container, for example `/models/Hy3-preview`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### Hardware
 
@@ -81,6 +83,7 @@ cd /workspace
 export MODEL_PATH=/models/Hy3-preview
 
 HCCL_OP_EXPANSION_MODE=AIV \
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL_PATH} \
   --served-model-name hy3-preview \
   --tensor-parallel-size 16 \

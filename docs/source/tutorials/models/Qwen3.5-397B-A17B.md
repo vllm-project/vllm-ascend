@@ -22,13 +22,17 @@ The support matrix records the maximum verified capability for this model. The s
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
-- `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
-- `Qwen3.5-397B-A17B-w4a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp).
-- `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8)
-- `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Qwen3.5-397B-A17B` (BF16 version) | 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
+| `Qwen3.5-397B-A17B-w8a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
+| `Qwen3.5-397B-A17B-w4a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
+| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 Ascend 950DT(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
+| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 Ascend 950DT(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -190,7 +194,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
 
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
       --host 0.0.0.0 \
       --port 8000 \
@@ -233,7 +237,8 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
       --host 0.0.0.0 \
       --port 8000 \
@@ -297,7 +302,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
   --port 8000 \
@@ -344,7 +349,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
   --port 8000 \
@@ -442,6 +447,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
   --port 30060 \
@@ -512,6 +518,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
   --port 30050 \
@@ -609,7 +616,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
 export HCCL_ALGO=level0:fullmesh
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
   --port 30060 \
@@ -684,7 +691,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
 export HCCL_ALGO=level0:fullmesh
 
-
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
   --port 30050 \
