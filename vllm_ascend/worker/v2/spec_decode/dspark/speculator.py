@@ -35,13 +35,15 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.dcp_utils import DCPDraftReplicatedMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(DCPDraftReplicatedMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config = self._prepare_dcp_draft_config(vllm_config)
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
@@ -177,6 +179,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+        self._prepare_dcp_draft_batch(input_batch, dummy_run, skip_attn_for_dummy_run)
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
         if dummy_run and skip_attn_for_dummy_run:

@@ -254,3 +254,27 @@ def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch
     lse_final = torch.logsumexp(lse_list, dim=0, keepdim=False)
     out_final = torch.sum(torch.exp(lse_list - lse_final) * out_list, dim=0)
     return out_final, lse_final
+
+
+def expand_dcp_replicated_block_table(
+    block_table: torch.Tensor,
+    manager_block_size: int,
+    kernel_block_size: int,
+    replication_size: int,
+    column_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Expand target-DCP block IDs into the GQA draft's resident lane pages."""
+    if manager_block_size % kernel_block_size != 0:
+        raise ValueError("Replicated draft manager blocks must be divisible by the kernel block size.")
+    blocks_per_phys_block = manager_block_size // kernel_block_size
+    local_columns = (
+        column_indices // (replication_size * blocks_per_phys_block) * blocks_per_phys_block
+        + column_indices % blocks_per_phys_block
+    )
+    lanes = (column_indices // blocks_per_phys_block) % replication_size
+    local_blocks = torch.index_select(block_table, 1, local_columns.to(torch.int64))
+    if blocks_per_phys_block == 1:
+        return local_blocks * replication_size + lanes
+    local_sub_blocks = local_blocks % blocks_per_phys_block
+    local_phys_blocks = local_blocks // blocks_per_phys_block
+    return (local_phys_blocks * replication_size + lanes) * blocks_per_phys_block + local_sub_blocks
