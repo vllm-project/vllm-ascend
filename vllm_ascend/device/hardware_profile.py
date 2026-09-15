@@ -35,6 +35,7 @@ class HardwareCapability(Enum):
     GDN_COMPATIBILITY = auto()
     GRAPH_MULS_ADD_FUSION = auto()
     GRAPH_NORM_QUANT_FUSION = auto()
+    INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
     IRQ_CPU_RESERVATION = auto()
     LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
@@ -141,6 +142,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,

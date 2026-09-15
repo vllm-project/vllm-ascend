@@ -2,30 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-Next cache specs and compressed-cache addressing."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
-from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolBackend,
     AscendIndexerKPoolMetadataBuilder,
-    AscendIndexerKPoolStateBackend,
+    AscendIndexerKPoolTailBackend,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
-    Glm5NextStateCache,
+    Glm5NextTailCache,
+    KpoolTailManager,
     format_indexer_kpool_slot_mapping,
 )
 from vllm_ascend.utils import vllm_version_is
@@ -35,18 +38,36 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
-def test_state_uses_sliding_pages_and_full_precision():
+@pytest.mark.parametrize("capacity", [4, 12])
+def test_tail_uses_one_full_precision_page(capacity):
     register_ascend_kv_cache_specs()
-    spec = AscendIndexerKPoolStateSpec(
-        block_size=4,
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=capacity,
         sliding_window=4,
+        compress_ratio=4,
         num_kv_heads=1,
-        head_size=256,
+        head_size=128,
         dtype=torch.float32,
     )
-    assert spec.page_size_bytes == 4096
-    assert KVCacheSpecRegistry.get_manager_class(spec) is SlidingWindowManager
-    assert spec.max_admission_blocks_per_request(16, 1024) > 1
+    assert spec.page_size_bytes == 2 * capacity * 128 * 4
+    assert spec.real_page_size_bytes == spec.unpadded_page_size_bytes == spec.page_size_bytes
+    padded_spec = replace(spec, page_size_padded=spec.page_size_bytes + 256)
+    assert padded_spec.page_size_bytes == spec.page_size_bytes + 256
+    assert padded_spec.real_page_size_bytes == padded_spec.unpadded_page_size_bytes == spec.page_size_bytes
+    with pytest.raises(AssertionError):
+        _ = replace(spec, page_size_padded=spec.page_size_bytes - 1).page_size_bytes
+    merged_spec = AscendIndexerKPoolTailSpec.merge([spec, replace(spec)])
+    assert merged_spec == spec and merged_spec is not spec
+    with pytest.raises(AssertionError):
+        AscendIndexerKPoolTailSpec.merge([spec, padded_spec])
+    with pytest.raises(AssertionError):
+        AscendIndexerKPoolTailSpec.merge([object()])
+    assert KVCacheSpecRegistry.get_manager_class(spec) is KpoolTailManager
+    assert spec.max_admission_blocks_per_request(16, 1024) == 1
+    assert spec.max_admission_blocks_per_request(8192, 131072) == 1
+    assert not spec.prefix_cacheable
+    assert not is_prefix_cacheable(spec)
+    assert spec.is_circular
     context_parallel_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=1024),
         parallel_config=SimpleNamespace(
@@ -61,14 +82,15 @@ def test_state_uses_sliding_pages_and_full_precision():
     ("dtype", "block_size", "sliding_window"),
     [
         (torch.bfloat16, 4, 4),
-        (torch.float32, 8, 4),
+        (torch.float32, 2, 4),
     ],
 )
 def test_invalid_state_layout_is_rejected(dtype, block_size, sliding_window):
     with pytest.raises(ValueError):
-        AscendIndexerKPoolStateSpec(
+        AscendIndexerKPoolTailSpec(
             block_size=block_size,
             sliding_window=sliding_window,
+            compress_ratio=4,
             num_kv_heads=1,
             head_size=256,
             dtype=dtype,
@@ -80,6 +102,61 @@ def test_completed_pool_slots_preserve_logical_block_padding():
     positions = torch.tensor([0, 14, 15, 16, 127, 128, 143, 15])
     actual = format_indexer_kpool_slot_mapping(slots, positions, 128, 16)
     assert actual.tolist() == [-1, -1, 0, -1, 7, -1, 8, -1]
+
+
+def test_tail_manager_retains_one_private_block_until_free():
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    pool = BlockPool(12, True, 4)
+    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
+    initially_free = pool.get_num_free_blocks()
+    assert manager.get_num_blocks_to_allocate("a", 1000, [], 0, 0, 1000) == 1
+    a = manager.allocate_new_blocks("a", 1000, 1000)
+    b = manager.allocate_new_blocks("b", 3, 3)
+    assert len(a) == len(b) == 1
+    assert a[0].block_id != b[0].block_id
+    for tokens in (1001, 4096, 131072):
+        assert manager.allocate_new_blocks("a", tokens, tokens) == []
+        manager.remove_skipped_blocks("a", tokens)
+        assert manager.req_to_blocks["a"] == a
+        assert manager.get_num_blocks_to_allocate("a", tokens, [], tokens - 1, tokens - 1, tokens) == 0
+    request = SimpleNamespace(request_id="a")
+    manager.cache_blocks(request, 131072)
+    manager.cache_blocks(request, 131072, replay_boundary=16)
+    manager.cache_blocks(request, 131072, replay_boundaries=[16])
+    assert a[0].block_hash is None
+    assert manager.get_num_common_prefix_blocks("a") == 0
+    manager.free("a")
+    assert pool.get_num_free_blocks() == initially_free - 1
+    assert manager.req_to_blocks["b"] == b
+    manager.free("b")
+    assert pool.get_num_free_blocks() == initially_free
+
+
+def test_tail_manager_prefix_hit_has_no_shared_blocks():
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    pool = BlockPool(8, True, 4)
+    manager = KpoolTailManager(spec, pool, True, 1, scheduler_block_size=16)
+    blocks, hit = manager.find_longest_cache_hit([], 4096, [1, 3], pool, spec, False, 16)
+    assert blocks == ([], []) and hit == 0
+    manager.allocate_external_computed_blocks("hit", 1024, 0)
+    assert len(manager.req_to_blocks["hit"]) == 1
+    manager.allocate_external_computed_blocks("hit", 1024, 512)
+    assert len(manager.req_to_blocks["hit"]) == 1
+    manager.free("hit")
 
 
 @pytest.mark.parametrize("ratio", [0, 1, 3])
@@ -157,12 +234,11 @@ def test_model_cache_layers_publish_source_compatible_specs():
             prefix="model.layers.0.indexer.k_cache",
             compress_ratio=16,
         )
-        state = Glm5NextStateCache(
-            state_dim=256,
+        state = Glm5NextTailCache(
+            head_dim=128,
             dtype=torch.float32,
             compress_ratio=16,
-            cache_config=cache_config,
-            prefix="model.layers.0.indexer.state_cache",
+            prefix="model.layers.0.indexer.tail_cache",
         )
 
     indexer_spec = indexer.get_kv_cache_spec(None)
@@ -175,12 +251,12 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
     assert state_spec.block_size == state_spec.sliding_window == 16
-    assert state_spec.head_size == 256
+    assert state_spec.head_size == 128
     assert state_spec.dtype == torch.float32
     assert state_spec.model_version == "glm5_next"
     assert state_spec.indexes_kv_by_block_stride
     assert indexer.get_attn_backend() is AscendIndexerKPoolBackend
-    assert state.get_attn_backend() is AscendIndexerKPoolStateBackend
+    assert state.get_attn_backend() is AscendIndexerKPoolTailBackend
     assert set(current_config.compilation_config.static_forward_context) == {
         indexer.prefix,
         state.prefix,

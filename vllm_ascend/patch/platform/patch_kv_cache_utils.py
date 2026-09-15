@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -93,9 +95,20 @@ def _ascend_resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
+    cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
+    filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
+    if filtered_private_groups:
+        # A fixed tail block is not a token-page scheduling or hashing unit.
+        # Pool alignment is enforced by the GLM planner and prefix coordinator.
+        kv_cache_config = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
+        groups = cacheable_groups
 
     if len(groups) <= 1:
-        bs = cache_config.block_size * dcp
+        # EngineCore's global size is the minimum across all original groups.
+        # After filtering a private tail, it can therefore be smaller than the
+        # sole cacheable group's token-page size.
+        block_size = groups[0].kv_cache_spec.block_size if filtered_private_groups else cache_config.block_size
+        bs = block_size * dcp
         return bs, bs
 
     group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
