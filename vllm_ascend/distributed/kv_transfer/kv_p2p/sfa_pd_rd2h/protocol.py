@@ -16,6 +16,11 @@ READ_READY_BATCH = b"read_ready_batch"
 READ_DONE = b"read_done"
 READ_FAILED = b"read_failed"
 
+# PP-aware MF_META handshake.  A bare ACK is the legacy PP=1 response;
+# producers with PP>1 require the structured acknowledgement below.
+SFAPD_PROTOCOL_VERSION = 1
+MF_META_ACK = b"mf_meta_ack"
+
 
 def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
     """Return ``(main_group_id, indexer_group_id)`` from layer names.
