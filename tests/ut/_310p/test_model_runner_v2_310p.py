@@ -19,10 +19,31 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend._310p.worker.v2.spec_utils import expand_idx_mapping_cpu
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+
+def test_expand_idx_mapping_uses_caller_owned_cpu_buffers() -> None:
+    idx_mapping = np.array([5, 2, 7], dtype=np.int32)
+    cu_num_logits = np.array([0, 1, 4, 6], dtype=np.int32)
+    expanded_mapping = np.full(8, -1, dtype=np.int32)
+    expanded_local_pos = np.full(8, -1, dtype=np.int32)
+
+    expand_idx_mapping_cpu(
+        idx_mapping,
+        6,
+        cu_num_logits,
+        expanded_mapping,
+        expanded_local_pos,
+    )
+
+    np.testing.assert_array_equal(expanded_mapping[:6], [5, 2, 2, 2, 7, 7])
+    np.testing.assert_array_equal(expanded_local_pos[:6], [0, 0, 1, 2, 0, 1])
+    np.testing.assert_array_equal(expanded_mapping[6:], [-1, -1])
+    np.testing.assert_array_equal(expanded_local_pos[6:], [-1, -1])
 
 
 def _make_vllm_config(**overrides):
@@ -61,6 +82,71 @@ def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 
 
+@pytest.mark.parametrize(
+    ("has_mamba", "uses_eagle_block_drop", "num_spec_tokens", "expected"),
+    [
+        (True, True, 2, True),
+        (True, True, 1, False),
+        (True, False, 2, False),
+        (False, True, 2, False),
+        (True, True, 0, False),
+    ],
+)
+def test_kv_zeroing_uses_narrow_310p_gate(
+    has_mamba: bool,
+    uses_eagle_block_drop: bool,
+    num_spec_tokens: int,
+    expected: bool,
+) -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = (
+        SimpleNamespace(
+            num_speculative_tokens=num_spec_tokens,
+            use_eagle_block_drop=lambda: uses_eagle_block_drop,
+        )
+        if num_spec_tokens
+        else None
+    )
+    kv_cache_config = SimpleNamespace(
+        has_mamba_layers=has_mamba,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
+    )
+
+    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
+        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
+
+
+def test_kv_zeroing_matches_v028_gate() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
+    kv_cache_config = SimpleNamespace(
+        has_mamba_layers=True,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
+    )
+
+    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
+        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+
+
+def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = None
+    runner.kv_cache_config = SimpleNamespace(
+        has_mamba_layers=True,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=False)],
+    )
+    scheduler_output = SimpleNamespace(
+        kv_cache_block_copies=None,
+        new_block_ids_to_zero=[1, 2, 3],
+    )
+
+    with patch.object(NPUModelRunner, "update_requests") as update_requests:
+        runner.update_requests(scheduler_output)
+
+    assert scheduler_output.new_block_ids_to_zero is None
+    update_requests.assert_called_once_with(scheduler_output)
+
+
 def test_config_accepts_qwen3_vl_multimodal_mrope() -> None:
     """Qwen3-VL is multimodal + MRoPE; 310P MRv2 must allow it."""
     config = _make_vllm_config()
@@ -89,14 +175,17 @@ def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
 def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
+    state._num_accepted_tokens_cpu = np.zeros(4, dtype=np.int32)
+    state._align_mode = False
+    state.recoverssm = None
     idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int32)
 
     state.postprocess_state(idx_mapping, num_sampled=3)
-    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([3, 0, 3, 0], dtype=torch.int32))
+    np.testing.assert_array_equal(state._num_accepted_tokens_cpu, np.array([3, 0, 3, 0], dtype=np.int32))
 
     num_sampled = torch.tensor([2, 9, 4], dtype=torch.int32)
     state.postprocess_state(idx_mapping, num_sampled=num_sampled)
-    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([2, 0, 4, 0], dtype=torch.int32))
+    np.testing.assert_array_equal(state._num_accepted_tokens_cpu, np.array([2, 0, 4, 0], dtype=np.int32))
 
 
 def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
@@ -141,6 +230,7 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
 def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:
     """Qwen3.5 GDN layers may be omitted by upstream V2; 310P restores them."""
     runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
     runner.vllm_config = object()
     restored = object()
     linear_layer = SimpleNamespace(get_kv_cache_spec=lambda _cfg: restored)
@@ -309,6 +399,120 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
 
 
+def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"same": 0, "rewound": 1},
+        num_computed_tokens_np=np.array([4, 3], dtype=np.int32),
+        num_computed_tokens_cpu=torch.tensor([4, 8], dtype=torch.int32),
+    )
+    runner.input_buffers = SimpleNamespace(
+        seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
+        seq_lens_np=np.zeros(2, dtype=np.int32),
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"same": 1, "rewound": 2},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["same", "rewound"]),
+    )
+
+    changed = runner._update_seq_lens_cpu(scheduler_output, ["same", "rewound"])
+
+    assert changed == [1]
+    torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, torch.tensor([4, 3]))
+    torch.testing.assert_close(runner.input_buffers.seq_lens_cpu, torch.tensor([5, 5]))
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_np, [5, 5])
+
+
+def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
+    idx_mapping_np = np.array([1, 0], dtype=np.int32)
+    query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(cpu=torch.zeros((2, 8), dtype=torch.int32)),
+        last_sampled_tokens_cpu=torch.zeros((2, 1), dtype=torch.int64),
+        total_len=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
+        num_computed_tokens_np=np.zeros(2, dtype=np.int32),
+        num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        num_computed_tokens=SimpleNamespace(cpu=torch.zeros(2, dtype=torch.int32)),
+    )
+    sampled_tokens = torch.tensor([[10, 11], [20, -1]], dtype=torch.int32)
+    num_sampled = torch.tensor([2, 1], dtype=torch.int32)
+    num_rejected = torch.tensor([0, 1], dtype=torch.int32)
+
+    sampled_cpu = model_runner_module._post_update_cpu(
+        idx_mapping_np,
+        query_start_loc_np,
+        req_states,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+    )
+
+    torch.testing.assert_close(sampled_cpu, num_sampled)
+    np.testing.assert_array_equal(req_states.total_len.np, [1, 2])
+    np.testing.assert_array_equal(req_states.num_computed_tokens_np, [1, 2])
+    torch.testing.assert_close(req_states.last_sampled_tokens_cpu[:, 0], torch.tensor([20, 11]))
+    torch.testing.assert_close(req_states.all_token_ids.cpu[1, :2], torch.tensor([10, 11]))
+
+
+def test_postprocess_sampled_keeps_last_token_on_device() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = False
+    runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
+    runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
+        last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+    )
+    runner.model_state = MagicMock()
+    runner.speculator = object()
+    runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
+        2, dtype=torch.int64, device=runner.device, pin_memory=False
+    )
+    runner._decode_input_indices = model_runner_module.CpuGpuBuffer(
+        2, dtype=torch.int64, device=runner.device, pin_memory=False
+    )
+    idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
+    sampled_tokens = torch.tensor([[10, 11], [20, -1]], dtype=torch.int32)
+    num_sampled = torch.tensor([2, 1], dtype=torch.int32)
+    num_rejected = torch.tensor([0, 1], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
+    runner._sampled_tokens_cpu = sampled_tokens
+    runner._num_sampled_cpu = num_sampled
+    runner._num_rejected_cpu = num_rejected
+
+    with patch.object(model_runner_module, "_post_update_cpu", return_value=num_sampled.cpu()) as post_update:
+        runner.postprocess_sampled(
+            idx_mapping,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+        )
+
+    post_update.assert_called_once()
+    runner.model_state.postprocess_state.assert_called_once_with(
+        torch.from_numpy(runner._postprocess_idx_mapping_np),
+        num_sampled.cpu(),
+        runner.req_states.num_computed_tokens_cpu,
+    )
+    torch.testing.assert_close(runner.req_states.last_sampled_tokens, runner.req_states.last_sampled_tokens_cpu)
+
+
+def test_sampler_does_not_copy_sampled_tokens_to_cpu() -> None:
+    sampler = Ascend310PSampler(device="cpu")
+    input_batch = SimpleNamespace(
+        seq_lens=torch.ones(2, dtype=torch.int32),
+        num_reqs=2,
+    )
+
+    output = sampler(torch.tensor([[0.0, 1.0], [2.0, 0.0]]), input_batch)
+
+    torch.testing.assert_close(output.sampled_token_ids, torch.tensor([[1], [0]], dtype=torch.int32))
+    assert not hasattr(sampler, "sampled_tokens_cpu")
+
+
 @pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
 def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, sync_count) -> None:
     runner = object.__new__(NPUModelRunner310V2)
@@ -429,6 +633,28 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
     )
     block_tables.append_block_ids(0, ([7],), overwrite=True)
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
+
+
+def test_slot_mapping_copies_only_active_prefix() -> None:
+    block_tables = Ascend310PBlockTables(
+        block_sizes=[4],
+        max_num_reqs=1,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[2],
+        device=torch.device("cpu"),
+    )
+    block_tables.append_block_ids(0, ([3],), overwrite=True)
+    block_tables.slot_mappings.fill_(99)
+
+    slots = block_tables.compute_slot_mappings(
+        np.array([0], dtype=np.int32),
+        np.array([0, 2], dtype=np.int32),
+        np.array([0, 1], dtype=np.int64),
+        num_tokens_padded=4,
+    )
+
+    torch.testing.assert_close(slots, torch.tensor([[12, 13, -1, -1]], dtype=torch.int32))
+    torch.testing.assert_close(block_tables.slot_mappings[:, 4:], torch.full((1, 4), 99, dtype=torch.int32))
 
 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
@@ -623,15 +849,6 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
 
         model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())
         torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
-
-
-def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
-    query_lens = NPUModelRunner310V2._get_valid_query_lens(
-        torch.tensor([3, 7, -1, -1], dtype=torch.int32),
-        torch.tensor([0, 2, 5], dtype=torch.int32),
-    )
-
-    torch.testing.assert_close(query_lens, torch.tensor([2, 3], dtype=torch.int32))
 
 
 def test_worker_selects_v2_runner_on_310p() -> None:
