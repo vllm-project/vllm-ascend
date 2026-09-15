@@ -25,8 +25,9 @@ MAX_BATCHED_TOKENS = 16384
     quantization="BF16",
     graph_mode="full_decode_only",
 )
+@pytest.mark.parametrize("pp_size,tp_size", [(2, 2), (4, 1)], ids=["pp2tp2", "pp4tp1"])
 @wait_until_npu_memory_free()
-def test_qwen35_pp_mtp_full_decode_only() -> None:
+def test_qwen35_pp_mtp_full_decode_only(pp_size: int, tp_size: int) -> None:
     port = get_open_port()
     server_args = [
         "--trust-remote-code",
@@ -35,9 +36,9 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
         "--seed",
         "1024",
         "--tensor-parallel-size",
-        "2",
+        str(tp_size),
         "--pipeline-parallel-size",
-        "2",
+        str(pp_size),
         "--distributed-executor-backend",
         "mp",
         "--async-scheduling",
