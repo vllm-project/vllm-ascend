@@ -593,8 +593,9 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
     attn_metadata = builder.build(
         0,
         common_attn_metadata,
-        num_accepted_tokens=torch.tensor([2, 4], dtype=torch.int32),
-        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([2, 4, 99, 99], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3, -1, -1], dtype=torch.int32),
+        num_actual_reqs=batch_spec.batch_size,
     )
 
     assert torch.equal(
@@ -608,6 +609,63 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4, 0, 0], dtype=torch.int32),
     )
+    assert torch.equal(
+        attn_metadata.spec_state_indices_tensor[2:],
+        torch.full((2, 4), NULL_BLOCK_ID, dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.num_accepted_tokens,
+        torch.tensor([2, 4, 1, 1], dtype=torch.int32),
+    )
+
+
+def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
+    batch_spec = BatchSpec(
+        seq_lens=[1, 1],
+        query_lens=[1, 1],
+        name="full_graph_padded_non_spec_actual_seq_lengths",
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=batch_spec,
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.num_reqs = 4
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.spec_state_indices_tensor.fill_(77)
+
+    attn_metadata = builder.build(
+        0,
+        common_attn_metadata,
+        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
+        num_actual_reqs=batch_spec.batch_size,
+    )
+
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+    )
+    assert (
+        attn_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
+        == builder.non_spec_actual_seq_lengths.data_ptr()
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_decode_metadata.actual_seq_lengths,
+        torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+    )
+    assert attn_metadata.num_actual_tokens == 2
+    assert attn_metadata.num_decodes == batch_spec.batch_size
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
+    )
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
 
 
 def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):

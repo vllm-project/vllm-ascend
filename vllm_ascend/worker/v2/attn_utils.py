@@ -30,6 +30,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -313,6 +314,8 @@ def build_attn_metadata(
                     **attn_metadata_extra_kwargs,
                 )
             else:
+                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                    attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
