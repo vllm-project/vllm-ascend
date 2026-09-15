@@ -79,7 +79,7 @@ on:
 
 jobs:
   generate-matrix:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -118,7 +118,6 @@ jobs:
 
       - name: Login to SWR
         id: login-swr
-        if: ${{ inputs.should_push }}
         uses: docker/login-action@v4
         with:
           registry: ${{ inputs.swr_registry }}
@@ -130,6 +129,7 @@ jobs:
         env:
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        shell: bash
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
@@ -186,7 +186,6 @@ jobs:
           fi
 
           BUILD_ARGS=(
-            --network host
             --platform ${{ matrix.arch_platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"
@@ -264,7 +263,7 @@ jobs:
 
   merge-image:
     name: Merge multi-arch nightly-${{ inputs.target }}
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4
     needs: build
     # Run even if some matrix instances failed. Each OS variant is merged independently,
     # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
