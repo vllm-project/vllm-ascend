@@ -63,6 +63,7 @@ def test_a5_fp8_plan_uses_flat_shared_kv():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert not plan.requires_block_offset_slots
         assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
 
 
@@ -71,6 +72,7 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert not plan.requires_block_offset_slots
         torch.testing.assert_close(
             plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
             torch.tensor([5, -1], dtype=torch.int32),
@@ -81,6 +83,7 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
     with _on(AscendDeviceType.A3):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        assert plan.requires_block_offset_slots
         kwargs: dict[str, Any] = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs
