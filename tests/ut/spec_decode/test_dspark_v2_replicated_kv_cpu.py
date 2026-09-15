@@ -46,7 +46,7 @@ def test_draft_tables_expand_lanes_without_mutating_target(replication, subblock
             self.draft_kv_cache_group_ids = [1]
             self.attn_groups = [[], [SimpleNamespace(kv_cache_spec=ReplicatedSpec())]]
 
-    namespace = {
+    namespace: dict[str, Any] = {
         "torch": torch,
         "contextmanager": contextmanager,
         "copy": copy,
@@ -118,10 +118,10 @@ def test_mrv2_pd_config_isolates_recompute_and_preserves_target():
 
     @dataclass
     class Config:
-        parallel_config: object
-        cache_config: object
+        parallel_config: SimpleNamespace
+        cache_config: SimpleNamespace
         kv_transfer_config: object
-        additional_config: object
+        additional_config: dict[str, Any]
 
         def __post_init__(self):
             if self.kv_transfer_config is None:
@@ -132,7 +132,8 @@ def test_mrv2_pd_config_isolates_recompute_and_preserves_target():
             self.vllm_config = config
             self.device = device
 
-    scope = dict(
+    scope: dict[str, Any] = dict(
+        cast=cast,
         contextmanager=contextmanager,
         copy=copy,
         replace=replace,
@@ -179,7 +180,7 @@ def test_cp_precheck_filters_only_registered_replicated_draft():
     function = next(
         node
         for node in ast.parse(source.read_text()).body
-        if getattr(node, "name", None) == "check_attention_cp_compatibility"
+        if isinstance(node, ast.FunctionDef) and node.name == "check_attention_cp_compatibility"
     )
     seen = []
 
@@ -188,7 +189,7 @@ def test_cp_precheck_filters_only_registered_replicated_draft():
         for layer in config.compilation_config.static_forward_context.values():
             assert layer.returns_lse
 
-    scope = dict(copy=copy, _upstream_check_attention_cp_compatibility=upstream)
+    scope: dict[str, Any] = dict(copy=copy, _upstream_check_attention_cp_compatibility=upstream)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
     target_layer = SimpleNamespace(returns_lse=True)
     draft_layer = SimpleNamespace(returns_lse=False, _ascend_dcp_replicated_draft=True)
@@ -211,7 +212,11 @@ def test_cp_precheck_filters_only_registered_replicated_draft():
 def test_mrv2_replicated_cache_views_cover_physical_pages(replication, split):
     root = Path(__file__).resolve().parents[3] / "vllm_ascend"
     source = root / "worker/v2/attn_utils.py"
-    function = next(n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "_reshape_kv_cache_v2")
+    function = next(
+        n
+        for n in ast.parse(source.read_text()).body
+        if isinstance(n, ast.FunctionDef) and n.name == "_reshape_kv_cache_v2"
+    )
 
     class AttentionSpec:
         block_size = 768
@@ -223,7 +228,7 @@ def test_mrv2_replicated_cache_views_cover_physical_pages(replication, split):
 
     other = type("OtherSpec", (), {})
     spec = AttentionSpec()
-    scope = dict(
+    scope: dict[str, Any] = dict(
         torch=torch,
         AttentionSpec=AttentionSpec,
         AscendDCPReplicatedDraftAttentionSpec=AttentionSpec,
@@ -293,7 +298,8 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
             return model
 
     cls = mixin_node()
-    scope = dict(
+    scope: dict[str, Any] = dict(
+        cast=cast,
         contextmanager=contextmanager,
         enable_dcp=enable_dcp,
         set_current_vllm_config=set_config,
@@ -323,11 +329,11 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
 @pytest.mark.parametrize("dummy,skip", [(False, False), (False, True), (True, False), (True, True)])
 def test_mixin_batch_refresh_dispatch(replicated, dummy, skip):
     cls = mixin_node()
-    scope = dict(contextmanager=contextmanager)
+    scope: dict[str, Any] = dict(contextmanager=contextmanager)
     exec(compile("from __future__ import annotations\n" + ast.unparse(cls), "mixin", "exec"), scope)
     host = scope[cls.name]()
     host.replicated_draft_kv = replicated
-    refreshed = []
+    refreshed: list[object] = []
     host._refresh_replicated_block_tables = refreshed.append
     batch = object()
     host._prepare_dcp_draft_batch(batch, dummy, skip)
@@ -343,9 +349,9 @@ def test_platform_replicated_draft_exception_requires_v2(use_v2):
     function = next(
         n
         for n in ast.parse(source.read_text()).body
-        if getattr(n, "name", None) == "_validate_draft_decode_context_parallel_config"
+        if isinstance(n, ast.FunctionDef) and n.name == "_validate_draft_decode_context_parallel_config"
     )
-    scope = {}
+    scope: dict[str, Any] = {}
     exec(compile("from __future__ import annotations\n" + ast.unparse(function), str(source), "exec"), scope)
     target = SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3"))
     draft = SimpleNamespace(
@@ -377,9 +383,11 @@ def test_platform_replicated_draft_exception_requires_v2(use_v2):
 def test_draft_recompute_options_are_isolated(scheduler, legacy):
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/dcp_utils.py"
     function = next(
-        n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "draft_additional_config"
+        n
+        for n in ast.parse(source.read_text()).body
+        if isinstance(n, ast.FunctionDef) and n.name == "draft_additional_config"
     )
-    scope = dict(copy=copy)
+    scope: dict[str, Any] = dict(copy=copy)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
     target = dict(recompute_scheduler_enable=legacy, scheduler_config=scheduler, multistream_overlap_shared_expert=True)
     original = copy.deepcopy(target)
@@ -396,7 +404,11 @@ def test_draft_recompute_options_are_isolated(scheduler, legacy):
 def test_replicated_planner_single_layer_descriptors(layer_count, layer_stride, valid):
     root = Path(__file__).resolve().parents[3] / "vllm_ascend"
     source = root / "worker/v2/attn_utils.py"
-    function = next(n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "_allocate_kv_cache")
+    function = next(
+        n
+        for n in ast.parse(source.read_text()).body
+        if isinstance(n, ast.FunctionDef) and n.name == "_allocate_kv_cache"
+    )
     attention_type = type("AttentionSpec", (), {"page_size_bytes": 8})
     mamba_type = type("MambaSpec", (), {"page_size_bytes": 8})
     names = [f"target{i}" for i in range(layer_count)]
@@ -411,7 +423,7 @@ def test_replicated_planner_single_layer_descriptors(layer_count, layer_stride, 
         kv_cache_tensors=descriptors,
         kv_cache_groups=[SimpleNamespace(layer_names=list(specs))],
     )
-    scope = dict(
+    scope: dict[str, Any] = dict(
         torch=torch,
         KVPPConfig=SimpleNamespace(from_vllm_config=lambda _: SimpleNamespace(size=1)),
         get_current_vllm_config=lambda: SimpleNamespace(kv_transfer_config=None),
@@ -466,7 +478,7 @@ def test_propose_keeps_draft_dcp_context_through_graph_replay(fail):
         finally:
             active[0] = False
 
-    scope = dict(
+    scope: dict[str, Any] = dict(
         Parent=Parent,
         vllm_version_is=lambda _: False,
         build_attn_metadata_wrapper=nullcontext,

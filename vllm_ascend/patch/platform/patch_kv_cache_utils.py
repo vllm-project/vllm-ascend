@@ -3,6 +3,7 @@
 import math
 from collections import defaultdict
 from dataclasses import replace
+from typing import cast
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -265,7 +266,7 @@ def _get_replicated_draft_kv_cache_groups(
     target_specs = {}
     for name, spec in kv_cache_spec.items():
         if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
-            draft_specs[name] = replace(spec, page_size_padded=None)
+            draft_specs[name] = replace(cast(FullAttentionSpec, spec), page_size_padded=None)
         else:
             target_specs[name] = spec
     if not draft_specs:

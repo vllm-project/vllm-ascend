@@ -1433,7 +1433,7 @@ def test_replicated_draft_grouping_keeps_upstream_unifier(monkeypatch):
 def test_replicated_draft_grouping_delegates_unrecognized_specs(monkeypatch):
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=2)
     specs["unknown.layer"] = next(iter(specs.values()))
-    expected = []
+    expected: list[KVCacheGroupSpec] = []
     fallback = MagicMock(return_value=expected)
     monkeypatch.setattr(kv_cache_utils_patch, "_orig_get_kv_cache_groups", fallback)
     config = SimpleNamespace(scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False))

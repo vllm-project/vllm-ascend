@@ -5,7 +5,7 @@
 import copy
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
@@ -15,6 +15,10 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm_ascend.attention.context_parallel.common_cp import expand_dcp_replicated_block_table
 from vllm_ascend.attention.utils import enable_dcp
 from vllm_ascend.core.kv_cache_interface import AscendDCPReplicatedDraftAttentionSpec
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+    from vllm.v1.worker.utils import AttentionGroup
 
 
 def uses_dcp_replicated_gqa_draft(config: VllmConfig) -> bool:
@@ -64,6 +68,13 @@ class DCPDraftReplicatedMixin:
     before proposing. Model loading and attention setup delegate through super().
     """
 
+    # State supplied by the speculator hosting this cooperative mixin.
+    vllm_config: VllmConfig
+    attn_vllm_config: VllmConfig
+    device: torch.device
+    draft_kv_cache_group_ids: list[int]
+    attn_groups: list[list["AttentionGroup"]]
+
     def _prepare_dcp_draft_config(self, vllm_config: VllmConfig) -> VllmConfig:
         self.target_vllm_config = vllm_config
         self.replicated_draft_kv = uses_dcp_replicated_gqa_draft(vllm_config)
@@ -81,7 +92,7 @@ class DCPDraftReplicatedMixin:
 
     def load_draft_model(self, target_model: torch.nn.Module, target_attn_layer_names: set[str]) -> torch.nn.Module:
         with self._draft_dcp_context():
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+            model = cast("DSparkSpeculator", super()).load_draft_model(target_model, target_attn_layer_names)
         if self.replicated_draft_kv:
             # The upstream load_model sets draft_attn_layer_names after this hook.
             layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -99,7 +110,9 @@ class DCPDraftReplicatedMixin:
         target_attn_groups: Any,
     ) -> None:
         with self._draft_dcp_context():
-            super().set_attn(model_state, kv_cache_config, block_tables, target_input_buffers, target_attn_groups)
+            cast("DSparkSpeculator", super()).set_attn(
+                model_state, kv_cache_config, block_tables, target_input_buffers, target_attn_groups
+            )
 
         if self.replicated_draft_kv:
             self._target_block_tables = block_tables

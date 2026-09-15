@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -15,7 +16,7 @@ SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/distributed/kv_trans
 @pytest.fixture
 def worker():
     tree = ast.parse(SOURCE.read_text())
-    cls = next(node for node in tree.body if getattr(node, "name", None) == "MooncakeConnectorWorker")
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "MooncakeConnectorWorker")
     names = {
         "_get_replicated_draft_block_ids",
         "_set_replicated_draft_transfer_metadata",
@@ -29,7 +30,7 @@ def worker():
         for node in tree.body
         if getattr(node, "name", None) in {"GroupPull", "transfer_groups_need_independent_block_ids"}
     ]
-    scope = {"dataclass": dataclass}
+    scope: dict[str, Any] = {"dataclass": dataclass}
     exec(
         compile(
             "from __future__ import annotations\n" + ast.unparse(ast.Module(body=[*nodes, cls], type_ignores=[])),
@@ -105,8 +106,8 @@ def test_matching_head_source_owns_all_draft_pages_once(worker, rank):
     worker.tp_rank = rank
     meta = metadata()
     ports = [[3001, 3000], [3000, 3001]]
-    local = [([4], []), ([5], [])]
-    remote = [([1], []), ([2], [])]
+    local: list[tuple[list[int], list[int]]] = [([4], []), ([5], [])]
+    remote: list[tuple[list[int], list[int]]] = [([1], []), ([2], [])]
     pulls = [[[worker.GroupPull(0, 0, 1), worker.GroupPull(1, 0, 1)] for _ in shard] for shard in ports]
     worker._set_replicated_draft_transfer_metadata("r", meta, ports, local, remote, pulls)
     sources = [
