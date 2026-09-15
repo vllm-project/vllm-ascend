@@ -433,6 +433,7 @@ def test_unquantized_shared_situ_uses_split_bf16_path(monkeypatch):
     runner.multistream_overlap_shared_expert = False
     events = fused_moe_module.FusedMoEEvents(
         before_routed_experts=MagicMock(),
+        shared_input_ready=MagicMock(),
         before_dispatch=MagicMock(),
         before_gmm2=MagicMock(),
         before_combine=MagicMock(),
@@ -489,6 +490,7 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     stream = MagicMock()
     events = fused_moe_module.FusedMoEEvents(
         before_routed_experts=MagicMock(),
+        shared_input_ready=MagicMock(),
         before_dispatch=MagicMock(),
         before_gmm2=MagicMock(),
         before_combine=MagicMock(),
@@ -554,6 +556,7 @@ def test_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch, quant_type):
     runner.multistream_overlap_shared_expert = False
     events = fused_moe_module.FusedMoEEvents(
         before_routed_experts=MagicMock(),
+        shared_input_ready=MagicMock(),
         before_dispatch=MagicMock(),
         before_gmm2=MagicMock(),
         before_combine=MagicMock(),
@@ -608,6 +611,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    gathered = torch.randn(2, 8)
     routed_result = SimpleNamespace(
         routed_out=routed_out,
         before_dispatch_evt=None,
@@ -617,6 +621,7 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     )
     runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
     runner._forward_shared_experts = MagicMock(return_value=shared_out)
+    runner._prepare_shared_expert_input = MagicMock(return_value=gathered)
     current_stream = MagicMock()
 
     monkeypatch.setattr(AscendMoERunner, "is_internal_router", property(lambda _: False))
@@ -632,10 +637,39 @@ def test_shared_forward_impl_returns_current_runner_contract(monkeypatch, has_sh
     if has_shared_experts:
         assert result[0] is shared_out
         assert result[1] is routed_out
-        assert runner._forward_shared_experts.call_args.args[0] is shared_experts_input
+        # The gather is issued on the default stream (the mocked current stream)
+        # before the routed path is enqueued; the shared-experts stream consumes
+        # the gathered input once shared_input_ready fires.
+        runner._prepare_shared_expert_input.assert_called_once_with(shared_experts_input)
+        assert runner._forward_shared_experts.call_args.args[0] is gathered
+        assert runner._forward_shared_experts.call_args.args[1].shared_input_ready is not None
     else:
         assert result is routed_out
+        runner._prepare_shared_expert_input.assert_not_called()
         runner._forward_shared_experts.assert_not_called()
+
+
+def test_forward_shared_experts_requires_shared_input_ready_event(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    runner._shared_experts = SimpleNamespace()
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
+
+    with pytest.raises(AssertionError, match="shared_input_ready"):
+        runner._forward_shared_experts(torch.randn(2, 4), events)
 
 
 def test_forward_impl_preserves_original_input_for_shared_experts(monkeypatch):
