@@ -70,9 +70,26 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None and x.dtype in _SUPPORTED_DTYPES:
-        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # CPU tensors and unsupported dtypes/dimensions use the saved native torch.sum.
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. The last dim can only be spelled as -1 or x.dim() - 1,
+    # so only those take the batch-invariant path, which passes the normalized
+    # index x.dim() - 1 to the kernel. Everything else (non-last-dim, tuple dim,
+    # full reduction when dim is None, CPU tensors, unsupported dtypes) falls
+    # back to the saved native torch.sum.
+    if x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
+        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, x.dim() - 1, keepdim)
+    if x.device.type == "npu" and x.dtype in _SUPPORTED_DTYPES:
+        # Only the last dim can run on the batch-invariant kernel, so this NPU float
+        # reduction is served by native torch.sum and is no longer covered by the
+        # batch-invariant guarantee. Warn once per (dim, dtype) so the gap is visible
+        # instead of silently returning a possibly batch-dependent result.
+        logger.warning_once(
+            "Batch-invariant reduce_sum falls back to native torch.sum for dim=%s on a %s NPU tensor; "
+            "this reduction is not guaranteed to be batch-invariant.",
+            dim,
+            x.dtype,
+        )
     return torch_sum(x, dim, keepdim)
 
 
