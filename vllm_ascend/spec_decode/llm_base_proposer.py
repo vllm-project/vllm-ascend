@@ -624,7 +624,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_update_stream(update_stream)
         self.update_stream = update_stream
 
-    def _maybe_update_metadata(self, att_backend, aclgraph_runtime_mode, multi_steps_attn_metadata):
+    def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
             update_params = []
             for per_layer_metadata in multi_steps_attn_metadata:
@@ -836,7 +836,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
                 multi_steps_attn_metadata,
             )
 
@@ -1173,7 +1172,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
                 multi_steps_attn_metadata,
             )
 
