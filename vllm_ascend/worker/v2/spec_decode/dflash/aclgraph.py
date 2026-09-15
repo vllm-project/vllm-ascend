@@ -67,8 +67,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        # MLA needs rotary positions and speculative metadata during capture;
-        # other parallel drafters retain their existing capture path.
+        # Supply draft-specific metadata during capture.
         capture_context = getattr(self.speculator, "draft_capture_context", nullcontext)
         with communicator_switch(), model_capture_wrapper(self.speculator, False), capture_context():
             super().capture(
