@@ -51,6 +51,7 @@ def _patch_pool_scheduler_importlib():
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config = MagicMock()
+    config.kv_events_config = None
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
     config.kv_transfer_config.get_from_extra_config.return_value = True
@@ -359,7 +360,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         delay, _ = scheduler.request_finished(request, [1, 2])
-        self.assertTrue(delay)
+        self.assertFalse(delay)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_request_finished_empty_blocks(self, mock_client_cls):
@@ -436,7 +437,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             num_prompt_tokens=64,
         )
 
-    def _make_running_chunk_output(self, new_block_ids):
+    def _make_running_chunk_output(self, new_block_ids, num_computed_tokens=16):
         sched_output = MagicMock()
         sched_output.finished_req_ids = set()
         sched_output.preempted_req_ids = set()
@@ -444,6 +445,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.num_scheduled_tokens = {"r1": 16}
         sched_output.scheduled_cached_reqs.req_ids = ["r1"]
         sched_output.scheduled_cached_reqs.new_block_ids = [new_block_ids]
+        sched_output.scheduled_cached_reqs.num_computed_tokens = [num_computed_tokens]
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
@@ -460,6 +462,8 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             req_id="r1",
             token_len=128,
             allocated_block_ids_by_group=[[] for _ in range(4)],
+            num_prompt_tokens=256,
+            prefill_end_tokens=256,
         )
         request_tracker.update = MagicMock()
         scheduler._request_trackers["r1"] = request_tracker
@@ -475,7 +479,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
             new_block_ids,
             "r1",
             0,
-            MagicMock(),
+            MagicMock(num_computed_tokens=[128]),
             self._make_running_chunk_output(new_block_ids),
             False,
         )
@@ -505,6 +509,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         new_req_data.num_computed_tokens = 0
         new_req_data.block_ids = [0, 1]
         new_req_data.prompt_token_ids = list(range(32))
+        new_req_data.prefill_token_ids = None
 
         sched_output = MagicMock()
         sched_output.finished_req_ids = set()
@@ -516,6 +521,101 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         meta = scheduler.build_connector_meta(sched_output)
         self.assertTrue(len(meta.requests) >= 1)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_new_request_uses_full_mrv2_reprefill_range(self, mock_client_cls):
+        config = self._make_config()
+        config.kv_events_config = MagicMock(enable_kv_cache_events=True)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        request = MagicMock(
+            request_id="r1",
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(48)),
+            block_hashes=[b"h0", b"h1", b"h2"],
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        new_request = MagicMock(
+            req_id="r1",
+            num_computed_tokens=0,
+            block_ids=[0, 1, 2],
+            prompt_token_ids=list(range(32)),
+            prefill_token_ids=list(range(48)),
+        )
+        output = MagicMock(num_scheduled_tokens={"r1": 48})
+
+        scheduler._process_new_request(new_request, output, force_skip_save=False)
+
+        tracker = scheduler._request_trackers["r1"]
+        self.assertEqual(tracker.prefill_end_tokens, 48)
+        self.assertEqual(tracker.token_ids, list(range(48)))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_consumer_decode_boundary_backfills_missing_prefix(self, mock_client_cls):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"save_decode_cache": True},
+        )
+        config.kv_events_config = MagicMock(enable_kv_cache_events=True)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        request = MagicMock(
+            num_computed_tokens=47,
+            num_prompt_tokens=35,
+            prompt_token_ids=list(range(35)),
+            all_token_ids=list(range(48)),
+            block_hashes=[b"h0", b"h1", b"h2"],
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=47,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+            token_ids=list(range(47)),
+            num_prompt_tokens=35,
+            prefill_end_tokens=35,
+        )
+        output = self._make_running_chunk_output([], num_computed_tokens=47)
+        output.num_scheduled_tokens = {"r1": 1}
+
+        meta = scheduler.build_connector_meta(output)
+
+        self.assertEqual(len(meta.requests), 1)
+        req_meta = meta.requests[0]
+        self.assertTrue(req_meta.can_save)
+        self.assertEqual((req_meta.save_start_token, req_meta.save_end_token), (0, 48))
+        self.assertEqual(req_meta.token_ids, list(range(48)))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_consumer_does_not_save_unaccepted_speculative_tokens(self, mock_client_cls):
+        scheduler = KVPoolScheduler(
+            self._make_config(kv_role="kv_consumer", extra_config={"save_decode_cache": True}),
+            use_layerwise=False,
+        )
+        request = MagicMock(
+            num_computed_tokens=47,
+            num_prompt_tokens=32,
+            prompt_token_ids=list(range(32)),
+            all_token_ids=list(range(47)),
+            block_hashes=[b"h0", b"h1", b"h2"],
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[0, 1, 2]])
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=47,
+            allocated_block_ids=[0, 1, 2],
+            num_saved_tokens=0,
+            num_prompt_tokens=32,
+            prefill_end_tokens=32,
+        )
+        output = self._make_running_chunk_output([], num_computed_tokens=47)
+        output.num_scheduled_tokens = {"r1": 4}
+
+        meta = scheduler.build_connector_meta(output)
+
+        self.assertEqual(len(meta.requests), 1)
+        self.assertEqual(meta.requests[0].save_end_token, 32)
+        self.assertEqual(meta.requests[0].target_token_len, 47)
+        self.assertEqual(scheduler._request_trackers["r1"].token_len, 47)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_reloads_prefix_with_layer_reuse(self, mock_client_cls):
@@ -831,6 +931,32 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
                 self.assertEqual(scheduler._block_pool.free_blocks.called, should_free)
                 self.assertEqual(1 in scheduler.sending_blocks, not should_free)
 
+    def test_store_job_pins_dense_blocks_until_all_workers_finish(self):
+        scheduler = self._make_scheduler()
+        scheduler._block_pool.blocks = [MagicMock(), MagicMock()]
+        req_meta = MagicMock(
+            can_save=True,
+            block_ids_by_group=[[0, 1]],
+            event_id=None,
+            store_job_id=None,
+        )
+
+        scheduler.reference_sending_blocks(req_meta)
+
+        self.assertEqual((req_meta.event_id, req_meta.store_job_id), (0, 0))
+        scheduler._block_pool.touch.assert_called_once_with(scheduler._block_pool.blocks)
+        self.assertEqual(scheduler.sending_blocks, {0: [0, 1]})
+        self.assertTrue(scheduler.has_pending_push_work())
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+            AscendStoreKVConnectorWorkerMetadata,
+        )
+
+        output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 2}))
+        scheduler.update_connector_output(output)
+        self.assertFalse(scheduler.has_pending_push_work())
+        scheduler._block_pool.free_blocks.assert_called_once_with(list(reversed(scheduler._block_pool.blocks)))
+
     def test_invalid_event_id(self):
         scheduler = self._make_scheduler()
         scheduler.sending_events = {}
@@ -889,13 +1015,13 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r_nonexist"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
-        self.assertTrue(delay)
+        self.assertFalse(delay)
 
     def test_tracker_not_saved(self):
         scheduler = self._make_scheduler()
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import RequestTracker
 
-        for request_id, add_tracker, expected in [("missing", False, True), ("r1", True, False)]:
+        for request_id, add_tracker in [("missing", False), ("r1", True)]:
             with self.subTest(request_id=request_id):
                 scheduler = self._make_scheduler()
                 if add_tracker:
@@ -904,7 +1030,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
                     )
                 request = MagicMock(request_id=request_id)
                 delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
-                self.assertEqual(delay, expected)
+                self.assertFalse(delay)
 
     def test_delay_free_with_blocks(self):
         scheduler = self._make_scheduler()
@@ -914,8 +1040,8 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request = MagicMock()
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
-        self.assertTrue(delay)
-        self.assertEqual(scheduler._delayed_free_blocks_by_req["r1"], 2)
+        self.assertFalse(delay)
+        self.assertNotIn("r1", scheduler._delayed_free_blocks_by_req)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()
