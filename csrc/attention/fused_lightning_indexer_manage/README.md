@@ -112,7 +112,7 @@ visible_length = actual_seq_lengths_key[i] - (query_end - 1 - query_row)
   - 当`L>Q*2048`时，必须满足`Q*2048<=C<=32640`；
   - `L<=floor((actual_seq_lengths_key[i]-Q)/128)*128`，保证稳定Prefix对全部Query因果可见。
 - `req_pool_entries[i]`必须位于`[0,pool_size)`，同一次调用的有效请求不能写入同一Pool行。同一请求生命周期内，Pool行号必须保持不变。
-- `source_capacity`最大为$2^{21}=2097152$。Source长度超过$2^{17}=131072$时，内部使用21-bit Source ID编码；所有对外输出始终为完整INT32 Source ID。
+- `source_capacity`最大为`2^21 = 2097152`。Source长度超过`2^17 = 131072`时，内部使用21-bit Source ID编码；所有对外输出始终为完整INT32 Source ID。
 - HBM Logical Slot使用15 bit编码，32767为内部无效值，因此C最大为32640。`INT32_MIN`仅用于`cache_slots_pool`中的非Resident标记，不会作为有效Slot输出。
 - 所有输入、输出必须位于同一NPU设备并保持连续。
 - 对逐请求动态非法值，Kernel执行安全保护：不破坏对应Pool行，将TopK输出填充为-1，并将相关计数置0。该保护不能替代上层框架的参数校验。
@@ -184,7 +184,26 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_lightning
 - MTP多路Query、Q=14边界、非连续Pool行和非Identity Block Table；
 - 首次建Cache、稳态淘汰、Miss搬运计划、Source到Slot映射及重复调用All-Hit；
 - `-2 -> -1 -> -1`、`-3 -> -1`、`-3 -> -2 -> -1`生命周期；
-- 超过`2^17`的长Source ID编码路径；
+- 跨越`2^17`、`2^18`、`2^19`、`2^20`及接近`2^21`上限的长Source ID编码路径，包括长序列多路Query混合状态；
+- 2048/2049和4095/4096/4097 Miss Occurrence排序边界；
 - 代表性的shape、dtype、连续性和最大Query路数校验。
 
+测试共收集105个pytest case：Q=1～14覆盖非卸载、首次卸载和稳态卸载状态，代表性Q值覆盖FLOAT16/BFLOAT16与32/64个Index Head的交叉组合，并覆盖窄路由、宽路由、混合状态Batch及多档长序列。每个pytest case结束后会输出`[当前case/总case] [完成百分比]`，便于观察长测试的执行进度。
+
 测试使用`torch_npu.npu_lightning_indexer`作为TopK参考实现，仅验证功能正确性，不包含性能测试、耗时阈值或性能基线。
+
+## 典型时延
+
+下表为64K MTP5（Q=6）稳态卸载场景的实测结果。测试设备为Ascend 910_93（`SOC_VERSION=ascend910_9391`），数据类型为BF16，Index Head数量为32，Source长度为65536，HBM Cache容量为12288，`request_state=-1`。每一路Query约有200个Cache Miss，多路Query去重后的Union Miss为400；测试包含10次预热和300次计时迭代，时延单位为μs。
+
+其中，Official表示仅调用`torch_npu.npu_lightning_indexer`完成TopK检索的时延；Fused表示调用`fused_lightning_indexer_manage`完成TopK检索和稀疏缓存管理的总时延；Overhead为两者之差。
+
+| Batch Size | Official | Fused | Overhead |
+| ---: | ---: | ---: | ---: |
+| 1 | 134.030 | 288.410 | +154.380 |
+| 2 | 149.060 | 294.270 | +145.210 |
+| 5 | 220.570 | 375.950 | +155.380 |
+| 16 | 578.230 | 776.090 | +197.860 |
+| 24 | 838.920 | 1044.890 | +205.970 |
+
+时延会随硬件、CANN版本、编译选项和运行负载变化，表中结果仅用于说明该测试配置下的典型表现，不作为性能承诺或测试通过阈值。

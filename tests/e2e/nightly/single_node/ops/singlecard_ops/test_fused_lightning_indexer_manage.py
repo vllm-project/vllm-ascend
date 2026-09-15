@@ -21,6 +21,158 @@ INVALID_SLOT = -(1 << 31)
 PADDING_ID = -1
 MAX_ROUTES = 14
 
+FIRST_DECODE_SCENARIOS = (
+    pytest.param([1], 8320, 8192, id="q1"),
+    pytest.param([1, 2, 3], 8320, 8192, id="mixed-q1-q2-q3"),
+    pytest.param([4], 16256, 12288, id="q4"),
+    pytest.param([7], 16256, 14336, id="q7"),
+)
+
+STEADY_REPLACEMENT_SCENARIOS = (
+    pytest.param([1], 8320, 8192, id="q1"),
+    pytest.param([1, 2, 3], 8320, 8192, id="mixed-q1-q2-q3"),
+    pytest.param([4], 16256, 12288, id="q4"),
+    pytest.param([5], 16256, 12288, id="q5"),
+    pytest.param([6], 16256, 12288, id="q6"),
+    pytest.param([7], 16256, 14336, id="q7"),
+)
+
+ALL_ROUTE_SCENARIOS = (
+    (1, 8320, 8192),
+    (2, 8320, 8192),
+    (3, 8320, 8192),
+    (4, 16256, 12288),
+    (5, 16256, 12288),
+    (6, 16256, 12288),
+    (7, 16256, 14336),
+    (8, 16512, 16384),
+    (9, 18560, 18432),
+    (10, 20608, 20480),
+    (11, 22656, 22528),
+    (12, 24704, 24576),
+    (13, 26752, 26624),
+    (14, 32768, 32640),
+)
+
+ROUTE_STATE_SCENARIOS = tuple(
+    pytest.param(q, state, offload_len, cache_tokens, id=f"q{q}-state{state}")
+    for q, offload_len, cache_tokens in ALL_ROUTE_SCENARIOS
+    for state in (-3, -2, -1)
+)
+
+DTYPE_HEAD_ROUTE_SCENARIOS = tuple(
+    pytest.param(
+        q,
+        state,
+        offload_len,
+        cache_tokens,
+        dtype,
+        heads,
+        id=f"q{q}-state{state}-{dtype_name}-h{heads}",
+    )
+    for dtype, dtype_name, heads in (
+        (torch.bfloat16, "bf16", 32),
+        (torch.bfloat16, "bf16", 64),
+        (torch.float16, "fp16", 32),
+        (torch.float16, "fp16", 64),
+    )
+    for q, state, offload_len, cache_tokens in (
+        (1, -3, 8320, 8192),
+        (4, -2, 16256, 12288),
+        (7, -1, 16256, 14336),
+        (8, -3, 16512, 16384),
+        (12, -2, 24704, 24576),
+        (14, -1, 32768, 32640),
+    )
+)
+
+MIXED_BATCH_SCENARIOS = (
+    pytest.param(
+        [1, 4, 7],
+        [-3, -3, -3],
+        16256,
+        14336,
+        id="local-all-non-offload",
+    ),
+    pytest.param(
+        [1, 4, 7],
+        [-2, -2, -2],
+        16256,
+        14336,
+        id="local-all-first-decode",
+    ),
+    pytest.param([1, 4, 7], [-1, -1, -1], 16256, 14336, id="local-all-steady"),
+    pytest.param([1, 4, 7], [-3, -2, -1], 16256, 14336, id="local-mixed-state"),
+    pytest.param(
+        [8, 12, 14],
+        [-3, -3, -3],
+        32768,
+        32640,
+        id="wide-all-non-offload",
+    ),
+    pytest.param(
+        [8, 12, 14],
+        [-2, -2, -2],
+        32768,
+        32640,
+        id="wide-all-first-decode",
+    ),
+    pytest.param([8, 12, 14], [-1, -1, -1], 32768, 32640, id="wide-all-steady"),
+    pytest.param([8, 12, 14], [-3, -2, -1], 32768, 32640, id="wide-mixed-state"),
+    pytest.param(
+        [1, 4, 7, 8, 12, 14],
+        [-3, -2, -1, -3, -2, -1],
+        32768,
+        32640,
+        id="mixed-local-wide-state",
+    ),
+)
+
+LONG_SEQUENCE_SCENARIOS = (
+    pytest.param(
+        [1], [-1], 131200, 8192, 1 << 17, torch.bfloat16, 32, id="cross-2pow17"
+    ),
+    pytest.param(
+        [4], [-1], 262272, 12288, 1 << 18, torch.bfloat16, 32, id="cross-2pow18"
+    ),
+    pytest.param(
+        [7], [-2], 524416, 14336, 1 << 19, torch.bfloat16, 64, id="cross-2pow19"
+    ),
+    pytest.param(
+        [14], [-1], 1048704, 32640, 1 << 20, torch.float16, 64, id="cross-2pow20"
+    ),
+    pytest.param(
+        [1],
+        [-1],
+        2097024,
+        8192,
+        (1 << 21) - 256,
+        torch.bfloat16,
+        32,
+        id="near-2pow21-limit",
+    ),
+    pytest.param(
+        [1, 4, 7],
+        [-3, -2, -1],
+        131200,
+        14336,
+        1 << 17,
+        torch.float16,
+        64,
+        id="long-mixed-state-mtp",
+    ),
+)
+
+
+@pytest.fixture(autouse=True)
+def _show_test_progress(request: pytest.FixtureRequest):
+    """Print this module's collection progress after every pytest case."""
+    yield
+    module_items = [item for item in request.session.items if item.path == request.node.path]
+    position = module_items.index(request.node) + 1
+    percent = (position * 100 + len(module_items) - 1) // len(module_items)
+    print(f" [{position}/{len(module_items)}] [{percent}%]", flush=True)
+
 
 @dataclass
 class ManageCase:
@@ -222,6 +374,55 @@ def _native_topk(case: ManageCase) -> torch.Tensor:
     return torch.stack(rows)
 
 
+def _build_occurrence_boundary_case(q: int, occurrence_count: int) -> ManageCase:
+    cache_tokens = q * TOPK
+    extra = ((occurrence_count + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    case = _build_case(
+        q_values=[q],
+        states=[-1],
+        offload_len=cache_tokens + extra,
+        cache_tokens=cache_tokens,
+        random_block_table=False,
+    )
+
+    # Give every route one disjoint TOPK-sized positive-score interval. This
+    # makes the requested miss-occurrence boundary deterministic.
+    case.query.zero_()
+    case.index_weights.fill_(1)
+    case.index_key_cache.zero_()
+    key_by_source = case.index_key_cache.reshape(-1, 1, HEAD_DIM)
+    for route in range(q):
+        case.query[route, :, route].fill_(1)
+        key_by_source[route * TOPK : (route + 1) * TOPK, 0, route].fill_(1)
+
+    reference = _native_topk(case).cpu().to(torch.int64)
+    expected_union = torch.arange(cache_tokens, dtype=torch.int64)
+    torch.testing.assert_close(
+        torch.unique(reference.reshape(-1), sorted=True),
+        expected_union,
+        rtol=0,
+        atol=0,
+    )
+
+    route_misses = [occurrence_count // q] * q
+    for route in range(occurrence_count % q):
+        route_misses[route] += 1
+    missing = torch.cat([reference[route, : route_misses[route]] for route in range(q)])
+    hits = torch.cat([reference[route, route_misses[route] :] for route in range(q)])
+    assert missing.numel() == occurrence_count
+
+    fillers = torch.arange(cache_tokens, cache_tokens + occurrence_count, dtype=torch.int64)
+    cached = torch.cat((hits, fillers))
+    assert cached.numel() == cache_tokens
+
+    cache = torch.full_like(case.cache_seed.cpu(), INVALID_SLOT)
+    row = case.req_entries[0]
+    generator = torch.Generator().manual_seed(4096 + occurrence_count)
+    cache[row, cached] = torch.randperm(cache_tokens, generator=generator, dtype=torch.int64).to(torch.int32)
+    case.cache_seed = cache.to("npu")
+    return case
+
+
 def _assert_resident_bijection(cache_row: torch.Tensor, length: int, capacity: int) -> None:
     resident_slots = cache_row[:length]
     resident_slots = resident_slots[resident_slots >= 0]
@@ -352,23 +553,55 @@ def test_fused_lightning_indexer_manage_non_offload_matches_native(dtype, heads)
     _run_and_assert(case)
 
 
+@pytest.mark.parametrize("q_values,offload_len,cache_tokens", FIRST_DECODE_SCENARIOS)
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_first_decode_initializes_cache():
-    case = _build_case(q_values=[1], states=[-2], offload_len=2176, cache_tokens=2048)
+def test_fused_lightning_indexer_manage_first_decode_initializes_cache(q_values, offload_len, cache_tokens):
+    case = _build_case(
+        q_values=q_values,
+        states=[-2] * len(q_values),
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+    )
     _run_and_assert(case)
 
 
+@pytest.mark.parametrize("q_values,offload_len,cache_tokens", STEADY_REPLACEMENT_SCENARIOS)
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_steady_replacement_then_all_hit():
-    case = _build_case(q_values=[1], states=[-1], offload_len=2176, cache_tokens=2048)
+def test_fused_lightning_indexer_manage_steady_replacement_then_all_hit(q_values, offload_len, cache_tokens):
+    case = _build_case(
+        q_values=q_values,
+        states=[-1] * len(q_values),
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+    )
     updated_cache, outputs = _run_and_assert(case)
-    assert int(outputs[5][0]) > 0
+    assert torch.any(outputs[5] > 0)
 
     repeated = replace(case, cache_seed=updated_cache.clone())
     repeated_cache, repeated_outputs = _run_and_assert(repeated)
     assert torch.all(repeated_outputs[2] == 0)
     assert torch.all(repeated_outputs[5] == 0)
     torch.testing.assert_close(repeated_cache, updated_cache, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        pytest.param([-3, -3, -3], id="all-non-offload"),
+        pytest.param([-2, -2, -2], id="all-first-decode"),
+        pytest.param([-1, -1, -1], id="all-steady"),
+        pytest.param([-3, -2, -1], id="mixed-state"),
+    ],
+)
+@torch.inference_mode()
+def test_fused_lightning_indexer_manage_state_patterns(states):
+    case = _build_case(
+        q_values=[1, 2, 3],
+        states=states,
+        offload_len=8320,
+        cache_tokens=8192,
+    )
+    _run_and_assert(case)
 
 
 @torch.inference_mode()
@@ -420,34 +653,105 @@ def test_fused_lightning_indexer_manage_lifecycle():
     torch.testing.assert_close(stable_cache, identity_cache, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize(
+    "q,state,offload_len,cache_tokens",
+    ROUTE_STATE_SCENARIOS,
+)
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_q14_boundary():
+def test_fused_lightning_indexer_manage_route_state_matrix(
+    q, state, offload_len, cache_tokens
+):
     case = _build_case(
-        q_values=[14],
-        states=[-1],
-        offload_len=32768,
-        cache_tokens=32640,
+        q_values=[q],
+        states=[state],
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
     )
     _run_and_assert(case)
 
 
+@pytest.mark.parametrize(
+    "q,state,offload_len,cache_tokens,dtype,heads",
+    DTYPE_HEAD_ROUTE_SCENARIOS,
+)
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_long_source_id():
+def test_fused_lightning_indexer_manage_dtype_head_matrix(
+    q, state, offload_len, cache_tokens, dtype, heads
+):
     case = _build_case(
-        q_values=[1],
-        states=[-1],
-        offload_len=131200,
-        cache_tokens=8192,
+        q_values=[q],
+        states=[state],
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+        dtype=dtype,
+        heads=heads,
+    )
+    _run_and_assert(case)
+
+
+@pytest.mark.parametrize(
+    "q_values,states,offload_len,cache_tokens",
+    MIXED_BATCH_SCENARIOS,
+)
+@torch.inference_mode()
+def test_fused_lightning_indexer_manage_mixed_batch_matrix(
+    q_values, states, offload_len, cache_tokens
+):
+    case = _build_case(
+        q_values=q_values,
+        states=states,
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+    )
+    _run_and_assert(case)
+
+
+@pytest.mark.parametrize(
+    "q,occurrence_count",
+    [
+        pytest.param(5, 2048, id="q5-occurrence-2048"),
+        pytest.param(5, 2049, id="q5-occurrence-2049"),
+        pytest.param(6, 4095, id="q6-occurrence-4095"),
+        pytest.param(7, 4096, id="q7-occurrence-4096"),
+        pytest.param(7, 4097, id="q7-occurrence-4097"),
+    ],
+)
+@torch.inference_mode()
+def test_fused_lightning_indexer_manage_occurrence_sort_boundaries(q, occurrence_count):
+    case = _build_occurrence_boundary_case(q, occurrence_count)
+    _, outputs = _run_and_assert(case)
+    assert int(outputs[2].sum()) == occurrence_count
+    assert int(outputs[5][0]) == occurrence_count
+
+
+@pytest.mark.parametrize(
+    "q_values,states,offload_len,cache_tokens,min_source,dtype,heads",
+    LONG_SEQUENCE_SCENARIOS,
+)
+@torch.inference_mode()
+def test_fused_lightning_indexer_manage_long_sequence_source_ids(
+    q_values, states, offload_len, cache_tokens, min_source, dtype, heads
+):
+    case = _build_case(
+        q_values=q_values,
+        states=states,
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+        dtype=dtype,
+        heads=heads,
         random_block_table=False,
     )
     case.query.fill_(1)
     case.index_weights.fill_(1)
-    # Make every source in the first block above 2^17 an unambiguous TopK
-    # member while retaining random scores elsewhere to avoid a tied cutoff.
-    case.index_key_cache[1024].fill_(4)
+
+    # Give the target high-ID block distinct dominant scores so every route
+    # selects long-sequence sources without introducing a tied TopK cutoff.
+    target_block = min_source // BLOCK_SIZE
+    for offset in range(BLOCK_SIZE):
+        case.index_key_cache[target_block, offset].fill_(4.0 + offset * 0.125)
 
     reference = _native_topk(case)
-    assert torch.any(reference >= (1 << 17))
+    assert torch.all(torch.any(reference >= min_source, dim=1))
     _run_and_assert(case)
 
 
