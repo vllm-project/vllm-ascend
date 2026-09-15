@@ -104,8 +104,6 @@ class AscendMlaDCPMetadataBuilder(
         metadata_cls: type[AscendMLAMetadata] | None = None,
         supports_dcp_with_varlen: bool = True,
     ):
-        # Fixed-width speculative verification does not imply support for
-        # arbitrary ragged decode queries. Preserve the caller capability.
         super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size

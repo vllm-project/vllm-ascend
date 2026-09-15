@@ -755,10 +755,9 @@ class NPUModelRunner(GPUModelRunner):
 
     def _draft_uses_qwen3_gqa_dspark(self) -> bool:
         """Return whether the draft expects Kimi's materialized residual."""
-        speculative_config = getattr(self, "speculative_config", None)
-        if speculative_config is None or not speculative_config.use_dspark():
+        if self.speculative_config is None or not self.speculative_config.use_dspark():
             return False
-        draft_model_config = speculative_config.draft_model_config
+        draft_model_config = self.speculative_config.draft_model_config
         if draft_model_config is None:
             return False
         hf_config = draft_model_config.hf_config
@@ -5686,11 +5685,6 @@ class NPUModelRunner(GPUModelRunner):
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
-        replicated_draft_layer_names = (
-            set(getattr(self.drafter, "_draft_attn_layer_names", ()))
-            if self._uses_dcp_replicated_dspark_draft_kv()
-            else set()
-        )
         for layer_name, attn_module in attn_layers.items():
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
@@ -5833,6 +5827,11 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        replicated_draft_layer_names = (
+            set(getattr(self.drafter, "_draft_attn_layer_names", ()))
+            if self._uses_dcp_replicated_dspark_draft_kv()
+            else set()
+        )
         # Preserve the non-DCP target/Mamba layout. Only effective draft K/V
         # bytes are replicated; from_full_attention_spec removes the target
         # padding because the mixed planner allocates draft tensors separately.
