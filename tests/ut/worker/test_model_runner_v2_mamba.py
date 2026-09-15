@@ -123,6 +123,24 @@ def test_mrv2_cow_copy_ignores_aligned_storage_padding():
     assert torch.equal(backing[[0, 25]], padding_before)
 
 
+def test_mrv2_cow_copy_snapshots_overlapping_views_before_writes():
+    # Hybrid Attention/Mamba views can overlap one shared allocation.  The
+    # destination of the first view aliases the source of the second view, so
+    # sequential read/write copies would propagate the wrong bytes.
+    backing = torch.arange(12, dtype=torch.int32)
+    first_view = backing[:8].view(4, 2)
+    second_view = backing[4:].view(4, 2)
+    expected_second_source = second_view[0].clone()
+
+    _copy_kv_cache_blocks_inplace_ascend(
+        [[first_view], [second_view]],
+        4,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    assert torch.equal(second_view[2], expected_second_source)
+
+
 def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))

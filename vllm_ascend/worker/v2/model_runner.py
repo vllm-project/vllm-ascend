@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
@@ -94,6 +95,8 @@ def _copy_kv_cache_blocks_inplace_ascend(
     """
     if not kv_cache_block_copies:
         return
+    if os.getenv("VLLM_ASCEND_DIAG_DISABLE_KV_COW_COPY") == "1":
+        return
 
     first_tensor = None
     tensors: list[torch.Tensor] = []
@@ -132,9 +135,16 @@ def _copy_kv_cache_blocks_inplace_ascend(
         dtype=torch.long,
         device=first_tensor.device,
     )
+    # Different logical cache views can overlap the same hybrid backing
+    # allocation. Snapshot every source before writing any destination;
+    # otherwise an earlier view's destination may alias a later view's source
+    # and make the CoW result depend on view iteration order.
+    pending_writes: list[tuple[torch.Tensor, torch.Tensor]] = []
     for tensor in tensors:
         logical_blocks = tensor.view(num_blocks, -1)
-        logical_blocks[dst_indices] = logical_blocks[src_indices]
+        pending_writes.append((logical_blocks, logical_blocks[src_indices].clone()))
+    for logical_blocks, source_snapshot in pending_writes:
+        logical_blocks[dst_indices] = source_snapshot
 
 
 class NPUModelRunner(GPUModelRunner):

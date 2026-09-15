@@ -4,6 +4,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
@@ -26,6 +27,11 @@ class AscendMambaManager(MambaManager):
         # relying on a process environment variable that can disagree with
         # the connector role.
         self.is_kv_producer = False
+
+    def _cache_partial_tail_block(self, *args, **kwargs):
+        if os.getenv("VLLM_ASCEND_DIAG_DISABLE_MAMBA_PARTIAL_TAIL") == "1":
+            return None
+        return super()._cache_partial_tail_block(*args, **kwargs)
 
     def add_local_computed_blocks(
         self,
