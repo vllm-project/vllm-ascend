@@ -78,7 +78,7 @@ symbols = {
     "DeepseekV41CompressorStateSpec": State,
     "DeepseekV41SWASpec": SWA,
     "DeepseekV41DraftSWASpec": Draft,
-    "is_v41_spec": lambda s: isinstance(s, (Full, Index, State, SWA, Draft)),
+    "is_deepseek_v41_cache_spec": lambda s: isinstance(s, (Full, Index, State, SWA, Draft)),
     "replace": dataclasses.replace,
     "UniformTypeKVCacheSpecs": Uniform,
     "KVCacheGroupSpec": lambda **kw: SimpleNamespace(**kw),

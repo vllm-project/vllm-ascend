@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 
+from vllm_ascend.models.common import deepseek as deepseek_shared
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_module
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
     select_deepseek_v4_vision_experts,
@@ -34,6 +35,80 @@ class _FakeMoERunner(nn.Module):
     def forward(self, hidden_states, router_logits, input_ids=None):
         self.input_ids = input_ids
         return hidden_states
+
+
+@pytest.mark.parametrize("is_internal_router", [False, True])
+@pytest.mark.parametrize("is_sequence_parallel", [False, True])
+@pytest.mark.parametrize("has_fp32_input", [False, True])
+def test_deepseek_v4_moe_reuses_fp32_input_on_matching_token_shard(
+    monkeypatch, is_internal_router, is_sequence_parallel, has_fp32_input
+):
+    hidden_states = torch.randn(4, 8, dtype=torch.bfloat16)
+    fp32_input = hidden_states.float() if has_fp32_input else None
+    input_ids = torch.tensor([11, 22, 13, 24])
+    experts = MagicMock(side_effect=lambda **kwargs: kwargs["hidden_states"])
+    experts.is_internal_router = is_internal_router
+    gate = SimpleNamespace(tid2eid=torch.zeros(32, 2), weight=torch.randn(3, 8))
+    moe = SimpleNamespace(gate=gate, experts=experts, is_sequence_parallel=is_sequence_parallel, tp_size=1)
+    monkeypatch.setattr(deepseek_shared, "sp_shard", lambda x: x[2:])
+    monkeypatch.setattr(deepseek_shared, "sp_all_gather", lambda x: torch.cat([x, x]))
+    linear = MagicMock(wraps=torch.nn.functional.linear)
+    monkeypatch.setattr(deepseek_shared.F, "linear", linear)
+
+    deepseek_v4_module.DeepseekV4MoE.forward(moe, hidden_states, input_ids, fp32_input)
+
+    kwargs = experts.call_args.kwargs
+    expected_hidden = hidden_states[2:] if is_sequence_parallel else hidden_states
+    torch.testing.assert_close(kwargs["hidden_states"], expected_hidden, rtol=0, atol=0)
+    assert kwargs["input_ids"] is input_ids
+    if is_internal_router:
+        router_input = kwargs["router_logits"]
+        linear.assert_not_called()
+    else:
+        linear.assert_called_once()
+        router_input = linear.call_args.args[0]
+        torch.testing.assert_close(kwargs["router_logits"], expected_hidden.float() @ gate.weight.T)
+    torch.testing.assert_close(router_input.float(), expected_hidden.float(), rtol=0, atol=0)
+    if has_fp32_input:
+        expected_fp32 = fp32_input[2:] if is_sequence_parallel else fp32_input
+        assert router_input.dtype == torch.float32
+        assert router_input.data_ptr() == expected_fp32.data_ptr()
+
+
+def test_deepseek_v4_dsa_cp_keeps_moe_input_sequence_parallel():
+    layer = deepseek_v4_module.DeepseekV2DecoderLayer.__new__(deepseek_v4_module.DeepseekV2DecoderLayer)
+    nn.Module.__init__(layer)
+    layer.use_sequence_parallel_moe = True
+    layer.enable_dsa_cp = True
+    layer.hc_attn_fn = nn.Parameter(torch.empty(1))
+    layer.hc_attn_scale = nn.Parameter(torch.empty(1))
+    layer.hc_attn_base = nn.Parameter(torch.empty(1))
+    layer.hc_ffn_fn = nn.Parameter(torch.empty(1))
+    layer.hc_ffn_scale = nn.Parameter(torch.empty(1))
+    layer.hc_ffn_base = nn.Parameter(torch.empty(1))
+
+    hidden_states = torch.randn(2, 4, 8)
+    collapsed = torch.randn(2, 8)
+    layer.hc_pre = MagicMock(
+        side_effect=[
+            (collapsed, torch.empty(0), torch.empty(0)),
+            (collapsed, torch.empty(0), torch.empty(0)),
+        ]
+    )
+    layer.input_layernorm = MagicMock(side_effect=lambda value: value)
+    layer.self_attn = MagicMock(side_effect=lambda **kwargs: kwargs["hidden_states"])
+    layer.hc_post = MagicMock(side_effect=lambda value, *_args: value)
+    layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
+    layer.mlp = MagicMock(return_value=collapsed)
+
+    layer.forward(
+        torch.arange(2),
+        hidden_states,
+        None,
+        input_ids=torch.tensor([11, 22]),
+    )
+
+    assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is True
 
 
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
@@ -79,21 +154,15 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
         use_sequence_parallel_moe=False,
     )
 
-    monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
-    monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_shared, "FusedMoEFactory", fused_moe)
+    monkeypatch.setattr(deepseek_shared, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_shared, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(
-        deepseek_v4_module,
+        deepseek_shared,
         "get_ascend_config",
         lambda: SimpleNamespace(mix_placement=False),
-    )
-    monkeypatch.setattr(deepseek_v4_module.rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(
-        deepseek_v4_module.rocm_aiter_ops,
-        "is_fusion_moe_shared_experts_enabled",
-        lambda: False,
     )
 
     moe = deepseek_v4_module.DeepseekV4MoE(
@@ -177,21 +246,15 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
         use_sequence_parallel_moe=False,
     )
 
-    monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
-    monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_shared, "FusedMoEFactory", fused_moe)
+    monkeypatch.setattr(deepseek_shared, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_shared, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(
-        deepseek_v4_module,
+        deepseek_shared,
         "get_ascend_config",
         lambda: SimpleNamespace(mix_placement=False),
-    )
-    monkeypatch.setattr(deepseek_v4_module.rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(
-        deepseek_v4_module.rocm_aiter_ops,
-        "is_fusion_moe_shared_experts_enabled",
-        lambda: False,
     )
 
     moe = deepseek_v4_module.DeepseekV4MoE(
@@ -241,20 +304,15 @@ def test_hash_layer_router_bias_is_skipped_when_unused(monkeypatch):
     )
     model.num_redundant_experts = 0
 
-    monkeypatch.setattr(deepseek_v4_module, "fused_moe_make_expert_params_mapping", lambda *a, **k: [])
-    monkeypatch.setattr(deepseek_v4_module, "get_spec_layer_idx_from_weight_name", lambda *a, **k: None)
-    monkeypatch.setattr(deepseek_v4_module, "is_pp_missing_parameter", lambda *a, **k: False)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_shared, "fused_moe_make_expert_params_mapping", lambda *a, **k: [])
+    monkeypatch.setattr(deepseek_shared, "get_spec_layer_idx_from_weight_name", lambda *a, **k: None)
+    monkeypatch.setattr(deepseek_shared, "is_pp_missing_parameter", lambda *a, **k: False)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_shared, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(
-        deepseek_v4_module,
+        deepseek_shared,
         "get_ascend_config",
         lambda: SimpleNamespace(mix_placement=False),
-    )
-    monkeypatch.setattr(
-        deepseek_v4_module.rocm_aiter_ops,
-        "is_fusion_moe_shared_experts_enabled",
-        lambda: False,
     )
 
     dense_bias = torch.full((num_experts,), 2.0)

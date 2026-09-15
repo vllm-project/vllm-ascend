@@ -193,6 +193,8 @@ every other node is a headless worker.
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
+    # Allow time for weight loading and graph capture on large models.
+    export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -206,7 +208,7 @@ every other node is a headless worker.
     DP_START_RANK=$((NODE_RANK * 2))
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
-      HEADLESS_ARGS+=(--headless)
+      HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$DP_START_RANK")
     fi
 
     vllm serve "$MODEL_PATH" \
@@ -217,7 +219,6 @@ every other node is a headless worker.
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 4 \
       --data-parallel-size-local 2 \
-      --data-parallel-start-rank "$DP_START_RANK" \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
@@ -254,6 +255,8 @@ every other node is a headless worker.
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
+    # Allow time for weight loading and graph capture on large models.
+    export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -266,7 +269,7 @@ every other node is a headless worker.
 
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
-      HEADLESS_ARGS+=(--headless)
+      HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$NODE_RANK")
     fi
 
     vllm serve "$MODEL_PATH" \
@@ -277,7 +280,6 @@ every other node is a headless worker.
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
-      --data-parallel-start-rank "$NODE_RANK" \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
@@ -298,6 +300,10 @@ every other node is a headless worker.
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
+
+Omit `--data-parallel-start-rank` on Node 0: specifying even `0` selects
+hybrid load balancing in the pinned vLLM CLI, which is incompatible with
+headless remote engines. Set the start rank only on the headless nodes.
 
 Start Node 0 first and then the remaining nodes. The global topology is
 DP4/TP8/EP32 in both configurations:
