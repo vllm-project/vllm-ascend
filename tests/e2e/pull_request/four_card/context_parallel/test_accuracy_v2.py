@@ -42,6 +42,11 @@ PCP_FULL_DECODE_GRAPH = {
     "cudagraph_capture_sizes": [4, 8],
 }
 
+MLA_DCP_FULL_DECODE_GRAPH = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [2],
+}
+
 MLA_DCP_MODEL = os.getenv("MLA_DCP_MODEL_PATH", "vllm-ascend/DeepSeek-V2-Lite-W8A8")
 MLA_DCP_PROMPTS = [
     "The capital of France is",
@@ -269,21 +274,21 @@ def test_dsv3_2_sfa_pcp_dcp_model_runner_v2_graph_accuracy() -> None:
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
-    graph_mode="eager",
+    graph_mode="full_decode_only",
 )
 @patch.dict(
     os.environ,
     {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_BATCH_INVARIANT": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_deepseek_v2_lite_mla_dcp_model_runner_v2_eager() -> None:
-    """Guard MRV2 MLA DCP decode and chunked-prefill execution."""
+def test_deepseek_v2_lite_mla_dcp_model_runner_v2_graph() -> None:
+    """Guard MRV2 MLA DCP full-decode graph and chunked prefill."""
     with VllmRunner(
         MLA_DCP_MODEL,
         max_model_len=1024,
@@ -298,7 +303,7 @@ def test_deepseek_v2_lite_mla_dcp_model_runner_v2_eager() -> None:
         cp_kv_cache_interleave_size=128,
         block_size=128,
         quantization="ascend",
-        enforce_eager=True,
+        compilation_config=MLA_DCP_FULL_DECODE_GRAPH,
     ) as runner:
         outputs = runner.generate_greedy(MLA_DCP_PROMPTS, max_tokens=8)
 
