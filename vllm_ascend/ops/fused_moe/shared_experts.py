@@ -509,25 +509,33 @@ class AscendSharedExperts:
 
         path = self._select_mlp_path()
         if path is SharedExpertMLPPath.A8_INT_FUSED:
-            return self._run_a8_int_mlp(
+            shared_out = self._run_a8_int_mlp(
                 hidden_states,
                 milestones,
                 down_projection_ready,
                 down_projection_milestone,
             )
-        if path is SharedExpertMLPPath.A8_MXFP_FUSED:
-            return self._run_a8_mxfp_mlp(
+        elif path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            shared_out = self._run_a8_mxfp_mlp(
                 hidden_states,
                 milestones,
                 down_projection_ready,
                 down_projection_milestone,
             )
-        return self._run_linear_wrapped_mlp(
-            hidden_states,
-            milestones,
-            down_projection_ready,
-            down_projection_milestone,
-        )
+        else:
+            return self._run_linear_wrapped_mlp(
+                hidden_states,
+                milestones,
+                down_projection_ready,
+                down_projection_milestone,
+            )
+
+        # Fused quantized paths bypass part2(), which normally applies the
+        # model-specific shared-expert gate.
+        if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
+            gate_out, _ = self.layer.expert_gate(hidden_states)
+            shared_out = F.sigmoid(gate_out) * shared_out
+        return shared_out
 
     def _select_mlp_path(self) -> SharedExpertMLPPath:
         """Select a path without changing the quantization scheme's math.
