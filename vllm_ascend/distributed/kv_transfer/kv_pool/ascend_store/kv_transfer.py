@@ -867,6 +867,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_size: int | list[int],
         tp_rank: int,
         tp_size: int = 1,
+        pcp_rank: int = 0,
+        pcp_size: int = 1,
         dcp_size: int = 1,
         put_step: int = 1,
         kv_role: str = "kv_producer",
@@ -878,6 +880,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
         )
+        self.pcp_rank = pcp_rank
+        self.pcp_size = pcp_size
         self.put_step = put_step
         self.kv_role = kv_role
         self.group_uses_align_state = group_uses_align_state or []
@@ -1022,7 +1026,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_start = block_idx * group_block_size
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
-            pre_shard = self.dcp_size <= 1 and not align_state_group
+            tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
+            # PCP=2, TP=4, KV heads=2, tp_replicas=2:
+            # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
+            #  0        0 / 2            0      0, 4, ...
+            #  0        1 / 3            1      1, 5, ...
+            #  1        0 / 2            2      2, 6, ...
+            #  1        1 / 3            3      3, 7, ...
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -1030,8 +1040,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.tp_rank % self.put_step if pre_shard else None,
-                shard_size=self.put_step if pre_shard else None,
+                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
+                shard_size=self.pcp_size * tp_replicas,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)
