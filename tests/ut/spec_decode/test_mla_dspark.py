@@ -241,7 +241,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         yield
 
     monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
-    result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
+    result = spec.build_draft_attn_metadata_for_graph(2, torch.tensor([128]))
     assert captured["pad"] == 10
     assert result == [metadata]
     assert query_metadata.actual_seq_lengths_q == [5, 10]
