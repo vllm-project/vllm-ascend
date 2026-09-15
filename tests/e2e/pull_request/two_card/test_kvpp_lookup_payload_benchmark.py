@@ -25,6 +25,7 @@ from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleN
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupHashMode
 
 MODEL = "Qwen/Qwen3-8B"
+MODEL_MAX_LEN = 40960
 PROMPT_SEED = " ".join(f"lookup payload marker {index}" for index in range(256))
 
 pytestmark = pytest.mark.e2e_model(MODEL)
@@ -35,10 +36,13 @@ RPC_WARMUPS = 50
 RPC_SAMPLES = 1000
 
 BLOCK_SIZE = 128
-COMMON_PREFIX_BLOCKS = 512
+COMMON_PREFIX_BLOCKS = 312
 SERVING_REQUESTS = 64
 SERVING_OUTPUT_TOKENS = 8
 GPU_BLOCKS = 640
+SERVING_INPUT_TOKENS = (COMMON_PREFIX_BLOCKS + 1) * BLOCK_SIZE
+assert SERVING_INPUT_TOKENS + SERVING_OUTPUT_TOKENS <= MODEL_MAX_LEN
+assert COMMON_PREFIX_BLOCKS + 2 * SERVING_REQUESTS + 1 <= GPU_BLOCKS
 SERVING_SAMPLES_PER_INSTANCE = 5
 SERVING_MODE_ORDERS = (
     (LookupHashMode.FULL, LookupHashMode.SUFFIX),
@@ -126,7 +130,10 @@ class LookupStub:
     def __init__(self, expected_calls: int):
         self.expected_calls = expected_calls
         self.calls = 0
-        self.hash_counts = {LookupHashMode.FULL: [], LookupHashMode.SUFFIX: []}
+        self.hash_counts: dict[LookupHashMode, list[int]] = {
+            LookupHashMode.FULL: [],
+            LookupHashMode.SUFFIX: [],
+        }
         self.server: Any = None
 
     def lookup_scheduler(
@@ -173,7 +180,10 @@ def test_lookup_rpc_payload_benchmark():
     server = LookupKeyServer(stub, config)
     stub.server = server
     client = LookupKeyClient(config)
-    samples = {LookupHashMode.FULL: [], LookupHashMode.SUFFIX: []}
+    samples: dict[LookupHashMode, list[float]] = {
+        LookupHashMode.FULL: [],
+        LookupHashMode.SUFFIX: [],
+    }
 
     try:
         for _ in range(RPC_WARMUPS):
@@ -191,7 +201,7 @@ def test_lookup_rpc_payload_benchmark():
             )
 
         for sample_index in range(RPC_SAMPLES):
-            order = (
+            order: tuple[tuple[LookupHashMode, list[bytes]], ...] = (
                 (LookupHashMode.FULL, full_hashes),
                 (LookupHashMode.SUFFIX, suffix_hashes),
             )
@@ -520,10 +530,11 @@ def run_serving_mode(
     case_name = f"{tmp_path.name}-r{round_index}-p{order_position}-{mode.value}-{isolation_id}"
     with SingleNodeMemcacheManager(config, case_name) as pool:
         port = get_open_port()
-        # This is intentionally a low-noise upper-bound scenario for lookup
-        # payload savings. A dense model and short output minimize
+        # This is intentionally a low-noise near-context-limit scenario for
+        # lookup payload savings. A dense model and short output minimize
         # unrelated model, collective, and decode work, while the long local
-        # prefix maximizes the hashes that FULL sends and SUFFIX omits.
+        # prefix maximizes the hashes that FULL sends and SUFFIX omits without
+        # exceeding the model's declared context length.
         args = [
             "--served-model-name",
             "kvpp-test",
@@ -532,7 +543,7 @@ def run_serving_mode(
             "1",
             "--enforce-eager",
             "--max-model-len",
-            "66000",
+            str(MODEL_MAX_LEN),
             "--max-num-batched-tokens",
             "4096",
             "--max-num-seqs",
@@ -586,6 +597,7 @@ def run_serving_mode(
             common_prefix = (seed_tokens * ((common_size + len(seed_tokens) - 1) // len(seed_tokens)))[:common_size]
             suffix_seed = (seed_tokens * ((BLOCK_SIZE + len(seed_tokens) - 1) // len(seed_tokens)))[:BLOCK_SIZE]
             prompts = [common_prefix + suffix_seed[index:] + suffix_seed[:index] for index in range(SERVING_REQUESTS)]
+            assert all(len(prompt) == SERVING_INPUT_TOKENS for prompt in prompts)
 
             # This first concurrent batch only populates the fresh pool. It is
             # not a correctness oracle: the behavior under test is whether
@@ -806,6 +818,8 @@ def test_vllm_serve_lookup_payload_benchmark(tmp_path):
             "samples_per_instance": SERVING_SAMPLES_PER_INSTANCE,
             "requests_per_sample": SERVING_REQUESTS,
             "measured_requests_per_mode": (len(SERVING_MODE_ORDERS) * SERVING_SAMPLES_PER_INSTANCE * SERVING_REQUESTS),
+            "max_model_len": MODEL_MAX_LEN,
+            "input_tokens_per_request": SERVING_INPUT_TOKENS,
             "common_prefix_blocks": COMMON_PREFIX_BLOCKS,
             "suffix_blocks": 1,
             "output_tokens": SERVING_OUTPUT_TOKENS,
