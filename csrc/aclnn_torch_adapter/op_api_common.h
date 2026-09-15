@@ -736,11 +736,12 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     TORCH_CHECK(workspace_status == 0,                                        \
                 "call " #aclnn_api " failed, detail:", aclGetRecentErrMsg()); \
     void *workspace_addr = nullptr;                                           \
+    // Keep workspace alive until OpCommand::Run() completes.                 \
+    at::Tensor workspace_tensor;                                              \
     if (workspace_size != 0) {                                                \
       at::TensorOptions options =                                             \
           at::TensorOptions(torch_npu::utils::get_npu_device_type());         \
-      auto workspace_tensor =                                                 \
-          at::empty({workspace_size}, options.dtype(kByte));                  \
+      workspace_tensor = at::empty({workspace_size}, options.dtype(kByte));   \
       workspace_addr = const_cast<void *>(workspace_tensor.storage().data()); \
     }                                                                         \
     auto acl_call = [converted_params, workspace_addr, workspace_size,        \
