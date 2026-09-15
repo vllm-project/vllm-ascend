@@ -8,14 +8,15 @@ This document shows how to write YAML configs consumed by
 `model` automatically.
 
 Do not write `proxy_node_index`, `proxy_host`, `proxy_port`, `proxy_script`, or
-`dp_group` in YAML. The framework derives proxy metadata from `routing.type`,
-and roles are selected by `routing.groups`.
+`dp_group` in YAML. The framework derives proxy metadata from `routing.type`
+and `routing.layerwise`; roles are selected by `routing.groups`.
 
 ## Disaggregated Prefill Template
 
 Use this template for PD disaggregation. `routing.groups` decides which config
 entries run as prefillers or decoders. The framework derives the PD proxy script
-from `routing.type`, so do not write `proxy_*` fields in YAML.
+from `routing.type` and `routing.layerwise`, so do not write `proxy_*`
+fields in YAML.
 
 ```yaml
 test_name: "test DeepSeek-V2-Lite-W8A8 external dp disaggregated_prefill"
@@ -30,6 +31,9 @@ npu_per_node: 16
 
 routing:
   type: "disaggregated_prefill"
+  # Optional. Defaults to false for backward compatibility.
+  # Set to true when every P/D server uses MooncakeLayerwiseConnector.
+  layerwise: false
   groups:
     prefiller: [0]
     decoder: [1]
@@ -194,6 +198,8 @@ benchmarks:
 - `cluster_hosts`: Optional local-debug IP list. Omit it in CI unless a test
   needs fixed hosts.
 - `routing.type`: Supported value is `disaggregated_prefill`.
+- `routing.layerwise`: Optional boolean. Set it to `true` to use the layerwise
+  proxy. The default is `false`.
 - `routing.groups`: Maps config indices to roles. `disaggregated_prefill`
   requires `prefiller` and `decoder`.
 - For `disaggregated_prefill`, use `kv_producer` for prefiller templates and
@@ -308,14 +314,26 @@ The generated configs and service logs are archived with the node logs:
 <external-dp-log-root>/node-0/memcache-meta-service.log
 ```
 
-The framework also derives proxy metadata from `routing.type`:
+The framework also derives proxy metadata from `routing.type` and
+`routing.layerwise`:
 
 ```text
-disaggregated_prefill -> examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+disaggregated_prefill + layerwise=false
+  -> examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+disaggregated_prefill + layerwise=true
+  -> examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py
 ```
 
 The proxy runs on node 0, listens on `${NODE_0_IP}:1999`, and is used by node 0
 for benchmark requests.
+
+For layerwise KV transfer, set `routing.layerwise: true`. The framework then starts
+`examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
+instead. Existing configs that omit `layerwise` continue to use
+`load_balance_proxy_server_example.py`. A layerwise config must also use
+`MooncakeLayerwiseConnector` for every prefiller and decoder template; changing
+the connector without changing the routing mode uses an incompatible proxy
+request flow.
 
 ## Template Variables
 
