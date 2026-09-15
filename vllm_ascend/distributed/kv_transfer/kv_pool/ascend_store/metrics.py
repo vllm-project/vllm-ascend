@@ -48,6 +48,14 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
             self.data.setdefault("load_get_duration_seconds", []).extend(durations)
         if num_keys := other.data.get("load_get_keys"):
             self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys
+        for field in (
+            "lookup_hashes_sent",
+            "lookup_hashes_omitted",
+            "lookup_duration_seconds",
+            "lookup_requests",
+        ):
+            if field in other.data:
+                self.data[field] = self.data.get(field, 0) + other.data[field]
         if "delayed_release_requests" in other.data:
             self.data["delayed_release_requests"] = other.data["delayed_release_requests"]
             self.data["delayed_release_blocks"] = other.data["delayed_release_blocks"]
@@ -62,6 +70,12 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
             reduced["ascend_store_load_get_count"] = len(durations)
             reduced["ascend_store_load_get_avg_ms"] = round(fmean(durations) * 1e3, 3)
             reduced["ascend_store_load_get_keys"] = self.data.get("load_get_keys", 0)
+        if "lookup_hashes_sent" in self.data:
+            reduced["ascend_store_lookup_hashes_sent"] = self.data["lookup_hashes_sent"]
+            reduced["ascend_store_lookup_hashes_omitted"] = self.data.get("lookup_hashes_omitted", 0)
+        if "lookup_duration_seconds" in self.data:
+            reduced["ascend_store_lookup_duration_seconds"] = self.data["lookup_duration_seconds"]
+            reduced["ascend_store_lookup_requests"] = self.data.get("lookup_requests", 0)
         return reduced
 
     def record_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
@@ -73,6 +87,15 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
     def set_delayed_release(self, num_requests: int, num_blocks: int) -> None:
         self.data["delayed_release_requests"] = num_requests
         self.data["delayed_release_blocks"] = num_blocks
+
+    def record_lookup_hashes(self, sent: int, omitted: int) -> None:
+        self.data["lookup_hashes_sent"] = self.data.get("lookup_hashes_sent", 0) + sent
+        self.data["lookup_hashes_omitted"] = self.data.get("lookup_hashes_omitted", 0) + omitted
+
+    def record_lookup_duration(self, duration_seconds: float) -> None:
+        """Record opt-in scheduler-side blocking time for performance analysis."""
+        self.data["lookup_duration_seconds"] = self.data.get("lookup_duration_seconds", 0.0) + duration_seconds
+        self.data["lookup_requests"] = self.data.get("lookup_requests", 0) + 1
 
 
 class AscendStorePromMetrics(KVConnectorPromMetrics):
@@ -123,6 +146,41 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
             ),
             per_engine_labelvalues,
         )
+        self._lookup_hashes_sent = create_metric_per_engine(
+            self._counter_cls(
+                name="vllm:ascend_store_lookup_hashes_sent_total",
+                documentation="Number of request block hashes sent in AscendStore lookup RPCs.",
+                labelnames=labelnames,
+            ),
+            per_engine_labelvalues,
+        )
+        self._lookup_hashes_omitted = create_metric_per_engine(
+            self._counter_cls(
+                name="vllm:ascend_store_lookup_hashes_omitted_total",
+                documentation="Number of HBM-cached request block hashes omitted from AscendStore lookup RPCs.",
+                labelnames=labelnames,
+            ),
+            per_engine_labelvalues,
+        )
+        self._lookup_duration = create_metric_per_engine(
+            self._counter_cls(
+                name="vllm:ascend_store_lookup_duration_seconds_total",
+                documentation=(
+                    "Opt-in scheduler-side wall time blocked in AscendStore "
+                    "lookup RPCs. Disabled unless profile_lookup is configured."
+                ),
+                labelnames=labelnames,
+            ),
+            per_engine_labelvalues,
+        )
+        self._lookup_requests = create_metric_per_engine(
+            self._counter_cls(
+                name="vllm:ascend_store_lookup_requests_total",
+                documentation=("Number of AscendStore lookup RPCs included in the opt-in lookup duration measurement."),
+                labelnames=labelnames,
+            ),
+            per_engine_labelvalues,
+        )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
         metric = self._load_get_duration.get(engine_idx)
@@ -132,6 +190,18 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         metric = self._load_get_keys.get(engine_idx)
         if metric is not None:
             metric.inc(transfer_stats_data.get("load_get_keys", 0))
+        metric = self._lookup_hashes_sent.get(engine_idx)
+        if metric is not None:
+            metric.inc(transfer_stats_data.get("lookup_hashes_sent", 0))
+        metric = self._lookup_hashes_omitted.get(engine_idx)
+        if metric is not None:
+            metric.inc(transfer_stats_data.get("lookup_hashes_omitted", 0))
+        metric = self._lookup_duration.get(engine_idx)
+        if metric is not None:
+            metric.inc(transfer_stats_data.get("lookup_duration_seconds", 0))
+        metric = self._lookup_requests.get(engine_idx)
+        if metric is not None:
+            metric.inc(transfer_stats_data.get("lookup_requests", 0))
         metric = self._delayed_release_requests.get(engine_idx)
         if metric is not None:
             if "delayed_release_requests" in transfer_stats_data:

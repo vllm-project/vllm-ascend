@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ge
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
+    HBMCachedBlockHashList,
 )
 # isort: on
 
@@ -285,6 +286,35 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
 class TestFindReachableHitTokens(unittest.TestCase):
     """The shared driver behind the scheduler/worker coordinator lookups."""
+
+    def test_combines_hbm_coordinates_with_remote_suffix_hit(self):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            return_value=_FakePrefixManager,
+        ):
+            coord = AscendStoreCoordinator(
+                [KVCacheGroupSpec(["layer.0"], _full_spec(16))],
+                scheduler_block_size=16,
+                hash_block_size=16,
+                group_block_sizes=[16],
+                group_cache_families=["c1"],
+            )
+        logical_hashes = HBMCachedBlockHashList(
+            [b"h2", b"h3"],
+            num_hbm_cached_hashes=2,
+        )
+
+        def query_group_hits(group_id, group_block_hashes, lookup_mask):
+            self.assertEqual(group_id, 0)
+            self.assertIsNone(lookup_mask)
+            self.assertEqual(len(group_block_hashes), 4)
+            self.assertIs(group_block_hashes[0], group_block_hashes[1])
+            self.assertEqual(group_block_hashes[2:], [b"h2", b"h3"])
+            return group_block_hashes[:3]
+
+        hit = coord.find_reachable_hit_tokens(logical_hashes, 64, query_group_hits)
+
+        self.assertEqual(hit, 48)
 
     def test_passes_mask_allowed_hashes_to_query_callback(self):
         coord = AscendStoreCoordinator(

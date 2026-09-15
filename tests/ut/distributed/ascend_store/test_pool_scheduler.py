@@ -26,6 +26,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    LookupHashMode,
     RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -660,10 +661,16 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_make_socket.return_value = mock_socket
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
-        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"], [b"mode"]]
         client = LookupKeyClient(config)
-        result = client.lookup(64, [b"\xaa\xbb"], hbm_hit_tokens=16)
+        result = client.lookup(
+            64,
+            [b"\xaa\xbb"],
+            hbm_hit_tokens=16,
+            lookup_hash_mode=LookupHashMode.SUFFIX,
+        )
         self.assertEqual(result, 32)
+        self.assertEqual(mock_encoder_cls.return_value.encode.call_args_list[2].args[0], "suffix")
         mock_socket.send_multipart.assert_called_once()
         frames = mock_socket.send_multipart.call_args.args[0]
         self.assertEqual(
@@ -672,6 +679,7 @@ class TestLookupKeyClient(unittest.TestCase):
                 (64).to_bytes(4, "big"),
                 b"groups",
                 (16).to_bytes(4, "big"),
+                b"mode",
                 b"hashes",
             ],
         )

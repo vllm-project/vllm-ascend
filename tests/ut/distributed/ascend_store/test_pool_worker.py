@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
     LoadSpec,
+    LookupHashMode,
     ReqMeta,
     SharedBlockData,
     get_partial_block_index,
@@ -927,6 +928,99 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 0]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 16)
+
+    def test_lookup_hash_modes_preserve_results_and_change_only_payload(self):
+        """Exercise FULL and SUFFIX from scheduler selection through lookup."""
+        worker = self._make_worker()
+        worker.cache_coordinator = None
+        worker.token_database.block_size = [64]
+        worker.m_store.exists.return_value = [1]
+        request = MagicMock(
+            prompt_token_ids=list(range(96)),
+            num_tokens=96,
+            request_id="r1",
+            block_hashes=["h0", "h1", "h2", "h3", "h4", "h5"],
+        )
+        cases = [
+            (None, False, LookupHashMode.FULL, request.block_hashes, 6, 0),
+            ("suffix", True, LookupHashMode.SUFFIX, request.block_hashes[2:], 4, 2),
+        ]
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
+        for configured_mode, profile_lookup, mode, expected_payload, expected_sent, expected_omitted in cases:
+            with self.subTest(mode=mode.value):
+                extra_config: dict[str, bool | str] = {"profile_lookup": profile_lookup}
+                if configured_mode is not None:
+                    extra_config["lookup_hash_mode"] = configured_mode
+                config = self._make_config(
+                    block_size=16,
+                    extra_config=extra_config,
+                )
+                config.parallel_config.prefill_context_parallel_size = 1
+                config.parallel_config.decode_context_parallel_size = 1
+                config.parallel_config.tensor_parallel_size = 1
+                config.parallel_config.world_size = 1
+                config.cache_config.hash_block_size = 16
+                config.kv_transfer_config.get_from_extra_config.return_value = True
+                with (
+                    patch(f"{module}.importlib") as scheduler_importlib,
+                    patch(f"{module}.LookupKeyClient"),
+                ):
+                    scheduler_importlib.import_module.return_value = MagicMock()
+                    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
+                        KVPoolScheduler,
+                    )
+
+                    scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+                scheduler.client = MagicMock()
+                scheduler.client.lookup.side_effect = worker.lookup_scheduler
+                worker.m_store.reset_mock()
+                self.assertEqual(scheduler.get_num_new_matched_tokens(request, 32), (32, False))
+                scheduler.client.lookup.assert_called_once_with(
+                    96,
+                    expected_payload,
+                    [0],
+                    hbm_hit_tokens=32,
+                    lookup_hash_mode=mode,
+                )
+                keys = worker.m_store.exists.call_args.args[0]
+                self.assertEqual(len(keys), 1)
+                self.assertTrue(keys[0].endswith("@h3"))
+                load_spec = scheduler.load_specs[request.request_id]
+                self.assertEqual(load_spec.kvpool_cached_tokens, 64)
+                self.assertEqual(load_spec.vllm_cached_tokens, 32)
+                stats = scheduler.get_stats()
+                self.assertIsNotNone(stats)
+                self.assertEqual(stats.data["lookup_hashes_sent"], expected_sent)
+                self.assertEqual(stats.data["lookup_hashes_omitted"], expected_omitted)
+                if profile_lookup:
+                    self.assertEqual(stats.data["lookup_requests"], 1)
+                    self.assertGreater(stats.data["lookup_duration_seconds"], 0)
+                else:
+                    self.assertNotIn("lookup_requests", stats.data)
+
+        invalid_config = self._make_config(
+            block_size=16,
+            extra_config={"lookup_hash_mode": "invalid"},
+        )
+        invalid_config.parallel_config.prefill_context_parallel_size = 1
+        invalid_config.parallel_config.decode_context_parallel_size = 1
+        invalid_config.parallel_config.tensor_parallel_size = 1
+        invalid_config.parallel_config.world_size = 1
+        invalid_config.cache_config.hash_block_size = 16
+        with self.assertRaisesRegex(ValueError, "lookup_hash_mode must be one of: full, suffix"):
+            KVPoolScheduler(invalid_config, use_layerwise=False)
+
+        invalid_profile_config = self._make_config(
+            block_size=16,
+            extra_config={"profile_lookup": "true"},
+        )
+        invalid_profile_config.parallel_config.prefill_context_parallel_size = 1
+        invalid_profile_config.parallel_config.decode_context_parallel_size = 1
+        invalid_profile_config.parallel_config.world_size = 1
+        invalid_profile_config.cache_config.hash_block_size = 16
+        with self.assertRaisesRegex(TypeError, "profile_lookup must be a bool"):
+            KVPoolScheduler(invalid_profile_config, use_layerwise=False)
 
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()

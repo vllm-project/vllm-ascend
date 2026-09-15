@@ -39,9 +39,13 @@ def test_stats_aggregate_and_reduce():
     first = AscendStoreKVConnectorStats()
     first.set_delayed_release(1, 2)
     first.record_operation("load_get", 0.01, 3)
+    first.record_lookup_hashes(sent=6, omitted=2)
+    first.record_lookup_duration(0.003)
     second = AscendStoreKVConnectorStats()
     second.set_delayed_release(2, 5)
     second.record_operation("load_get", 0.02, 5)
+    second.record_lookup_hashes(sent=3, omitted=1)
+    second.record_lookup_duration(0.007)
 
     first.aggregate(second)
 
@@ -51,6 +55,10 @@ def test_stats_aggregate_and_reduce():
         "ascend_store_load_get_count": 2,
         "ascend_store_load_get_avg_ms": 15.0,
         "ascend_store_load_get_keys": 8,
+        "ascend_store_lookup_hashes_sent": 9,
+        "ascend_store_lookup_hashes_omitted": 3,
+        "ascend_store_lookup_duration_seconds": 0.01,
+        "ascend_store_lookup_requests": 2,
     }
 
 
@@ -65,6 +73,10 @@ def test_prom_metrics_observe():
             "delayed_release_blocks": 5,
             "load_get_duration_seconds": [0.01, 0.02],
             "load_get_keys": 8,
+            "lookup_hashes_sent": 9,
+            "lookup_hashes_omitted": 3,
+            "lookup_duration_seconds": 0.01,
+            "lookup_requests": 2,
         }
     )
 
@@ -72,3 +84,7 @@ def test_prom_metrics_observe():
     assert ascend_store_prom._delayed_release_blocks[0].value == 5
     assert ascend_store_prom._load_get_duration[0].observed == [0.01, 0.02]
     assert ascend_store_prom._load_get_keys[0].value == 8
+    assert ascend_store_prom._lookup_hashes_sent[0].value == 9
+    assert ascend_store_prom._lookup_hashes_omitted[0].value == 3
+    assert ascend_store_prom._lookup_duration[0].value == 0.01
+    assert ascend_store_prom._lookup_requests[0].value == 2
