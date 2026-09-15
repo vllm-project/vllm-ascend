@@ -239,9 +239,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output_is_reduced: bool,
     ) -> tuple[torch.Tensor, bool]:
         if self._should_reduce_routed_before_combine():
-            fused_output = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
-                fused_output, self.layer_name
-            )
+            fused_output = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(fused_output, self.layer_name)
             return fused_output, True
         return fused_output, fused_output_is_reduced
 
