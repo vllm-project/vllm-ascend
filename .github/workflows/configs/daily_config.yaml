@@ -1,0 +1,42 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Daily high-frequency nightly subset for daytime regression detection.
+# Every `name` below MUST match a test case in nightly_config.yaml.
+# Add/remove entries to tune the subset; the schedule_e2e_test.yaml workflow
+# dispatches them via the schedule_nightly_test_<soc>.yaml workflows.
+
+a2:
+  multi_node:
+    - name: multi-node-qwen3-235b-dp
+  single_node:
+    - name: qwen3-32b-int8
+a3:
+  multi_node:
+    - name: multi-node-deepseek-v3.2-W8A8-EP
+  double_node:
+    - name: multi-node-qwen3-dp
+  single_node:
+    - name: deepseek-r1-0528-w8a8
+  multi_card:
+    - name: qwen3-30b-acc
+a5:
+  multi_node:
+    # Currently disabled in nightly_config.yaml; resolve_daily_tests.py skips
+    # it with a warning until the A5 multi-node case is enabled.
+    - name: Qwen3-235B-W8A8-EPLB
+  single_node:
+    - name: Qwen3_32b_w8a8_A5

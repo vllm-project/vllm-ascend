@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Schedule All E2E Tests
+name: Schedule Daily Tests
 
 on:
   workflow_dispatch:
@@ -30,6 +30,25 @@ on:
         required: false
         default: false
         type: boolean
+      daily_test_cases:
+        description: >-
+          Daily nightly subset. Empty = use daily_config_yaml (repo default or
+          inline). Non-empty supports: JSON dict {"a2":["name"],"a3":["name"]},
+          "daily-all", "daily-<soc>", or comma-separated test names.
+          Names are resolved directly against nightly_config.yaml,
+          NOT against daily_config_yaml.
+        required: false
+        default: ''
+        type: string
+      daily_config_yaml:
+        description: >-
+          Raw YAML string of the daily nightly config. When non-empty overrides
+          .github/workflows/configs/daily_config.yaml from the repo.
+        required: false
+        default: ''
+        type: string
+  repository_dispatch:
+    types: [daily-nightly-dispatch]
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -39,6 +58,7 @@ defaults:
 
 permissions:
   contents: read
+  actions: write
   pull-requests: write
 
 concurrency:
@@ -133,6 +153,181 @@ jobs:
       base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
       upload_timing: ${{ inputs.update_est_times }}
+
+  daily-select-tests:
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      has_daily_a2: ${{ steps.resolve.outputs.has_daily_a2 }}
+      daily_a2_tests: ${{ steps.resolve.outputs.daily_a2_tests }}
+      has_daily_a3: ${{ steps.resolve.outputs.has_daily_a3 }}
+      daily_a3_tests: ${{ steps.resolve.outputs.daily_a3_tests }}
+      has_daily_a3_560t: ${{ steps.resolve.outputs.has_daily_a3_560t }}
+      daily_a3_560t_tests: ${{ steps.resolve.outputs.daily_a3_560t_tests }}
+      has_daily_a5: ${{ steps.resolve.outputs.has_daily_a5 }}
+      daily_a5_tests: ${{ steps.resolve.outputs.daily_a5_tests }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
+            }}
+          fetch-depth: 1
+
+      - name: Resolve daily config source
+        id: daily-config
+        env:
+          DAILY_CONFIG_INPUT: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.daily_config_yaml ||
+              github.event.client_payload.daily_config_yaml || ''
+            }}
+        run: |
+          set -euo pipefail
+          pip install pyyaml -q
+          if [ -n "$DAILY_CONFIG_INPUT" ]; then
+            printf '%s' "$DAILY_CONFIG_INPUT" > daily_config.yaml
+            echo "source=inline" >> "$GITHUB_OUTPUT"
+          else
+            cp .github/workflows/configs/daily_config.yaml daily_config.yaml
+            echo "source=repo" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve daily test cases
+        id: resolve
+        env:
+          DAILY_TEST_CASES: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.daily_test_cases ||
+              github.event.client_payload.daily_test_cases || ''
+            }}
+        run: |
+          python3 .github/workflows/scripts/resolve_daily_tests.py \
+            --daily-config ./daily_config.yaml \
+            --nightly-config .github/workflows/configs/nightly_config.yaml \
+            --test-cases "$DAILY_TEST_CASES"
+
+  daily-dispatch-a2:
+    name: Dispatch Nightly-A2 daily subset
+    needs: daily-select-tests
+    if: needs.daily-select-tests.outputs.has_daily_a2 == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install gh
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-a2 with daily subset
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh workflow run schedule_nightly_test_a2.yaml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f test_cases='${{ needs.daily-select-tests.outputs.daily_a2_tests }}' \
+            -f vllm_ascend_branch='main' \
+            -f skip_build_image='true' \
+            -f request_id='daily' \
+            -f vllm_ascend_ref='main'
+
+  daily-dispatch-a3:
+    name: Dispatch Nightly-A3 daily subset
+    needs: daily-select-tests
+    if: needs.daily-select-tests.outputs.has_daily_a3 == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install gh
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-a3 with daily subset
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh workflow run schedule_nightly_test_a3.yaml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_tests }}' \
+            -f vllm_ascend_branch='main' \
+            -f skip_build_image='true' \
+            -f request_id='daily' \
+            -f vllm_ascend_ref='main'
+
+  daily-dispatch-a3-560t:
+    name: Dispatch Nightly-A3-560T daily subset
+    needs: daily-select-tests
+    if: needs.daily-select-tests.outputs.has_daily_a3_560t == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install gh
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-a3-560t with daily subset
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh workflow run schedule_nightly_test_a3_560t.yaml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_560t_tests }}' \
+            -f vllm_ascend_branch='main' \
+            -f skip_build_image='true' \
+            -f request_id='daily' \
+            -f vllm_ascend_ref='main'
+
+  daily-dispatch-a5:
+    name: Dispatch Nightly-A5 daily subset
+    needs: daily-select-tests
+    if: needs.daily-select-tests.outputs.has_daily_a5 == 'true'
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install gh
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch nightly-a5 with daily subset
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh workflow run schedule_nightly_test_a5.yaml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f test_cases='${{ needs.daily-select-tests.outputs.daily_a5_tests }}' \
+            -f vllm_ascend_branch='main' \
+            -f skip_build_image='true' \
+            -f request_id='daily' \
+            -f vllm_ascend_ref='main'
 
   update-estimated-times:
     needs: [run-all-tests]

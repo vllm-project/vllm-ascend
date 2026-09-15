@@ -19,6 +19,13 @@
 # Single-node and multi-card tests run directly on dedicated runners labeled in nightly_config.yaml.
 name: Nightly-A3-560T
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      (inputs.request_id == 'daily' &&
+        'Nightly-A3-560T (Daily)' ||
+        format('Nightly-A3-560T (PR) {0}', inputs.request_id)) ||
+      'Nightly-A3-560T (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:
