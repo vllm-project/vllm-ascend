@@ -144,7 +144,7 @@ jobs:
             SWR_REGISTRY="${{ inputs.swr_registry }}/ascend/vllm-ascend"
             SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp"
             TAG_PREFIX="nightly-ci"
-            BASE_IMAGE=""
+            BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
           fi
 
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
