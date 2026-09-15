@@ -201,9 +201,13 @@ def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
 
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
-    """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
+    """Return SparseFlashMLA cmp_ratio.
+
+    ops-transformer SparseFlashMLA only accepts 1/4/128 (default 1 when only
+    ori_kv is used). 0 is not a legal compression ratio.
+    """
     if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
-        return 0
+        return 1
     return max(compress_ratio, 1)
 
 
