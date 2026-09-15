@@ -310,9 +310,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     seq_len = seq_len.tolist()
                 actual_seq_lengths_kv = seq_len
 
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
-                if split_kind is None and pad_length > 0:
-                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+                if split_kind is None:
+                    # Parallel DSpark queries use BSND: one KV length per
+                    # request, even when each request has several query tokens.
+                    num_requests = q_nope.shape[0]
+                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_requests - len(actual_seq_lengths_kv))
+                    if input_layout == "BSND":
+                        boundaries = decode_meta.actual_seq_lengths_q
+                        assert boundaries is not None
+                        actual_seq_lengths = [end - start for start, end in zip([0, *boundaries[:-1]], boundaries)]
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
