@@ -29,7 +29,7 @@ from vllm.config import CompilationConfig
 from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
 QWEN35_DENSE_MODEL = "Qwen/Qwen3.5-9B"
-QWEN35_EAGLE3_DRAFT_MODEL = "BLR2/Qwen3.5-9B-Eagle3-ShareGPT"
+QWEN35_EAGLE3_DRAFT_MODEL = "leslie1776/Qwen3.5-9B-Eagle3-ShareGPTocal-di"
 MODELS = [QWEN35_DENSE_MODEL]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
