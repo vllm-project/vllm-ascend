@@ -1286,7 +1286,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.quant_config = SimpleNamespace(
             quant_description={"model.layers.3.self_attn.indexer.quant_type": "INT8_DYNAMIC"}
         )
-        vc.additional_config = {"enable_sparse_li_c8": True}
+        # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
+        # init_ascend_config): indexer_kv_dtype "int8" makes it active.
+        vc.attention_config.indexer_kv_dtype = "int8"
 
         config = init_ascend_config(vc)
 
@@ -1298,7 +1300,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        vc.additional_config = {"enable_sparse_sfa_c8": "true"}
+        # enable_sparse_sfa_c8 is derived from cache_dtype (see
+        # init_ascend_config): cache_dtype "fp8" makes it active.
+        vc.cache_config.cache_dtype = "fp8"
 
         config = init_ascend_config(vc)
 
@@ -1328,6 +1332,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
                     "refresh": True,
                     "enable_sparse_li_c8": enable_li_c8,
                 }
+                # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
+                # init_ascend_config); the per-case flag is expressed there.
+                vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
                 if kv_role is not None:
                     vc.kv_transfer_config = KVTransferConfig(
                         kv_connector="MooncakeConnectorV1",
