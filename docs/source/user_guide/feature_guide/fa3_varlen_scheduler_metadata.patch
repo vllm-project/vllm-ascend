@@ -1,0 +1,107 @@
+--- a/flash_attn_npu_3/flash_attn_npu_interface.py
++++ b/flash_attn_npu_3/flash_attn_npu_interface.py
+@@ -721,32 +721,39 @@
+         deterministic=False,
+         sm_margin=0,
+         return_softmax=False,
++        scheduler_metadata=None,
+     ):
+         if softmax_scale is None:
+             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
+-        # Training interfaces do not expose scheduler_metadata (aligned with
+-        # official flash-attn); the scheduler metadata is computed internally on
+-        # the AICPU so no D2H/H2D sync breaks the pipeline. cache_seqlens holds
+-        # the per-batch KV lengths and stays on device.
+-        batch_size = cu_seqlens_q.shape[0] - 1
+-        num_heads, head_size = q.shape[1], q.shape[2]
+-        num_heads_k = k.shape[1]
+-        if seqused_k is not None:
+-            cache_seqlens = seqused_k
++        # Inference can share precomputed device tiling across equal layer
++        # layouts. Calls without metadata retain the existing training path.
++        if scheduler_metadata is None:
++            batch_size = cu_seqlens_q.shape[0] - 1
++            num_heads, head_size = q.shape[1], q.shape[2]
++            num_heads_k = k.shape[1]
++            if seqused_k is not None:
++                cache_seqlens = seqused_k
++            else:
++                cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
++            scheduler_metadata = get_scheduler_metadata(
++                batch_size, max_seqlen_q, max_seqlen_k, num_heads, num_heads_k, head_size,
++                cache_seqlens,
++                qkv_dtype=q.dtype,
++                cu_seqlens_q=cu_seqlens_q,
++                causal=causal,
++                window_size=window_size,
++                softcap=softcap,
++                num_splits=num_splits,
++                sm_margin=sm_margin,
++                softmax_scale=softmax_scale,
++            )
+         else:
+-            cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+-        scheduler_metadata = get_scheduler_metadata(
+-            batch_size, max_seqlen_q, max_seqlen_k, num_heads, num_heads_k, head_size,
+-            cache_seqlens,
+-            qkv_dtype=q.dtype,
+-            cu_seqlens_q=cu_seqlens_q,
+-            causal=causal,
+-            window_size=window_size,
+-            softcap=softcap,
+-            num_splits=num_splits,
+-            sm_margin=sm_margin,
+-            softmax_scale=softmax_scale,
+-        )
++            _validate_scheduler_metadata(
++                scheduler_metadata, causal=causal, window_size=window_size,
++                softcap=softcap, softmax_scale=softmax_scale,
++                seqlen_q=max_seqlen_q, varlen_q=True, num_splits=num_splits,
++                page_table=None, k_cache=k, max_seqlen_k=max_seqlen_k,
++            )
+         # out, q, k, v, out_padded, softmax_lse = _flash_attn_varlen_forward(
+         out, softmax_lse, *rest = _flash_attn_forward(
+             q,
+@@ -825,7 +832,7 @@
+         dq = dq[..., :head_size_og]  # We could have padded the head dimension
+         dk = dk[..., :head_size_og]
+         dv = dv[..., :head_size_og]
+-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
++        return (dq, dk, dv) + (None,) * (len(ctx.needs_input_grad) - 3)
+
+
+ def flash_attn_qkvpacked_func(
+@@ -988,6 +995,7 @@
+     deterministic=False,
+     sm_margin=0,
+     return_attn_probs=False,
++    scheduler_metadata=None,
+ ):
+     return FlashAttnVarlenFunc.apply(
+         q,
+@@ -1011,6 +1019,7 @@
+         deterministic,
+         sm_margin,
+         return_attn_probs,
++        scheduler_metadata,
+     )
+
+
+@@ -1206,7 +1215,7 @@
+
+ def _validate_scheduler_metadata(scheduler_metadata, *, causal, window_size, softcap,
+                                  softmax_scale, seqlen_q, varlen_q, num_splits,
+-                                 page_table, k_cache):
++                                 page_table, k_cache, max_seqlen_k=None):
+     """Reject scheduler_metadata created with arguments that do not match this
+     call; the AICPU-written tiling bakes in the mask layout, paged geometry,
+     softcap-divided softmax scale and split schedule."""
+@@ -1233,7 +1242,7 @@
+         expected["max_seqlen_k"] = int(k_cache.shape[1]) * int(page_table.shape[1])
+     else:
+         expected["page_size"] = None
+-        expected["max_seqlen_k"] = int(k_cache.shape[1])
++        expected["max_seqlen_k"] = int(k_cache.shape[1] if max_seqlen_k is None else max_seqlen_k)
+     mismatches = []
+     for key, call_val in expected.items():
+         meta_val = params.get(key, "<missing>")

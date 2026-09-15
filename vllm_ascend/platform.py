@@ -230,6 +230,16 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
+        if not attn_selector_config.use_pcp and get_ascend_config().enable_fa3 is True:
+            if use_mla or use_sparse or use_compress or attn_selector_config.use_pcp:
+                raise ValueError("FA3 supports dense decoder attention without context parallelism.")
+            if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+                raise ValueError("FA3 is not supported on the compatibility attention platform.")
+            if util.find_spec("flash_attn_npu_3") is None:
+                raise ImportError("FA3 requires flash-attention-npu built with its v3 backend (flash_attn_npu_3).")
+            logger.info_once("Using Ascend FA3 attention with device-side tiling.")
+            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
+
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 

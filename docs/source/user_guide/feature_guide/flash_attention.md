@@ -1,5 +1,9 @@
 # Flash Attention 3
 
+For general inference with device-side tiling, chunked prefill, prefix caching,
+and graph execution, see [FA3 inference](fa3_inference.md). The configuration and
+limitations below describe the separate RL training-consistency backend.
+
 !!! note
 
     Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
