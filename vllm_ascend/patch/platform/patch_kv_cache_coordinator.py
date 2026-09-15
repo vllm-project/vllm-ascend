@@ -22,7 +22,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
-    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -198,12 +197,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # actually be matched.
         # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
         for mgr in self.single_type_managers:
-            if not vllm_version_is("0.28.0"):
-                # Main uses a separate write-mask alignment. Match the lookup
-                # boundary, including the raw-tail pool alignment.
-                mgr.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
-            elif isinstance(mgr, SlidingWindowManager):
-                mgr.scheduler_block_size = self.lcm_block_size
+            # Both supported versions use a separate write-mask alignment.
+            # Match the lookup boundary, including the raw-tail pool alignment.
+            mgr.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
 
         self.use_eagle = use_eagle
 

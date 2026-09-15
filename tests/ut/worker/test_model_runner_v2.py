@@ -465,7 +465,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
         install_pp.assert_called_once()
     else:
         install_pp.assert_not_called()
@@ -501,7 +501,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
         runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
     else:
         runner.pp_handler.broadcast_draft_tokens.assert_not_called()
