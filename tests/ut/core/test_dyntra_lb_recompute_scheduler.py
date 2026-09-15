@@ -18,6 +18,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
     AsyncDyntraLBRecomputeScheduler,
     DyntraLBRecomputeScheduler,
+    RecomputeScheduler,
 )
 
 
@@ -40,6 +41,7 @@ def _create_dyntra_lb_recompute_scheduler():
 def test_dyntra_lb_recompute_schedulers_use_policy_mixin():
     assert issubclass(DyntraLBRecomputeScheduler, DyntraLBPolicyMixin)
     assert issubclass(AsyncDyntraLBRecomputeScheduler, DyntraLBPolicyMixin)
+    assert DyntraLBRecomputeScheduler.schedule is RecomputeScheduler.schedule
     assert (
         DyntraLBRecomputeScheduler._apply_load_balance_modifications
         is DyntraLBPolicyMixin._apply_load_balance_modifications
@@ -65,12 +67,8 @@ def test_dyntra_lb_recompute_invokes_policy_hooks():
 
 def test_dyntra_lb_recompute_emits_scheduler_diagnostics(monkeypatch):
     scheduler = _create_dyntra_lb_recompute_scheduler()
+    scheduler._enable_diagnostics = True
     summaries = []
-    monkeypatch.setattr(
-        recompute_scheduler_module,
-        "diagnostics_enabled",
-        lambda _config: True,
-    )
     monkeypatch.setattr(
         recompute_scheduler_module,
         "print_scheduler_summary",
