@@ -339,20 +339,11 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         if self.hash:
-            # Use `torch.rand(...).topk(...)` instead of `torch.randint` so
-            # each token's top-k expert ids are unique: MC2 dispatch/combine
-            # fails in the dummy profile run if a token repeats an expert id.
-            token_to_expert = (
-                torch.rand(
-                    config.vocab_size,
-                    config.n_routed_experts,
-                )
-                .topk(
-                    config.num_experts_per_tok,
-                    dim=1,
-                )
-                .indices.to(torch.int32)
-            )
+            # MC2 dispatch/combine fails
+            # in the dummy profile run if a token repeats an expert id
+            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
 
             self.gate.tid2eid = nn.Parameter(
                 token_to_expert,
