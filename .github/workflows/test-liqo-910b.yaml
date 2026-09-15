@@ -3,6 +3,8 @@ name: Test Liqo 910b
 on:
   push:
     branches: [test/liqo-sz-lab-runner]
+  pull_request:
+    branches: [main]
 
 jobs:
   test:
