@@ -1230,6 +1230,27 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
+#   3. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
+#      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
+#    Why:
+#       The upstream thinking-budget kernels expose two independent
+#       Triton-Ascend compiler limitations. A helper with pointer arguments and
+#       branch-local returns fails TTIR-to-Linalg materialization when called
+#       from a dynamic `tl.range`. The marker-cache kernel also uses chained
+#       runtime boolean expressions that older Triton-Ascend versions cannot
+#       compile.
+#    How:
+#       Replace the helper with complementary masked loads followed by
+#       `tl.where`, and replace chained three-term conditions in the
+#       marker-cache kernel with nested two-term conditions. The scan and
+#       thinking-budget semantics remain unchanged.
+#    Related PR (if no, explain why):
+#       No. These are Triton-Ascend compiler compatibility workarounds.
+#    Future Plan:
+#       Remove the `_load_effective_token` patch after the new Q4
+#       Triton-Ascend release is available. Remove the marker-cache kernel
+#       patch when Triton-Ascend 3.6.0 is the minimum supported version.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
