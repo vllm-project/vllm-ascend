@@ -228,6 +228,7 @@ def test_mrv2_replicated_cache_views_cover_physical_pages(replication, split):
         AttentionSpec=AttentionSpec,
         AscendDCPReplicatedDraftAttentionSpec=AttentionSpec,
         AscendSFAIndexerCacheSpec=other,
+        AscendIndexerKPoolTailSpec=other,
         MLAAttentionSpec=other,
         AscendMLAAttentionSpec=other,
         AscendSlidingWindowMLASpec=other,
@@ -269,6 +270,7 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
     current = [target]
     events = []
     layer = SimpleNamespace()
+    target_layer = SimpleNamespace()
 
     @contextmanager
     def set_config(config):
@@ -296,13 +298,13 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
         enable_dcp=enable_dcp,
         set_current_vllm_config=set_config,
         AttentionLayerBase=object,
-        get_layers_from_vllm_config=lambda *args: {"draft": layer},
+        get_layers_from_vllm_config=lambda *args: {"target": target_layer, "draft": layer},
     )
     exec(compile("from __future__ import annotations\n" + ast.unparse(cls), "mixin", "exec"), scope)
     host = type("Host", (scope[cls.name], Parent), {})()
     host.target_vllm_config = target
     host.attn_vllm_config = host.vllm_config = draft
-    host.draft_attn_layer_names = {"draft"}
+    assert not hasattr(host, "draft_attn_layer_names")
     host.replicated_draft_kv = replicated
     assert enable_dcp()
     model = object()
@@ -314,6 +316,7 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
     assert events == [(model, {"target"}, not replicated)]
     assert current[0] is target and enable_dcp()
     assert getattr(layer, "_ascend_dcp_replicated_draft", False) == (replicated and not fail)
+    assert not hasattr(target_layer, "_ascend_dcp_replicated_draft")
 
 
 @pytest.mark.parametrize("replicated", [False, True])
@@ -387,3 +390,51 @@ def test_draft_recompute_options_are_isolated(scheduler, legacy):
     assert draft["multistream_overlap_shared_expert"]
     if scheduler and "other" in scheduler:
         assert draft["scheduler_config"]["other"] == 3
+
+
+@pytest.mark.parametrize("layer_count,layer_stride,valid", [(1, 0, True), (2, 0, False), (2, 16, True)])
+def test_replicated_planner_single_layer_descriptors(layer_count, layer_stride, valid):
+    root = Path(__file__).resolve().parents[3] / "vllm_ascend"
+    source = root / "worker/v2/attn_utils.py"
+    function = next(n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "_allocate_kv_cache")
+    attention_type = type("AttentionSpec", (), {"page_size_bytes": 8})
+    mamba_type = type("MambaSpec", (), {"page_size_bytes": 8})
+    names = [f"target{i}" for i in range(layer_count)]
+    specs = {name: attention_type() for name in names}
+    specs["state"] = mamba_type()
+    descriptors = [
+        SimpleNamespace(size=64, layers=names, offset=0, layer_stride=layer_stride, block_stride=8),
+        SimpleNamespace(size=64, layers=["state"], offset=32, layer_stride=0, block_stride=8),
+    ]
+    config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_tensors=descriptors,
+        kv_cache_groups=[SimpleNamespace(layer_names=list(specs))],
+    )
+    scope = dict(
+        torch=torch,
+        KVPPConfig=SimpleNamespace(from_vllm_config=lambda _: SimpleNamespace(size=1)),
+        get_current_vllm_config=lambda: SimpleNamespace(kv_transfer_config=None),
+        _is_dsv4_model=lambda _: False,
+        _get_layer_kv_cache_specs=lambda _: specs,
+        AttentionSpec=attention_type,
+        MambaSpec=mamba_type,
+        AscendIndexerKPoolTailSpec=type("OtherSpec", (), {}),
+        vllm_version_is=lambda _: False,
+        get_kv_cache_tensor_layers=lambda descriptor: descriptor.layers,
+        is_hidden_state_cache_spec=lambda _: False,
+    )
+    exec(compile("from __future__ import annotations\n" + ast.unparse(function), str(source), "exec"), scope)
+    allocate = scope[function.name]
+    if not valid:
+        with pytest.raises(ValueError, match="contiguous per-layer"):
+            allocate(config, {}, torch.device("cpu"))
+        return
+    caches = allocate(config, {}, torch.device("cpu"))
+    assert all(cache.is_contiguous() and cache.numel() == 16 for cache in caches.values())
+    assert caches["state"].storage_offset() == 32
+    caches["target0"].fill_(7)
+    assert not caches["state"].any()
+    if layer_count > 1:
+        assert caches["target1"].storage_offset() == 16
+        assert not caches["target1"].any()

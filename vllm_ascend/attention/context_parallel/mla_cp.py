@@ -215,6 +215,17 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     understand this class
     """
 
+    can_return_lse_for_decode: bool = True
+    # Causal decode merges interleave-aware history with the replicated current
+    # chunk; noncausal decode reads each rank's complete local sequence.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # AscendMLAImpl bypasses the upstream MLA initializer. FIA returns LSE
+        # for the internal DCP merge, so expose that capability to MRv2 checks.
+        self.need_to_return_lse_for_decode = self.dcp_size > 1
+
     @staticmethod
     def update_graph_params(
         update_stream,
