@@ -249,6 +249,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
     def set_moe_parameters(self):
         self.expert_weights = []
+        self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = getattr(self.config, "n_group", 1)
 
         self.moe_layers = []

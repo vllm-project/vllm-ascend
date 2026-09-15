@@ -15,9 +15,30 @@ from vllm_ascend.distributed.eplb.state import (
 )
 
 
-def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.add_model is upstream_eplb_state.EplbState.add_model
+def test_uses_upstream_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+
+
+def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
+    def upstream_add_model(self, model, model_config):
+        del model, model_config
+        self.policy = object()
+
+    policy = object()
+    policy_factory = MagicMock(return_value=policy)
+    monkeypatch.setattr(
+        upstream_eplb_state.EplbState,
+        "add_model",
+        upstream_add_model,
+    )
+    monkeypatch.setattr(eplb_state, "AscendV2EplbPolicy", policy_factory)
+    state = AscendEplbState.__new__(AscendEplbState)
+
+    state.add_model(object(), object())
+    state.add_model(object(), object())
+
+    assert state.policy is policy
+    policy_factory.assert_called_once_with()
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(

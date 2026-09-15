@@ -137,9 +137,10 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     consumed_event = MagicMock()
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
-        layer_idx=3,
+        layer_idx=1,
         transfer_metadata=object(),
         consumed_event=consumed_event,
+        is_last_result=True,
     )
     model_state = SimpleNamespace(
         pending_result=pending_result,
@@ -164,7 +165,7 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     result = wrapped_move(model_state, 0, future_option="future")
 
     assert result == "moved"
-    refresh.assert_called_once_with(model_state, 3)
+    refresh.assert_called_once_with(model_state, 1)
     log_info.assert_called_once_with(
         "%s: model=%s",
         patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
