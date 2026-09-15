@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,7 +7,7 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, use_custom_add_rms_norm
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -128,3 +129,34 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+class TestAddRMSNormKernelSelection:
+    """The residual branch must pick its kernel from the checkpoint."""
+
+    @pytest.mark.parametrize(
+        "bias,bias_loaded",
+        [
+            (None, False),
+            (torch.zeros(8), False),
+        ],
+    )
+    def test_native_kernel_without_a_loaded_norm_bias(self, bias, bias_loaded):
+        with patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True) as custom_op:
+            assert use_custom_add_rms_norm(bias, bias_loaded) is False
+        custom_op.assert_not_called()
+
+    def test_custom_kernel_once_a_norm_bias_was_loaded(self):
+        with patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True):
+            assert use_custom_add_rms_norm(torch.ones(8), True) is True
+
+    def test_custom_kernel_is_still_gated_on_the_custom_op_library(self):
+        with patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=False):
+            assert use_custom_add_rms_norm(torch.ones(8), True) is False
+
+    def test_env_restores_the_previous_behaviour(self):
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_NATIVE_ADD_RMS_NORM": "0"}),
+            patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True),
+        ):
+            assert use_custom_add_rms_norm(None, False) is True
