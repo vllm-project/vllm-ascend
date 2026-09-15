@@ -203,3 +203,68 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     assert moe.gate.bias_vl.shape == (config.n_routed_experts,)
     assert fused_moe.call_args.kwargs["bias_vl"] is moe.gate.bias_vl
     assert fused_moe.call_args.kwargs["e_score_correction_bias"] is None
+
+
+def _make_gate_owner(with_correction_bias: bool, num_experts: int) -> nn.Module:
+    gate = nn.Module()
+    if with_correction_bias:
+        gate.e_score_correction_bias = nn.Parameter(torch.zeros(num_experts))
+    mlp = nn.Module()
+    mlp.gate = gate
+    layer = nn.Module()
+    layer.mlp = mlp
+    return layer
+
+
+def test_hash_layer_router_bias_is_skipped_when_unused(monkeypatch):
+    """Hash-router layers ship a router bias the Ascend model does not own.
+
+    ``DeepseekV4MoE`` gives hash layers ``tid2eid`` and leaves
+    ``e_score_correction_bias`` unset, while native DeepSeek-V4 checkpoints
+    still store ``gate.bias`` for those layers. Loading it must be skipped
+    rather than raising ``KeyError``.
+    """
+    num_experts = 4
+    hash_layer = _make_gate_owner(with_correction_bias=False, num_experts=num_experts)
+    dense_layer = _make_gate_owner(with_correction_bias=True, num_experts=num_experts)
+
+    inner = nn.Module()
+    inner.layers = nn.ModuleList([hash_layer, dense_layer])
+
+    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
+    nn.Module.__init__(model)
+    model.model = inner
+    model.config = SimpleNamespace(
+        n_routed_experts=num_experts,
+        n_shared_experts=None,
+        num_attention_heads=8,
+    )
+    model.num_redundant_experts = 0
+
+    monkeypatch.setattr(deepseek_v4_module, "fused_moe_make_expert_params_mapping", lambda *a, **k: [])
+    monkeypatch.setattr(deepseek_v4_module, "get_spec_layer_idx_from_weight_name", lambda *a, **k: None)
+    monkeypatch.setattr(deepseek_v4_module, "is_pp_missing_parameter", lambda *a, **k: False)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        deepseek_v4_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mix_placement=False),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_module.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: False,
+    )
+
+    dense_bias = torch.full((num_experts,), 2.0)
+    loaded_params = model.load_weights(
+        [
+            ("layers.0.ffn.gate.bias", torch.ones(num_experts)),
+            ("layers.1.ffn.gate.bias", dense_bias),
+        ]
+    )
+
+    assert "model.layers.0.mlp.gate.e_score_correction_bias" not in loaded_params
+    assert "model.layers.1.mlp.gate.e_score_correction_bias" in loaded_params
+    assert torch.allclose(dense_layer.mlp.gate.e_score_correction_bias, dense_bias)

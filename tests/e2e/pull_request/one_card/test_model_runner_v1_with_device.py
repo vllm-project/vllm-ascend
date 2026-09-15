@@ -435,6 +435,7 @@ def test_stateful_handoff_preserves_decode_graph(
 ):
     # Exercise the real dispatcher and DP synchronization using CPU metadata only.
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dcp_size = 1
     runner.dp_size = dp_size
     runner.dp_rank = 0
     runner.parallel_config = SimpleNamespace(
@@ -443,11 +444,10 @@ def test_stateful_handoff_preserves_decode_graph(
         tensor_parallel_size=8,
         use_sequence_parallel_moe=True,
     )
-    cudagraph_capture_sizes = [8, 16, 24, 32]
     runner.compilation_config = SimpleNamespace(
         pass_config=SimpleNamespace(enable_sp=True),
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
+        cudagraph_capture_sizes=[8, 16, 24, 32],
         max_cudagraph_capture_size=32,
         compile_sizes=[],
     )
@@ -464,14 +464,12 @@ def test_stateful_handoff_preserves_decode_graph(
         lora_config=None,
         model_config=runner.model_config,
     )
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),
         num_prompt_tokens=np.array(prompts),
         lora_id_to_lora_request={},
-    )
-    runner.ascend_config = SimpleNamespace(
-        get_mc2_comm_alg=lambda: "", finegrained_tp_config=SimpleNamespace(max_finegrained_tp_size=1)
     )
     runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
     runner.cudagraph_dispatcher.initialize_cudagraph_keys(
@@ -487,9 +485,8 @@ def test_stateful_handoff_preserves_decode_graph(
     monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
     monkeypatch.setattr(f"{module}.get_dp_group", lambda: SimpleNamespace(cpu_group=None))
     monkeypatch.setattr(f"{module}.dist.all_reduce", all_reduce)
-    num_tokens = sum(scheduled)
     mode, descriptor, _, tokens_across_dp, _ = runner._determine_batch_execution_and_padding(
-        num_tokens=num_tokens,
+        num_tokens=sum(scheduled),
         num_reqs=len(scheduled),
         num_scheduled_tokens_np=np.array(scheduled, dtype=np.int32),
         max_num_scheduled_tokens=max(scheduled),
@@ -499,12 +496,5 @@ def test_stateful_handoff_preserves_decode_graph(
     assert mode == expected_mode
     assert descriptor.uniform == (expected_mode == CUDAGraphMode.FULL)
     if dp_size > 1:
-        padded_num_tokens = num_tokens
-        for capture_size in cudagraph_capture_sizes:
-            if num_tokens <= capture_size:
-                padded_num_tokens = capture_size
-                break
-        assert descriptor.num_tokens == padded_num_tokens
-        expected_tokens_across_dp = torch.full((dp_size,), 32, dtype=torch.int32)
-        expected_tokens_across_dp[0] = padded_num_tokens
-        torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
+        assert descriptor.num_tokens == 32
+        torch.testing.assert_close(tokens_across_dp, torch.full((dp_size,), 32, dtype=torch.int32))
