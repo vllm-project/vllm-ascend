@@ -251,9 +251,10 @@ class AscendMetadata:
     # Per-step scratch for C8-MXFP (QFA) layers. The builder creates one
     # AscendMetadata per step shared by all attention layers, so the QFA
     # metadata operator output is computed once per step instead of once
-    # per layer. Key: "step" -> QFA metadata tensor. Only used on the eager
-    # path -- graph capture bypasses the cache so the metadata op executes
-    # inside the captured region.
+    # per layer. Key: layout_q_descale -> QFA metadata tensor, because that
+    # layout is what selects the prefill or decode kernel the plan is computed
+    # for. Only used on the eager path -- graph capture bypasses the cache so
+    # the metadata op executes inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
     # Rank-local padded token count when PCP expands the batch across the
     # prefill context parallel group; None when PCP is disabled.
@@ -2356,7 +2357,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 QFA_QUANT_MODE_MXFP8 = 1
 QFA_MASK_MODE_CAUSAL = 3
 QFA_LAYOUT_TND = "TND"
+QFA_LAYOUT_N2TGD = "N2TGD"
 QFA_LAYOUT_PA_BBND = "PA_BBND"
+# MXFP8 takes the q scale in one of two layouts, and the choice selects the
+# kernel: TND (Q_T, Q_N, D/64, 2) compiles the prefill template, N2TGD
+# (KV_N, Q_T, G, D/64, 2) the decode one, which merges the S1 and G axes.
+# The operator doc puts the boundary at G*Q_S, recommending N2TGD at or below
+# this value. Both layouts hold the same scales, so the split is a performance
+# choice, not a correctness one.
+QFA_QSCALE_N2TGD_MAX_G_TIMES_QS = 80
 
 
 def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
@@ -2480,6 +2489,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
         max_seqlen_q: int,
+        layout_q_descale: str,
     ):
         """Return the QFA metadata plan (AICPU op output).
 
@@ -2501,7 +2511,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         # calls are just normal eager executions (~us, AICPU).
         use_step_cache = not _EXTRA_CTX.capturing
         cache = self._qfa_step_cache(attn_metadata) if use_step_cache else {}
-        metadata = cache.get("step")
+        # Keyed by layout because that is what picks the prefill or decode
+        # template; every full-attention layer of one step agrees on it, so
+        # in practice this still resolves to a single plan per step.
+        metadata = cache.get(layout_q_descale)
         if metadata is None:
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
@@ -2534,12 +2547,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 win_left=-1,
                 win_right=-1,
                 layout_q=QFA_LAYOUT_TND,
-                layout_q_descale=QFA_LAYOUT_TND,
+                layout_q_descale=layout_q_descale,
                 layout_kv=QFA_LAYOUT_PA_BBND,
                 layout_out=QFA_LAYOUT_TND,
             )
             if use_step_cache:
-                cache["step"] = metadata
+                cache[layout_q_descale] = metadata
         return metadata
 
     def _qfa_int8_mask(self, attn_metadata: AscendMetadata) -> torch.Tensor | None:
@@ -2552,6 +2565,47 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             return attn_metadata.attn_mask
         return attn_metadata.attn_mask.to(torch.int8)
 
+    def _qfa_query_scale_for_layout(self, query_scale: torch.Tensor, max_seqlen_q: int) -> tuple[torch.Tensor, str]:
+        """Return the q scale in the layout that selects the right QFA kernel.
+
+        The scale comes out of npu_dynamic_mx_quant as TND
+        ``(Q_T, Q_N, D/64, 2)``, which is what the operator's prefill template
+        wants. Its decode template wants the same values as N2TGD
+        ``(KV_N, Q_T, G, D/64, 2)``: the query-head axis split into
+        ``(KV_N, G)`` and the KV-head half hoisted in front of the token axis,
+        so one kv head's whole group is contiguous. Query heads are laid out
+        GQA-contiguous (head ``n`` serves kv head ``n // G``), which is what
+        makes the split a plain reshape and the rest a permute.
+
+        Which one to send is a throughput choice -- both carry identical
+        scales, and a mismatch only costs the wrong kernel, never a wrong
+        result -- so it follows the operator doc's G*Q_S boundary. Decode
+        lands well inside it (G is 8-16 per rank on Qwen3.8 and Q_S is 1, or
+        1+num_spec under MTP) and prefill well outside. The decision reads
+        the query shape, not the scheduler state, so MTP verify steps
+        (SpecDecoding, 1+spec query tokens) take the decode layout too.
+        """
+        # Head counts that do not split into whole kv-head groups (possible
+        # on MTP draft layers) cannot be reshaped; keep TND instead of
+        # producing a miscounted layout. num_kv_heads == 0 would otherwise
+        # raise ZeroDivisionError here.
+        if self.num_kv_heads == 0 or query_scale.shape[1] % self.num_kv_heads != 0:
+            return query_scale, QFA_LAYOUT_TND
+        group_size = query_scale.shape[1] // self.num_kv_heads
+        if group_size * max_seqlen_q > QFA_QSCALE_N2TGD_MAX_G_TIMES_QS:
+            return query_scale, QFA_LAYOUT_TND
+        # Permute the byte view: transpose and the copy behind .contiguous()
+        # either reject float8 outright or fall back to AICPU, which stalls
+        # the device. _run_qfa bitcasts back to E8M0 at the call boundary.
+        scale_bytes = query_scale.view(torch.uint8)
+        num_tokens = scale_bytes.shape[0]
+        n2tgd = (
+            scale_bytes.view(num_tokens, self.num_kv_heads, group_size, *scale_bytes.shape[2:])
+            .permute(1, 0, 2, 3, 4)
+            .contiguous()
+        )
+        return n2tgd, QFA_LAYOUT_N2TGD
+
     def _run_qfa(
         self,
         quant_query: torch.Tensor,
@@ -2563,6 +2617,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         seqused_kv: torch.Tensor,
         qfa_metadata,
         max_seqlen_q: int,
+        layout_q_descale: str,
         num_tokens: int,
         output: torch.Tensor,
     ) -> torch.Tensor:
@@ -2611,7 +2666,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=-1,
             layout_q=QFA_LAYOUT_TND,
-            layout_q_descale=QFA_LAYOUT_TND,
+            layout_q_descale=layout_q_descale,
             layout_kv=QFA_LAYOUT_PA_BBND,
             layout_out=QFA_LAYOUT_TND,
             return_softmax_lse=False,
@@ -2699,11 +2754,21 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         # that safe for every replay.
         max_seqlen_q = attn_metadata.max_query_len or num_tokens
 
+        # Both operators have to agree on the q scale layout: it is what picks
+        # the prefill or the decode kernel, and the metadata plan is computed
+        # for that kernel. Under graph capture the layout and the permuted
+        # shape are both baked in, which is safe because the decision reads
+        # max_query_len -- the same quantity vLLM uses to decide that a graph
+        # is a uniform-decode one, so every replay of a captured graph agrees
+        # with the capture.
+        query_scale, layout_q_descale = self._qfa_query_scale_for_layout(query_scale, max_seqlen_q)
+
         qfa_metadata = self._get_qfa_metadata(
             attn_metadata,
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
             max_seqlen_q=max_seqlen_q,
+            layout_q_descale=layout_q_descale,
         )
         return self._run_qfa(
             quant_query,
@@ -2714,6 +2779,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             seqused_kv=seqused_kv,
             qfa_metadata=qfa_metadata,
             max_seqlen_q=max_seqlen_q,
+            layout_q_descale=layout_q_descale,
             num_tokens=num_tokens,
             output=output,
         )
