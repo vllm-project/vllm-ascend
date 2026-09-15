@@ -22,9 +22,9 @@ _KVPP: GroupCoordinator | None = None
 class ReplicatedGroup:
     """A no-communication stand-in for a TP group of world_size 1.
 
-    Used to replicate a parameter across ranks (e.g. the DSpark Markov head,
-    which is always replicated): every rank holds the full weight, so there is
-    nothing to all-reduce / all-gather. Unlike a real ``GroupCoordinator``,
+    Used to replicate a parameter across ranks (e.g. a disable_tp layer such
+    as the DSpark Markov lm_head): every rank holds the full weight, so there
+    is nothing to all-reduce / all-gather. Unlike a real ``GroupCoordinator``,
     constructing this does **not** call ``hcclCommInitRootInfoConfig`` — it is
     a pure logical object exposing just the attributes
     ``AscendVocabParallelEmbedding`` reads (``world_size``, ``rank_in_group``)
@@ -46,7 +46,7 @@ class ReplicatedGroup:
 
 
 # Singleton: identical on every rank, no HCCL comm created.
-_MARKOV_TP = ReplicatedGroup()
+_REPLICATED = ReplicatedGroup()
 
 
 def init_ascend_model_parallel(
@@ -209,8 +209,8 @@ def get_embed_tp_group() -> GroupCoordinator:
     return _EMBED_TP
 
 
-def get_markov_tp_group() -> ReplicatedGroup:
-    return _MARKOV_TP
+def get_replicated_group() -> ReplicatedGroup:
+    return _REPLICATED
 
 
 def get_p_tp_group() -> GroupCoordinator:

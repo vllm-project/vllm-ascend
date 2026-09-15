@@ -234,24 +234,26 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         )
 
         self.assertTrue(layer.disable_tp)
-        self.assertIsNone(layer.comm_group)
+        self.assertIs(layer.comm_group, parallel_state.get_replicated_group())
         self.assertEqual(layer.tp_size, 1)
         self.assertEqual(layer.tp_rank, 0)
 
-    def test_markov_prefix_always_replicated(self):
-        """The DSpark Markov head is replicated on every rank (vllm#49731).
+    def test_dspark_markov_lm_head_replicated(self):
+        """The DSpark markov lm_head is replicated on every rank (vllm#49731).
 
-        The markov prefix must win over the lmhead prefix match ("markov_head"
-        contains "head") even when lmhead_tp is enabled — setUp makes
-        lmhead_tp_enable() return True — and pin the layer to the
-        world_size=1 ReplicatedGroup so every rank holds the full table and
-        forward skips all communication.
+        vllm's DSparkMarkovHead constructs markov_w2 as a ParallelLMHead with
+        disable_tp=True; its prefix ("layers.N.markov_head.markov_w2")
+        contains "head", so disable_tp must win over the lmhead prefix match
+        even when lmhead_tp is enabled — setUp makes lmhead_tp_enable()
+        return True — and pin the layer to the world_size=1 ReplicatedGroup
+        so every rank holds the full table and forward skips all
+        communication.
         """
         markov_group = MagicMock()
         markov_group.world_size = 1
         markov_group.rank_in_group = 0
         with (
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_markov_tp_group", return_value=markov_group),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_replicated_group", return_value=markov_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=MagicMock()),
             patch(
                 "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank",
@@ -273,7 +275,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 org_num_embeddings=self.org_num_embeddings,
                 padding_size=self.padding_size,
                 quant_config=None,
-                prefix="markov_head.markov_w2",
+                prefix="layers.0.markov_head.markov_w2",
+                disable_tp=True,
             )
 
         self.assertIs(layer.comm_group, markov_group)
