@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
-from vllm_ascend.ops.triton.glm5_next_kpool_state_compress import (  # type: ignore[import-untyped]
-    glm5_next_kpool_state_compress_and_write_cache_triton,
+from vllm_ascend.ops.triton.glm5_next_kpool_tail_compress import (  # type: ignore[import-untyped]
+    glm5_next_kpool_tail_compress_and_write_cache_triton,
 )
 from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore[import-untyped]
     glm5_next_lightning_indexer_triton,
@@ -19,7 +19,7 @@ from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (  # type: ignore
 if TYPE_CHECKING:
     from vllm_ascend.attention.indexer_kpool import (
         AscendIndexerKPoolMetadata,
-        AscendIndexerKPoolStateMetadata,
+        AscendIndexerKPoolTailMetadata,
     )
 
 
@@ -70,9 +70,9 @@ class SparseAttnIndexerKpool(nn.Module):
         weights: torch.Tensor | None,
         positions: torch.Tensor,
         indexer_cache: torch.Tensor,
-        state_cache: torch.Tensor,
+        tail_cache: torch.Tensor,
         indexer_metadata: AscendIndexerKPoolMetadata,
-        state_metadata: AscendIndexerKPoolStateMetadata,
+        tail_metadata: AscendIndexerKPoolTailMetadata,
         *,
         gate_score: torch.Tensor,
         compress_ape: torch.Tensor,
@@ -93,17 +93,23 @@ class SparseAttnIndexerKpool(nn.Module):
             raise ValueError("GLM KPool metadata requires cum_query_lens and raw_seq_lens.")
         if indexer_cache.dtype != torch.bfloat16:
             raise TypeError("GLM KPool compressed cache must be bfloat16.")
-        if state_cache.dtype != torch.float32 or k.dtype != torch.float32 or gate_score.dtype != torch.float32:
-            raise TypeError("GLM KPool keys, gates and compressor state must be float32.")
-        if state_cache.ndim == 4:
-            state_cache = state_cache.view(state_cache.shape[0], state_cache.shape[1], -1)
-        if state_cache.shape[-1] != 2 * self.head_dim or gate_score.shape != k.shape:
-            raise ValueError("GLM KPool state stores one key and gate vector per token.")
+        if tail_cache.dtype != torch.float32 or k.dtype != torch.float32 or gate_score.dtype != torch.float32:
+            raise TypeError("GLM KPool keys, gates and compressor tail must be float32.")
+        if (
+            tail_cache.ndim != 4
+            or tail_cache.shape[1] != 2
+            or tail_cache.shape[2] < index_kpool
+            or tail_cache.shape[3] != self.head_dim
+            or gate_score.shape != k.shape
+        ):
+            raise ValueError("GLM KPool tail requires [blocks, 2, capacity, head_dim] K/gate storage.")
+        if tail_metadata.block_size != tail_cache.shape[2]:
+            raise ValueError("GLM KPool tail metadata capacity must match the bound cache.")
         if compress_ape.shape != (index_kpool, self.head_dim) or compress_ape.dtype != torch.float32:
             raise ValueError("GLM KPool APE must be FP32 with shape [pool_size, head_dim].")
 
-        glm5_next_kpool_state_compress_and_write_cache_triton(
-            state_cache,
+        glm5_next_kpool_tail_compress_and_write_cache_triton(
+            tail_cache,
             indexer_cache,
             k,
             gate_score,
@@ -111,12 +117,12 @@ class SparseAttnIndexerKpool(nn.Module):
             positions,
             indexer_metadata.cum_query_lens,
             indexer_metadata.raw_seq_lens,
-            state_metadata.slot_mapping[:num_tokens],
-            state_metadata.block_table,
+            tail_metadata.slot_mapping[:num_tokens],
+            tail_metadata.block_table,
             indexer_metadata.slot_mapping[:num_tokens],
             index_kpool,
         )
-        # Sharing top-k still advances both state caches.
+        # Sharing top-k still advances the compressed cache and raw tail.
         if not compute_topk:
             return None
         if q_values is None or weights is None:
