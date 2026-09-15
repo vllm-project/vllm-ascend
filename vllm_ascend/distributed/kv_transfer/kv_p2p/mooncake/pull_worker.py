@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendDCPReplicatedDraftAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -319,7 +319,7 @@ class MooncakePullRecvingThread(threading.Thread):
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
         # For FA or SWA with kv_heads > 1, must use HND kv_cache layout.
-        elif isinstance(spec, (SlidingWindowSpec, AscendDCPReplicatedDraftAttentionSpec)):
+        elif isinstance(spec, SlidingWindowSpec):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
             remote_num_kv_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
@@ -652,35 +652,6 @@ class MooncakePullRecvingThread(threading.Thread):
         selection_index: int,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
-        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
-            # Both ranks hold the entire draft sequence. Published block sizes
-            # include replication, so map global token offsets between their
-            # different logical page widths on the matching TP head shard.
-            kernel_size = local_block_size // local_block_size_scale
-            if kernel_size != remote_block_size // remote_block_size_scale:
-                raise ValueError("Replicated draft PD requires equal P/D kernel block sizes.")
-            first_block = len(local_full_group_block_ids) - len(local_group_block_ids)
-            end_token = min(local_num_prompt_tokens - 1, remote_num_prompt_tokens)
-            local_ids, remote_ids = [], []
-            for offset, block_id in enumerate(local_group_block_ids):
-                block_start = (first_block + offset) * local_block_size
-                for kernel_offset in range(local_block_size_scale):
-                    token_start = block_start + kernel_offset * kernel_size
-                    if token_start + kernel_size <= num_computed_tokens:
-                        continue
-                    if token_start >= end_token:
-                        break
-                    remote_block, remote_offset = divmod(token_start, remote_block_size)
-                    if remote_block >= len(remote_group_block_ids):
-                        raise ValueError("Insufficient remote replicated draft blocks for PD transfer.")
-                    local_ids.append(block_id * local_block_size_scale + kernel_offset)
-                    remote_ids.append(
-                        remote_group_block_ids[remote_block] * remote_block_size_scale + remote_offset // kernel_size
-                    )
-            return [
-                (self._select_remote_tp_rank(ranks, selection_index), local_ids, remote_ids)
-                for ranks in remote_tp_rank_groups
-            ]
         is_dcp_transfer = (
             (self.dcp_size > 1 or remote_dcp_size > 1)
             and isinstance(spec, FullAttentionSpec)
@@ -1136,7 +1107,7 @@ class MooncakePullRecvingThread(threading.Thread):
             raise NotImplementedError(f"Mooncake transfer address calculation does not support {type(spec).__name__}")
 
         first_local_layer_index, first_remote_layer_index = next(iter(transfer_entries_by_layer))
-        if isinstance(spec, (SlidingWindowSpec, AscendDCPReplicatedDraftAttentionSpec)):
+        if isinstance(spec, SlidingWindowSpec):
             local_attention_dcp_size = remote_attention_dcp_size = 1
         else:
             local_attention_dcp_size = self.dcp_size
