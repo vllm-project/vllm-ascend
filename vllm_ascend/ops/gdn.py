@@ -17,10 +17,10 @@
 
 import torch
 import torch_npu
-from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
@@ -248,14 +248,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        out, _ = self.out_proj(core_attn_out)
+        # The method-patched Qwen layer and the legacy Ascend class share the
+        # same projection contract, but only Qwen inherits this helper.
+        out = QwenGatedDeltaNetAttention._output_projection(self, core_attn_out, z)
         if output is not None:
             output[:num_tokens] = out
         return out
