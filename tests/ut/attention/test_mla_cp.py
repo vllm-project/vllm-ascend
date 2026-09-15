@@ -27,12 +27,37 @@ from vllm_ascend.attention.mla_v1 import (
 )
 
 
+def _init_mla_without_mlapo(self, *args, **kwargs):
+    self.enable_mlapo = False
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("enable_mlapo", [False, True])
+def test_mla_dcp_disables_mlapo(dcp_size, enable_mlapo):
+    def init_mla(self, *args, **kwargs):
+        self.enable_mlapo = enable_mlapo
+
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", new=init_mla),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+        patch("vllm_ascend.attention.context_parallel.mla_cp.logger") as logger,
+    ):
+        impl = AscendMlaDCPImpl()
+
+    assert impl.enable_mlapo is (enable_mlapo and dcp_size == 1)
+    if enable_mlapo and dcp_size > 1:
+        logger.warning_once.assert_called_once_with("MLAPO is not supported with MLA DCP yet; disabling MLAPO.")
+    else:
+        logger.warning_once.assert_not_called()
+
+
 @pytest.mark.parametrize("dcp_size", [1, 2, 4])
 def test_mla_dcp_extends_v1_backend(dcp_size) -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
     dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
     with (
-        patch.object(AscendMLAImpl, "__init__", return_value=None),
+        patch.object(AscendMLAImpl, "__init__", new=_init_mla_without_mlapo),
         patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
     ):
         impl = AscendMlaDCPImpl()
@@ -54,7 +79,7 @@ def test_mla_dcp_extends_v1_backend(dcp_size) -> None:
 def test_mla_dcp_passes_upstream_speculative_cp_check(interleave_size):
     dcp_group = SimpleNamespace(world_size=4, rank_in_group=0, device_group=Mock())
     with (
-        patch.object(AscendMLAImpl, "__init__", return_value=None),
+        patch.object(AscendMLAImpl, "__init__", new=_init_mla_without_mlapo),
         patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
     ):
         impl = AscendMlaDCPImpl()

@@ -7,6 +7,7 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -38,6 +39,8 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
 from vllm_ascend.utils import weak_ref_tensors
+
+logger = init_logger(__name__)
 
 
 class MLASplitAttentionKind(Enum):
@@ -225,6 +228,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         # AscendMLAImpl bypasses the upstream MLA initializer. FIA returns LSE
         # for the internal DCP merge, so expose that capability to MRv2 checks.
         self.need_to_return_lse_for_decode = self.dcp_size > 1
+        if self.dcp_size > 1 and self.enable_mlapo:
+            self.enable_mlapo = False
+            logger.warning_once("MLAPO is not supported with MLA DCP yet; disabling MLAPO.")
 
     @staticmethod
     def update_graph_params(
