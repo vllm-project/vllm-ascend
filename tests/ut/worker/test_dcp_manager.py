@@ -351,7 +351,9 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
         draft_dcp_metadata.draft_base_seq_lens,
         torch.tensor([13, 13], dtype=torch.int32),
     )
-    assert draft_dcp_metadata.dcp_mtp_attn_mask is mtp_mask
+    # Split MLA decode uses a current-chunk causal mask, not the old DCP mask.
+    assert draft_dcp_metadata.dcp_mtp_attn_mask is None
+    assert original_dcp_metadata.dcp_mtp_attn_mask is mtp_mask
     assert not torch.any(common_attn_metadata.is_prefilling)
     assert original_dcp_metadata.max_query_len == 8
     assert original_dcp_metadata.draft_cp_seq_len is None
