@@ -339,7 +339,7 @@ def _apply_patch() -> None:
         return
     _PATCHED = True
     _patch_model_runner_output()
-    _patch_engine_core()
+    # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
     _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
