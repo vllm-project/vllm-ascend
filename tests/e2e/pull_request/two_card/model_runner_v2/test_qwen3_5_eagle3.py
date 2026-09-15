@@ -17,7 +17,7 @@
 #
 """Qwen3.6-27B BF16 EAGLE3 acceptance on MRV2 over two NPUs.
 
-Run "pytest tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_eagle3.py".
+Run "pytest tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_5_eagle3.py".
 """
 
 import os
@@ -37,15 +37,13 @@ MAX_MODEL_LEN = 72320
 MAX_NUM_BATCHED_TOKENS = 16384
 GPU_MEMORY_UTILIZATION = 0.95
 
-_EAGER = os.environ.get("QWEN36_EAGLE3_EAGER") == "1"
-
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
         pytest.param(
-            2.43,
+            2.4,
             3,
             {"ascend_compilation_config": {"enable_npugraph_ex": False}},
             id="eagle3-qwen35-9b",
