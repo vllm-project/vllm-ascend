@@ -448,13 +448,18 @@ def test_partition_batch_keeps_piecewise_request_extent():
 
 
 @pytest.mark.parametrize("dcp_world_size", [1, 2])
-def test_attention_context_collects_global_pcp_data(dcp_world_size):
+@pytest.mark.parametrize("is_prefilling", [False, True])
+def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
+    input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
+    input_batch.idx_mapping = torch.from_numpy(input_batch.idx_mapping_np)
+    input_batch.num_reqs_after_padding = 4
+    input_batch.is_prefilling_np[:] = is_prefilling
     block_tables = (
-        torch.tensor([[1]], dtype=torch.int32),
-        torch.tensor([[2]], dtype=torch.int32),
+        torch.tensor([[1], [2], [0], [0]], dtype=torch.int32),
+        torch.tensor([[3], [4], [0], [0]], dtype=torch.int32),
     )
     slot_mapping_capacity = input_batch.num_tokens_after_padding + 3
     global_slot_mappings = torch.arange(
@@ -476,12 +481,12 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size):
 
     actual = manager.build_attention_context()
 
-    if dcp_world_size > 1:
+    if dcp_world_size > 1 and is_prefilling:
         torch.testing.assert_close(
-            actual.global_block_table_num_blocks, torch.tensor([[3, 7], [11, 15]], dtype=torch.int32)
+            actual.global_block_table_num_blocks, torch.tensor([[7, 3], [15, 11]], dtype=torch.int32)
         )
         num_blocks.fill(0)
-        assert actual.global_block_table_num_blocks[0, 0] == 3
+        assert actual.global_block_table_num_blocks[0, 0] == 7
     else:
         assert actual.global_block_table_num_blocks is None
     assert actual.global_batch is input_batch
