@@ -534,8 +534,6 @@ def server_args(mode: LookupHashMode, profile_lookup: bool, port: int) -> list[s
         "vllm",
         "--port",
         str(port),
-        "--additional-config",
-        '{"enable_kvpp":true}',
         "--kv-transfer-config",
         json.dumps(
             {
@@ -729,6 +727,7 @@ def run_benchmark(tmp_path, *, profile_lookup: bool) -> dict[str, Any]:
             "tensor_parallel_size": TENSOR_PARALLEL_SIZE,
             "model_runner_v2": False,
             "expert_parallel": False,
+            "kv_layer_parallelism": False,
             "async_scheduling": False,
             "load_async": False,
             "profile_lookup": profile_lookup,
