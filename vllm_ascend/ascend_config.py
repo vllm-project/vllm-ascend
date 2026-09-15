@@ -699,6 +699,14 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
+        if self.multistream_overlap_shared_expert and effective_flashcomm and vc.parallel_config.data_parallel_size > 1:
+            self.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "multistream_overlap_shared_expert is disabled: combined with FlashComm1 (SP) "
+                "it deadlocks during engine startup (determine_available_memory dummy run) "
+                "when data_parallel_size > 1, surfacing as vector core timeout (507034). "
+                "See https://github.com/vllm-project/vllm-ascend/issues/16446."
+            )
         if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(

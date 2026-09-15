@@ -604,6 +604,46 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_multistream_disabled_with_flashcomm1_and_dp_gt1(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.data_parallel_size = 2
+        test_vllm_config.additional_config = {
+            "multistream_overlap_shared_expert": True,
+            "enable_flashcomm1": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(ascend_config.multistream_overlap_shared_expert)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_multistream_kept_with_flashcomm1_and_dp1(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "multistream_overlap_shared_expert": True,
+            "enable_flashcomm1": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_multistream_kept_without_flashcomm1_and_dp_gt1(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.data_parallel_size = 2
+        test_vllm_config.additional_config = {
+            "multistream_overlap_shared_expert": True,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)
