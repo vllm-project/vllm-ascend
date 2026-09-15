@@ -65,6 +65,7 @@ class TestIsDefaultV2ModelRunnerModel:
         "architecture",
         [
             "Qwen3ForCausalLM",
+            "Qwen3MoeForCausalLM",
             "MiniMaxM2ForCausalLM",
             "DeepseekV3ForCausalLM",
             "GlmMoeDsaForCausalLM",
