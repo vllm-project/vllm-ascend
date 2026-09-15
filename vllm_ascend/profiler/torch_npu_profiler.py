@@ -19,8 +19,10 @@
 from contextlib import suppress
 from typing import Any
 
+import torch
 import torch_npu
 from vllm.config import ProfilerConfig
+from vllm.logger import logger
 from vllm.profiler.wrapper import WorkerProfiler
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -31,6 +33,13 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
 
     def __init__(self, profiler_config: ProfilerConfig, trace_name: str) -> None:
         super().__init__(profiler_config)
+        self._uses_schedule = profiler_config.warmup_iterations > 0 or profiler_config.wait_iterations > 0
+        # profiler.start() consumes schedule step 0, so this tracks the
+        # remaining non-active steps advanced by profiler.step().
+        self._warmup_steps_remaining = max(
+            profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
+            0,
+        )
         self.profiler: Any = self._create_profiler(profiler_config, trace_name)
 
     @staticmethod
@@ -45,6 +54,22 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
         if msmonitor_use_daemon:
             raise RuntimeError(
                 "additional_config.msmonitor_use_daemon and torch profiler cannot be enabled at the same time."
+            )
+
+        profiler_schedule = None
+        if profiler_config.warmup_iterations > 0 or profiler_config.wait_iterations > 0:
+            profiler_schedule = torch_npu.profiler.schedule(
+                skip_first=0,
+                wait=profiler_config.wait_iterations,
+                warmup=profiler_config.warmup_iterations,
+                active=profiler_config.active_iterations,
+                repeat=1,
+            )
+            logger.info_once(
+                "NPU profiler schedule configured: wait=%d, warmup=%d, active=%d",
+                profiler_config.wait_iterations,
+                profiler_config.warmup_iterations,
+                profiler_config.active_iterations,
             )
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(
@@ -64,11 +89,14 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 torch_npu.profiler.ProfilerActivity.CPU,
                 torch_npu.profiler.ProfilerActivity.NPU,
             ],
+            schedule=profiler_schedule,
+            record_shapes=profiler_config.torch_profiler_record_shapes,
             with_stack=False,
             profile_memory=profiler_config.torch_profiler_with_memory,
             # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
             # The with_stack option in torch_npu.profiler introduces significant time overhead.
             with_modules=profiler_config.torch_profiler_with_stack,
+            with_flops=profiler_config.torch_profiler_with_flops,
             experimental_config=experimental_config,
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                 profiler_config.torch_profiler_dir,
@@ -83,4 +111,12 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
         self.profiler.stop()
 
     def _profiler_step(self) -> bool:
+        if self._uses_schedule:
+            self.profiler.step()
+            if self._warmup_steps_remaining > 0:
+                self._warmup_steps_remaining -= 1
+                return False
         return True
+
+    def annotate_context_manager(self, name: str):
+        return torch.profiler.record_function(name)
