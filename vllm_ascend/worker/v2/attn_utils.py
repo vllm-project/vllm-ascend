@@ -868,6 +868,45 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+class _DeviceAwareKVViews(tuple):
+    """Tuple of per-layer KV cache tensors that exposes ``device``.
+
+    vLLM main builds the runner's flat KV cache list by filtering the
+    ``kv_caches`` values on ``cache.device`` (see #53781). Ascend keeps the
+    K/V (and indexer/state) tensors for one layer in a single tuple, so the
+    container has to answer ``device`` like the tensors it holds.
+    """
+
+    @property
+    def device(self) -> torch.device:
+        return _first_view_device(self)
+
+
+class _DeviceAwareKVViewList(list):
+    """List form of :class:`_DeviceAwareKVViews` for Mamba/state caches."""
+
+    @property
+    def device(self) -> torch.device:
+        return _first_view_device(self)
+
+
+def _first_view_device(views: Any) -> torch.device:
+    for view in views:
+        if isinstance(view, torch.Tensor):
+            return view.device
+    return torch.device("cpu")
+
+
+def _as_device_aware(cache: Any) -> Any:
+    if isinstance(cache, torch.Tensor):
+        return cache
+    if isinstance(cache, tuple):
+        return _DeviceAwareKVViews(cache)
+    if isinstance(cache, list):
+        return _DeviceAwareKVViewList(cache)
+    return cache
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -921,7 +960,7 @@ def allocate_kv_cache_main(
                 group_map[key].layer_names.append(layer_name)
         attn_groups.extend(group_map[key] for key in group_order)
 
-    return _reshape_kv_cache_v2(
+    kv_caches = _reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw_tensors,
         cache_dtype=vllm_config.cache_config.cache_dtype,
@@ -929,6 +968,9 @@ def allocate_kv_cache_main(
         shared_kv_cache_layers=shared_layers,
         kv_cache_config=kv_cache_config,
     )
+    # Keep the per-layer K/V containers unchanged for the model while letting
+    # the upstream runner's ``cache.device`` filter address them.
+    return {layer_name: _as_device_aware(cache) for layer_name, cache in kv_caches.items()}
 
 
 def _reshape_mamba_kv_cache(

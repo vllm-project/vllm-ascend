@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for MiniMax M3 sparse attention layer wiring in ``msa_m3``."""
@@ -96,8 +97,6 @@ def _create_common_attn_metadata(
     seq_lens = torch.tensor(batch_spec.seq_lens, dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
-    context_lens = [batch_spec.seq_lens[i] - batch_spec.query_lens[i] for i in range(batch_spec.batch_size)]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.arange(
         batch_spec.batch_size * max_blocks,
@@ -110,8 +109,7 @@ def _create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max(batch_spec.query_lens),
@@ -421,8 +419,7 @@ def test_sparse_metadata_builder_fia_padded_dummy_request() -> None:
         query_start_loc=padded_query_start_loc,
         query_start_loc_cpu=padded_query_start_loc_cpu,
         seq_lens=common.seq_lens,
-        _seq_lens_cpu=common._seq_lens_cpu,
-        _num_computed_tokens_cpu=common._num_computed_tokens_cpu,
+        seq_lens_cpu_upper_bound=common.seq_lens_cpu_upper_bound,
         num_reqs=batch_size + 1,
         num_actual_tokens=common.num_actual_tokens,
         max_query_len=common.max_query_len,

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # ruff: noqa: E501
 import inspect
 import unittest
@@ -1468,8 +1469,7 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
-            '_num_computed_tokens_cache'
+            'dcp_local_seq_lens_cpu', '_num_computed_tokens_cache'
         }
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)

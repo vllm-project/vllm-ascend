@@ -93,6 +93,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -174,11 +175,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if getattr(g.kv_cache_spec, "participates_in_prefix_caching", True)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
+        self.enable_partial_hash_hits = (
+            dcp_world_size == 1
+            and allow_partial_hash_hits
+            and any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and g.kv_cache_spec.block_size > hash_block_size
+                for g in kv_cache_config.kv_cache_groups
+            )
         )
         self.verify_and_split_kv_cache_groups()
 
@@ -415,6 +420,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     metrics_collector: KVCacheMetricsCollector | None = None,
     max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
@@ -436,6 +442,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
             num_prefill_lookahead=num_prefill_lookahead,
+            allow_partial_hash_hits=allow_partial_hash_hits,
         )
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
@@ -453,6 +460,10 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         orig_kwargs["max_in_flight_tokens"] = token_budget
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
         orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+        if not vllm_version_is("0.28.0"):
+            # vLLM #54736 added allow_partial_hash_hits to the upstream
+            # coordinator factory on main only.
+            orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
@@ -470,6 +481,7 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
         num_prefill_lookahead=num_prefill_lookahead,
+        allow_partial_hash_hits=allow_partial_hash_hits,
     )
 
 
