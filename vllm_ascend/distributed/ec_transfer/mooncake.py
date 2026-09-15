@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import TransferEngine
 
 _REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 
@@ -52,12 +53,14 @@ _REGISTRATION_ALIGNMENT = 2 * 1024 * 1024
 class AscendMooncakeTransfer(MooncakeTransfer):
     """Reuse Mooncake registration ownership with Ascend's shared engine."""
 
+    _engine: TransferEngine | None
+
     def __init__(self, hostname: str, protocol: str) -> None:
         if protocol != "ascend":
             raise ValueError("Ascend ECMooncakeConnector requires mooncake_protocol='ascend'.")
         super().__init__(hostname, protocol)
 
-    def _ensure_engine(self) -> Any:
+    def _ensure_engine(self) -> TransferEngine:
         if self._engine is None:
             self._engine = global_te.get_transfer_engine(self._hostname, device_name=None)
         return self._engine
@@ -69,6 +72,8 @@ class AscendMooncakeTransfer(MooncakeTransfer):
 
 class _AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered slab required by Ascend transport."""
+
+    tensor: torch.Tensor | None
 
     def prepare(self, device: torch.device, transfer: AscendMooncakeTransfer) -> None:
         if self.tensor is not None or self._disabled:
