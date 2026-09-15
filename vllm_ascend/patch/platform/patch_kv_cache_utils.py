@@ -97,6 +97,7 @@ def _ascend_resolve_kv_cache_block_sizes(
     lcm(group_block_sizes) * dcp to maintain alignment.
     """
     cache_config = vllm_config.cache_config
+    connector_enabled = getattr(vllm_config, "kv_transfer_config", None) is not None
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
@@ -110,7 +111,7 @@ def _ascend_resolve_kv_cache_block_sizes(
     cacheable_groups = [g for g in groups if is_prefix_cacheable(g.kv_cache_spec)]
     if len(cacheable_groups) != len(groups):
         scheduler_block_size = math.lcm(*(g.kv_cache_spec.block_size for g in groups)) * dcp
-        if not cache_config.enable_prefix_caching or not cacheable_groups:
+        if not (cache_config.enable_prefix_caching or connector_enabled) or not cacheable_groups:
             return scheduler_block_size, scheduler_block_size
         filtered = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
         if dcp == 1:
@@ -133,7 +134,7 @@ def _ascend_resolve_kv_cache_block_sizes(
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by DCP for proper alignment.
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp
-        if not cache_config.enable_prefix_caching:
+        if not (cache_config.enable_prefix_caching or connector_enabled):
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
