@@ -25,6 +25,11 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
+    extend_capture_descriptors,
+    physical_k_capture_scope,
+    v2_varlen_physical_k_enabled,
+)
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -47,6 +52,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
         # because upstream's init_cudagraph_manager creates the manager without it.
         self.speculator = speculator
+        self._v2_varlen_physical_k = v2_varlen_physical_k_enabled(vllm_config)
+        if self._v2_varlen_physical_k:
+            extend_capture_descriptors(self)
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
@@ -71,9 +79,13 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        with (
+            physical_k_capture_scope(self, forward_fn) as forward_with_runtime_width,
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, False),
+        ):
             super().capture(
-                forward_fn,
+                forward_with_runtime_width,
                 input_buffers,
                 block_tables,
                 attn_groups,
@@ -90,6 +102,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
+            num_tokens_padded=num_tokens,
         )
         if use_updatable_graph(attn_backend):
             return self._updatable_graph_replay(desc, draft_attn_metadatas)

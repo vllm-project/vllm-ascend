@@ -21,7 +21,11 @@ from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSampl
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
-
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
+    PhysicalKDFlashMixin,
+    initialize_physical_k_buffers,
+    physical_k_scope,
+)
 
 def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., None]:
     # Upstream uses the attention kernel block size for DCP ownership, which is
@@ -34,7 +38,7 @@ def prepare_dflash_inputs_factory(kv_cache_block_size: int) -> Callable[..., Non
     return prepare_with_block_size
 
 
-class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
+class AscendDFlashSpeculator(PhysicalKDFlashMixin, LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
@@ -43,8 +47,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         with disable_profiling_chunk_for_draft(self.vllm_config):
             return super().load_draft_model(target_model, target_attn_layer_names)
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded,
+        seq_lens_cpu_upper_bound,
+        num_tokens_padded=None,
+    ):
+        num_tokens_padded = num_tokens_padded or (num_reqs_padded * self.num_query_per_req)
         with build_attn_metadata_wrapper():
             # vLLM main (#56181) replaced _build_draft_attn_metadata with
             # _build_uniform_attn_metadata (BatchExecutionDescriptor).
@@ -85,6 +94,8 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self._lmhead_tp_validate_draft_sampling()
+        self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        initialize_physical_k_buffers(self)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -164,7 +175,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-        with build_attn_metadata_wrapper():
+        with physical_k_scope(self, input_batch), build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,
