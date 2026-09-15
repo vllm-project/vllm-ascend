@@ -167,7 +167,8 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_kwargs={},
             include_metadata_device=True,
-            applies_sparse_attn_runtime_kwargs=True,
+            # SparseFlashMla PA_BBND rejects KV cu_seqlens (TND-only, EZ0037).
+            applies_sparse_attn_runtime_kwargs=False,
         )
     return DsaAttnKvPlan(
         uses_sparse_flash_mla=False,
