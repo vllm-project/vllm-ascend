@@ -17,6 +17,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -324,6 +325,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+
+    # vLLM removed these deprecated fields on main in the v0.29 deprecation
+    # (commit 5fe77aecfc). They are still present on the v0.28.0 release lane.
+    # NPU attention backends and speculative decoding still rely on them, so
+    # re-declare them here on lanes where the upstream parent no longer has them.
+    if not vllm_version_is("0.28.0"):
+        _seq_lens_cpu: torch.Tensor | None = None
+        _num_computed_tokens_cpu: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
