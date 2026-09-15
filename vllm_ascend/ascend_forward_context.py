@@ -11,7 +11,8 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -95,7 +96,12 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+            is_draft_model,
+            model_instance=model_instance,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -221,6 +227,35 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+def get_a5_mega_moe_buffer_tokens_per_rank(
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int | None = None,
+) -> int:
+    """Resolve the A5 MegaMoE capacity for the current PD role.
+
+    Prefill scheduler capacity is rank-local in vLLM. Other roles retain the
+    conservative MC2/graph capacity to avoid increasing decode memory usage.
+    """
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    if kv_role == "kv_producer":
+        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
+    else:
+        if mc2_tokens_capacity is None:
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if mc2_tokens_capacity is None:
+            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+        execution_tokens_per_rank = mc2_tokens_capacity
+
+    ascend_config = get_ascend_config()
+    expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
+    return compute_mega_moe_buffer_tokens_per_rank(
+        ascend_config.mega_moe_max_tokens,
+        execution_tokens_per_rank,
+        expert_parallel_size,
+    )
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -282,10 +317,99 @@ def _select_a3_moe_comm_method(
     return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
 
 
+_A5_MEGA_MOE_QUANT_TYPES = {
+    QuantType.W4A8MXFP,
+}
+_A5_MEGA_MOE_GROUP_SIZE = 32
+_A5_MOE_QUANT_TYPES_BY_CONFIG_ID: dict[int, QuantType] = {}
+
+
+def _is_a5_mega_moe_supported_quant(quant_type: QuantType | None) -> bool:
+    return quant_type in _A5_MEGA_MOE_QUANT_TYPES
+
+
+def _get_moe_quant_type_from_model_instance(model_instance: torch.nn.Module | None) -> QuantType | None:
+    model = getattr(model_instance, "model", None)
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(model_instance, "layers", None)
+    if layers is None:
+        return None
+
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        quant_type = getattr(mlp, "quant_type", None)
+        if isinstance(quant_type, QuantType):
+            return quant_type
+    return None
+
+
+def _get_a5_moe_activation(
+    vllm_config: VllmConfig,
+    model_instance: torch.nn.Module | None,
+) -> str | None:
+    model = getattr(model_instance, "model", None)
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(model_instance, "layers", None)
+    if layers is not None:
+        for layer in layers:
+            activation = getattr(getattr(layer, "mlp", None), "activation", None)
+            if isinstance(activation, str):
+                return activation
+            if isinstance(activation, Enum):
+                return activation.name
+
+    hf_text_config = vllm_config.model_config.hf_text_config
+    return getattr(hf_text_config, "hidden_act", getattr(hf_text_config, "hidden_activation", None))
+
+
+def _is_a5_mega_moe_supported_activation(activation: str | None) -> bool:
+    if activation is None:
+        return True
+    normalized = activation.lower().removeprefix("moeactivation.")
+    return normalized in {"silu", "swiglu"}
+
+
+def _get_a5_moe_group_size(vllm_config: VllmConfig) -> int | None:
+    quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None)
+    if isinstance(quant_description, dict):
+        return quant_description.get("group_size")
+    return getattr(quant_description, "group_size", None)
+
+
+def cache_a5_moe_quant_type(
+    vllm_config: VllmConfig | None,
+    quant_type: QuantType,
+) -> None:
+    if vllm_config is None:
+        return
+    _A5_MOE_QUANT_TYPES_BY_CONFIG_ID[id(vllm_config)] = quant_type
+
+
+def _get_a5_moe_quant_type(
+    vllm_config: VllmConfig,
+    model_instance: torch.nn.Module | None = None,
+) -> QuantType | None:
+    quant_type = _get_moe_quant_type_from_model_instance(model_instance)
+    if quant_type is not None:
+        return quant_type
+
+    quant_type = _A5_MOE_QUANT_TYPES_BY_CONFIG_ID.get(id(vllm_config))
+    if quant_type is not None:
+        return quant_type
+
+    return None
+
+
 def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    quant_type: QuantType | None,
+    enable_fused_mc2: int,
+    activation: str | None,
+    group_size: int | None,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -293,14 +417,54 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    ascend_config = get_ascend_config()
+    eplb_config = getattr(ascend_config, "eplb_config", None)
+    dynamic_eplb = bool(getattr(eplb_config, "dynamic_eplb", False))
+    num_redundant_experts = int(getattr(eplb_config, "num_redundant_experts", 0))
+    fused_mc2_mode_1 = enable_fused_mc2 == 1
+    has_expert_parallel_world = world_size > 1
+    mix_placement = bool(getattr(ascend_config, "mix_placement", False))
+    mega_moe_buffer_tokens_per_rank = (
+        get_a5_mega_moe_buffer_tokens_per_rank(
+            vllm_config,
+            mc2_tokens_capacity,
+        )
+        if fused_mc2_mode_1
+        else 0
+    )
+    within_mega_moe_buffer_capacity = num_tokens <= mega_moe_buffer_tokens_per_rank
+    supported_quant = _is_a5_mega_moe_supported_quant(quant_type)
+    supported_activation = _is_a5_mega_moe_supported_activation(activation)
+    supported_group_size = group_size in (None, _A5_MEGA_MOE_GROUP_SIZE)
+    supported_eplb = not dynamic_eplb and num_redundant_experts == 0
+    supported_placement = not mix_placement
+    a5_mega_moe_enable = (
+        fused_mc2_mode_1
+        and has_expert_parallel_world
+        and within_mega_moe_buffer_capacity
+        and supported_quant
+        and supported_activation
+        and supported_group_size
+        and supported_eplb
+        and supported_placement
+    )
+    if a5_mega_moe_enable:
+        return MoECommType.FUSED_MC2
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
-        return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
-        return MoECommType.ALLGATHER
-    return MoECommType.ALLTOALL
+        moe_comm_type = MoECommType.MC2
+    elif world_size <= num_experts_per_tok:
+        moe_comm_type = MoECommType.ALLGATHER
+    else:
+        moe_comm_type = MoECommType.ALLTOALL
+    return moe_comm_type
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model=False,
+    model_instance: torch.nn.Module | None = None,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -312,14 +476,18 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, prefer the fused MoE backend for main- and
+       draft-model forwards with W4A8 MXFP quantization and SwiGLU semantics
+       when fused MC2 mode 1 is enabled and EPLB does not use dynamic or redundant
+       experts. Other unsupported cases use MC2 when tokens fit its capacity, or
+       fall back to all-gather/all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
         is_draft_model (bool): Whether the model runs in MTP mode.
+        model_instance (torch.nn.Module | None): Model instance used by A5 to
+            read the already resolved MoE QuantType.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -351,7 +519,15 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             get_ascend_config().enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            _get_a5_moe_quant_type(vllm_config, model_instance),
+            get_ascend_config().enable_fused_mc2,
+            _get_a5_moe_activation(vllm_config, model_instance),
+            _get_a5_moe_group_size(vllm_config),
+        )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 
