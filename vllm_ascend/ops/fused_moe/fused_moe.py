@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -30,6 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
@@ -331,16 +334,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Start the SP shared-input gather before the latent down projection."""
-        gathered_input = hidden_states
-        all_gather_done = None
+        prepared_input = PreparedSharedExpertInput(hidden_states)
         shared_experts = self.ascend_shared_experts
         if self._can_overlap_sp_shared_with(self.routed_input_transform):
             assert shared_experts is not None
-            gathered_input, all_gather_done = shared_experts.start_input_all_gather(hidden_states)
+            prepared_input = shared_experts.prepare_input_async(hidden_states)
         routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
-        if all_gather_done is not None:
-            torch.npu.current_stream().wait_event(all_gather_done)
-            shared_input = gathered_input
+        if prepared_input.ready_event is not None:
+            torch.npu.current_stream().wait_event(prepared_input.ready_event)
+            shared_input = prepared_input.hidden_states
         return routed_input, shared_input
 
     def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
@@ -351,6 +353,35 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             assert shared_experts is not None
             shared_experts.wait_for_output()
         return fused_output
+
+    def _compute_router_logits(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        # Gate linears are unquantized. Their weight is normally pre-cast by
+        # AscendUnquantizedLinearMethod to avoid a Cast in this hot path.
+        gate = self.gate
+        assert gate is not None
+        hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+        if hasattr(gate, "weight_fp32"):
+            return F.linear(hidden_states_fp32, gate.weight_fp32)
+        gate_out = gate(hidden_states)
+        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+
+    def _prepare_router_and_milestones(
+        self,
+        shared_hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.npu.Event, torch.npu.Event]:
+        if self.is_internal_router:
+            shared_input_ready = torch.npu.current_stream().record_event()
+            router_logits = self._compute_router_logits(shared_hidden_states, router_logits)
+            router_output_ready = torch.npu.current_stream().record_event()
+        else:
+            shared_input_ready = torch.npu.current_stream().record_event()
+            router_output_ready = shared_input_ready
+        return router_logits, shared_input_ready, router_output_ready
 
     def _forward_impl(
         self,
@@ -363,61 +394,37 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 if self.is_internal_router:
-                    gate = self.gate
-                    assert gate is not None
-                    hidden_states_fp32 = (
-                        router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
-                    )
-                    if hasattr(gate, "weight_fp32"):
-                        router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-                    else:
-                        _gate_out = gate(shared_hidden_states)
-                        router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
+                    router_logits = self._compute_router_logits(hidden_states, router_logits)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            # The runner input transform provides a padded gathered tensor in
-            # SP multistream mode. Trim the shared-MLP view before use.
             shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
             defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
-            shared_expert_input = (
-                shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
+            prepared_shared_input = (
+                PreparedSharedExpertInput(shared_hidden_states, is_gathered=True)
+                if shared_input_is_gathered
+                else self.ascend_shared_experts.prepare_input_before_routed(shared_hidden_states)
             )
-            if self.is_internal_router:
-                gate = self.gate
-                assert gate is not None
-                # Reuse the fused RMSNorm FP32 output when supplied. Otherwise,
-                # retain the standalone cast for other model call sites.
-                hidden_states_fp32 = (
-                    router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
-                )
-                before_routed_experts = torch.npu.current_stream().record_event()
-                if hasattr(gate, "weight_fp32"):
-                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-                else:
-                    _gate_out = gate(shared_hidden_states)
-                    router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
-                after_routed_experts = torch.npu.current_stream().record_event()
-            else:
-                before_routed_experts = torch.npu.current_stream().record_event()
-                after_routed_experts = None
-
-            routed_out, fused_moe_events = self.routed_experts.forward_impl(
+            router_logits, shared_input_ready, router_output_ready = self._prepare_router_and_milestones(
+                shared_hidden_states,
+                router_logits,
+            )
+            routed_out, milestones = self.routed_experts.forward_impl(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
-            fused_moe_events.before_routed_experts = before_routed_experts
-            fused_moe_events.after_routed_experts = after_routed_experts
-            if shared_input_is_gathered:
-                fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
+            assert isinstance(milestones, RoutedMoEMilestones)
+            milestones.shared_input_ready = shared_input_ready
+            milestones.router_output_ready = router_output_ready
+            if prepared_shared_input.is_gathered:
+                milestones.routed_finalize_done = torch.npu.current_stream().record_event()
 
             shared_out = self.ascend_shared_experts.forward(
-                shared_expert_input,
-                fused_moe_events,
-                input_is_gathered=shared_input_is_gathered,
+                prepared_shared_input,
+                milestones,
                 defer_output_wait=defer_shared_output_wait,
             )
             return shared_out, routed_out
