@@ -21,6 +21,7 @@ import torch
 import torch_npu
 
 FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE = 512
+FIA_TND_W8A8_PAGED_PREFILL_FALLBACK_HEAD_SIZE = 256
 SWA_INT_MAX = 2147483647
 
 
@@ -42,7 +43,7 @@ def npu_large_head_prefill_attention(
     # cases on an NPU attention op instead of falling back to Python.
     num_tokens = attn_metadata.actual_seq_lengths_q[-1]
     query = query[:num_tokens]
-    key, value, actual_seq_lengths_kv = _get_large_head_prefill_kv(
+    key, value, actual_seq_lengths_kv = get_dense_prefill_kv(
         key,
         value,
         attn_metadata,
@@ -76,7 +77,7 @@ def npu_large_head_prefill_attention(
     return attn_output, None
 
 
-def _get_large_head_prefill_kv(
+def get_dense_prefill_kv(
     key: torch.Tensor,
     value: torch.Tensor,
     attn_metadata: Any,
@@ -87,6 +88,7 @@ def _get_large_head_prefill_kv(
     head_size: int,
     is_prefill_no_cache: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+    """Return dense TND KV and cumulative lengths for a prefill call."""
     # PrefillNoCache already has dense TND key/value tensors. Chunked prefill
     # may need historical paged KV cache gathered back to dense TND.
     if is_prefill_no_cache or key_cache is None or value_cache is None:
@@ -120,6 +122,7 @@ def _gather_paged_kv_to_dense(
     num_kv_heads: int,
     head_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather valid tokens from paged KV cache into dense TND tensors."""
     # npu_fusion_attention consumes dense TND KV, while cached prefill KV is
     # stored by blocks. Gather only valid tokens from the block table.
     block_size = key_cache.shape[1]
