@@ -634,6 +634,34 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
+# ** 19a. File: platform/patch_tokenizer_cache.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.base.BaseRenderer.__init__`
+#      `vllm.renderers.base.BaseRenderer._tokenize_prompt`
+#      `vllm.renderers.hf.safe_apply_chat_template`
+#      `vllm.renderers.deepseek_v4.DeepseekV4Renderer._apply_chat_template`
+#      `vllm.renderers.deepseek_v32.DeepseekV32Renderer._apply_chat_template`
+#    Why:
+#       Prefix caching removes the compute for a repeated conversation prefix,
+#       but tokenization still runs over the full prompt on every turn, so at a
+#       high prefix-cache hit rate the tokenizer becomes the dominant frontend
+#       cost of agent workloads. Upstream tokenizes each request from scratch
+#       and reuses nothing across turns.
+#    How:
+#       Cache tokenization per added-token-delimited segment. Turn N re-sends
+#       turns 1..N-1 verbatim, so every segment but the appended suffix is a
+#       cache hit. The identity `encode(A + B) == encode(A) + encode(B)` holds
+#       when the cut falls right after an added token, which is exactly where
+#       chat templates put message boundaries; it is verified against a probe
+#       corpus when the cache is built, and the cache disables itself if the
+#       check fails. Requests that ask for token offsets, or that would need
+#       truncation, fall through to the original path unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/16298
+#    Future Plan:
+#       Remove this patch once upstream vLLM reuses tokenization across turns
+#       of the same conversation.
+#
 # ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,

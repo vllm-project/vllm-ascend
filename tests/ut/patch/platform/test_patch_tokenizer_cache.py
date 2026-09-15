@@ -1,5 +1,18 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Unit tests for the segment-level incremental tokenizer cache.
 
 The cache is driven through a character-level fake tokenizer so the tests run
@@ -14,9 +27,12 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import regex as re
 
-from vllm_ascend.tokenizer_cache import IncrementalTokenizerCache, _probe_corpus
-
-pytestmark = pytest.mark.cpu_test
+from vllm_ascend.patch.platform.patch_tokenizer_cache import (
+    IncrementalTokenizerCache,
+    _cache_for,
+    _chat_ids,
+    _probe_corpus,
+)
 
 _END = "<|im_end|>"
 _START = "<|im_start|>"
@@ -80,6 +96,15 @@ def _build(added_tokens=(_END, _START), capacity_gb=1, **kwargs):
     return tokenizer, IncrementalTokenizerCache(tokenizer, capacity_gb=capacity_gb)
 
 
+def _chat_render(tokenizer, text):
+    """Stand-in for a patched chat entry point: text out, ids in."""
+
+    def render(**kwargs):
+        return tokenizer.reference(text) if kwargs.get("tokenize", True) else text
+
+    return render
+
+
 def test_enabled_when_concatenation_identity_holds():
     _, cache = _build()
     assert cache.enabled
@@ -123,7 +148,9 @@ def test_encode_is_bit_identical_to_plain_tokenization(text):
 def test_probe_corpus_round_trips_through_the_cache():
     tokenizer, cache = _build()
     corpus = _probe_corpus(tokenizer.all_special_tokens)
-    assert len(corpus) == 11
+    # Every probe is distinct, so the corpus cannot silently degenerate into
+    # repetitions of one shape.
+    assert len(corpus) == len(set(corpus)) > 0
     for text in corpus:
         assert cache.encode(text) == tokenizer.reference(text)
 
@@ -187,18 +214,26 @@ def test_add_special_tokens_is_served_only_when_it_is_a_noop():
     assert not bos_cache.is_eligible(add_special_tokens=True)
 
 
-def test_chat_path_requires_matching_probes():
+def test_chat_path_is_armed_only_by_a_matching_probe():
     tokenizer, cache = _build()
     text = f"system{_END}user: hi{_END}"
 
-    assert cache.arm_chat_path([(text, tokenizer.reference(text))])
-    assert cache.chat_path_enabled
+    assert cache.verify_chat_path(_chat_render(tokenizer, text))
+    # The verdict is cached: a later mismatching probe cannot revoke it.
+    assert cache.verify_chat_path(lambda **_: [123, 456])
 
-    tokenizer2, cache2 = _build()
-    assert not cache2.arm_chat_path([(text, [123, 456])])
-    assert not cache2.chat_path_enabled
+    _, bad_cache = _build()
 
-    assert not cache2.arm_chat_path([])
+    def mismatched(**kwargs):
+        return [123, 456] if kwargs.get("tokenize", True) else text
+
+    assert not bad_cache.verify_chat_path(mismatched)
+    assert not bad_cache.verify_chat_path(_chat_render(tokenizer, text))
+
+
+def test_chat_path_is_not_armed_when_rendering_returns_no_text():
+    _, cache = _build()
+    assert not cache.verify_chat_path(lambda **_: [123, 456])
 
 
 def test_tiny_capacity_still_returns_correct_ids():
@@ -234,3 +269,35 @@ def test_concurrent_encodes_are_consistent():
 def test_probe_corpus_is_deterministic_and_empty_without_specials():
     assert _probe_corpus([]) == []
     assert _probe_corpus([_START, _END]) == _probe_corpus([_END, _START])
+
+
+def test_cache_for_returns_none_for_missing_or_unknown_tokenizers():
+    assert _cache_for(None) is None
+    assert _cache_for(_FakeTokenizer()) is None
+
+
+def test_chat_ids_returns_none_for_requests_that_opt_out_of_tokenizing():
+    tokenizer, cache = _build()
+    assert _chat_ids(cache, _chat_render(tokenizer, f"a{_END}"), {"tokenize": False}) is None
+
+
+def test_chat_ids_uses_the_cache_when_the_identity_holds():
+    tokenizer, cache = _build()
+    text = f"system{_END}user: hi{_END}"
+    expected = tokenizer.reference(text)
+
+    assert _chat_ids(cache, _chat_render(tokenizer, text), {}) == expected
+    calls = len(tokenizer.calls)
+    assert _chat_ids(cache, _chat_render(tokenizer, text), {}) == expected
+    # Both segments of `text` are cached by now, so the second call is free.
+    assert len(tokenizer.calls) == calls
+
+
+def test_chat_ids_falls_through_when_the_template_identity_does_not_hold():
+    tokenizer, cache = _build()
+    text = f"system{_END}user: hi{_END}"
+
+    def mismatched(**kwargs):
+        return [123, 456] if kwargs.get("tokenize", True) else text
+
+    assert _chat_ids(cache, mismatched, {}) is None
