@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from torch import nn
 
+from vllm_ascend.models.common import deepseek as deepseek_common
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
 
@@ -18,19 +19,17 @@ def test_routed_moe_receives_configured_swiglu_limit(monkeypatch):
             super().__init__()
             fused_moe_kwargs.update(kwargs)
 
-    monkeypatch.setattr(deepseek_v4, "FusedMoEFactory", StubFusedMoEFactory)
-    monkeypatch.setattr(deepseek_v4, "ReplicatedLinear", StubModule)
-    monkeypatch.setattr(deepseek_v4, "DeepseekV2MLP", StubModule)
-    monkeypatch.setattr(deepseek_v4, "get_tensor_model_parallel_world_size", lambda: 1)
-    monkeypatch.setattr(deepseek_v4, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_common, "FusedMoEFactory", StubFusedMoEFactory)
+    monkeypatch.setattr(deepseek_common, "ReplicatedLinear", StubModule)
+    monkeypatch.setattr(deepseek_common, "DeepseekMLP", StubModule)
+    monkeypatch.setattr(deepseek_common, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_common, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
-        deepseek_v4,
+        deepseek_common,
         "get_ep_group",
         lambda: SimpleNamespace(device_group=SimpleNamespace(size=lambda: 1), rank_in_group=0),
     )
-    monkeypatch.setattr(deepseek_v4, "get_ascend_config", lambda: SimpleNamespace(mix_placement=False))
-    monkeypatch.setattr(deepseek_v4.rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
-    monkeypatch.setattr(deepseek_v4.rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False)
+    monkeypatch.setattr(deepseek_common, "get_ascend_config", lambda: SimpleNamespace(mix_placement=False))
 
     config = SimpleNamespace(
         hidden_act="silu",
