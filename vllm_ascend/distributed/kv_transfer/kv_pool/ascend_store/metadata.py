@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -20,9 +21,41 @@ def make_layerwise_block_key(
     model_name: str,
     block_hash_or_tail: str,
     head_or_tp_rank: int,
+    *,
+    namespace: str = "",
+    pp_rank: int = 0,
+    dcp_rank: int = 0,
 ) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
+    """One object per local layer stack and KV shard; retain TP-only keys."""
+    if namespace:
+        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@dcp_rank:{dcp_rank}@{block_hash_or_tail}@{head_or_tp_rank}"
+    if pp_rank != 0 or dcp_rank != 0:
+        raise ValueError("PP/DCP layerwise keys require a topology namespace")
     return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
+
+
+def get_mooncake_layerwise_namespace(model_config: Any, parallel_config: Any) -> str:
+    """Isolate incompatible PP partitions and DCP memory layouts.
+
+    The scheduler and every worker use the same model partitioning API,
+    including uneven/custom PP partitions. No cross-topology resharding is
+    attempted: a different layout gets a cold cache rather than incorrect KV.
+    """
+    pp_size = _as_positive_int(getattr(parallel_config, "pipeline_parallel_size", 1), 1)
+    dcp_size = _as_positive_int(getattr(parallel_config, "decode_context_parallel_size", 1), 1)
+    if pp_size == dcp_size == 1:
+        return ""
+    tp_size = _as_positive_int(parallel_config.tensor_parallel_size, 1)
+    partitions = []
+    for pp_rank in range(pp_size):
+        stage_config = copy(parallel_config)
+        stage_config.rank = pp_rank * tp_size
+        start, end = model_config.get_layers_start_end_indices(stage_config)
+        if end <= start:
+            raise ValueError("Mooncake layerwise requires at least one model layer per PP stage")
+        partitions.append(f"{start}-{end}")
+    interleave = _as_positive_int(getattr(parallel_config, "cp_kv_cache_interleave_size", 1), 1)
+    return f"layerwise_v2@tp:{tp_size}@pp:{','.join(partitions)}@dcp:{dcp_size}@interleave:{interleave}"
 
 
 def is_block_key_layerwise(use_layerwise: bool, backend_name: str) -> bool:
@@ -45,30 +78,13 @@ def validate_mooncake_layerwise_topology(
     backend_name: str,
     use_layerwise: bool,
 ) -> None:
-    """Reject coordinates omitted from the current Mooncake block key."""
+    """PP and DCP are supported; PCP still needs a separate cache layout."""
     if not use_layerwise or backend_name.lower() != "mooncake":
         return
 
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    topology_dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
-        (
-            "prefill_context_parallel_size",
-            parallel_size("prefill_context_parallel_size"),
-        ),
-        (
-            "decode_context_parallel_size",
-            parallel_size("decode_context_parallel_size"),
-        ),
-    )
-    unsupported = [f"{name}={size}" for name, size in topology_dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
-        )
+    pcp_size = _as_positive_int(getattr(parallel_config, "prefill_context_parallel_size", 1), 1)
+    if pcp_size > 1:
+        raise ValueError(f"Mooncake block-key layerwise does not support PCP; prefill_context_parallel_size={pcp_size}")
 
 
 @dataclass(frozen=True)
