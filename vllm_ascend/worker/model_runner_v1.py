@@ -252,6 +252,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -4379,7 +4380,7 @@ class NPUModelRunner(GPUModelRunner):
         """Whether a cache spec requires one block-strided backing tensor."""
         return isinstance(
             kv_cache_spec,
-            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, AscendIndexerKPoolTailSpec),
         ) and (
             self.use_compress
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)

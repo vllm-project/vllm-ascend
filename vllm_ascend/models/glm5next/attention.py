@@ -31,7 +31,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
-    Glm5NextStateCache,
+    Glm5NextTailCache,
 )
 
 
@@ -106,12 +106,11 @@ class Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.index_kpool,
         )
-        # Absolute-position FP32 K/gate pages retain the incomplete pool.
-        self.state_cache = Glm5NextStateCache(
-            state_dim=2 * self.head_dim,
+        # Request-owned FP32 K/gate ring retains the incomplete pool.
+        self.tail_cache = Glm5NextTailCache(
+            head_dim=self.head_dim,
             dtype=torch.float32,
-            prefix=f"{prefix}.compressor.state_cache",
-            cache_config=cache_config,
+            prefix=f"{prefix}.tail_cache",
             compress_ratio=self.index_kpool,
         )
         self.prefix = prefix
