@@ -34,6 +34,11 @@ from vllm_ascend.utils import is_310p
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "Qwen3ForCausalLM",
+        "MiniMaxM2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "GlmMoeDsaForCausalLM",
+        "DeepseekV4ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
     }
 )
 
@@ -99,7 +104,7 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
     LoRA and batch-size-based dynamic speculative decoding
     (``num_speculative_tokens_per_batch_size``) are excluded from the
     default-V2 feature whitelist. Static ``eagle3`` / ``mtp`` / ``dflash``
-    remain supported. ``VLLM_USE_V2_MODEL_RUNNER`` still overrides this
+    / ``dspark`` remain supported. ``VLLM_USE_V2_MODEL_RUNNER`` still overrides this
     default decision.
     """
     if getattr(vllm_config, "lora_config", None) is not None:
@@ -120,7 +125,7 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
         )
         return False
 
-    if speculative_config.method in ("eagle3", "mtp", "dflash"):
+    if speculative_config.method in ("eagle3", "mtp", "dflash", "dspark"):
         logger.info_once(
             "Model Runner V2 is enabled by default for speculative method '%s'.",
             speculative_config.method,
