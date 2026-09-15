@@ -4845,7 +4845,7 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec
                     )
                     attn_module = self.compilation_config.static_forward_context.get(layer_name)
-                    is_fused_mla = (
+                    is_single_raw_mla = (
                         isinstance(attn_module, MLAAttention)
                         and type(current_kv_cache_spec) is AscendMLAAttentionSpec
                         and not use_legacy_shared_by_layout
@@ -4862,8 +4862,8 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
                     # 使用上方standardized shared backing生成的bare raw tensor。
-                    # is_fused_mla只基于当前layer判断，不能推广到shared_layers。
-                    if is_fused_mla:
+                    # is_single_raw_mla只基于当前layer判断，不能推广到shared_layers。
+                    if is_single_raw_mla:
                         fused_raw_size = (
                             kv_cache_config.num_blocks
                             * current_kv_cache_spec.page_size_bytes
@@ -5178,9 +5178,8 @@ class NPUModelRunner(GPUModelRunner):
                         kv_caches[layer_name] = reshaped_tensors
                         continue
 
-                    # Fused MLA使用allocate/hybrid阶段的一整块raw backing。
-                    # 这里构造token交错的单一fused view；mla_v1在forward入口
-                    # 派生nope/rope逻辑视图。MHA/GQA继续走raw K/V协议。
+                    # MLA使用allocate/hybrid阶段的一整块raw backing。
+                    # A5FlashMLA消费token交错的单tensor；A3 FIA消费component-major 双view。MHA/GQA继续走raw K/V协议。
                     attn_module = self.compilation_config.static_forward_context.get(layer_name)
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = None
@@ -5219,28 +5218,59 @@ class NPUModelRunner(GPUModelRunner):
                         fused_dim = nope_dim + rope_dim
                         typed_raw = fused_raw_tensor.view(dtype)
                         slot_elements = slot_bytes // element_size
-                        fused_shape = (
+                        component_shape = (
                             kv_cache_config.num_blocks * kernel_blocks_per_manager,
                             kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
-                            fused_dim,
                         )
-                        # 每个kernel slot内按token交错存储[nope|rope]：
-                        # token0[nope|rope], token1[nope|rope], ...。
-                        # cache协议只保留这个单一fused tensor，首轴stride
-                        # 携带hybrid page padding信息。
-                        fused_cache = torch.as_strided(
+                        if get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
+                            # A5每个kernel slot内按token交错存储[nope|rope]：
+                            # token0[nope|rope], token1[nope|rope], ...。
+                            fused_cache = torch.as_strided(
+                                typed_raw,
+                                size=(*component_shape, fused_dim),
+                                stride=(
+                                    slot_elements,
+                                    current_kv_cache_spec.num_kv_heads * fused_dim,
+                                    fused_dim,
+                                    1,
+                                ),
+                                storage_offset=typed_raw.storage_offset(),
+                            )
+                            kv_caches[layer_name] = fused_cache
+                            continue
+
+                        # A3/FIA要求nope和rope各自内部连续，只允许首轴携带
+                        # page padding stride。每个kernel slot物理上按
+                        # [all nope][all rope][padding]写入。
+                        nope_cache = torch.as_strided(
                             typed_raw,
-                            size=fused_shape,
+                            size=(*component_shape, nope_dim),
                             stride=(
                                 slot_elements,
-                                current_kv_cache_spec.num_kv_heads * fused_dim,
-                                fused_dim,
+                                current_kv_cache_spec.num_kv_heads * nope_dim,
+                                nope_dim,
                                 1,
                             ),
                             storage_offset=typed_raw.storage_offset(),
                         )
-                        kv_caches[layer_name] = fused_cache
+                        rope_cache = torch.as_strided(
+                            typed_raw,
+                            size=(*component_shape, rope_dim),
+                            stride=(
+                                slot_elements,
+                                current_kv_cache_spec.num_kv_heads * rope_dim,
+                                rope_dim,
+                                1,
+                            ),
+                            storage_offset=(
+                                typed_raw.storage_offset()
+                                + kernel_block_size
+                                * current_kv_cache_spec.num_kv_heads
+                                * nope_dim
+                            ),
+                        )
+                        kv_caches[layer_name] = (nope_cache, rope_cache)
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:
