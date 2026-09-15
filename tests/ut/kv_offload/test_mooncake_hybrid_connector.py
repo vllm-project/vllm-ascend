@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
+    _get_tensor_transfer_span_bytes,
 )
 
 
@@ -520,6 +521,13 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_transfer_span_includes_inter_block_padding(self):
+        backing = torch.empty(18, dtype=torch.uint8)
+        tensor = torch.as_strided(backing, size=(3, 4), stride=(6, 1))
+
+        self.assertEqual(tensor.numel() * tensor.element_size(), 12)
+        self.assertEqual(_get_tensor_transfer_span_bytes(tensor), 18)
+
     def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
         alignment = 2 * 1024 * 1024
         backing_size = 4 * alignment

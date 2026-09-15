@@ -1790,7 +1790,7 @@ class MooncakeConnectorWorker:
                     if not isinstance(kv_cache_tuple, (tuple, list)):
                         kv_cache_tuple = [kv_cache_tuple]
                     for tensor in kv_cache_tuple:
-                        tensor_nbytes = tensor.element_size() * math.prod(tensor.shape)
+                        tensor_nbytes = _get_tensor_transfer_span_bytes(tensor)
                         if tensor_nbytes == 0:
                             continue
                         tensor_addrs.append(tensor.data_ptr())
@@ -2150,6 +2150,24 @@ def group_concurrent_contiguous(
     dst_groups = [g.tolist() for g in dst_groups]
 
     return src_groups, dst_groups
+
+
+def _get_tensor_transfer_span_bytes(tensor: torch.Tensor) -> int:
+    """Return the byte span touched by block-stride KV transfers.
+
+    Hybrid KV tensors can have padding between blocks, so ``numel()`` does
+    not describe the physical range transferred by the connector. The
+    transfer path copies one full ``stride(0)`` for every block, including
+    the final block.
+    """
+    if tensor.numel() == 0:
+        return 0
+    if tensor.dim() == 0:
+        return tensor.element_size()
+    block_stride = tensor.stride(0)
+    if block_stride <= 0:
+        raise ValueError(f"KV cache block stride must be positive, got {block_stride}.")
+    return tensor.shape[0] * block_stride * tensor.element_size()
 
 
 def string_to_int64_hash(input_str):
