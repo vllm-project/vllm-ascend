@@ -124,6 +124,10 @@ class NPUWorker310(NPUWorker):
                 self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
             ) // 2
 
+        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
+            self.available_kv_cache_memory_bytes,
+        )
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB (halved for workspace)",

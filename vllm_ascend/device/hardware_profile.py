@@ -20,25 +20,34 @@ class HardwareCapability(Enum):
     ATB_EXTENSIONS = auto()
     ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
+    CANN_MEGAMOE = auto()
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
     DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
-    DSA_O_PROJ_TP = auto()
     DSV4_COMPRESSED_CACHE = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     FP8_ATTENTION = auto()
+    FUSED_MOE_COMPATIBILITY = auto()
+    FUSED_SWIGLU_TUNING_ARGS = auto()
     GDN_COMPATIBILITY = auto()
+    GRAPH_MULS_ADD_FUSION = auto()
+    GRAPH_NORM_QUANT_FUSION = auto()
+    INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
     IRQ_CPU_RESERVATION = auto()
     LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
     MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     MLAPO_NATIVE_WEIGHTS = auto()
+    MINIMAX_M3_PREFILL_KV_GATHER_Q = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
+    MOE_DISPATCH_EXTRA_ARGS = auto()
+    MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
     NPUGRAPH_EX = auto()
+    NPU_TOP_K_TOP_P = auto()
     PAGED_ATTENTION = auto()
     RC_DEVICE_DISCOVERY = auto()
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
@@ -46,6 +55,7 @@ class HardwareCapability(Enum):
     SFA_DCP_REPLICATED_INDEXER = auto()
     STANDARD_WORKER_PATCHES = auto()
     STANDARD_MAMBA_PATCH = auto()
+    SWIGLU_OAI_MX_QUANT = auto()
     TRITON_BATCH_MEMCPY = auto()
     UNRESTRICTED_MLAPO = auto()
 
@@ -79,6 +89,15 @@ class DeviceAddressingMode(Enum):
     DUAL_CHIP_CARD = auto()
 
 
+class MoECommPolicy(Enum):
+    """MoE communication selection policies."""
+
+    CAPACITY_AND_EXPERT_DENSITY = auto()
+    FUSED_OR_CAPACITY = auto()
+    CAPACITY_AND_WORLD_SIZE = auto()
+    ALLGATHER = auto()
+
+
 class QuantizationBackendFamily(Enum):
     """Quantization configuration implementation families."""
 
@@ -104,6 +123,7 @@ class HardwareProfile:
     device_adaptor_family: DeviceAdaptorFamily
     device_addressing_mode: DeviceAddressingMode
     weight_layout_policy: WeightLayoutPolicy
+    moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
     capabilities: frozenset[HardwareCapability]
 
@@ -119,6 +139,10 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
+        HardwareCapability.GRAPH_MULS_ADD_FUSION,
+        HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
@@ -131,7 +155,10 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
-_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MC2_FULLMESH_V2_COMM,
+    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+}
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
@@ -143,8 +170,9 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
+            moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES,
+            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -154,8 +182,14 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.STANDARD,
             device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
+            moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_A3_CAPABILITIES,
+            capabilities=_A3_CAPABILITIES
+            | {
+                HardwareCapability.CANN_MEGAMOE,
+                HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+            },
         ),
         AscendDeviceType._310P: HardwareProfile(
             _device_type=AscendDeviceType._310P,
@@ -165,11 +199,14 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.COMPATIBILITY,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
+            moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
                     HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+                    HardwareCapability.FUSED_MOE_COMPATIBILITY,
+                    HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
                     HardwareCapability.GDN_COMPATIBILITY,
                     HardwareCapability.IRQ_CPU_RESERVATION,
                     HardwareCapability.RC_DEVICE_DISCOVERY,
@@ -185,6 +222,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED,
             device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
+            moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=frozenset(
                 {
@@ -193,19 +231,24 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
-                    HardwareCapability.DSA_O_PROJ_TP,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
                     HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.GRAPH_MULS_ADD_FUSION,
+                    HardwareCapability.GRAPH_NORM_QUANT_FUSION,
                     HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+                    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
+                    HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+                    HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
+                    HardwareCapability.SWIGLU_OAI_MX_QUANT,
                     HardwareCapability.TRITON_BATCH_MEMCPY,
                     HardwareCapability.UNRESTRICTED_MLAPO,
                 }

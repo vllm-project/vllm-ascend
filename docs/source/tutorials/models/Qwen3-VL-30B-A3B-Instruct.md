@@ -205,15 +205,12 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=400
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=400
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=100
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
 
     vllm serve Eco-Tech/Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8 \
       --host 0.0.0.0 \
@@ -246,15 +243,12 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=1024
-    export OMP_NUM_THREADS=1
-    export OMP_PROC_BIND=false
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
 
     vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
       --host 0.0.0.0 \
@@ -272,7 +266,8 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
       --mm-processor-cache-gb 0 \
       --limit-mm-per-prompt.image 1 \
       --limit-mm-per-prompt.video 0 \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2": 1}'
     ```
 
 === "A2 series"

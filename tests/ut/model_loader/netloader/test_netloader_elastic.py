@@ -34,6 +34,7 @@ from vllm_ascend.model_loader.netloader.executor.elastic_load import (
     _finalize_hccl_recv_buffer,
     _get_recv_transfer_items,
     _get_send_transfer_items,
+    _iter_tensors_in_value,
     _prepare_hccl_recv_buffer,
     cache_processed_layout_transfer_manifest,
     get_cached_processed_layout_transfer_items,
@@ -319,6 +320,55 @@ def test_processed_layout_transfer_items_include_module_attribute_tensors(monkey
     assert "layer.weight" in send_names
     assert "layer.aclnn_input_scale_reciprocal" in send_names
     assert send_names == recv_names
+
+
+def test_iter_tensors_in_value_handles_cyclic_containers():
+    tensor = torch.ones(2)
+    cyclic_values = [tensor]
+    cyclic_values.append(cyclic_values)
+
+    tensors = list(_iter_tensors_in_value("values", cyclic_values, set()))
+
+    assert tensors == [("values.0", tensor)]
+
+
+def test_processed_layout_collection_scans_shared_impl_graph_once(monkeypatch):
+    monkeypatch.setattr(
+        p2p_elastic_load,
+        "_is_transferable_tensor",
+        lambda tensor: not tensor.is_meta and tensor.numel() > 0,
+    )
+
+    class SharedState:
+        def __init__(self):
+            self.tensor = torch.ones(2)
+
+    class Impl:
+        def __init__(self, shared_state):
+            self.shared_state = shared_state
+
+    class Layer(torch.nn.Module):
+        def __init__(self, shared_state):
+            super().__init__()
+            self.impl = Impl(shared_state)
+
+    class Model(torch.nn.Module):
+        def __init__(self, shared_state):
+            super().__init__()
+            self.layer_0 = Layer(shared_state)
+            self.layer_1 = Layer(shared_state)
+
+    shared_state = SharedState()
+    with patch.object(
+        p2p_elastic_load,
+        "_try_collect_transferable_tensor",
+        wraps=p2p_elastic_load._try_collect_transferable_tensor,
+    ) as mock_collect:
+        names = [name for name, _ in _collect_processed_layout_tensors(Model(shared_state))]
+
+    assert names == ["layer_0.impl.shared_state.tensor"]
+    shared_tensor_calls = [call for call in mock_collect.call_args_list if call.args[1] is shared_state.tensor]
+    assert len(shared_tensor_calls) == 1
 
 
 def test_dram_transfer_items_still_use_named_parameters_only():

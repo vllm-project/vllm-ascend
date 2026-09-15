@@ -91,7 +91,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
 
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
@@ -102,13 +102,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             batch_descriptor=None,  # Full graph model don't need batch_descriptor
             slot_mapping=None,
         ):
-            # decide to update draft graph params
             _EXTRA_CTX.is_draft_model = True
-
             _EXTRA_CTX.is_draft_model_prefill = False
-
             forward_context = get_forward_context()
-
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],

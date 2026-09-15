@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import gc
+import weakref
 from types import SimpleNamespace
 
 import torch
@@ -25,6 +27,8 @@ from vllm_ascend.model_loader.rfork.transfer_backend import (
     _collect_processed_layout_tensors,
     _parse_weight_info,
     _reshape_tensor_to_seed_shape,
+    _split_tensors_by_excluded_blocks,
+    _subtract_weight_blocks,
     get_remote_instance_transfer_engine_info,
 )
 
@@ -87,14 +91,18 @@ def test_recv_from_source_refreshes_registered_shape_after_reshape(monkeypatch):
     assert backend.rfork_transfer_engine_weights_shape_dict["weight"] == (1, 2, 3)
 
 
-def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
+def test_recv_from_source_retains_registered_transferable_tensor_owners(monkeypatch):
     tensor = torch.arange(6).reshape(2, 3)
+    tensor_ref = weakref.ref(tensor)
+    tensor_numel = tensor.numel()
+    tensor_element_size = tensor.element_size()
     backend = RForkTransferBackend.__new__(RForkTransferBackend)
     backend.rfork_transfer_engine = SimpleNamespace(
         batch_transfer_sync_read=lambda *args: SimpleNamespace(is_error=lambda: False)
     )
     backend.rfork_transfer_engine_weights_shape_dict = {"weight": (2, 3)}
-    backend._registered_transferable_tensors = [("weight", tensor)]
+    registered_tensors = [("weight", tensor)]
+    backend._registered_transferable_tensors = registered_tensors
 
     def fail_if_rescanned(model, processed_layout):
         raise AssertionError("recv_from_source should reuse the registered tensor cache")
@@ -105,13 +113,118 @@ def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
         "get_remote_instance_transfer_engine_info",
         lambda *args: (
             "seed-session",
-            {"weight": [1, tensor.numel(), tensor.element_size(), [2, 3]]},
+            {"weight": [1, tensor_numel, tensor_element_size, [2, 3]]},
             None,
         ),
     )
 
     assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
+    assert backend._registered_transferable_tensors is registered_tensors
+    del registered_tensors
+    del tensor
+    gc.collect()
+    assert tensor_ref() is not None
+
+
+def test_recv_from_source_keeps_registered_tensors_when_seed_metadata_is_unavailable(monkeypatch):
+    tensor = torch.arange(6).reshape(2, 3)
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace()
+    registered_tensors = [("weight", tensor)]
+    backend._registered_transferable_tensors = registered_tensors
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "get_remote_instance_transfer_engine_info",
+        lambda *args: (None, None, None),
+    )
+
+    assert not backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
+    assert backend._registered_transferable_tensors is registered_tensors
+
+
+def test_unregister_memory_region_releases_registered_tensor_owners():
+    tensor = torch.arange(6).reshape(2, 3)
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_unregister_memory=lambda *args: SimpleNamespace(is_error=lambda: False)
+    )
+    backend.rfork_transfer_engine_weights_info_dict = {"weight": (tensor.data_ptr(), tensor.numel(), 1)}
+    backend.rfork_transfer_engine_weights_shape_dict = {"weight": tuple(tensor.shape)}
+    backend.registered_weight_blocks = [(tensor.data_ptr(), tensor.numel() * tensor.element_size())]
+    backend._registered_transferable_tensors = [("weight", tensor)]
+
+    assert backend.unregister_memory_region()
     assert backend._registered_transferable_tensors is None
+    assert backend.rfork_transfer_engine_weights_info_dict is None
+    assert backend.rfork_transfer_engine_weights_shape_dict is None
+    assert backend.registered_weight_blocks == []
+
+
+def test_unregister_memory_region_keeps_tracking_when_engine_fails():
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_unregister_memory=lambda *args: SimpleNamespace(
+            is_error=lambda: True, to_string=lambda: "mock unregister error"
+        )
+    )
+    stale_blocks = [(4096, 128)]
+    backend.registered_weight_blocks = list(stale_blocks)
+    backend.rfork_transfer_engine_weights_info_dict = {"weight": (4096, 128, 2)}
+    backend.rfork_transfer_engine_weights_shape_dict = {"weight": (64,)}
+    backend._registered_transferable_tensors = []
+
+    assert not backend.unregister_memory_region()
+    assert backend.registered_weight_blocks == stale_blocks
+    assert backend.rfork_transfer_engine_weights_info_dict is not None
+    assert backend.rfork_transfer_engine_weights_shape_dict is not None
+
+
+def test_register_memory_region_retries_stale_blocks_before_registering(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    stale_blocks = [(storage.data_ptr() + 4096, 256)]
+    backend, registered_calls, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        [
+            {
+                "address": storage.data_ptr(),
+                "size": storage.numel() * storage.element_size(),
+                "state": "active_allocated",
+            }
+        ],
+        stale_blocks=stale_blocks,
+    )
+
+    assert backend.register_memory_region(object(), True)
+
+    assert unregistered_calls == [[stale_blocks[0][0]]]
+    assert registered_calls == [([storage.data_ptr()], [40])]
+    assert backend.registered_weight_blocks == [(storage.data_ptr(), 40)]
+
+
+def test_register_memory_region_aborts_when_stale_unregister_fails(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    stale_blocks = [(storage.data_ptr() + 4096, 256)]
+    backend, registered_calls, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        [
+            {
+                "address": storage.data_ptr(),
+                "size": storage.numel() * storage.element_size(),
+                "state": "active_allocated",
+            }
+        ],
+        stale_blocks=stale_blocks,
+        unregister_error=True,
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    assert registered_calls == []
+    assert unregistered_calls == [[stale_blocks[0][0]]]
+    assert backend.registered_weight_blocks == stale_blocks
 
 
 def test_transferable_tensor_scan_depends_on_runtime_layout(monkeypatch):
@@ -145,3 +258,206 @@ def test_get_remote_instance_transfer_engine_info_non_200_returns_three_values(m
     )
 
     assert get_remote_instance_transfer_engine_info("http://seed", "seed-key") == (None, None, None)
+
+
+def test_subtract_weight_blocks_cuts_excluded_ranges():
+    assert _subtract_weight_blocks([(0, 100)], []) == [(0, 100)]
+    assert _subtract_weight_blocks([(0, 100)], [(0, 100)]) == []
+    assert _subtract_weight_blocks([(0, 100)], [(10, 20)]) == [(0, 10), (30, 70)]
+    assert _subtract_weight_blocks([(0, 100)], [(-50, 60)]) == [(10, 90)]
+    assert _subtract_weight_blocks([(0, 100)], [(90, 50)]) == [(0, 90)]
+    assert _subtract_weight_blocks([(0, 100)], [(200, 10)]) == [(0, 100)]
+    assert _subtract_weight_blocks(
+        [(0, 100), (200, 100)],
+        [(50, 10), (240, 10)],
+    ) == [(0, 50), (60, 40), (200, 40), (250, 50)]
+
+
+def test_split_tensors_by_excluded_blocks_separates_shared_storage():
+    storage = torch.arange(10)
+    shared_tensor = storage[:3]
+    own_tensor = torch.arange(4)
+
+    kept_tensors, excluded_names = _split_tensors_by_excluded_blocks(
+        [("model.embed_tokens.weight", shared_tensor), ("layers.0.fc.weight", own_tensor)],
+        [(storage.data_ptr(), shared_tensor.numel() * shared_tensor.element_size())],
+    )
+
+    assert [name for name, _ in kept_tensors] == ["layers.0.fc.weight"]
+    assert excluded_names == ["model.embed_tokens.weight"]
+
+
+def test_split_tensors_by_excluded_blocks_noop_without_exclusion():
+    tensor = torch.arange(6)
+    kept_tensors, excluded_names = _split_tensors_by_excluded_blocks([("weight", tensor)], [])
+
+    assert kept_tensors == [("weight", tensor)]
+    assert excluded_names == []
+
+
+def _make_register_memory_region_backend(
+    monkeypatch,
+    tensors,
+    snapshot_blocks,
+    stale_blocks=(),
+    unregister_error=False,
+):
+    registered_calls = []
+    unregistered_calls = []
+
+    def batch_register_memory(addresses, sizes):
+        registered_calls.append((list(addresses), list(sizes)))
+        return SimpleNamespace(is_error=lambda: False)
+
+    def batch_unregister_memory(addresses):
+        unregistered_calls.append(list(addresses))
+        return SimpleNamespace(is_error=lambda: unregister_error, to_string=lambda: "mock unregister error")
+
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_register_memory=batch_register_memory,
+        batch_unregister_memory=batch_unregister_memory,
+    )
+    backend.registered_weight_blocks = list(stale_blocks)
+    monkeypatch.setattr(
+        transfer_backend,
+        "_iter_transferable_tensors",
+        lambda model, processed_layout: iter(tensors),
+    )
+    snapshot = [{"blocks": snapshot_blocks}]
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(memory=SimpleNamespace(memory_snapshot=lambda: snapshot)),
+        raising=False,
+    )
+    return backend, registered_calls, unregistered_calls
+
+
+def test_register_memory_region_skips_shared_weights(monkeypatch):
+    storage = torch.arange(100, dtype=torch.float32)
+    shared_weight = storage[:10]
+    own_weight = storage[20:32].reshape(2, 6)
+    backend, registered_calls, _ = _make_register_memory_region_backend(
+        monkeypatch,
+        [("model.embed_tokens.weight", shared_weight), ("layers.0.fc.weight", own_weight)],
+        [
+            {
+                "address": storage.data_ptr(),
+                "size": storage.numel() * storage.element_size(),
+                "state": "active_allocated",
+            }
+        ],
+    )
+
+    excluded_blocks = [(storage.data_ptr(), 40)]
+    assert backend.register_memory_region(object(), True, exclude_blocks=excluded_blocks)
+
+    assert set(backend.rfork_transfer_engine_weights_info_dict) == {"layers.0.fc.weight"}
+    assert [name for name, _ in backend._registered_transferable_tensors] == ["layers.0.fc.weight"]
+    assert backend.excluded_weight_blocks == excluded_blocks
+    assert registered_calls == [([storage.data_ptr() + 40], [360])]
+    assert backend.registered_weight_blocks == [(storage.data_ptr() + 40, 360)]
+
+
+def test_register_memory_region_registers_all_weights_without_exclusion(monkeypatch):
+    storage = torch.arange(100, dtype=torch.float32)
+    weight_a = storage[:10]
+    weight_b = storage[20:32]
+    backend, registered_calls, _ = _make_register_memory_region_backend(
+        monkeypatch,
+        [("a.weight", weight_a), ("b.weight", weight_b)],
+        [
+            {
+                "address": storage.data_ptr(),
+                "size": storage.numel() * storage.element_size(),
+                "state": "active_allocated",
+            }
+        ],
+    )
+
+    assert backend.register_memory_region(object(), True)
+
+    assert set(backend.rfork_transfer_engine_weights_info_dict) == {"a.weight", "b.weight"}
+    assert registered_calls == [([storage.data_ptr()], [400])]
+    assert backend.excluded_weight_blocks == []
+
+
+def test_register_memory_region_skips_empty_batch_after_excluding_all_weights(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, registered_calls, _ = _make_register_memory_region_backend(
+        monkeypatch,
+        [("model.embed_tokens.weight", storage)],
+        [
+            {
+                "address": storage.data_ptr(),
+                "size": storage.numel() * storage.element_size(),
+                "state": "active_allocated",
+            }
+        ],
+    )
+
+    excluded_blocks = [(storage.data_ptr(), storage.numel() * storage.element_size())]
+    assert backend.register_memory_region(object(), True, exclude_blocks=excluded_blocks)
+
+    assert backend.rfork_transfer_engine_weights_info_dict == {}
+    assert backend.rfork_transfer_engine_weights_shape_dict == {}
+    assert backend._registered_transferable_tensors == []
+    assert backend.registered_weight_blocks == []
+    assert registered_calls == []
+
+
+def test_recv_from_source_defensively_skips_pre_registered_weights(monkeypatch):
+    storage = torch.arange(100, dtype=torch.float32)
+    shared_weight = storage[:10]
+    own_weight = storage[20:32]
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_transfer_sync_read=lambda *args: SimpleNamespace(is_error=lambda: False)
+    )
+    backend.rfork_transfer_engine_weights_shape_dict = {}
+    backend.excluded_weight_blocks = [(storage.data_ptr(), 40)]
+    backend._registered_transferable_tensors = None
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "_iter_transferable_tensors",
+        lambda model, processed_layout: iter(
+            [
+                ("model.embed_tokens.weight", shared_weight),
+                ("layers.0.fc.weight", own_weight),
+            ]
+        ),
+    )
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "get_remote_instance_transfer_engine_info",
+        lambda *args: (
+            "seed-session",
+            {"layers.0.fc.weight": [7, own_weight.numel(), own_weight.element_size()]},
+            None,
+        ),
+    )
+
+    assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
+    assert backend.rfork_transfer_engine_weights_shape_dict == {"layers.0.fc.weight": tuple(own_weight.shape)}
+
+
+def test_recv_from_source_fails_for_unknown_weight_outside_shared_blocks(monkeypatch):
+    own_weight = torch.arange(12, dtype=torch.float32)
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_transfer_sync_read=lambda *args: SimpleNamespace(is_error=lambda: False)
+    )
+    backend.rfork_transfer_engine_weights_shape_dict = {}
+    backend.excluded_weight_blocks = [(4096, 128)]
+    backend._registered_transferable_tensors = [("layers.0.fc.weight", own_weight)]
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "get_remote_instance_transfer_engine_info",
+        lambda *args: ("seed-session", {}, None),
+    )
+
+    assert not backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)

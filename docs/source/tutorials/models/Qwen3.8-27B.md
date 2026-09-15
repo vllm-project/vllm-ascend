@@ -218,14 +218,14 @@ Before starting the service:
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
     export VLLM_USE_MODELSCOPE=True
-    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -321,14 +321,14 @@ Before starting the service:
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
     export VLLM_USE_MODELSCOPE=True
-    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \

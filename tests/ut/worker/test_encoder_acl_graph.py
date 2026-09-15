@@ -7,6 +7,7 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 from vllm.v1.worker.gpu.model_states import interface
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     EncoderAclGraphManager,
@@ -210,7 +211,7 @@ def test_capture_budget_graph_npu():
             side_effect=lambda tensors: tensors,
         ),
     ):
-        mgr._capture_budget_graph(2048)
+        mgr._capture_budget_graph(2048, **({} if vllm_version_is("0.28.0") else {"axis_keys": ()}))
 
     graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph

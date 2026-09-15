@@ -3,7 +3,7 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
+from vllm_ascend.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
 from vllm_ascend.ops.triton.mamba.causal_conv1d import PAD_SLOT_ID, causal_conv1d_fn
 from vllm_ascend.utils import enable_custom_op
 

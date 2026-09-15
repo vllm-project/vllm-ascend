@@ -40,6 +40,7 @@ import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
@@ -59,23 +60,30 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     bypass_pp_guard = spec_pp_support is not None
-    original_get_pp_group = dspark_utils.get_pp_group
-    original_should_share = eagle_utils._should_share
+    original_eagle_should_share = eagle_utils._should_share
+    if vllm_version_is("0.28.0"):
+        # Release binds these names at module import; main imports locally.
+        original_get_pp_group = dspark_utils.get_pp_group
+        original_dspark_should_share = dspark_utils._should_share
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     if bypass_pp_guard:
-        # The upstream loader checks the live PP group independently of config.
-        single_rank_pp_group = SimpleNamespace(world_size=1)
-        dspark_utils.get_pp_group = lambda: single_rank_pp_group
+        if vllm_version_is("0.28.0"):
+            single_rank_pp_group = SimpleNamespace(world_size=1)
+            dspark_utils.get_pp_group = lambda: single_rank_pp_group
 
         def should_share(eagle, flag, draft, target):
-            # The last PP rank has no target embedding. Keep the draft's own
-            # embedding instead of replacing it with PPMissingLayer.
+            # Non-owning PP ranks expose embed / lm_head as PPMissingLayer
+            # (no ``weight``). Keep the draft's own copy instead of sharing.
             if flag == "has_own_embed_tokens":
                 return False
-            return original_should_share(eagle, flag, draft, target)
+            if target is not None and not hasattr(target, "weight"):
+                return False
+            return original_eagle_should_share(eagle, flag, draft, target)
 
         eagle_utils._should_share = should_share
+        if vllm_version_is("0.28.0"):
+            dspark_utils._should_share = should_share
     try:
         # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
@@ -84,8 +92,10 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if inherits_target_quant:
             model_utils.get_draft_quant_config = _original_get_draft_quant_config
         if bypass_pp_guard:
-            dspark_utils.get_pp_group = original_get_pp_group
-            eagle_utils._should_share = original_should_share
+            eagle_utils._should_share = original_eagle_should_share
+            if vllm_version_is("0.28.0"):
+                dspark_utils.get_pp_group = original_get_pp_group
+                dspark_utils._should_share = original_dspark_should_share
 
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both

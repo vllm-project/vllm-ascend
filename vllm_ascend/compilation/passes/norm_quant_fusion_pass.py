@@ -23,7 +23,8 @@ from vllm.config.compilation import Range
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
-from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import enable_custom_op
 
 
 class AddRMSNormQuantPattern(BasePattern):
@@ -379,10 +380,11 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             return
 
         common_epsilons = [1e-5, 1e-6]
+        profile = get_current_hardware_profile()
 
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION):
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():

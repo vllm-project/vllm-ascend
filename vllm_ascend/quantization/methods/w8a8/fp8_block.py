@@ -45,7 +45,14 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
+from ..base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchRepeatSpec,
+)
 from ..registry import register_scheme
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
 
@@ -137,6 +144,36 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
     keeps the model dtype (everything else).
     """
 
+    supports_weight_switch = True
+
+    # Dense post-processing keeps weight in [output, input] layout.
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+
+    def _get_weight_switch_specs(
+        self,
+        layer: torch.nn.Module,
+        config: WeightSwitchConfig,
+    ) -> tuple[
+        tuple[WeightSwitchGatherSpec, ...],
+        tuple[WeightSwitchRepeatSpec, ...],
+        str,
+    ]:
+        gather_specs, repeat_specs, shard_axis = super()._get_weight_switch_specs(layer, config)
+        if self.mxfp8_method is None:
+            return gather_specs, repeat_specs, shard_axis
+        if shard_axis == "input":
+            return (
+                self.mxfp8_method.weight_switch_gather_specs,
+                self.mxfp8_method.weight_switch_repeat_specs,
+                shard_axis,
+            )
+        return (
+            self.mxfp8_method.weight_switch_output_gather_specs,
+            self.mxfp8_method.weight_switch_output_repeat_specs,
+            shard_axis,
+        )
+
     def __init__(self, weight_block_size: tuple[int, int]):
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
@@ -191,6 +228,11 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             return
 
         quantized, mx_scale = _mx_quantize(resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg)
+        # mx_scale_pairs: CANN 9.1 npu_dynamic_mx_quant packs two E8M0 scales
+        # per entry on a 2D weight, so the native result is [out, in // 64, 2]
+        # while the MXFP8 method unpacks [out, in // 32]. view() keeps the
+        # bytes; reshape() restores the layout the method expects.
+        mx_scale = mx_scale.view(torch.uint8).reshape(resolved.shape[0], -1)
         layer.weight = torch.nn.Parameter(quantized, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
@@ -337,7 +379,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             )
             quantized, expert_scale = _mx_quantize(resolved, scale_alg)
             weight[expert].copy_(quantized)
-            mx_scale[expert].copy_(expert_scale)
+            mx_scale[expert].copy_(expert_scale.view(torch.uint8).reshape(mx_scale[expert].shape))
         return mx_scale
 
     def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:

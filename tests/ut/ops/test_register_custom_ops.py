@@ -78,3 +78,24 @@ def test_sp_ep_fake_shapes_follow_uneven_local_chunks(monkeypatch):
 
     assert gathered.shape == (8, 4)
     assert reduced.shape == (3, 4)
+
+
+def test_rope_fake_uses_requested_output_dtype():
+    positions = torch.arange(2)
+    query = torch.empty(2, 128, dtype=torch.bfloat16)
+    key = torch.empty(2, 64, dtype=torch.bfloat16)
+
+    query_out, key_out = custom_ops._rope_forward_oot_impl_fake(
+        positions,
+        query,
+        key,
+        torch.empty(16, 64, dtype=torch.bfloat16),
+        64,
+        64,
+        out_dtype=torch.float8_e4m3fn,
+    )
+
+    assert query_out.shape == query.shape
+    assert key_out.shape == key.shape
+    assert query_out.dtype == torch.float8_e4m3fn
+    assert key_out.dtype == torch.float8_e4m3fn

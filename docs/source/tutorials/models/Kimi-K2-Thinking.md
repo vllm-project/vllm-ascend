@@ -348,9 +348,9 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|------------|----------------|---------------------|
-| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2K input / 2K output in Chapter 8. |
+| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2k input / 2k output in Chapter 8. |
 | Low Latency | Single-node | 16 (A3) | bfloat16 | Reduce `--max-num-seqs` and `--max-num-batched-tokens` from the validated baseline (`12` and `8192`) to reduce queueing delay. In the Chapter 8 concurrency sweep, concurrency 1-4 kept mean TTFT below 1s; validate TTFT, TPOT, and tail latency against the target latency SLO. |
-| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1K/1K concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
+| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1k/1k concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
 
 ### 9.2 Tuning Guidelines
 

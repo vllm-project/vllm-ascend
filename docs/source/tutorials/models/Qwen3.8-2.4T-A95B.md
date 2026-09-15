@@ -196,9 +196,9 @@ Before starting the service:
         export DP_SIZE=4
         export TP_SIZE=16
 
+        export HCCL_BUFFSIZE_EP=2048
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export HCCL_BUFFSIZE=1024
-        export HCCL_BUFFSIZE_EP=2048
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_ROCE_ENABLE=0
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -250,9 +250,9 @@ Before starting the service:
         export DP_START_RANK=<1_OR_2_OR_3>
         export TP_SIZE=16
 
+        export HCCL_BUFFSIZE_EP=2048
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export HCCL_BUFFSIZE=1024
-        export HCCL_BUFFSIZE_EP=2048
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_ROCE_ENABLE=0
         export HCCL_OP_EXPANSION_MODE="AIV"

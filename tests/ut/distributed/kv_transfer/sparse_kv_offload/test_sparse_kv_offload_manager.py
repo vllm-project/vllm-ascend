@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 class _FakeKVCacheSpec:
@@ -56,6 +57,14 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
+    def test_non_a3_is_rejected(self):
+        with (
+            patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A2),
+            self.assertRaisesRegex(RuntimeError, "Sparse KV offload is only support on A3"),
+        ):
+            manager_module.init_sparse_kv_offload_manager(None, None, None)
+
     def test_memory_plan_is_limited_by_active_workload(self):
         specs, vllm_config, alignment_reserve = _make_memory_plan_inputs()
 
@@ -315,7 +324,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                         "empty",
                         return_value=MagicMock(),
                     ),
-                    patch.object(SparseKVOffloadManager, "_build_cpp"),
+                    patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
                 ):
                     SparseKVOffloadManager(
                         vllm_config,
@@ -368,7 +377,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             patch.object(manager_module, "offload", offload_backend, create=True),
             patch.object(manager_module.torch, "zeros", return_value=MagicMock()),
             patch.object(manager_module.torch, "empty", return_value=MagicMock()),
-            patch.object(SparseKVOffloadManager, "_build_cpp"),
+            patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
             self.assertRaisesRegex(ValueError, "exceeds DRAM limit"),
         ):
             SparseKVOffloadManager(

@@ -104,10 +104,11 @@ The quantization types currently supported by LLM-Compressor can be viewed in th
 
 ### 3. Native FP8 checkpoints (no quantization step needed)
 
-Many models are now published directly in FP8, for example [Qwen/Qwen3.8-27B-FP8](https://modelscope.cn/models/Qwen/Qwen3.8-27B-FP8). Their `config.json` carries `"quant_method": "fp8"` together with a `weight_block_size`, meaning every quantized weight is stored as `float8_e4m3fn` plus one `float32` scale per weight block. vLLM Ascend detects and serves these checkpoints as published, so no offline re-quantization is required:
+Many models are now published directly in FP8, for example [Qwen/Qwen3.8-27B-FP8](https://modelscope.cn/models/Qwen/Qwen3.8-27B-FP8) and [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash). Their `config.json` carries `"quant_method": "fp8"` together with a `weight_block_size`, meaning every quantized weight is stored as `float8_e4m3fn` plus one `float32` scale per weight block. vLLM Ascend detects and serves these checkpoints as published, so no offline re-quantization is required:
 
 ```bash
 vllm serve /path/to/Qwen3.8-27B-FP8 --trust-remote-code
+vllm serve /path/to/GLM-5.3-Flash --tensor-parallel-size 8 --trust-remote-code
 ```
 
 How the weights are executed depends on the hardware:

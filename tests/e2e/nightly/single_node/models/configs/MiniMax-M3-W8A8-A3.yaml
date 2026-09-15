@@ -35,7 +35,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.95"
       - "--max-model-len"
-      - "67560"
+      - "69632"
       - "--max-num-batched-tokens"
       - "32768"
       - "--long-prefill-token-threshold"
