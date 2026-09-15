@@ -65,11 +65,22 @@ def add_rms_norm(
 _SUPPORTED_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
 
 
-def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
+def reduce_sum(
+    x: torch.Tensor,
+    dim: int | None = None,
+    keepdim: bool = False,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
     dim = -1 if dim is None and x.dim() == 1 else dim
+    # torch.sum can accumulate in an explicit dtype, but the batch-invariant kernel
+    # has no such overload. Materialize the cast so a single dispatch path below
+    # serves both torch.sum forms; the native fallback already matches the dtype
+    # semantics of torch.sum.
+    if dtype is not None and x.dtype != dtype:
+        x = x.to(dtype)
     if x.device.type == "npu" and dim is not None and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
     # CPU tensors and unsupported dtypes/dimensions use the saved native torch.sum.
