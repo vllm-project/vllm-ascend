@@ -29,10 +29,6 @@ The following model weights are available:
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -473,7 +469,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 Here is an accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -487,11 +483,11 @@ Here is an accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 

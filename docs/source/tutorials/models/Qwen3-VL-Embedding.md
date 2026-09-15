@@ -207,7 +207,7 @@ For more usage examples, please reference the [examples](https://github.com/vllm
 
 Here are two accuracy evaluation methods.
 
-### Using MTEB
+### 7.1 Using MTEB
 
 1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
@@ -243,7 +243,7 @@ Here are two accuracy evaluation methods.
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance of `Qwen3-VL-Embedding-2B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
