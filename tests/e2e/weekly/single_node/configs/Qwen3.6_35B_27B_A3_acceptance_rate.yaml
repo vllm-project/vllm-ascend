@@ -81,7 +81,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--speculative_config"
-      - '{"method": "eagle3", "model":"Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full", "enforce_eager": true, "num_speculative_tokens": 9}'
+      - '{"method": "eagle3", "model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full", "enforce_eager": true, "num_speculative_tokens": 9}'
     benchmarks:
       <<: *benchmarks_perf
     test_content:
