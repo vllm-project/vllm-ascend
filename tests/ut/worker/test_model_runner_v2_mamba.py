@@ -150,6 +150,20 @@ def test_mrv2_advertises_standardized_shared_kv_backing():
     assert NPUModelRunner.supports_standardized_shared_kv_backing is True
 
 
+def test_mrv2_shared_backing_support_follows_connector_capability():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+
+    for kv_transfer_config, expected in (
+        (None, True),
+        (SimpleNamespace(kv_connector="MooncakeConnectorV1"), True),
+        (SimpleNamespace(kv_connector="MooncakeConnectorV2"), True),
+        (SimpleNamespace(kv_connector="MooncakePullConnector"), True),
+        (SimpleNamespace(kv_connector="UnsupportedConnector"), False),
+    ):
+        runner.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+        assert runner.supports_shared_backing_with_kv_transfer is expected
+
+
 def test_prepare_inputs_propagates_padded_request_count():
     model_runner_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
     module = ast.parse(model_runner_path.read_text(encoding="utf-8"))
