@@ -61,6 +61,26 @@ def test_sp_ep_reduce_scatter_pads_local_chunks(monkeypatch):
     assert result.shape == (3, 4)
 
 
+def test_sp_ep_reduce_scatter_draft_vl_keeps_ep_layout(monkeypatch):
+    _patch_sp_ep_context(monkeypatch)
+    custom_ops._EXTRA_CTX.is_draft_model = True
+    monkeypatch.setattr(custom_ops, "is_vl_model", lambda: True, raising=False)
+
+    def unexpected_tp_all_reduce(_x):
+        raise AssertionError("EP/SP finalize must not use TP AllReduce")
+
+    monkeypatch.setattr(
+        custom_ops,
+        "tensor_model_parallel_all_reduce",
+        unexpected_tp_all_reduce,
+        raising=False,
+    )
+
+    result = custom_ops._maybe_pad_and_reduce_impl(torch.arange(32).view(8, 4))
+
+    assert result.shape == (3, 4)
+
+
 def test_sp_ep_reduce_scatter_unpads_local_chunk(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
     monkeypatch.setattr(custom_ops, "get_ep_group", _EpGroupRank0)
