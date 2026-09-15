@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import torch
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
@@ -161,9 +162,6 @@ def _make_read_thread() -> MembPullReadThread:
         tp_size=1,
         layer_metadata={},
         main_name_to_idx={},
-        cpu_pools=[],
-        main_gva_bases=[],
-        main_block_lens=[],
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": ([3, 4], [8])},
@@ -172,9 +170,156 @@ def _make_read_thread() -> MembPullReadThread:
     return thread
 
 
+def _make_parent_read_thread() -> MembPullReadThread:
+    thread = MembPullReadThread.__new__(MembPullReadThread)
+    thread.tp_rank = 0
+    thread._state = ConsumerReadState(
+        num_blocks=16,
+        tp_size=1,
+        layer_metadata={},
+        main_name_to_idx={"model.layers.0.self_attn": 0},
+        indexer_tensors=[None],
+        indexer_scale_tensors=[None],
+        dest_blocks_by_req={"req-0": ([3, 1], [])},
+        get_offload_layer_id=lambda _: 0,
+        cpu_parent_caches=[torch.empty((16, 2, 1, 12), dtype=torch.bfloat16)],
+        main_parent_gva_bases=[3000],
+        main_parent_block_lens=[48],
+        main_cache_dtype="bfloat16",
+        main_cache_num_heads=1,
+        main_cache_nope_dim=8,
+        main_cache_rope_dim=4,
+    )
+    return thread
+
+
+def _token_concat_wire_meta(**overrides):
+    meta = {
+        "base_addrs": [1000],
+        "block_len": [24],
+        "block_size_scale": [2],
+        "main_tensor_count": 1,
+        "main_cache_layout": "token_concat",
+        "main_cache_dtype": "bfloat16",
+        "main_cache_num_heads": 1,
+        "main_cache_nope_dim": 8,
+        "main_cache_rope_dim": 4,
+        "has_indexer": False,
+    }
+    meta.update(overrides)
+    return {"model.layers.0.self_attn": meta}
+
+
+def test_token_concat_parent_descriptor_preserves_unordered_blocks():
+    thread = _make_parent_read_thread()
+    layer = thread._resolve_read_layer(
+        "model.layers.0.self_attn",
+        _token_concat_wire_meta(),
+    )
+
+    assert layer is not None
+    local, peer, lengths, info = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[5, 2],
+        p_indexer_block_ids=[],
+        want_info=True,
+    )
+
+    assert local == [3144, 3048]
+    assert peer == [1240, 1096]
+    assert lengths == [48, 48]
+    assert info is not None
+    assert info["n_main"] == 2
+    assert info["atomic_transfers"] == 2
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"main_cache_layout": "separate_nope_rope"}, "token_concat"),
+        ({"main_cache_dtype": "float16"}, "dtype mismatch"),
+        ({"main_cache_dtype": "float32"}, "dtype mismatch"),
+        ({"main_cache_num_heads": 2}, "head geometry mismatch"),
+        ({"main_cache_nope_dim": 7}, "head geometry mismatch"),
+        ({"main_cache_rope_dim": 5}, "head geometry mismatch"),
+        ({"block_size_scale": [1]}, "page bytes mismatch"),
+    ],
+)
+def test_token_concat_layout_mismatch_fails_before_descriptor_build(override, message):
+    thread = _make_parent_read_thread()
+
+    with pytest.raises(RuntimeError, match=message):
+        thread._resolve_read_layer(
+            "model.layers.0.self_attn",
+            _token_concat_wire_meta(**override),
+        )
+
+
+def test_missing_wire_layout_label_falls_back_to_legacy_default():
+    """A wire frame without the layout tag is legacy metadata, and legacy
+    metadata must be rejected -- never silently accepted."""
+    thread = _make_parent_read_thread()
+
+    meta = _token_concat_wire_meta()
+    del meta["model.layers.0.self_attn"]["main_cache_layout"]
+    with pytest.raises(RuntimeError, match="token_concat"):
+        thread._resolve_read_layer("model.layers.0.self_attn", meta)
+
+    meta = _token_concat_wire_meta()
+    del meta["model.layers.0.self_attn"]["main_tensor_count"]
+    with pytest.raises(RuntimeError, match="one parent main tensor"):
+        thread._resolve_read_layer("model.layers.0.self_attn", meta)
+
+
+def test_send_metadata_serializes_token_concat_geometry():
+    layer_name = "model.layers.0.self_attn"
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread._state = ProducerSendState(
+        last_layer_idx=0,
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(16,),
+        layer_metadata={
+            layer_name: LayerMetadata(
+                tensor_group_idx=[0],
+                kv_caches_base_addr=[1000],
+                block_len=[24],
+                block_size_scale=[2],
+                main_tensor_count=1,
+                main_cache_layout="token_concat",
+                main_cache_dtype="bfloat16",
+                main_cache_num_heads=1,
+                main_cache_nope_dim=8,
+                main_cache_rope_dim=4,
+            )
+        },
+        layer_storage_slots={0: (0,)},
+        p_session="p-session",
+    )
+    thread._mf_meta_sent_paths = set()
+    thread.timeout = 1
+    dealer = MagicMock()
+    dealer.poll.return_value = True
+    dealer.recv_multipart.return_value = [b"ACK"]
+
+    import msgspec
+
+    encoder = msgspec.msgpack.Encoder()
+    thread._send_mf_meta("tcp://decode", dealer, encoder)
+
+    outer = msgspec.msgpack.decode(dealer.send.call_args.args[0])
+    wire = msgspec.msgpack.decode(outer[2])[layer_name]
+    assert wire["main_tensor_count"] == 1
+    assert wire["main_cache_layout"] == "token_concat"
+    assert wire["main_cache_dtype"] == "bfloat16"
+    assert wire["main_cache_num_heads"] == 1
+    assert wire["main_cache_nope_dim"] == 8
+    assert wire["main_cache_rope_dim"] == 4
+
+
 def _make_layer(
-    k_cpu_ptr: int | None,
-    v_cpu_ptr: int | None,
+    parent_cpu_ptr: int | None,
     *,
     has_indexer: bool = True,
 ) -> dict:
@@ -182,12 +327,9 @@ def _make_layer(
         "layer_name": "model.layers.0.self_attn",
         "pool_idx": 0,
         "offload_id": 0,
-        "p_k_base": 1000,
-        "p_v_base": 2000,
-        "p_k_len": 10,
-        "p_v_len": 20,
-        "k_cpu_ptr": k_cpu_ptr,
-        "v_cpu_ptr": v_cpu_ptr,
+        "p_parent_base": 1000,
+        "p_parent_len": 30,
+        "parent_cpu_ptr": parent_cpu_ptr,
         "indexer": (
             {
                 "p_dsa_base": 7000,
@@ -206,16 +348,16 @@ def test_read_descriptors_use_independent_main_and_indexer_block_ids():
     thread = _make_read_thread()
 
     local, peer, lengths, info = thread._build_req_descriptors(
-        _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000),
+        _make_layer(parent_cpu_ptr=3000),
         "req-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7],
         want_info=True,
     )
 
-    assert local == [3030, 4060, 8040]
-    assert peer == [1010, 2020, 7035]
-    assert lengths == [20, 40, 5]
+    assert local == [3090, 8040]
+    assert peer == [1030, 7035]
+    assert lengths == [60, 5]
     assert info is not None
     assert info["n_main"] == 2
     assert info["n_indexer"] == 1
@@ -225,7 +367,7 @@ def test_non_tp0_read_descriptors_still_transfer_indexer():
     thread = _make_read_thread()
 
     local, peer, lengths, info = thread._build_req_descriptors(
-        _make_layer(k_cpu_ptr=None, v_cpu_ptr=None),
+        _make_layer(parent_cpu_ptr=None),
         "req-0",
         p_main_block_ids=[1, 2],
         p_indexer_block_ids=[7],
@@ -241,31 +383,13 @@ def test_non_tp0_read_descriptors_still_transfer_indexer():
 
 
 def test_non_tp0_resolves_broadcast_main_gva_without_cpu_tensor():
-    thread = _make_read_thread()
+    thread = _make_parent_read_thread()
+    thread.tp_rank = 1
+    thread._state.cpu_parent_caches = []
     layer_name = "model.layers.0.self_attn"
-    thread._state.main_name_to_idx = {layer_name: 0}
-    thread._state.cpu_pools = [None]
-    thread._state.main_gva_bases = [(3000, 4000)]
-    thread._state.main_block_lens = [(10, 20)]
-    thread._state.indexer_tensors = [None]
-    thread._state.indexer_scale_tensors = [None]
-
-    layer = thread._resolve_read_layer(
-        layer_name,
-        {
-            layer_name: {
-                "base_addrs": [1000, 2000],
-                "block_len": [10, 20],
-                "block_size_scale": [1, 1],
-                "main_tensor_count": 2,
-                "has_indexer": False,
-            }
-        },
-    )
-
+    layer = thread._resolve_read_layer(layer_name, _token_concat_wire_meta())
     assert layer is not None
-    assert layer["k_cpu_ptr"] == 3000
-    assert layer["v_cpu_ptr"] == 4000
+    assert layer["parent_cpu_ptr"] == 3000
 
 
 @pytest.mark.parametrize(
@@ -273,11 +397,9 @@ def test_non_tp0_resolves_broadcast_main_gva_without_cpu_tensor():
     [(True, False), (False, True)],
 )
 def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scale, d_has_scale):
-    thread = _make_read_thread()
+    thread = _make_parent_read_thread()
     layer_name = "model.layers.0.self_attn"
     thread._state.main_name_to_idx = {layer_name: 0}
-    thread._state.main_gva_bases = [(3000, 4000)]
-    thread._state.main_block_lens = [(10, 20)]
     thread._state.indexer_tensors = [
         SimpleNamespace(
             shape=(16, 1, 1, 5),
@@ -294,9 +416,9 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
         if d_has_scale
         else None
     ]
-    base_addrs = [1000, 2000, 7000]
-    block_len = [10, 20, 5]
-    block_size_scale = [1, 1, 1]
+    base_addrs = [1000, 7000]
+    block_len = [48, 5]
+    block_size_scale = [1, 1]
     if p_has_scale:
         base_addrs.append(9000)
         block_len.append(1)
@@ -310,10 +432,11 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
             layer_name,
             {
                 layer_name: {
+                    **_token_concat_wire_meta()[layer_name],
                     "base_addrs": base_addrs,
                     "block_len": block_len,
                     "block_size_scale": block_size_scale,
-                    "main_tensor_count": 2,
+                    "main_tensor_count": 1,
                     "has_indexer": True,
                 }
             },
@@ -322,18 +445,17 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
 
 @pytest.mark.parametrize(
     (
-        "k_cpu_ptr",
-        "v_cpu_ptr",
+        "parent_cpu_ptr",
         "has_indexer",
         "expected_local",
         "expected_peer",
         "expected_lengths",
     ),
     [
-        (None, None, True, [8040], [7035], [5]),
-        (None, None, False, [], [], []),
-        (3000, 4000, False, [3030, 4060], [1010, 2020], [20, 40]),
-        (3000, 4000, True, [3030, 4060, 8040], [1010, 2020, 7035], [20, 40, 5]),
+        (None, True, [8040], [7035], [5]),
+        (None, False, [], [], []),
+        (3000, False, [3090], [1030], [60]),
+        (3000, True, [3090, 8040], [1030, 7035], [60, 5]),
     ],
     ids=[
         "non-tp0-indexer",
@@ -343,8 +465,7 @@ def test_resolve_read_layer_rejects_asymmetric_indexer_scale_presence(p_has_scal
     ],
 )
 def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
-    k_cpu_ptr,
-    v_cpu_ptr,
+    parent_cpu_ptr,
     has_indexer,
     expected_local,
     expected_peer,
@@ -354,8 +475,7 @@ def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
 
     local, peer, lengths, _ = thread._build_req_descriptors(
         _make_layer(
-            k_cpu_ptr=k_cpu_ptr,
-            v_cpu_ptr=v_cpu_ptr,
+            parent_cpu_ptr=parent_cpu_ptr,
             has_indexer=has_indexer,
         ),
         "req-0",
@@ -372,7 +492,7 @@ def test_read_descriptors_cover_tp_ownership_and_optional_indexer(
 def test_non_tp0_main_only_layer_acknowledges_without_memfabric_read():
     thread = _make_read_thread()
     thread.engine = MagicMock()
-    layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
+    layer = _make_layer(parent_cpu_ptr=None, has_indexer=False)
     thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
 
     thread._do_read_batch(
@@ -386,10 +506,10 @@ def test_non_tp0_main_only_layer_acknowledges_without_memfabric_read():
 
 
 def test_tp_ranks_split_main_blocks_into_disjoint_contiguous_ranges():
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    layer = _make_layer(parent_cpu_ptr=3000, has_indexer=False)
     expected = [
-        ([3000, 4000], [1000, 2000], [20, 40]),
-        ([3020, 4040], [1020, 2040], [20, 40]),
+        ([3000], [1000], [60]),
+        ([3060], [1060], [60]),
     ]
 
     for tp_rank, (expected_local, expected_peer, expected_lengths) in enumerate(expected):
@@ -418,7 +538,7 @@ def test_tp_rank_without_blocks_in_small_chunk_acknowledges_without_read():
     thread.tp_rank = 1
     thread._state.tp_size = 2
     thread.engine = MagicMock()
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    layer = _make_layer(parent_cpu_ptr=3000, has_indexer=False)
     thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
 
     thread._do_read_batch(
@@ -432,7 +552,7 @@ def test_tp_rank_without_blocks_in_small_chunk_acknowledges_without_read():
 
 
 def test_small_chunks_rotate_across_tp_ranks():
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    layer = _make_layer(parent_cpu_ptr=3000, has_indexer=False)
 
     for chunk_start in range(4):
         for tp_rank in range(4):
@@ -513,7 +633,7 @@ def test_failed_tp_rank_remains_terminal_until_other_ranks_finish():
 def test_owned_component_without_descriptors_still_fails():
     thread = _make_read_thread()
     thread.engine = MagicMock()
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    layer = _make_layer(parent_cpu_ptr=3000, has_indexer=False)
     thread._resolve_read_layer = MagicMock(return_value=layer)  # type: ignore[method-assign]
     thread._build_req_descriptors = MagicMock(  # type: ignore[method-assign]
         return_value=([], [], [], None)
@@ -530,13 +650,60 @@ def test_owned_component_without_descriptors_still_fails():
     thread.engine.batch_transfer_sync_read.assert_not_called()
 
 
+def _make_consumer_registration_worker(
+    tp_rank=0,
+    *,
+    offload_layer_names=("model.layers.0.self_attn",),
+    gvas_parent_bases=None,
+    cpu_block_lens=None,
+    cpu_parent_caches=None,
+):
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.tp_rank = tp_rank
+    worker.kv_cache_config = SimpleNamespace(num_blocks=8)
+    worker.offload_manager = SimpleNamespace(
+        offload_layer_names=list(offload_layer_names),
+        gvas_parent_bases=[3000] if gvas_parent_bases is None else gvas_parent_bases,
+        cpu_block_lens=[48] if cpu_block_lens is None else cpu_block_lens,
+        cpu_parent_caches=[object()] if cpu_parent_caches is None else cpu_parent_caches,
+    )
+    return worker
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("gvas_parent_bases", "GVA/layer count mismatch"),
+        ("cpu_block_lens", "block-size/layer count mismatch"),
+        ("cpu_parent_caches", "CPU parent pool/layer count mismatch"),
+    ],
+)
+def test_consumer_registration_rejects_layer_count_mismatch(field, message):
+    fields = {"gvas_parent_bases": [3000], "cpu_block_lens": [48], "cpu_parent_caches": [object()]}
+    fields[field] = []
+    worker = _make_consumer_registration_worker(tp_rank=0, **fields)
+
+    with pytest.raises(RuntimeError, match=message):
+        worker._register_memfabric_pull({})
+
+
+def test_non_owner_rank_tolerates_missing_cpu_parent_pool():
+    """Non-owner ranks consume broadcast GVA bases only, so an empty local CPU
+    parent pool must pass the owner-rank guard and fail later, on the missing
+    top-k workspace, instead of tripping the count guard."""
+    worker = _make_consumer_registration_worker(tp_rank=1, cpu_parent_caches=[])
+
+    with pytest.raises(AttributeError):
+        worker._register_memfabric_pull({})
+
+
 def test_read_descriptor_rejects_missing_destination_blocks():
     thread = _make_read_thread()
     thread._state.dest_blocks_by_req.clear()
 
     with pytest.raises(RuntimeError, match="no destination blocks"):
         thread._build_req_descriptors(
-            _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False),
+            _make_layer(parent_cpu_ptr=None, has_indexer=False),
             "req-0",
             p_main_block_ids=[1],
             p_indexer_block_ids=[],
@@ -557,7 +724,7 @@ def test_read_descriptor_waits_for_late_destination_blocks():
     register_thread.start()
     try:
         local, peer, lengths, info = thread._build_req_descriptors(
-            _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
+            _make_layer(parent_cpu_ptr=3000, has_indexer=False),
             "req-0",
             p_main_block_ids=[1, 2],
             p_indexer_block_ids=[],
@@ -566,9 +733,9 @@ def test_read_descriptor_waits_for_late_destination_blocks():
     finally:
         register_thread.join(timeout=1)
 
-    assert local == [3030, 4060]
-    assert peer == [1010, 2020]
-    assert lengths == [20, 40]
+    assert local == [3090]
+    assert peer == [1030]
+    assert lengths == [60]
     assert info is not None
 
 
@@ -577,7 +744,7 @@ def test_read_descriptor_rejects_incomplete_indexer_transfer():
 
     with pytest.raises(RuntimeError, match="indexer destination range is incomplete"):
         thread._build_req_descriptors(
-            _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000),
+            _make_layer(parent_cpu_ptr=3000),
             "req-0",
             p_main_block_ids=[1, 2],
             p_indexer_block_ids=[7, 9],
@@ -589,7 +756,7 @@ def test_main_only_layer_uses_chunk_destination_slice():
     thread = _make_read_thread()
 
     local, peer, lengths, info = thread._build_req_descriptors(
-        _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
+        _make_layer(parent_cpu_ptr=3000, has_indexer=False),
         "req-0",
         p_main_block_ids=[2],
         p_indexer_block_ids=[],
@@ -597,9 +764,9 @@ def test_main_only_layer_uses_chunk_destination_slice():
         main_start_block=1,
     )
 
-    assert local == [3040, 4080]
-    assert peer == [1020, 2040]
-    assert lengths == [10, 20]
+    assert local == [3120]
+    assert peer == [1060]
+    assert lengths == [30]
     assert info is not None
     assert info["d_main_ids"] == [4]
     assert info["n_indexer"] == 0
@@ -1237,9 +1404,6 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
         tp_size=1,
         layer_metadata={},
         main_name_to_idx={},
-        cpu_pools=[],
-        main_gva_bases=[],
-        main_block_lens=[],
         indexer_tensors=[],
         indexer_scale_tensors=[],
         dest_blocks_by_req={"req-0": (main_dest or [], indexer_dest)},
@@ -1251,7 +1415,7 @@ def _make_indexer_only_read_thread(indexer_dest: list[int], main_dest: list[int]
 def test_member0_pulls_main_and_indexer_slice():
     # ratio=2: member 0 pulls main (replicated, no split) + its indexer half.
     thread = _make_indexer_only_read_thread([10, 11, 12, 13], main_dest=[20, 21])
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    layer = _make_layer(parent_cpu_ptr=3000)
 
     local, peer, lengths, info = thread._build_req_descriptors(
         layer,
@@ -1276,7 +1440,7 @@ def test_member0_pulls_main_and_indexer_slice():
 
 def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():
     thread = _make_indexer_only_read_thread([10, 11, 12, 13])
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    layer = _make_layer(parent_cpu_ptr=3000)
 
     local, peer, lengths, info = thread._build_req_descriptors(
         layer,
@@ -1302,7 +1466,7 @@ def test_nonzero_member_skips_main_and_pulls_other_indexer_slice():
 
 def test_indexer_slices_are_disjoint_and_cover_full_range():
     thread = _make_indexer_only_read_thread([10, 11, 12, 13])
-    layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None)
+    layer = _make_layer(parent_cpu_ptr=None)
     covered: set[int] = set()
     for member in range(4):
         local, _, _, info = thread._build_req_descriptors(
@@ -1323,7 +1487,7 @@ def test_indexer_slices_are_disjoint_and_cover_full_range():
 
 def test_ratio_one_degenerates_to_full_pull():
     thread = _make_indexer_only_read_thread([10, 11, 12, 13], main_dest=[20, 21])
-    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000)
+    layer = _make_layer(parent_cpu_ptr=3000)
 
     _, _, _, info = thread._build_req_descriptors(
         layer,
@@ -1384,3 +1548,70 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
+
+
+def test_producer_registers_complete_parent_and_indexer_regions():
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import worker as worker_module
+
+    main_name = "model.layers.0.self_attn"
+    indexer_name = main_name + ".indexer"
+    parent = torch.zeros((6, 2, 1, 12), dtype=torch.bfloat16)
+    indexer = torch.zeros((3, 4, 1, 8), dtype=torch.bfloat16)
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
+    worker._backend = BACKEND_MEMFABRIC
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=3,
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=[main_name]),
+            SimpleNamespace(layer_names=[indexer_name]),
+        ],
+    )
+    worker._registered_parent_caches = {}
+    worker.layer_metadata = {}
+    worker.index_to_name = {}
+    worker._build_producer_send_state = MagicMock()
+    sender = MagicMock(startup_error=None)
+
+    def make_sender(*, ready_event, state):
+        ready_event.set()
+        return sender
+
+    with (
+        patch.object(worker_module, "global_memfabric_te") as engine,
+        patch.object(worker_module, "MembPullSendingThread", side_effect=make_sender),
+    ):
+        worker.register_kv_caches({main_name: (parent[..., :8], parent[..., 8:]), indexer_name: (indexer,)})
+        ptrs, sizes = engine.register_buffer.call_args.args
+    regions = dict(zip(ptrs, sizes))
+    assert regions[parent.data_ptr()] == parent.numel() * parent.element_size()
+    assert regions[indexer.data_ptr()] == indexer.numel() * indexer.element_size()
+    meta = worker.layer_metadata[main_name]
+    assert meta.main_tensor_count == 1
+    assert meta.kv_caches_base_addr == [parent.data_ptr(), indexer.data_ptr()]
+    assert meta.block_len == [48, 64]
+    assert meta.block_size_scale == [2, 1]
+    assert meta.tensor_group_idx == [0, 1]
+    assert worker._registered_parent_caches[main_name].data_ptr() == parent.data_ptr()
+
+
+def test_consumer_build_state_uses_parent_fields():
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.offload_manager = SimpleNamespace(_get_offload_layer_id=lambda _: 0)
+    worker.kv_cache_config = SimpleNamespace(num_blocks=3)
+    worker.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
+    worker.layer_metadata = {}
+    worker._main_name_to_idx = {"layer": 0}
+    worker._indexer_tensors = [None]
+    worker._indexer_scale_tensors = [None]
+    worker._dest_blocks_by_req = {}
+    worker._cpu_parent_caches = []  # peer rank uses the broadcast GVA
+    worker._main_parent_gva_bases = [3000]
+    worker._main_block_lens = [96]
+    worker._main_cache_dtype = "bfloat16"
+    worker._main_cache_num_heads = 1
+    worker._main_cache_nope_dim = 8
+    worker._main_cache_rope_dim = 4
+    state = worker._build_consumer_read_state()
+    assert state.main_parent_gva_bases == [3000]
+    assert state.main_parent_block_lens == [96]
+    assert state.cpu_parent_caches == []

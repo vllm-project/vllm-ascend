@@ -31,7 +31,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.cache_layout import (
+    paged_cache_token_addresses,
+    remap_sfa_source_addresses,
+)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
+from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent, split_sfa_kv_parent
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -321,29 +326,24 @@ def allocate_kv_cache_tensors_for_sparse_kv_offload(
     keep_device_kv_cache: bool,
     npu_kv_cache_allocate_func: typing.Callable,
 ):
+    tensor_size = k_tensor_size + v_tensor_size
     if tp_rank == 0:
-        [k_tensor_cpu, v_tensor_cpu] = empty_aligned_int8_cpu_tensors(
-            [k_tensor_size, v_tensor_size],
+        [parent_cpu] = empty_aligned_int8_cpu_tensors(
+            [tensor_size],
             alignment,
         )
     else:
-        k_tensor_cpu = None
-        v_tensor_cpu = None
+        parent_cpu = None
 
     if keep_device_kv_cache:
-        k_tensor = npu_kv_cache_allocate_func(
-            k_tensor_size,
-            alignment,
-        )
-        v_tensor = npu_kv_cache_allocate_func(
-            v_tensor_size,
+        parent_device = npu_kv_cache_allocate_func(
+            tensor_size,
             alignment,
         )
     else:
-        k_tensor = None
-        v_tensor = None
+        parent_device = None
 
-    return (k_tensor, v_tensor, k_tensor_cpu, v_tensor_cpu, k_tensor_size + v_tensor_size)
+    return (parent_device, parent_cpu, tensor_size)
 
 
 def reshape_kv_cache_tensors_for_sparse_kv_offload(
@@ -354,7 +354,7 @@ def reshape_kv_cache_tensors_for_sparse_kv_offload(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
 ):
-    raw_k_tensor, raw_v_tensor, raw_k_tensor_cpu, raw_v_tensor_cpu, sum_page_size_bytes = raw_cache_tensors
+    raw_parent_device, raw_parent_cpu, sum_page_size_bytes = raw_cache_tensors
     assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
     kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -363,29 +363,20 @@ def reshape_kv_cache_tensors_for_sparse_kv_offload(
         current_kv_cache_spec.num_kv_heads,
         current_kv_cache_spec.head_size,
     )
-    mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
     k_dim = vllm_config.model_config.hf_text_config.kv_lora_rank
     v_dim = vllm_config.model_config.hf_text_config.qk_rope_head_dim
-    k_shape = (
-        mla_num_blocks,
-        mla_block_size,
-        num_kv_heads,
-        k_dim,
-    )
-    v_shape = (
-        mla_num_blocks,
-        mla_block_size,
-        num_kv_heads,
-        v_dim,
-    )
-    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-
-    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
-    v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
+    if kv_cache_shape[-1] != k_dim + v_dim:
+        raise ValueError("Sparse offload parent width does not match NoPE/RoPE dimensions")
+    k_cache, v_cache = (None, None)
+    if raw_parent_device is not None:
+        k_cache, v_cache = split_sfa_kv_parent(
+            raw_parent_device, dtype=current_kv_cache_spec.dtype, shape=kv_cache_shape, nope_dim=k_dim
+        )
 
     if tp_rank == 0:
-        k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
-        v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
+        k_cache_cpu, v_cache_cpu = split_sfa_kv_parent(
+            raw_parent_cpu, dtype=current_kv_cache_spec.dtype, shape=kv_cache_shape, nope_dim=k_dim
+        )
     else:
         k_cache_cpu = None
         v_cache_cpu = None
@@ -735,6 +726,7 @@ class SparseKVOffloadManager:
         self.topk_buffers_v: list[torch.Tensor] = []
         self.k_caches_cpu: list[torch.Tensor] = []
         self.v_caches_cpu: list[torch.Tensor] = []
+        self.cpu_parent_caches: list[torch.Tensor] = []
         for layer_name in self.offload_layer_names:
             cache_or_caches = self._as_cache_tuple(kv_caches[layer_name])
             tuple_len = len(cache_or_caches)
@@ -748,6 +740,7 @@ class SparseKVOffloadManager:
             if self.tp_rank == 0:
                 self.k_caches_cpu.append(cache_or_caches[OFFLOAD_K_CACHE_CPU_INDEX])
                 self.v_caches_cpu.append(cache_or_caches[OFFLOAD_V_CACHE_CPU_INDEX])
+                self.cpu_parent_caches.append(get_sfa_kv_parent(self.k_caches_cpu[-1], self.v_caches_cpu[-1]))
 
         kv_head_num = self.topk_buffers_k[0].size(-2)
         head_dim_k = self.topk_buffers_k[0].size(-1)
@@ -813,53 +806,40 @@ class SparseKVOffloadManager:
         self.addr_v_bases: list[int] = [t.data_ptr() for t in self.topk_buffers_v]
         self.gvas_k_bases: list[int] = []
         self.gvas_v_bases: list[int] = []
-        self.cpu_block_lens: list[tuple[int, int]] = []
-        gvas_k_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
-        gvas_v_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device="npu")
-        cpu_block_lens_tensor = torch.zeros([self.num_layers, 2], dtype=torch.int64, device="npu")
-        shape_k_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
-        shape_v_tensor = torch.zeros([4], dtype=torch.int64, device="npu")
+        self.gvas_parent_bases: list[int] = []
+        self.cpu_block_lens: list[int] = []
+        parent_addresses = torch.zeros([self.num_layers], dtype=torch.int64, device=device)
+        parent_shapes = torch.zeros([self.num_layers, 4], dtype=torch.int64, device=device)
+        cpu_block_lens_tensor = torch.zeros([self.num_layers], dtype=torch.int64, device=device)
         if self.tp_rank == 0:
-            for layer_id in range(self.num_layers):
-                k_cpu = self.k_caches_cpu[layer_id]
-                v_cpu = self.v_caches_cpu[layer_id]
-                gvas_k_tensor[layer_id] = k_cpu.data_ptr()
-                gvas_v_tensor[layer_id] = v_cpu.data_ptr()
-                cpu_block_lens_tensor[layer_id, 0] = (
-                    k_cpu.numel() * k_cpu.element_size() // self.kv_cache_config.num_blocks
+            for layer_id, parent in enumerate(self.cpu_parent_caches):
+                parent_addresses[layer_id] = parent.data_ptr()
+                parent_shapes[layer_id].copy_(torch.tensor(parent.shape, dtype=torch.int64, device=device))
+                cpu_block_lens_tensor[layer_id] = (
+                    parent.numel() * parent.element_size() // self.kv_cache_config.num_blocks
                 )
-                cpu_block_lens_tensor[layer_id, 1] = (
-                    v_cpu.numel() * v_cpu.element_size() // self.kv_cache_config.num_blocks
-                )
-            shape_k_tensor.copy_(torch.tensor(self.k_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
-            shape_v_tensor.copy_(torch.tensor(self.v_caches_cpu[0].shape, dtype=torch.int64, device="npu"))
-        self.tp_group.broadcast(gvas_k_tensor, src=0)
-        self.tp_group.broadcast(gvas_v_tensor, src=0)
+        self.tp_group.broadcast(parent_addresses, src=0)
+        self.tp_group.broadcast(parent_shapes, src=0)
         self.tp_group.broadcast(cpu_block_lens_tensor, src=0)
-        self.tp_group.broadcast(shape_k_tensor, src=0)
-        self.tp_group.broadcast(shape_v_tensor, src=0)
         for layer_id in range(self.num_layers):
-            self.gvas_k_bases.append(gvas_k_tensor[layer_id].item())
-            self.gvas_v_bases.append(gvas_v_tensor[layer_id].item())
-            self.cpu_block_lens.append(
-                (
-                    cpu_block_lens_tensor[layer_id, 0].item(),
-                    cpu_block_lens_tensor[layer_id, 1].item(),
-                )
-            )
+            parent_addr = int(parent_addresses[layer_id].item())
+            self.gvas_parent_bases.append(parent_addr)
+            self.gvas_k_bases.append(parent_addr)
+            self.gvas_v_bases.append(parent_addr + self.token_size_bytes_k)
+            self.cpu_block_lens.append(int(cpu_block_lens_tensor[layer_id].item()))
 
         if self.use_fused_overlap and self.tp_rank != 0:
-            cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
-            cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
-            self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
-            self.v_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_v_shape) for ptr in self.gvas_v_bases]
+            for ptr, shape in zip(self.gvas_parent_bases, parent_shapes.tolist()):
+                parent = self._restore_bfloat16_tensor(ptr, [int(x) for x in shape])
+                if parent.shape[-1] != head_dim_k + head_dim_v:
+                    raise RuntimeError("Shared sparse CPU parent width does not match the local cache")
+                self.cpu_parent_caches.append(parent)
+                self.k_caches_cpu.append(parent[..., :head_dim_k])
+                self.v_caches_cpu.append(parent[..., head_dim_k:])
             logger.info(
-                "[fused_overlap_offload][init] restored shared CPU KV views on "
-                "tp_rank=%s layer_count=%s k_shape=%s v_shape=%s",
+                "[fused_overlap_offload][init] restored shared CPU parent KV views on tp_rank=%s layer_count=%s",
                 self.tp_rank,
                 self.num_layers,
-                cpu_k_shape,
-                cpu_v_shape,
             )
 
         gvas_buffer_offset = 0
@@ -1174,8 +1154,8 @@ class SparseKVOffloadManager:
 
         if has_prefill:
             assert k_cache_npu is not None and v_cache_npu is not None
-            src_k = int(k_cache_npu.data_ptr()) + safe_slots * self.token_size_bytes_k
-            src_v = int(v_cache_npu.data_ptr()) + safe_slots * self.token_size_bytes_v
+            src_k = paged_cache_token_addresses(k_cache_npu, safe_slots)
+            src_v = paged_cache_token_addresses(v_cache_npu, safe_slots)
         else:
             assert k is not None and v is not None
             k_rows = k.reshape(-1, self.token_size_bytes_k // k.element_size())
@@ -1190,8 +1170,8 @@ class SparseKVOffloadManager:
             src_k = int(k_rows.data_ptr()) + token_indices * self.token_size_bytes_k
             src_v = int(v_rows.data_ptr()) + token_indices * self.token_size_bytes_v
 
-        dst_k = int(k_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_k
-        dst_v = int(v_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_v
+        dst_k = paged_cache_token_addresses(k_cache_cpu, safe_slots)
+        dst_v = paged_cache_token_addresses(v_cache_cpu, safe_slots)
         self.d2h_src_ptrs_npu[:token_count].copy_(src_k)
         self.d2h_src_ptrs_npu[token_count : 2 * token_count].copy_(src_v)
         self.d2h_dst_ptrs_npu[:token_count].copy_(dst_k)
@@ -1618,7 +1598,7 @@ class SparseKVOffloadManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
-        sparse_kv_ops.sparse_kv_compute_lru_resident_addrs(
+        num_misses = sparse_kv_ops.sparse_kv_compute_lru_resident_addrs(
             miss_count,
             miss_tokens,
             miss_slots,
@@ -1636,6 +1616,14 @@ class SparseKVOffloadManager:
             addr_buffer,
             size_buffer,
             num_tokens_buffer,
+        )
+        remap_sfa_source_addresses(
+            gvas_buffer,
+            num_misses,
+            k_base=gvas_k_bases,
+            rope_base=gvas_v_bases,
+            k_token_bytes=token_size_bytes_k,
+            rope_token_bytes=token_size_bytes_v,
         )
 
 
