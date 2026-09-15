@@ -78,6 +78,8 @@ class RecomputeScheduler(Scheduler):
     is unavailable or fails, preemption falls back to local recomputation.
     """
 
+    prefill_capacity_bound: bool
+
     def _apply_load_balance_modifications(self) -> None:
         """Hook for DyntraLB to apply cross-rank scheduling decisions."""
 
