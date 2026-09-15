@@ -99,6 +99,15 @@ def _wrap_move_to_workspace(original_move):
         model_state = bound.arguments["model_state"]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
+        is_last_result = (
+            getattr(
+                pending_result,
+                "is_last_result",
+                layer_idx == model_state.model.num_moe_layers - 1,
+            )
+            if pending_result is not None
+            else False
+        )
 
         deferred_event = None
         consumed_event = None
@@ -110,12 +119,12 @@ def _wrap_move_to_workspace(original_move):
             result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
-                if bound.arguments["ep_rank"] == 0 and layer_idx == model_state.model.num_moe_layers - 1:
-                    logger.info(
-                        "%s: model=%s",
-                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                        model_state.model_name,
-                    )
+            if bound.arguments["ep_rank"] == 0 and is_last_result:
+                logger.info(
+                    "%s: model=%s",
+                    ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                    model_state.model_name,
+                )
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
