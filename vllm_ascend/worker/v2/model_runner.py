@@ -283,15 +283,16 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return
 
-        get_hidden_states = getattr(
-            self.model,
-            "get_mtp_target_hidden_states",
-            None,
-        )
-        if get_hidden_states is not None:
-            mtp_target_hidden_states = get_hidden_states()
-            if mtp_target_hidden_states is not None:
-                pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
+        if not state.aux_hidden_states:
+            get_hidden_states = getattr(
+                self.model,
+                "get_mtp_target_hidden_states",
+                None,
+            )
+            if get_hidden_states is not None:
+                mtp_target_hidden_states = get_hidden_states()
+                if mtp_target_hidden_states is not None:
+                    pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
         # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
         # so a replicated draft would read the PCP-local target output. Restore
