@@ -29,6 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -473,6 +474,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 group_list_type=group_list_type,
                 output_dtype=torch.bfloat16 if bias1 is not None else w2_scale[0].dtype,
             )[0]
+            # group_index with round-robin block assignment skips padding rows
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
                 x=hidden_states,
                 weight_scale=None,
@@ -480,7 +482,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 bias=None,
                 quant_scale=None,
                 quant_offset=None,
-                group_index=None,
+                group_index=cumsum_group_list(group_list, group_list_type, 1),
                 beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
                 activate_left=True,
