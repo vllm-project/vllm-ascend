@@ -899,6 +899,24 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+def _is_kimi_k3_target(vllm_config) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    return any(
+        architecture in {"KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
+        for architecture in architectures
+    )
+
+
+def enable_kimi_k3_sp(vllm_config) -> bool:
+    """K3 keeps sequence shards between layers, including at DP=1."""
+    if not _is_kimi_k3_target(vllm_config):
+        return False
+    parallel_config = vllm_config.parallel_config
+    return parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -911,6 +929,8 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
+    if _is_kimi_k3_target(vllm_config):
+        return enable_kimi_k3_sp(vllm_config)
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
