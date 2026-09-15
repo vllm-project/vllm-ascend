@@ -100,6 +100,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Compute MRoPE cos/sin inside the split-QKV fusion op instead of
+    # gathering the precomputed cache. Set "0" to use the cache fallback.
+    "VLLM_ASCEND_MROPE_INLINE_COS_SIN": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MROPE_INLINE_COS_SIN", "1"))
+    ),
 }
 
 # end-env-vars-definition
@@ -114,3 +119,4 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(env_variables.keys())
+
