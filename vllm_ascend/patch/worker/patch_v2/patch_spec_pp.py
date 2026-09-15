@@ -2,10 +2,28 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Speculative decoding support for Model Runner V2 PP."""
 
+from dataclasses import replace
+
 import numpy as np
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 _BROADCAST_PATCHED = "_vllm_ascend_spec_pp_broadcast_patched"
+
+
+def _make_spec_pp_comm_batch(input_batch):
+    """Ignore rank-local completion state when matching PP collectives.
+
+    Release versions without vllm-project/vllm#54436 can drop a decoding
+    request from the PP sampled-token broadcast. Newer InputBatch versions
+    have no rank-local completion bound and need no adjustment.
+    """
+    max_seq_len = getattr(input_batch, "max_seq_len_np", None)
+    if max_seq_len is None:
+        return input_batch
+    return replace(
+        input_batch,
+        max_seq_len_np=np.full_like(max_seq_len, np.iinfo(max_seq_len.dtype).max),
+    )
 
 
 def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
@@ -17,6 +35,7 @@ def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
     draft_width = max_sample_len - 1
     token_payload_width = max_sample_len + draft_width
     original_get_prev_sampled_outputs = pp_handler.get_prev_sampled_outputs
+    original_receive = pp_handler.receive
     original_broadcast = pp_handler.broadcast
     pending_send = None
 
@@ -55,6 +74,9 @@ def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
             )
         return outputs
 
+    def receive(input_batch):
+        return original_receive(_make_spec_pp_comm_batch(input_batch))
+
     def broadcast(sampled_token_ids, num_sampled, num_rejected, input_batch):
         nonlocal pending_send
         assert pp_handler.is_last_rank
@@ -83,11 +105,12 @@ def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
             token_payload,
             num_sampled,
             num_rejected,
-            input_batch,
+            _make_spec_pp_comm_batch(input_batch),
         )
 
     pp_handler.max_sample_len = token_payload_width
     pp_handler.get_prev_sampled_outputs = get_prev_sampled_outputs
+    pp_handler.receive = receive
     pp_handler.broadcast = broadcast
     pp_handler.broadcast_draft_tokens = broadcast_draft_tokens
     setattr(pp_handler, _BROADCAST_PATCHED, True)

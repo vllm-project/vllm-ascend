@@ -33,8 +33,11 @@ The same-checkpoint fix is a general one; a long-term plan exists to contribute
 it upstream to ``load_dspark_model``.
 """
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import vllm.envs as vllm_envs
 import vllm.model_executor.models.utils as model_utils
 import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
@@ -44,6 +47,7 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
+    use_legacy_spec_pp,
 )
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
@@ -59,7 +63,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     draft_model_config = speculative_config.draft_model_config
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
     spec_pp_support = resolve_spec_pp_support(vllm_config)
-    bypass_pp_guard = spec_pp_support is not None
+    bypass_pp_guard = spec_pp_support is not None and use_legacy_spec_pp()
     original_eagle_should_share = eagle_utils._should_share
     if vllm_version_is("0.28.0"):
         # Release binds these names at module import; main imports locally.
@@ -85,8 +89,12 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if vllm_version_is("0.28.0"):
             dspark_utils._should_share = should_share
     try:
-        # get_model also reads the config PP size; keep the draft unsharded.
-        with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
+        # Native draft loading already sets PP=1, but still reads the target's
+        # manual layer partition. Mask that partition on both version paths.
+        with (
+            patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None) if spec_pp_support is not None else nullcontext(),
+            bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support),
+        ):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
         if inherits_target_quant:
