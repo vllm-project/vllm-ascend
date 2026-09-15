@@ -42,8 +42,13 @@ import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
+if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true" \
+    or os.getenv("ENABLE_VPP", "false").lower() in ("true", "1"):
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+
+import vllm_ascend.patch.platform.patch_scheduler  # noqa
+import vllm_ascend.patch.platform.patch_outputs  # noqa
+import vllm_ascend.patch.platform.patch_vpp_core  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 

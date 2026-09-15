@@ -150,6 +150,19 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         pp_size = self.parallel_config.pipeline_parallel_size
         pcp_size = self.parallel_config.prefill_context_parallel_size
         return tp_size, pp_size, pcp_size
+    
+    def _get_output_rank(self) -> int:
+        additional_config = self.vllm_config.additional_config or {}
+        vp_size = additional_config.get("virtual_pipeline_parallel_size", 0)
+        # With an even vp_size the V-shaped fold-back assignment places the
+        # last virtual stage (norm / lm_head) back on PP rank 0, so the
+        # ModelRunnerOutput is produced by global rank 0.
+        if vp_size > 1 and vp_size % 2 == 0:
+            return 0
+        # No VPP or an odd vp_size: the last stage is the first TP worker of
+        # the last PP stage. Compute the original upstream formula directly
+        # (the core MultiprocExecutor._get_output_rank is hard-coded to 0).
+        return super()._get_output_rank()
 
     def _post_init_executor(self) -> None:
         pass

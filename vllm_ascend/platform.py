@@ -495,6 +495,39 @@ class NPUPlatform(Platform):
                 logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
                 compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
+        # Virtual Pipeline Parallelism (VPP) is incompatible with torch.compile,
+        # so it has to run eager, without compilation or aclgraphs.
+        #
+        # Under VPP a single physical rank runs several virtual stages, each a
+        # different slice of the decoder. The layout is a V-shaped fold-back, so
+        # with pp_size=2/vp_size=2 rank 0 owns both the first chunk (embedding)
+        # and the last one (norm + lm_head). Everything that differs between
+        # those stages -- is_first_rank, is_last_rank, and the
+        # start_layer/end_layer slice -- is read inside the model's forward,
+        # which is exactly the region @support_torch_compile compiles. vLLM
+        # drops every dynamo guard (skip_all_guards_unsafe in
+        # compilation/wrapper.py), so the graph traced on the first call --
+        # profile_run, pinned to virtual stage 0 -- is then reused
+        # unconditionally for every later stage. The last stage replays the
+        # first stage's shape: it returns IntermediateTensors instead of final
+        # hidden states, and compute_logits ends up calling linear() on None.
+        #
+        # Disabling FULL aclgraph alone is not enough: PIECEWISE still requires
+        # CompilationMode.VLLM_COMPILE and bakes in the same branch. Eager is
+        # currently the only configuration VPP is known to run correctly under.
+        if ascend_config.virtual_pipeline_parallel_size > 1 and (
+            not enforce_eager or compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.warning_once(
+                "virtual_pipeline_parallel_size=%d does not support compilation "
+                "or aclgraphs yet (a single compiled graph would be shared "
+                "across virtual stages), falling back to eager mode.",
+                ascend_config.virtual_pipeline_parallel_size,
+            )
+            enforce_eager = True
+            model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.mode = CompilationMode.NONE

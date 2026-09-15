@@ -17,6 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
+import copy
+from collections import deque
+
 import numpy as np
 import torch
 from vllm.lora.request import LoRARequest
@@ -28,7 +31,6 @@ from vllm.v1.sample.logits_processor import BatchUpdateBuilder, LogitsProcessors
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
 
 class NPUInputBatch(InputBatch):
     def __init__(
@@ -63,6 +65,10 @@ class NPUInputBatch(InputBatch):
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
+        self._block_sizes = block_sizes.copy()
+        self._kernel_block_sizes = [sizes.copy() for sizes in kernel_block_sizes]
+        self._num_speculative_tokens = num_speculative_tokens
+        self._cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -237,3 +243,192 @@ class NPUInputBatch(InputBatch):
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+    # ------------------------------------------------------------------
+    # Object pool for VPP clone reuse -- avoids repeated torch.zeros alloc
+    # ------------------------------------------------------------------
+    _vpp_clone_pool: deque["NPUInputBatch"] = deque(maxlen=32)
+
+    @classmethod
+    def _acquire_for_clone(cls, **kwargs) -> "NPUInputBatch":
+        """Get an NPUInputBatch from the pool, or create a new one."""
+        if cls._vpp_clone_pool and len(cls._vpp_clone_pool) > 0:
+            inst = cls._vpp_clone_pool.popleft()
+            inst._reset_for_clone()
+            return inst
+        return cls(**kwargs)
+
+    def _reset_for_clone(self):
+        """Reset mutable state while keeping large tensor allocations alive."""
+        self._req_ids.clear()
+        self.req_id_to_index.clear()
+
+        self.num_tokens.fill(0)
+        self.num_tokens_no_spec.fill(0)
+        self.num_prompt_tokens.fill(0)
+        self.num_computed_tokens_cpu_tensor.zero_()
+        self.num_computed_tokens_cpu.fill(0)
+
+        self.temperature.zero_()
+        self.temperature_cpu_tensor.zero_()
+        self.greedy_reqs.clear()
+        self.random_reqs.clear()
+
+        self.top_p.zero_()
+        self.top_p_cpu_tensor.zero_()
+        self.top_p_reqs.clear()
+
+        self.top_k.zero_()
+        self.top_k_cpu_tensor.zero_()
+        self.top_k_reqs.clear()
+
+        self.spec_decode_unsupported_reqs.clear()
+
+        self.frequency_penalties.zero_()
+        self.frequency_penalties_cpu_tensor.zero_()
+        self.frequency_penalties_reqs.clear()
+
+        self.presence_penalties.zero_()
+        self.presence_penalties_cpu_tensor.zero_()
+        self.presence_penalties_reqs.clear()
+
+        self.repetition_penalties.zero_()
+        self.repetition_penalties_cpu_tensor.zero_()
+        self.repetition_penalties_reqs.clear()
+
+        self.num_accepted_tokens_cpu_tensor.fill_(1)
+
+        self.generators.clear()
+        self.num_logprobs.clear()
+
+        self.has_allowed_token_ids.clear()
+        self.allowed_token_ids_mask = None
+        self.allowed_token_ids_mask_cpu_tensor = None
+
+        self.bad_words_token_ids.clear()
+        self.logits_processing_needs_token_ids.fill(False)
+        self.req_output_token_ids = []
+        self.spec_token_ids = [[] for _ in range(self.max_num_reqs)]
+
+        self.prev_sampled_token_ids = None
+        self.prev_req_id_to_index = None
+        self.sampled_token_ids_cpu = None
+        self.async_copy_ready_event = None
+
+        # Pool-reuse hygiene: these per-request dicts are not copied by
+        # clone_for_vpp_sampling either, so failing to clear them leaks
+        # stale entries from the PREVIOUS batch that used this pooled
+        # instance (e.g. a recycled clone carrying another batch's
+        # in-progress prompt logprobs).
+        self.in_progress_prompt_logprobs_cpu.clear()
+        self.logprob_token_ids.clear()
+        self.pooling_params.clear()
+        self.pooling_states.clear()
+        self.request_lora_mapping.fill(0)
+        self.lora_id_to_request_ids.clear()
+        self.lora_id_to_lora_request.clear()
+        self.batch_update_builder = BatchUpdateBuilder()
+
+        self.sampling_metadata = self._make_sampling_metadata()
+
+    def release_to_pool(self):
+        """Return this instance to the pool for later reuse."""
+        NPUInputBatch._vpp_clone_pool.append(self)
+
+    def clone_for_vpp_sampling(self) -> "NPUInputBatch":
+        """Clone the sampling-visible batch state for a yielded VPP batch."""
+        clone = NPUInputBatch._acquire_for_clone(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.vocab_size,
+            block_sizes=self._block_sizes,
+            kernel_block_sizes=self._kernel_block_sizes,
+            logitsprocs=self.logitsprocs,
+            logitsprocs_need_output_token_ids=self.logitsprocs_need_output_token_ids,
+            is_spec_decode=self.is_spec_decode,
+            is_pooling_model=self.is_pooling_model,
+            num_speculative_tokens=self._num_speculative_tokens,
+            cp_kv_cache_interleave_size=self._cp_kv_cache_interleave_size,
+        )
+
+        # Freeze the logits-processor state into the snapshot. The live batch
+        # keeps mutating its shared LogitsProcessors via update_state() as
+        # later batches are prepared; if the snapshot keeps referencing that
+        # object, a later/larger batch's per-request indices (e.g.
+        # MinTokensLogitsProcessor.logits_slice row indices) get applied to
+        # this snapshot's smaller logits tensor at sampling time, crashing
+        # the NPU with an out-of-bounds index_put_ (IndexCheck assert) or
+        # silently masking the wrong rows. Pooled clones ignore the
+        # logitsprocs kwarg, so this must be assigned explicitly.
+        clone.logitsprocs = copy.deepcopy(self.logitsprocs)
+
+        clone._req_ids = self._req_ids.copy()
+        clone.req_id_to_index = self.req_id_to_index.copy()
+        clone.token_ids_cpu_tensor = self.token_ids_cpu_tensor
+        clone.token_ids_cpu = self.token_ids_cpu
+        clone.is_token_ids_tensor = self.is_token_ids_tensor
+        clone.is_token_ids = self.is_token_ids
+        clone.num_tokens = self.num_tokens.copy()
+        clone.num_tokens_no_spec = self.num_tokens_no_spec.copy()
+        clone.num_prompt_tokens = self.num_prompt_tokens.copy()
+        clone.num_computed_tokens_cpu_tensor.copy_(self.num_computed_tokens_cpu_tensor)
+
+        clone.temperature_cpu_tensor.copy_(self.temperature_cpu_tensor)
+        clone.greedy_reqs = self.greedy_reqs.copy()
+        clone.random_reqs = self.random_reqs.copy()
+
+        clone.top_p_cpu_tensor.copy_(self.top_p_cpu_tensor)
+        clone.top_p_reqs = self.top_p_reqs.copy()
+
+        clone.top_k_cpu_tensor.copy_(self.top_k_cpu_tensor)
+        clone.top_k_reqs = self.top_k_reqs.copy()
+
+        clone.spec_decode_unsupported_reqs = self.spec_decode_unsupported_reqs.copy()
+
+        clone.frequency_penalties_cpu_tensor.copy_(self.frequency_penalties_cpu_tensor)
+        clone.frequency_penalties_reqs = self.frequency_penalties_reqs.copy()
+
+        clone.presence_penalties_cpu_tensor.copy_(self.presence_penalties_cpu_tensor)
+        clone.presence_penalties_reqs = self.presence_penalties_reqs.copy()
+
+        clone.repetition_penalties_cpu_tensor.copy_(self.repetition_penalties_cpu_tensor)
+        clone.repetition_penalties_reqs = self.repetition_penalties_reqs.copy()
+
+        clone.num_accepted_tokens_cpu_tensor.copy_(self.num_accepted_tokens_cpu_tensor)
+
+        clone.generators = self.generators.copy()
+        clone.num_logprobs = self.num_logprobs.copy()
+
+        clone.has_allowed_token_ids = self.has_allowed_token_ids.copy()
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            clone.allowed_token_ids_mask_cpu_tensor = self.allowed_token_ids_mask_cpu_tensor
+        if self.allowed_token_ids_mask is not None:
+            clone.allowed_token_ids_mask = self.allowed_token_ids_mask
+
+        clone.bad_words_token_ids = {
+            req_idx: [token_ids.copy() for token_ids in bad_words]
+            for req_idx, bad_words in self.bad_words_token_ids.items()
+        }
+        clone.logits_processing_needs_token_ids = self.logits_processing_needs_token_ids.copy()
+        clone.req_output_token_ids = self.req_output_token_ids.copy()
+        clone.spec_token_ids = [token_ids.copy() for token_ids in self.spec_token_ids]
+
+        clone.prev_sampled_token_ids = self.prev_sampled_token_ids
+        # Use an empty mapping (not None) as the neutral snapshot value.
+        # update_async_output_token_ids asserts the mapping is non-None
+        # whenever async sample tensors are bound to this clone
+        # (_bind_vpp_async_sample_state).  On PD prefill workers
+        # (_is_pd_prefill_worker) the live batch never populates the mapping,
+        # so without this default the deferred VPP sampling crashes there.
+        clone.prev_req_id_to_index = (
+            {} if self.prev_req_id_to_index is None else self.prev_req_id_to_index.copy()
+        )
+        # Async sample tensors are bound when this VPP snapshot is consumed.
+        # Cloning them here captures a stale in-flight batch.
+        clone.sampled_token_ids_cpu = None
+        clone.async_copy_ready_event = None
+        clone.sampling_metadata = clone._make_sampling_metadata()
+        return clone

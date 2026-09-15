@@ -765,10 +765,21 @@ class KVCacheRecvingThread(threading.Thread):
         attention_group_reformat_block_ids: list[tuple[tuple[int, list[list[int]], int, list[int]], bool]] = []
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int) -> list[int]:
-            first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-            if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
-                end_layer_index += self.num_draft_layers
-            return [layer_idx for layer_idx in layer_indices if first_layer_index <= layer_idx < end_layer_index]
+            # The remote rank's handshake metadata is self-describing: its
+            # per-layer address list has a non-empty entry exactly for the
+            # layers that rank owns.  Filter by registration instead of the
+            # contiguous get_prefill_pp_indices() split, so that VPP's
+            # fold-back layer assignment (e.g. pp rank0 holds the first AND
+            # last chunks) works without the consumer knowing P's vp_size.
+            # For contiguous CPP layouts this selects exactly the same layers
+            # as the old range filter (unowned entries are empty lists, and
+            # a shorter list means the rank owns no layers beyond it).
+            return [
+                layer_idx
+                for layer_idx in layer_indices
+                if layer_idx < len(remote_kv_caches_base_addrs)
+                and remote_kv_caches_base_addrs[layer_idx]
+            ]
 
         for group_pull in group_pulls:
             group_idx = group_pull.group_id

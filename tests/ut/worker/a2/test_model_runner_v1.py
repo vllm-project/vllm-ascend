@@ -7,7 +7,10 @@ import torch
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import (
+    NPUModelRunner,
+    VppAsyncSampleState,
+)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
@@ -147,6 +150,65 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         runner.model_config = MagicMock()
         runner.use_compress = False
         return runner
+
+    def test_bind_vpp_async_sample_state_replaces_stale_snapshot_tensor(self):
+        runner = self._build_runner()
+        sampled_token_ids_cpu = torch.arange(13).reshape(13, 1)
+        copy_ready_event = MagicMock()
+        runner._vpp_async_sample_state = VppAsyncSampleState(
+            sampled_token_ids_cpu=sampled_token_ids_cpu,
+            async_copy_ready_event=copy_ready_event,
+            producer_batch_id=24,
+            needs_output_token_ids=True,
+        )
+        input_batch = SimpleNamespace(
+            req_ids=["req0", "req1"],
+            sampled_token_ids_cpu=torch.full((4, 1), 99),
+            async_copy_ready_event=MagicMock(),
+            prev_req_id_to_index={"req0": 2, "req1": 9},
+        )
+        pending_state = SimpleNamespace(
+            input_batch=input_batch,
+            execute_model_state=SimpleNamespace(
+                scheduler_output=SimpleNamespace(batch_id=25)
+            ),
+        )
+
+        bound_state = runner._bind_vpp_async_sample_state(pending_state)
+
+        self.assertIsNotNone(bound_state)
+        assert bound_state is not None
+        self.assertIs(bound_state.sampled_token_ids_cpu, sampled_token_ids_cpu)
+        self.assertIs(input_batch.sampled_token_ids_cpu, sampled_token_ids_cpu)
+        self.assertIs(input_batch.async_copy_ready_event, copy_ready_event)
+        self.assertIsNone(runner._vpp_async_sample_state)
+
+    def test_bind_vpp_async_sample_state_clears_unused_stale_tensor(self):
+        runner = self._build_runner()
+        runner._vpp_async_sample_state = VppAsyncSampleState(
+            sampled_token_ids_cpu=None,
+            async_copy_ready_event=None,
+            producer_batch_id=24,
+            needs_output_token_ids=False,
+        )
+        input_batch = SimpleNamespace(
+            req_ids=["req0"],
+            sampled_token_ids_cpu=torch.tensor([[99]]),
+            async_copy_ready_event=MagicMock(),
+            prev_req_id_to_index={"req0": 0},
+        )
+        pending_state = SimpleNamespace(
+            input_batch=input_batch,
+            execute_model_state=SimpleNamespace(
+                scheduler_output=SimpleNamespace(batch_id=25)
+            ),
+        )
+
+        runner._bind_vpp_async_sample_state(pending_state)
+
+        self.assertIsNone(input_batch.sampled_token_ids_cpu)
+        self.assertIsNone(input_batch.async_copy_ready_event)
+        self.assertIsNone(runner._vpp_async_sample_state)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
