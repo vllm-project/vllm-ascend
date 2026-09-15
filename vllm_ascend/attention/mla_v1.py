@@ -1568,8 +1568,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         
         attn_output, attn_lse = self._compute_prefill_context(
-        q_nope, q_pe, kv_c_and_k_pe_cache,
-        self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
+            q_nope, q_pe, kv_c_and_k_pe_cache,
+            self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
         )
 
         attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim])
