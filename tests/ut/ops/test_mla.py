@@ -159,3 +159,79 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
+
+    def test_skip_topk_property_forwards_to_impl(self):
+        """The proposer's set_skip_topk must reach the impl that gates the indexer."""
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+
+        # Before mla_attn exists, the setter only stores the backing value.
+        attn.skip_topk = True
+        self.assertTrue(attn.skip_topk)
+        attn.skip_topk = False
+        self.assertFalse(attn.skip_topk)
+
+        # Once the impl exists, the setter must forward the toggle to it.
+        mock_impl = MagicMock()
+        mock_impl.skip_topk = False
+        mock_mla_attn = MagicMock()
+        mock_mla_attn.impl = mock_impl
+        attn.mla_attn = mock_mla_attn
+
+        attn.skip_topk = True
+        self.assertTrue(attn.skip_topk)
+        self.assertTrue(mock_impl.skip_topk, "impl skip_topk should be forwarded by the wrapper setter.")
+
+        attn.skip_topk = False
+        self.assertFalse(attn.skip_topk)
+        self.assertFalse(mock_impl.skip_topk, "impl skip_topk should follow the wrapper toggle back.")
+
+    def test_topk_indices_buffer_property_forwards_to_impl(self):
+        """_maybe_share_topk_indices / compact_topk_indices must reach the impl buffer."""
+        attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        self.assertIsNone(attn.topk_indices_buffer)
+
+        buffer = torch.empty(8, 2048, dtype=torch.int32)
+        mock_impl = MagicMock()
+        mock_impl.topk_indices_buffer = None
+        mock_mla_attn = MagicMock()
+        mock_mla_attn.impl = mock_impl
+        attn.mla_attn = mock_mla_attn
+
+        attn.topk_indices_buffer = buffer
+        self.assertIs(attn.topk_indices_buffer, buffer)
+        self.assertIs(mock_impl.topk_indices_buffer, buffer)
+
+    @patch("vllm_ascend.ops.mla.get_current_vllm_config")
+    @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
+    def test_initialization_skip_topk_consistency(self, mock_tp_size, mock_get_vllm_config):
+        """Init must store skip_topk on the wrapper and pass it to MLAAttention."""
+        mock_mla_attn = MagicMock()
+        mock_mla_attn.process_weights_after_loading = MagicMock()
+        mock_mla_attn.impl = MagicMock()
+        mock_mla_attn.impl.process_weights_after_loading = MagicMock()
+
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_attn_cls:
+            mock_tp_size.return_value = 2
+            mock_vllm_config = MagicMock(spec=VllmConfig)
+            mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
+            mock_get_vllm_config.return_value = mock_vllm_config
+            mock_vllm_config.compilation_config = CompilationConfig()
+
+            attn = AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                cache_config=self.mock_cache_config,
+                quant_config=self.mock_quant_config,
+                prefix=self.prefix,
+                skip_topk=True,
+            )
+
+            self.assertTrue(attn.skip_topk)
+            self.assertEqual(mock_mla_attn_cls.call_args.kwargs.get("skip_topk"), True)
