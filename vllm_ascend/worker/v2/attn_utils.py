@@ -42,7 +42,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -66,9 +67,28 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     vllm_version_is,
 )
+from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Do not mutate the scheduler/connector copy of the cache configuration.
+    return replace(kv_cache_config, kv_cache_groups=groups)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -591,6 +611,15 @@ def _allocate_kv_cache(
             to their corresponding memory buffer for K cache and V cache
     """
     vllm_config = get_current_vllm_config()
+    if KVPPConfig.from_vllm_config(vllm_config).size > 1:
+        caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
+        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        # Indexer reshape expects a tuple even without a quantization scale.
+        # Single-component main MLA caches still use a raw Tensor.
+        return {
+            name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
+            for name, parts in caches.items()
+        }
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
@@ -667,6 +696,14 @@ def _allocate_kv_cache(
             continue
 
         if dsv4_backing is not None:
+            continue
+
+        if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
+            # The compressed indexer and request-private tail share a physical
+            # small-page slot. Both need the same single backing allocation.
+            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+            for layer_name in shared_names:
+                kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
         if is_dsv4_model:
@@ -1036,17 +1073,26 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
-                # Spec properties already give the [B, H, N, C] layout that
-                # basic_cache writes as kv_cache[block, :, offset].
-                kv_cache_shape = (
-                    num_blocks,
-                    kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
-                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-                )
+                if vllm_version_is("0.28.0"):
+                    # Release basic_cache writes [block, offset, :, :].
+                    kv_cache_shape = group.backend.get_kv_cache_shape(
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype,
+                    )
+                else:
+                    # #51718 removes the backend shape hook and changes
+                    # basic_cache writes to [block, :, offset, :].
+                    kv_cache_shape = (
+                        num_blocks,
+                        kv_cache_spec.num_heads,
+                        kv_cache_spec.num_states,
+                        kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                    )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
-                page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
+                page_size_padded = kv_cache_spec.page_size_padded
                 if page_size_padded is not None:
                     dtype_size = get_dtype_size(kv_cache_spec.dtype)
                     page_stride = page_size_padded // dtype_size
@@ -1063,9 +1109,8 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if is_dsv4_model and isinstance(
-                kv_cache_spec,
-                (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec) or (
+                is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec))
             ):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"DSA cache for {layer_name} must use one raw tensor.")
@@ -1179,11 +1224,12 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them. Attention state is left to the
+    caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache

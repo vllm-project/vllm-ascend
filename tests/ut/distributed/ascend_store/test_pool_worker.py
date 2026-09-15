@@ -53,6 +53,7 @@ def make_worker(
     use_mla=False,
     enable_kv_events=False,
     num_hidden_layers=None,
+    use_kvpp=False,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -66,6 +67,7 @@ def make_worker(
 
     config = MagicMock()
     config.model_config.model = "org/llama-7b"
+    config.model_config.max_model_len = 1024
     config.model_config.use_mla = use_mla
     config.model_config.hf_text_config = MagicMock(spec=[])
     if num_hidden_layers is not None:
@@ -75,6 +77,9 @@ def make_worker(
     config.parallel_config.data_parallel_rank = 0
     config.parallel_config.rank = 0
     config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = 1
+    config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
         "backend": "mooncake",
@@ -88,6 +93,40 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise)
+
+
+class TestKVPPPoolWorker(unittest.TestCase):
+    def test_registers_persistent_layers_and_mtp(self):
+        import torch
+
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                worker = make_worker(self, tp_rank=rank, tp_size=2, num_layers=18, use_mla=True, use_kvpp=True)
+                worker.vllm_config = make_kvpp_config(2)
+                worker._transfer_threads_started = True
+                names = [layer_name(i) for i in (9, 10, 17)]
+                caches = {name: torch.zeros((4, 16, 8)) for name in names}
+                worker.register_kv_caches(caches)
+                expected = [names[rank], names[2]]
+                self.assertEqual(list(worker.kv_caches), expected)
+                self.assertEqual(worker.group_num_layers, {0: 2})
+                self.assertEqual(worker.num_layers, 18)
+                self.assertEqual(worker.group_kv_caches_base_addr[0], [caches[name].data_ptr() for name in expected])
+                self.assertEqual(worker.head_or_tp_rank, rank)
+                self.assertEqual(worker.put_step, 1)
+
+    def test_lookup_requires_every_tp_shard(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True)
+        for exists, expected in (([1, 1, 1, 1], 32), ([1, 1, 1, 0], 16), ([1, 1, 0, 0], 0)):
+            with self.subTest(exists=exists):
+                worker.m_store.exists.return_value = exists
+                self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), expected)
+                keys = worker.m_store.exists.call_args.args[0]
+                self.assertEqual(len(keys), 4)
+                self.assertTrue(all("@head_or_tp_rank:0" in key for key in keys[:2]))
+                self.assertTrue(all("@head_or_tp_rank:1" in key for key in keys[2:]))
 
 
 class _SparseSWAHitManager:
@@ -138,10 +177,12 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 self.assertEqual(cls.check_all_layers_exists(None, exists, num_layers), expected)
 
     def test_uses_mamba_kv_cache_inside_uniform_group(self):
+        import torch
         from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
         cls = self._make_worker_class()
-        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        # vLLM #53896 now compares page sizes while forming uniform groups.
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(torch.float32,))
         uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
         self.assertIsNotNone(uniform_spec)
         kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])

@@ -268,7 +268,7 @@ __aicore__ inline void InterleavedSplitBS<T>::Compute(uint32_t seqIdx, uint32_t 
 
     Mul(x, x, cos, calcTotalNum);
     inQueCos.FreeTensor(cos);
-    InterleavedInversion(x, calcTotalNum);
+    InterleavedInversion(x, calcTotalNum, tiling_->negateSin != 0);
     Add(y, y, x, calcTotalNum);
     inQueX.FreeTensor(x);
     outQueY.EnQue(y);
@@ -303,7 +303,7 @@ __aicore__ inline void InterleavedSplitBS<T>::ComputeCastFp32(uint32_t seqIdx, u
     inQueCos.FreeTensor(cos);
 
     Mul(tmp32BSBuf1, tmp32BSBuf1, tmp32Buf2, calcTotalNum);
-    InterleavedInversion(tmp32BSBuf1, calcTotalNum);
+    InterleavedInversion(tmp32BSBuf1, calcTotalNum, tiling_->negateSin != 0);
     Add(tmp32Buf3, tmp32Buf3, tmp32BSBuf1, calcTotalNum);
 
     LocalTensor<T> y = outQueY.AllocTensor<T>();
