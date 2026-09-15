@@ -688,7 +688,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --max-retries 3
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
 === "950DT products"
 
@@ -856,9 +856,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         31060 31061
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
-
-Key Parameter Descriptions:
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
 **`launch_online_dp.py` parameters:**
 
@@ -1276,7 +1274,7 @@ mooncake_master \
 
 3. Start Prefill the same way. Wait until every Prefill rank prints `Application startup complete`.
 
-4. Start the Section 5.3 proxy. The service is then accessible at `http://<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
+4. Start the Section 5.3 proxy. The service is then accessible at `<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
 
 #### 5.4.5 Verification
 
