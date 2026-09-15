@@ -139,12 +139,29 @@ check_npu_info() {
     cat "/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/ascend_toolkit_install.info"
 }
 
+# check_and_config() {
+#     echo "====> Configure mirrors and git proxy"
+#     git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+#     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+#     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+# }
 check_and_config() {
     echo "====> Configure mirrors and git proxy"
-    git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    # github加速镜像
+    git config --global url."https://shturl.cc//https://github.com/".insteadOf "https://github.com/"
+
+    # pip主源改用清华新pypi源，移除废弃 /pypi/web/simple
+    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+
+    # 昇腾私有源放 extra‑index‑url，华为云ascend pypi
     export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+    pip config set global.trusted-host mirrors.huaweicloud.com
+
+    # 增加pip默认超时，CI网络抖动场景
+    pip config set global.timeout 120
 }
+
 
 install_extra_components() {
     echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
