@@ -26,6 +26,7 @@ ARG AIS_BENCH_TAG="v3.1-20260609-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 ARG GITEE_USERNAME=""
 ARG GITEE_TOKEN=""
+ARG GIT_PROXY=""
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
@@ -40,9 +41,14 @@ RUN export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi" 
     python3 -m pip install -r requirements-dev.txt && \
     python3 -m pip cache purge
 
+# Configure git proxy for GitHub access (rewrite github.com URLs through the
+# internal proxy, since the cluster-internal buildkitd has no direct egress).
+RUN if [ -n "$GIT_PROXY" ]; then \
+      git config --system url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; \
+    fi
+
 # Install benchmark tools
-RUN CLONE_URL=$(echo "${AIS_BENCH_URL}" | sed "s|https://|https://${GITEE_USERNAME}:${GITEE_TOKEN}@|") && \
-    git clone -b ${AIS_BENCH_TAG} --depth 1 "${CLONE_URL}" /vllm-workspace/vllm-ascend/benchmark && \
+RUN git clone -b ${AIS_BENCH_TAG} --depth 1 "${AIS_BENCH_URL}" /vllm-workspace/vllm-ascend/benchmark && \
     cd /vllm-workspace/vllm-ascend/benchmark && \
     pip install -e . -r requirements/api.txt -r requirements/extra.txt && \
     python3 -m pip cache purge

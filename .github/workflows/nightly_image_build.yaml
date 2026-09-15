@@ -18,9 +18,15 @@
 # This workflow builds nightly images as a layer-cache warm-up at 20:00 Beijing time.
 # The nightly test workflows (Nightly-A2, Nightly-A3) each rebuild the image fresh
 # before running tests, so this schedule only serves to pre-populate the build cache.
+# PR builds: add the 'nightly-image-build' label to a PR to run a build-only
+# verification (login/push/merge are skipped, no image is published).
 name: Nightly Image Build Schedule
 
 on:
+  pull_request:
+    branches:
+      - 'main'
+    types: [ labeled ]
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -57,72 +63,77 @@ on:
 
 jobs:
   build-a2:
-    if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a2') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a2') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '910b'
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   build-a3:
-    if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: 'a3'
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   build-310p:
-    if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '310p'
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
   build-a5:
-    if: ${{ contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      soc: '950'
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
+
+  trigger-image-sync:
+    name: Trigger quay.io sync
+    if: ${{ !cancelled() && github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (needs.build-a2.result == 'success' || needs.build-a3.result == 'success' || needs.build-310p.result == 'success' || needs.build-a5.result == 'success') }}
+    needs: [build-a2, build-a3, build-310p, build-a5]
+    runs-on: linux-amd64-cpu-4
+    steps:
+      - name: Dispatch sync-vllm-ascend
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+        run: |
+          gh workflow run sync-vllm-ascend.yml \
+            --repo ascend-gha-runners/sync-tools
