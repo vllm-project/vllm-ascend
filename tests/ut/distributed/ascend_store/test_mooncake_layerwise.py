@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     LayerBatchBuilder,
     _build_range_debug_payload,
+    _LayerCommitMarker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -158,6 +159,146 @@ class TestMooncakeLayerSaveSession(unittest.TestCase):
         self.assertEqual(store.batch_copy_put.call_count, 2)
         store.batch_commit.assert_called_once_with(["key"])
         self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0)])
+
+
+class TestMooncakeLayerwiseHybridCommit(unittest.TestCase):
+    """Hybrid-layout commit behavior: staged puts must be committed by an
+    explicit ``_LayerCommitMarker`` after the last layer that has save tasks,
+    because the final physical layer may have none (e.g. Mamba hybrids)."""
+
+    NUM_LAYERS = 4
+
+    def _make_thread(self, store, tracker, group_builders):
+        return KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=make_token_database(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            page_size_bytes=60,
+            ready_event=threading.Event(),
+            num_layers=self.NUM_LAYERS,
+            layer_save_finished_events=[threading.Event() for _ in range(self.NUM_LAYERS)],
+            sync_save_events=[MagicMock() for _ in range(self.NUM_LAYERS)],
+            group_builders=group_builders,
+            put_started_keys={"key"},
+            session_tracker=tracker,
+        )
+
+    @staticmethod
+    def _make_range_task(layer_id, layer_idx_in_group, group_id=0, block_range_request=None):
+        request = block_range_request or ReqMeta("r1", block_ids=[2], block_hashes=[], is_last_chunk=True)
+        task = LayerTransferTask(
+            layer_id=layer_id,
+            layer_idx_in_group=layer_idx_in_group,
+            group_id=group_id,
+            block_ranges=[LayerBlockRange(request, 0, 1)],
+            shared_block_data=MagicMock(block_keys=["key"]),
+            use_key_major_ranges=True,
+        )
+        task.shared_block_data.save_keys = ["key"]
+        return task
+
+    @staticmethod
+    def _make_mock_builder(layer_id):
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerRangeReqMeta(
+            req_ids=["r1"],
+            layer_id=layer_id,
+            block_ids=[2],
+            keys=["key"],
+            all_buffers=[[3600]],
+            all_sizes=[[30]],
+            all_offsets=[[30]],
+        )
+        return builder
+
+    def test_commit_marker_commits_staged_puts_before_final_layer(self):
+        store = MagicMock()
+        store.batch_copy_put.return_value = [30]
+        store.batch_commit.return_value = [0]
+        tracker = MooncakeSessionTracker()
+        tracker.register_put_keys("r1", [("key", 0)])
+        thread = self._make_thread(store, tracker, [self._make_mock_builder(0)])
+
+        # Hybrid layout: only layer 0 has save tasks; layers 1-3 (incl. the
+        # final layer) have none, so the fixed final-layer trigger never fires.
+        task = self._make_range_task(layer_id=0, layer_idx_in_group=0)
+        thread.add_stored_request("r1")
+        thread.request_queue.put([task])
+        thread._handle_request([task])
+
+        store.batch_copy_put.assert_called_once()
+        store.batch_commit.assert_not_called()
+        self.assertEqual(thread._active_put_keys, {"key"})
+
+        thread.request_queue.put(_LayerCommitMarker())
+        thread._handle_request(_LayerCommitMarker())
+
+        store.batch_commit.assert_called_once_with(["key"])
+        self.assertIsNone(thread._active_put_keys)
+        self.assertEqual(tracker.prepare_load_entries("r1", []), [("key", 0)])
+        # Committed keys leave the put-started set so later chunks can re-put.
+        self.assertNotIn("key", thread._put_started_keys)
+
+    def test_commit_marker_without_active_puts_is_noop(self):
+        store = MagicMock()
+        tracker = MooncakeSessionTracker()
+        thread = self._make_thread(store, tracker, [self._make_mock_builder(0)])
+
+        thread.request_queue.put(_LayerCommitMarker())
+        thread._handle_request(_LayerCommitMarker())
+
+        store.batch_commit.assert_not_called()
+        self.assertIsNone(thread._active_put_keys)
+
+    def test_commit_marker_after_final_layer_commit_is_safe(self):
+        store = MagicMock()
+        store.batch_copy_put.return_value = [30]
+        store.batch_commit.return_value = [0]
+        tracker = MooncakeSessionTracker()
+        tracker.register_put_keys("r1", [("key", 0)])
+        thread = self._make_thread(store, tracker, [self._make_mock_builder(3)])
+
+        # Full-attention layout: the final layer itself triggers the commit.
+        task = self._make_range_task(layer_id=3, layer_idx_in_group=3)
+        thread.add_stored_request("r1")
+        thread.request_queue.put([task])
+        thread._handle_request([task])
+        store.batch_commit.assert_called_once_with(["key"])
+
+        # A trailing marker (worker always posts one after the last saving
+        # layer) must not double-commit already-committed keys.
+        thread.request_queue.put(_LayerCommitMarker())
+        thread._handle_request(_LayerCommitMarker())
+
+        store.batch_commit.assert_called_once_with(["key"])
+
+    def test_range_save_uses_layer_idx_in_group_for_offset_lookup(self):
+        """build_addrs must index the per-group offset table with the in-group
+        layer index, not the physical layer id (which can be out of bounds in
+        multi-group layouts)."""
+        store = MagicMock()
+        store.batch_copy_put.return_value = [30]
+        store.batch_commit.return_value = [0]
+        tracker = MooncakeSessionTracker()
+        builder_g0, builder_g1 = self._make_mock_builder(3), self._make_mock_builder(3)
+        thread = self._make_thread(store, tracker, [builder_g0, builder_g1])
+
+        # Physical layer 3 (in a 4-layer model) maps to group 1's local
+        # layer 1; group 1's offset table only has 2 entries, so indexing it
+        # with the physical layer id would be out of bounds.
+        task = self._make_range_task(layer_id=3, layer_idx_in_group=1, group_id=1)
+        thread.add_stored_request("r1")
+        thread.request_queue.put([task])
+        thread._handle_request([task])
+
+        builder_g0.build_addrs.assert_not_called()
+        builder_g1.build_addrs.assert_called_once()
+        self.assertEqual(builder_g1.build_addrs.call_args.args[1], 1)
+        # Data was still transferred for this layer.
+        store.batch_copy_put.assert_called_once()
 
 
 class TestMooncakeWorkerSessionPreparation(unittest.TestCase):

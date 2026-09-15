@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import _LayerCommitMarker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -1599,6 +1600,108 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         load_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual(save_range.partial_block_index, 2)
         self.assertEqual(load_range.partial_block_index, 2)
+
+
+class TestKVPoolWorkerHybridLayerwiseCommit(unittest.TestCase):
+    """Hybrid (e.g. MLA + Mamba) layerwise save behavior.
+
+    Hybrid models may have no save tasks on the final physical layer, so the
+    commit is triggered via ``_LayerCommitMarker`` after the last saving layer
+    instead of the fixed final-layer trigger, and the final layer waits for
+    every layer's save to finish.
+    """
+
+    NUM_LAYERS = 4
+
+    def _make_layerwise_worker(self, save_layers, last_save_layer_id):
+        """Build a bare worker (no full init) wired for save_kv_layer()."""
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.num_layers = self.NUM_LAYERS
+        worker.layer_save_tasks = [[] for _ in range(self.NUM_LAYERS)]
+        task = MagicMock()
+        task.block_ranges = [MagicMock()]
+        task.block_ranges[0].request.req_id = "r1"
+        for layer in save_layers:
+            worker.layer_save_tasks[layer] = [task]
+        worker._last_save_layer_id = last_save_layer_id
+        worker.layer_save_finished_events = [threading.Event() for _ in range(self.NUM_LAYERS)]
+        worker.sync_save_events = [MagicMock() for _ in range(self.NUM_LAYERS)]
+        worker.prefetch_layer_map = {}
+        worker.kv_send_thread = MagicMock()
+        worker.current_layer = 0
+        return worker
+
+    def test_save_kv_layer_posts_commit_marker_after_last_save_layer(self):
+        # Hybrid layout: only layers 0/1 (MLA) have save tasks; the Mamba
+        # layers and the final layer have none.
+        worker = self._make_layerwise_worker(save_layers=[0, 1], last_save_layer_id=1)
+        worker.current_layer = 1
+
+        worker.save_kv_layer(None)
+
+        sent_requests = worker.kv_send_thread.add_request.call_args_list
+        self.assertEqual(len(sent_requests), 2)
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import _LayerCommitMarker
+
+        self.assertIsInstance(sent_requests[1].args[0], _LayerCommitMarker)
+        # The marker is posted only once, after the last saving layer.
+        self.assertNotIsInstance(sent_requests[0].args[0], _LayerCommitMarker)
+        self.assertEqual(worker.current_layer, 2)
+
+    def test_save_kv_layer_skips_commit_marker_before_last_save_layer(self):
+        worker = self._make_layerwise_worker(save_layers=[0, 1], last_save_layer_id=1)
+        worker.current_layer = 0
+
+        worker.save_kv_layer(None)
+
+        sent_requests = worker.kv_send_thread.add_request.call_args_list
+        self.assertEqual(len(sent_requests), 1)
+        self.assertNotIsInstance(sent_requests[0].args[0], _LayerCommitMarker)
+
+    def test_save_kv_layer_without_tasks_sets_event_directly(self):
+        # A layer with no save task (e.g. a Mamba layer) just sets its own
+        # finished event; no request is queued to the sending thread.
+        worker = self._make_layerwise_worker(save_layers=[0, 1], last_save_layer_id=1)
+        worker.current_layer = 2
+
+        worker.save_kv_layer(None)
+
+        worker.kv_send_thread.add_request.assert_not_called()
+        self.assertTrue(worker.layer_save_finished_events[2].is_set())
+
+    def test_final_layer_waits_for_every_save_layer(self):
+        # All layers' saves must be awaited on the final layer, not just the
+        # final layer's own event (which a hybrid model never sets via a task).
+        worker = self._make_layerwise_worker(save_layers=[0, 1], last_save_layer_id=1)
+        worker.current_layer = self.NUM_LAYERS - 1
+        for event in worker.layer_save_finished_events:
+            event.set()
+        # Layer 3 reuses layer 1's save (prefetch), so layer 1 is a reuse
+        # source and keeps its event set; all other events are cleared.
+        worker.prefetch_layer_map = {3: 1}
+
+        worker.save_kv_layer(None)
+
+        for layer_id, event in enumerate(worker.layer_save_finished_events):
+            if layer_id == 1:
+                self.assertTrue(event.is_set())
+            else:
+                self.assertFalse(event.is_set())
+        self.assertEqual(worker.current_layer, self.NUM_LAYERS)
+
+    def test_hybrid_layerwise_init_does_not_raise(self):
+        # Mooncake layerwise used to reject hybrid/multi-group layouts;
+        # construction must now succeed.
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with patch(f"{module}.uses_hybrid_kv_cache", return_value=True):
+            worker = make_worker(
+                self,
+                extra_config={"backend": "memcache"},
+                use_layerwise=True,
+            )
+        self.assertTrue(worker.use_hybrid)
 
 
 class TestKVPoolWorkerTpMismatch(unittest.TestCase):

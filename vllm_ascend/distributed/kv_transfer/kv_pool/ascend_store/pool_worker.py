@@ -46,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    _LayerCommitMarker,
     _circular_shift,
     record_failed_blocks,
 )
@@ -182,8 +183,6 @@ class KVPoolWorker:
         self.use_layerwise_transfer = use_layerwise and self.layerwise_protocol is not None
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
-        if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
-            raise ValueError("Mooncake layerwise does not yet support hybrid or multi-group KV cache layouts")
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
@@ -530,6 +529,7 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
+            self._last_save_layer_id: int | None = None
             can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
             if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
                 ready_event_sending = threading.Event()
@@ -2132,6 +2132,10 @@ class KVPoolWorker:
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
+        self._last_save_layer_id = next(
+            (layer for layer in range(self.num_layers - 1, -1, -1) if self.layer_save_tasks[layer]),
+            None,
+        )
         # Protect the previous partial before allocating the next snapshot.
         self._prepare_load_gvas(requests)
         self._alloc_gvas_for_save(requests)
@@ -2226,12 +2230,20 @@ class KVPoolWorker:
                 for block_range in task.block_ranges:
                     send_thread.add_stored_request(block_range.request.req_id)
             send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
+            if (
+                self._last_save_layer_id is not None
+                and self.current_layer == self._last_save_layer_id
+            ):
+                # Hybrid models may have no save tasks on the final layer, so
+                # commit via marker instead of the fixed final-layer trigger.
+                send_thread.add_request(_LayerCommitMarker())
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
-            while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
-                send_thread.raise_if_failed()
-                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
+            for wait_layer in range(self.num_layers):
+                while not self.layer_save_finished_events[wait_layer].wait(timeout=10):
+                    send_thread.raise_if_failed()
+                    logger.info("Layerwise %d save not done, keep waiting", wait_layer)
             send_thread.raise_if_failed()
             reuse_source_layers = set(self.prefetch_layer_map.values())
             for layer_id in range(self.num_layers):
