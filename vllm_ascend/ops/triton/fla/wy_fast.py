@@ -80,8 +80,12 @@ def recompute_w_u_fwd_kernel(
             b_vb = b_v * b_beta[:, None]
             b_u = tl.dot(b_A, b_vb, allow_tf32=False)
             if HEAD_FIRST_OUTPUT:
-                # [B,H,T,D] 布局：base = i_h*(T_max*D) + (bos+offs_t_2d)*D
-                ptr_u = u + i_h * (T_max * V) + (bos + offs_t_2d) * V + offs_v
+                if IS_VARLEN:
+                    # [1,H,T,D]：bos 为扁平 T 维起点，(bos+t) 即全局 token 位置
+                    ptr_u = u + i_h * (T_max * V) + (bos + offs_t_2d) * V + offs_v
+                else:
+                    # [B,H,T,D]：batch 项 bos*H*V + head 项 i_h*T_max*V
+                    ptr_u = u + (bos * H + i_h * T_max + offs_t_2d) * V + offs_v
             else:
                 ptr_u = u + (bos * H + i_h) * V + offs_t_2d * (H * V) + offs_v * 1
             tl.store(ptr_u, b_u.to(ptr_u.dtype.element_ty), mask=mask_v)
@@ -95,7 +99,10 @@ def recompute_w_u_fwd_kernel(
             b_kb = b_k * b_beta[:, None] * b_g[:, None]
             b_w = tl.dot(b_A, b_kb)
             if HEAD_FIRST_OUTPUT:
-                ptr_w = w + i_h * (T_max * K) + (bos + offs_t_2d) * K + offs_k
+                if IS_VARLEN:
+                    ptr_w = w + i_h * (T_max * K) + (bos + offs_t_2d) * K + offs_k
+                else:
+                    ptr_w = w + (bos * H + i_h * T_max + offs_t_2d) * K + offs_k
             else:
                 ptr_w = w + (bos * H + i_h) * K + offs_t_2d * (H * K) + offs_k * 1
             tl.store(ptr_w, b_w.to(ptr_w.dtype.element_ty), mask=mask_k)
