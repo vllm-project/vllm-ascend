@@ -60,6 +60,7 @@ class AscendSFAIndexerMetadata:
     block_table: torch.Tensor
     sin: torch.Tensor
     cos: torch.Tensor
+    positions: torch.Tensor
     block_size: int = 0
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
@@ -468,6 +469,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     """
 
     reorder_batch_threshold = None
+    supports_draft_decode_metadata_update = True
 
     def __init__(
         self,
@@ -534,8 +536,26 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             block_table=common_attn_metadata.block_table_tensor[:num_reqs],
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
+            positions=common_attn_metadata.positions[:num_input_tokens],
             block_size=block_size,
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
         )
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: AscendSFAIndexerMetadata,
+    ) -> None:
+        cos, sin = get_cos_and_sin_mla(metadata.positions.long(), use_cache=True)
+        metadata.cos.copy_(cos)
+        metadata.sin.copy_(sin)
+
+        if get_ascend_config().c8_reshape_optim_enabled:
+            torch.ops._C_ascend.store_kv_block_metadata(
+                metadata.slot_mapping,
+                metadata.group_len,
+                metadata.group_key_idx,
+                metadata.group_key_cache_idx,
+                metadata.block_size,
+            )
