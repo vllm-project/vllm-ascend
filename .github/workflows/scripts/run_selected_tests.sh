@@ -185,10 +185,10 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes --durations=0 "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" pytest -sv --color=yes --durations=0 "${target}"
   fi
   local status=$?
   set -e
@@ -236,10 +236,10 @@ run_pytest_batch() {
     echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes --durations=0 "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" pytest -sv --color=yes --durations=0 "${batch_targets[@]}"
   fi
   local status=$?
   set -e

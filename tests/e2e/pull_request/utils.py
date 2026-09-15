@@ -296,6 +296,12 @@ def _run_speculative_decoding(
     )
 
     cleanup_dist_env_and_memory()
+
+    print(
+        f"[spec_decode_metric] model={model_name} drafts={num_drafts} "
+        f"accepted_tokens={num_accepted_tokens} acceptance_length={acceptance_length:.4f}"
+    )
+
     return acceptance_length
 
 
