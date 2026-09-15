@@ -150,7 +150,13 @@ def set_ascend_forward_context(
         )
 
         forward_context.moe_comm_type = moe_comm_type
-        forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        # A target and its drafter may own different expert shapes. Resolve
+        # model-owned communication state before graph execution; legacy
+        # models retain the original singleton implementation.
+        model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
+        forward_context.moe_comm_method = (
+            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+        )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
 

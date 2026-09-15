@@ -50,3 +50,17 @@ def test_sliding_window_mla_storage_and_page_size():
     )
     assert spec.storage_block_size == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
+
+
+def test_cache_layout_resolution_rejects_incompatible_layouts():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from vllm_ascend.core.kv_cache_interface import get_kv_cache_layout
+
+    first, second = object(), object()
+    assert get_kv_cache_layout([SimpleNamespace()]) is None
+    assert get_kv_cache_layout([SimpleNamespace(cache_layout=first)]) is first
+    with pytest.raises(ValueError, match="incompatible physical layouts"):
+        get_kv_cache_layout([SimpleNamespace(cache_layout=first), SimpleNamespace(cache_layout=second)])

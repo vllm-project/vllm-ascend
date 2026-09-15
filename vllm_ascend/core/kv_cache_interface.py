@@ -9,8 +9,9 @@ from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
@@ -53,7 +54,7 @@ def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         specs = tuple(kv_cache_spec.kv_cache_specs.values())
         return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
-    return getattr(kv_cache_spec, "is_circular", False)
+    return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
 
 
 def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
@@ -64,7 +65,9 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     """
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
-    return getattr(kv_cache_spec, "prefix_cacheable", True)
+    return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
+        getattr(kv_cache_spec, "participates_in_prefix_caching", True)
+    )
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
@@ -362,8 +365,23 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
 
 def register_ascend_kv_cache_specs() -> None:
     # Delay this import: the cache layer imports the specs from this module.
+    from vllm_ascend.core.deepseek_v41_kv_cache import (
+        DeepseekV41CompressorStateSpec,
+        DeepseekV41DraftSWASpec,
+        DeepseekV41FullSpec,
+        DeepseekV41IndexerSpec,
+        DeepseekV41SWASpec,
+    )
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
+    for spec, manager in (
+        (DeepseekV41FullSpec, FullAttentionManager),
+        (DeepseekV41IndexerSpec, FullAttentionManager),
+        (DeepseekV41SWASpec, SlidingWindowManager),
+        (DeepseekV41DraftSWASpec, SlidingWindowManager),
+        (DeepseekV41CompressorStateSpec, CircularBufferManager),
+    ):
+        KVCacheSpecRegistry.register(kvcache_spec_cls=spec, manager_class=manager, uniform_type_base_spec=spec)
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,
@@ -385,3 +403,19 @@ def register_ascend_kv_cache_specs() -> None:
         manager_class=KpoolTailManager,
         uniform_type_base_spec=AscendIndexerKPoolTailSpec,
     )
+
+
+def get_kv_cache_layout(specs):
+    """Resolve an optional physical layout from cache capabilities, not model names.
+
+    Group wrappers do not change layout ownership. Reject incompatible custom
+    layouts instead of silently planning their pages with one model's allocator.
+    """
+    layouts = set()
+    for spec in specs:
+        spec = getattr(spec, "kv_cache_spec", spec)
+        members = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        layouts.update(layout for member in members if (layout := getattr(member, "cache_layout", None)) is not None)
+    if len(layouts) > 1:
+        raise ValueError("KV cache groups contain incompatible physical layouts")
+    return next(iter(layouts), None)

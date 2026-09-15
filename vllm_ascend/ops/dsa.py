@@ -76,6 +76,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         need_gather_q_kv: bool = False,
+        apply_q_head_norm: bool = True,
     ) -> None:
         nn.Module.__init__(self)
         self.dim = dim
@@ -133,6 +134,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wkv=self.wkv,
             q_norm=self.q_norm,
             q_norm_without_weight=self.q_norm_without_weight,
+            apply_q_head_norm=apply_q_head_norm,
             kv_norm=self.kv_norm,
             indexer=self.indexer,
             compressor=self.compressor,
