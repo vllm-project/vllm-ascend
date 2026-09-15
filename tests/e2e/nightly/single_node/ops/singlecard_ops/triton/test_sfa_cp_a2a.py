@@ -275,3 +275,39 @@ def test_mla_history_lse_then_current_merge() -> None:
     actual = fused_sfa_dcp_lse_combine(torch.stack((merged_history, current)), 512, scatter_dim=0)
     torch.testing.assert_close(actual.cpu(), expected, atol=5e-4, rtol=5e-4)
     assert torch.isfinite(actual).all()
+
+
+@pytest.mark.parametrize("scatter_dim", [0, 1])
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("head_dim", [96, 256, 512])
+@pytest.mark.parametrize("local_dtype", [torch.float32, torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype):
+    torch.manual_seed(16362)
+    tokens, heads = 3, 2
+    history = torch.randn(dcp_size, tokens, heads, head_dim, device="npu")
+    history_lse = torch.randn(dcp_size, tokens, heads, 1, device="npu") * 80
+    # Slice both tensors to exercise independent non-contiguous FIA strides.
+    local = torch.randn(tokens, heads, head_dim * 2, device="npu", dtype=local_dtype)[..., ::2]
+    local_lse = (torch.randn(tokens, heads, 2, device="npu") * 80)[..., :1]
+    # History empty/current valid, history valid/current empty, both empty.
+    history_lse[:, 0, 0] = -torch.inf
+    history[:, 0, 0] = torch.nan
+    local_lse[0, 1] = torch.inf
+    local[0, 1] = torch.nan
+    history_lse[:, 1, 0] = torch.nan
+    history[:, 1, 0] = torch.nan
+    local_lse[1, 0] = -torch.inf
+    local[1, 0] = torch.nan
+    recv = torch.cat((history, history_lse), dim=-1)
+    if scatter_dim == 1:
+        recv = recv.transpose(1, 2).contiguous()
+    actual = fused_sfa_dcp_lse_combine(
+        recv, head_dim, scatter_dim, return_lse=True, local_output=local, local_lse=local_lse
+    )
+    values = torch.cat((history, local.float().unsqueeze(0)))
+    lses = torch.cat((history_lse, local_lse.unsqueeze(0)))[..., 0]
+    expected = _reference_merge(values, lses)
+    expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
+    torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)

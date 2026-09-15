@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -17,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
@@ -46,6 +46,25 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
             storage_block_size = kv_cache_spec.storage_block_size
             return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+
+
+def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve the fixed-block addressing capability through grouped specs."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        specs = tuple(kv_cache_spec.kv_cache_specs.values())
+        return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
+    return getattr(kv_cache_spec, "is_circular", False)
+
+
+def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve cacheability through uniform wrappers.
+
+    ``prefix_cacheable`` is the upstream API on the lanes that define it; the
+    release lane predates it, so an unset attribute means cacheable.
+    """
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
+    return getattr(kv_cache_spec, "prefix_cacheable", True)
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
@@ -281,38 +300,70 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
-    """Paged FP32 state used by an indexer K-pool compressor."""
+class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
+    """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
 
-    cache_role: str = "indexer_state"
+    ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
+    pool boundaries independently. The dedicated manager never slides or grows.
+    """
+
+    compress_ratio: int
+    model_version: str = "glm5_next"
+    cache_role: str = "indexer_tail"
+    indexes_kv_by_block_stride: bool = True
+
+    @property
+    def is_circular(self) -> bool:
+        return True
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        # The tail stores a fixed K/gate pair; the parent handles page padding.
+        return 2 * self.block_size * self.head_size * get_dtype_size(self.dtype)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.dtype != torch.float32:
-            raise ValueError(f"Indexer K-pool compressor state must use FP32, got {self.dtype}.")
-        if self.block_size != self.sliding_window:
-            raise ValueError(
-                "Indexer K-pool compressor state requires block_size == "
-                f"sliding_window, got {self.block_size} and {self.sliding_window}."
-            )
+            raise ValueError(f"Indexer K-pool tail must use FP32, got {self.dtype}.")
+        if self.num_kv_heads != 1 or self.head_size <= 0:
+            raise ValueError("Indexer K-pool tail requires one K/gate pair with positive head size.")
+        if self.compress_ratio <= 1 or self.block_size < self.compress_ratio:
+            raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
+        if self.sliding_window != self.compress_ratio:
+            raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, cls) for spec in specs)
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All indexer K-pool compressor-state layers in one cache group must have the same layout and cache role."
-        )
-        return copy.deepcopy(specs[0])
+        return super().merge(specs)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         del vllm_config
-        # The state group keeps only the current incomplete pool. Since its
-        # sliding window and block size are identical, one page per request is
-        # sufficient on every context-parallel rank.
         return self.page_size_bytes
+
+    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return 1
+
+    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+        return all(
+            isinstance(spec, AscendIndexerKPoolTailSpec)
+            and spec.block_size == self.block_size
+            and spec.compress_ratio == self.compress_ratio
+            for spec in kv_cache_specs.values()
+        )
 
 
 def register_ascend_kv_cache_specs() -> None:
+    # Delay this import: the cache layer imports the specs from this module.
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,
@@ -330,7 +381,7 @@ def register_ascend_kv_cache_specs() -> None:
     )
 
     KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendIndexerKPoolStateSpec,
-        manager_class=SlidingWindowManager,
-        uniform_type_base_spec=SlidingWindowMLASpec,
+        kvcache_spec_cls=AscendIndexerKPoolTailSpec,
+        manager_class=KpoolTailManager,
+        uniform_type_base_spec=AscendIndexerKPoolTailSpec,
     )

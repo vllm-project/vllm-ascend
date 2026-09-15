@@ -27,9 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
-    get_rotation_matrix,
     get_rotation_path,
     vllm_version_is,
 )
@@ -53,19 +51,18 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
-        # Upstream load_dspark_model overrides the drafter's quant_config with
-        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
-        # __init__ derives rotation_path=None and its fc projection is loaded
-        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
-        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
-        # project them back to model space.
+        # Upstream replaces quant_config with None for a BF16 draft. Pass only
+        # the target QuaRot path so the draft's existing load_weights can fold
+        # input inverse rotation into FC (W @ R) and align fallback embedding /
+        # lm_head before upstream decides weight sharing. Do not rotate again
+        # after loading or replace the draft's own quantization configuration.
+        draft_hf_config = self.draft_model_config.hf_config
         rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None and hasattr(model.model, "fc"):
-            rotation_weight = get_rotation_matrix(rotation_path)
-            fc = model.model.fc
-            with torch.no_grad():
-                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
+
         return model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -102,7 +99,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    # Preserve cache-group order so captured graph tasks and
+                    # runtime metadata stay aligned.
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
