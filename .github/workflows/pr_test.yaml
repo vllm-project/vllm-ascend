@@ -202,11 +202,14 @@ jobs:
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
 
+      - name: Test CPU batch routing
+        run: python3 -m unittest discover -s .github/workflows/scripts/tests -v
+
       - name: Get pre-commit config hash
         id: get_hash
         run: |
           PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
-          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> "$GITHUB_OUTPUT"
 
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
@@ -805,4 +808,3 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
-
