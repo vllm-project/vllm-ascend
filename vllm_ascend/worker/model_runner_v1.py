@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict, deque
@@ -2501,6 +2502,15 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            is_prefill_batch = bool(torch.any(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+                < self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
+            ))
+            # AIV all-reduce is asynchronous with respect to the host. Drain
+            # every prefill forward at the batch boundary, including a short
+            # final chunk. Decode remains asynchronous and pays no sync cost.
+            if is_prefill_batch and os.getenv("HCCL_OP_EXPANSION_MODE") == "AIV":
+                torch.npu.current_stream().synchronize()
             self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
                 profiling_chunk_config,
                 execution_start_time,
