@@ -15,6 +15,46 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionMetadataBuilder
 from vllm_ascend.attention.utils import enable_dcp
 
 
+def uses_dcp_replicated_gqa_draft(config: VllmConfig) -> bool:
+    spec_config = config.speculative_config
+    if spec_config is None:
+        return False
+    target_model_config = config.model_config
+    target_architectures = {
+        *(getattr(target_model_config, "architectures", ()) or ()),
+        *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
+    }
+    target_architecture = getattr(target_model_config, "architecture", None)
+    if target_architecture:
+        target_architectures.add(target_architecture)
+    draft_hf_config = spec_config.draft_model_config.hf_config
+    draft_architectures = {
+        *(getattr(spec_config.draft_model_config, "architectures", ()) or ()),
+        *(getattr(draft_hf_config, "architectures", ()) or ()),
+    }
+    return (
+        (
+            getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
+            or any("KimiK3" in architecture for architecture in target_architectures)
+        )
+        and getattr(draft_hf_config, "model_type", None) == "qwen3"
+        and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
+    )
+
+
+def draft_additional_config(additional_config: dict | None) -> dict:
+    """Isolate the model-only draft from target PD scheduler options."""
+    result = copy.deepcopy(additional_config or {})
+    if "recompute_scheduler_enable" in result:
+        result["recompute_scheduler_enable"] = False
+    draft_scheduler_config = result.get("scheduler_config")
+    if draft_scheduler_config is None:
+        draft_scheduler_config = {}
+        result["scheduler_config"] = draft_scheduler_config
+    draft_scheduler_config["recompute_scheduler_enable"] = False
+    return result
+
+
 class DCPReplicatedDraftMixin:
     """Adapt a MRv1 proposer to a local GQA draft with replicated DCP KV.
 
@@ -60,33 +100,9 @@ class DCPReplicatedDraftMixin:
 
     def _uses_dcp_replicated_draft_kv(self) -> bool:
         config = getattr(self, "vllm_config", None)
-        if config is None:
+        if config is None or getattr(self, "runner", None) is None:
             return False
-        spec_config = config.speculative_config
-        runner = getattr(self, "runner", None)
-        if spec_config is None or runner is None:
-            return False
-        target_model_config = config.model_config
-        target_architectures = {
-            *(getattr(target_model_config, "architectures", ()) or ()),
-            *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
-        }
-        target_architecture = getattr(target_model_config, "architecture", None)
-        if target_architecture:
-            target_architectures.add(target_architecture)
-        draft_hf_config = spec_config.draft_model_config.hf_config
-        draft_architectures = {
-            *(getattr(spec_config.draft_model_config, "architectures", ()) or ()),
-            *(getattr(draft_hf_config, "architectures", ()) or ()),
-        }
-        return (
-            (
-                getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
-                or any("KimiK3" in architecture for architecture in target_architectures)
-            )
-            and getattr(draft_hf_config, "model_type", None) == "qwen3"
-            and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
-        )
+        return uses_dcp_replicated_gqa_draft(config)
 
     def _get_model(self):
         if not self._uses_dcp_replicated_draft_kv():
@@ -112,6 +128,7 @@ class DCPReplicatedDraftMixin:
         draft_parallel_config = copy.copy(spec_config.draft_parallel_config)
         draft_parallel_config.rank = self.vllm_config.parallel_config.rank
         draft_parallel_config.decode_context_parallel_size = 1
+        additional_config = draft_additional_config(base.additional_config)
         return replace(
             base,
             model_config=spec_config.draft_model_config,
@@ -119,6 +136,7 @@ class DCPReplicatedDraftMixin:
             # GQA backend setup normalizes its cache block size to 128.
             # Keep the parent hybrid model's page geometry unchanged.
             cache_config=copy.deepcopy(base.cache_config),
+            additional_config=additional_config,
             # The target runner owns the PD connector and transfers all cache
             # groups. The model-only draft config must not validate that
             # connector's target topology against its local DP/DCP settings.

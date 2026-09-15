@@ -49,7 +49,7 @@ def test_draft_config_keeps_pd_connector_owned_by_target(replicated):
     proposer = object.__new__(AscendDSparkProposer)
     connector = SimpleNamespace(prefill_dp_size=2)
     cache = SimpleNamespace(block_size=3072)
-    base = SimpleNamespace(kv_transfer_config=connector, cache_config=cache)
+    base = SimpleNamespace(kv_transfer_config=connector, cache_config=cache, additional_config={})
     parallel = SimpleNamespace(rank=0, decode_context_parallel_size=2)
     proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=3))
     proposer.speculative_config = SimpleNamespace(draft_parallel_config=parallel, draft_model_config=object())
