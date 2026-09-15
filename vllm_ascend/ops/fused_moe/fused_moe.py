@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from torch.distributed import _functional_collectives as funcol
 import torch.nn.functional as F
 from vllm.distributed import (
     get_dp_group,
@@ -260,7 +261,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             and fused_output_is_reduced
             and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
         ):
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
+            shared_output = funcol.all_reduce(
+                shared_output, "sum", get_tp_group().device_group
+            )
         return shared_output
 
     @property
