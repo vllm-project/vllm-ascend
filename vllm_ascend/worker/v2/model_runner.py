@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import contextmanager
 
 import numpy as np
@@ -283,7 +284,7 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
     @torch.inference_mode()
-    def capture_model(self) -> int:
+    def capture_model(self, *, profile_only: bool = False) -> int:
         """Capture decoder and multimodal encoder graphs on Ascend."""
         if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
             encoder_runner = getattr(self.model_state, "encoder_runner", None)
@@ -295,7 +296,11 @@ class NPUModelRunner(GPUModelRunner):
         # type check expects the CUDA symbol. Temporarily bind that symbol to
         # NPUCommunicator, as is already done for decoder ACL graph capture.
         with torch_cuda_wrapper(), communicator_switch():
-            return super().capture_model()
+            if "profile_only" not in inspect.signature(GPUModelRunner.capture_model).parameters:
+                if profile_only:
+                    raise NotImplementedError("Graph memory profiling is unavailable in this vLLM version.")
+                return super().capture_model()
+            return super().capture_model(profile_only=profile_only)
 
     @torch.inference_mode()
     def execute_model(
