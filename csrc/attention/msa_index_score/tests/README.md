@@ -29,8 +29,8 @@ bash build.sh --run_example msa_index_score eager cust \
   --vendor_name=custom --soc=ascend950
 ```
 
-The expected summary is 40/40 passing cases on Ascend 950. A2/A3 skip four
-FP8 cases and run 36 cases.
+The expected summary is 50/50 passing cases on Ascend 950. A2/A3 skip ten
+FP8 cases and run 40 cases.
 
 ## 2. Test Matrix
 
@@ -61,6 +61,10 @@ right-down-causal masking.
 | `L1-stride-int8` | INT8 page axis has a gap of two | Quantized page copy with a stride |
 | `L0-wide-table-257` / `L1-wide-table-257-bf16` | Block-table width 257 | Ascend 950 C2UB windowed flush |
 | `L0-fp8-wide-table-257` | Width 257 with FP8 | Aligned score width and fill positions |
+| `L0-decode-q4-kv4` / `L0-decode-q4-kv4-b2` | Short decode with four query heads | MIX launch sized from estimated M tasks |
+| `L0-decode-q4-kv4-table275` | Short decode with a wide block table | Aligned score tail and windowed flush |
+| `L0-decode-q4-kv275` | Long-KV decode with 275 visible pages | Ascend 950 KV S-range splitting |
+| `L0-fp8-decode-*` | FP8 short and long-KV decode | E4M3FN/E5M2 compact, wide-table, and KV-split paths |
 
 The full matrix runs by default. The key layout is selected by `layout_key`
 (`layoutKeyOptional` in aclnn) and is not inferred from tensor rank.

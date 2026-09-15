@@ -92,6 +92,10 @@ Notation:
 - PageAttention BBND/BNBD keys may be non-contiguous on the physical-page axis
   on A2/A3 and Ascend 950. All inner axes must remain contiguous. TND keys must
   be contiguous, and `scale` remains tightly packed by logical page.
+- A2/A3 and Ascend 950 size the MIX launch from the estimated M-task count.
+  When short-M decode cannot fill the Ascend 950 AICs and spans multiple visible
+  KV S-tiles, `kvChunks` partitions the visible KV range across additional MIX
+  tasks. Short-KV and wide-table inputs keep a single KV chunk.
 - The operator returns block scores only and does not perform TopK.
 
 ## Build and Run
@@ -119,8 +123,8 @@ bash build.sh --run_example msa_index_score eager cust \
   --vendor_name=custom --soc=ascend950
 ```
 
-The expected result is 40/40 cases on Ascend 950. A2/A3 skip the four FP8
-cases and run 36 cases. FLOAT16/BFLOAT16/INT8 use a tolerance of `1e-3`; FP8
+The expected result is 50/50 cases on Ascend 950. A2/A3 skip the ten FP8
+cases and run 40 cases. FLOAT16/BFLOAT16/INT8 use a tolerance of `1e-3`; FP8
 uses `2e-2`.
 
 ## References
@@ -143,3 +147,6 @@ uses `2e-2`.
   `op_kernel/catlass`, derived from v1.3.1-notla. A2/A3 continue to use the
   repository Catlass submodule. The `msa_` prefix isolates only the A5-specific
   snapshot because its interfaces and implementation differ.
+- For Ascend 950 short-M/long-KV decode, host tiling derives `kvChunks` from
+  visible KV S-tiles. Both arch22 and arch35 schedulers split the S range and
+  only the final chunk writes the aligned tail fill.

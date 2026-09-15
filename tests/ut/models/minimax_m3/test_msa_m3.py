@@ -55,6 +55,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _minimax_m3_index_score,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
+    minimax_m3_index_decode_a5,
     minimax_m3_index_prefill,
     minimax_m3_index_tp_block_parallel_decode,
 )
@@ -544,21 +545,19 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
+def test_index_score_uses_ascendc_prefill_and_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
-        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
-    )
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
         return_value=AscendDeviceType.A5,
@@ -954,6 +953,75 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     assert "local_blocks" not in kwargs
 
 
+def test_ascendc_index_score_forwards_block_forcing_when_enabled() -> None:
+    expected = torch.zeros(2, 1, 4)
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
+        return_value=expected,
+        create=True,
+    ) as mock_index_score:
+        actual = _minimax_m3_index_score(
+            torch.zeros(1, 2, 128),
+            torch.zeros(4, 128, 128),
+            torch.tensor([[0, 1, 2, 3]], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([129], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            torch.zeros(2048, 2048, dtype=torch.int8),
+            init_blocks=2,
+            local_blocks=3,
+            force_blocks_in_kernel=True,
+        )
+
+    assert actual is expected
+    kwargs = mock_index_score.call_args.kwargs
+    assert kwargs["init_blocks"] == 2
+    assert kwargs["local_blocks"] == 3
+
+
+def test_a5_index_decode_uses_full_table_score_and_existing_topk_cleanup() -> None:
+    score = torch.tensor([[[4.0, 3.0, 2.0, 1.0]]])
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=MagicMock(return_value=True)),
+        ),
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._minimax_m3_index_score",
+            return_value=score,
+        ) as mock_score,
+        patch(
+            "vllm_ascend.models.minimax_m3.ops.msa_m3_npu._index_topk_postprocess_kernel",
+            create=True,
+        ) as mock_postprocess,
+    ):
+        topk_indices, select_num_idx = minimax_m3_index_decode_a5(
+            torch.zeros(1, 1, 128),
+            torch.zeros(4, 128, 128),
+            torch.tensor([[0, 1, 2, 3]], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([129], dtype=torch.int32),
+            torch.tensor([1], dtype=torch.int32),
+            torch.zeros(2048, 2048, dtype=torch.int8),
+            topk=2,
+            init_blocks=1,
+            local_blocks=1,
+            decode_query_len=1,
+        )
+
+    assert topk_indices.shape == (1, 1, 2)
+    assert topk_indices.dtype == torch.int32
+    assert select_num_idx.shape == (1, 1)
+    assert select_num_idx.dtype == torch.int32
+    assert mock_score.call_args.kwargs == {
+        "init_blocks": 1,
+        "local_blocks": 1,
+        "force_blocks_in_kernel": True,
+    }
+    mock_postprocess.__getitem__.assert_called_once_with((1, 1))
+    mock_postprocess.__getitem__.return_value.assert_called_once()
+
+
 def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
     idx_q = torch.ones(1, 2, 128, dtype=torch.bfloat16)
     index_key_cache = torch.zeros(4, 128, 128, dtype=torch.float8_e4m3fn)
@@ -1009,6 +1077,25 @@ def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
     assert "AdvanceStageWindow" in epilogue
     assert "FlushStageToStrideEnd" in epilogue
     assert "L0-fp8-wide-table-257" in example
+
+
+def test_bundled_ascendc_index_score_splits_long_kv_decode() -> None:
+    repo_root = Path(msa_m3_module.__file__).parents[3]
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
+    tiling = (op_root / "op_host" / "msa_index_score_tiling.cpp").read_text(encoding="utf-8")
+    tiling_data = (op_root / "op_host" / "msa_index_score_tiling.h").read_text(encoding="utf-8")
+    task = (op_root / "op_kernel" / "arch22" / "msa_index_score_task.h").read_text(encoding="utf-8")
+    a2_epilogue = (op_root / "op_kernel" / "arch22" / "msa_index_score_epilogue.h").read_text(encoding="utf-8")
+    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
+
+    assert "ValidateKeyInnerAxesContiguous" in tiling
+    assert "EstKvChunks" in tiling
+    assert "tilingData.set_kvChunks(kvChunks)" in tiling
+    assert "TILING_DATA_FIELD_DEF(uint32_t, kvChunks)" in tiling_data
+    assert "AssignSRange" in task
+    assert "strideOutToken_ <= MSA_STAGE_BLOCKS" in a2_epilogue
+    assert "L0-decode-q4-kv275" in example
+    assert "L0-fp8-e5m2-decode-q4-kv275" in example
 
 
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
