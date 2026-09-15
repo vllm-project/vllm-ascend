@@ -232,7 +232,10 @@ def scatter_mxfp_pa_nz_kv_cache(
     for src, cache in ((quant_key, key_cache), (quant_value, value_cache)):
         num_tokens, num_kv_heads, head_dim = src.shape
         src_bytes = src.view(torch.uint8) if src.dtype != torch.uint8 else src
-        nz = cache.view(
+        # aclnnIndex/aclnnIndexPut reject DT_FLOAT8_E4M3FN outright, so the
+        # cache side needs the byte view just like the payload side.
+        cache_bytes = cache.view(torch.uint8) if cache.dtype != torch.uint8 else cache
+        nz = cache_bytes.view(
             -1,
             num_kv_heads,
             head_dim // MXFP_KV_NZ_DIM_FRAG,
