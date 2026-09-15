@@ -96,6 +96,8 @@ def make_full_key(
     block_hash_hex: str,
     head_or_tp_rank: int,
     num_groups: int,
+    pp_rank: int = 0,
+    pp_size: int = 1,
 ) -> str:
     """Full-block key for the layerwise transfer.
 
@@ -103,10 +105,10 @@ def make_full_key(
     backward compatibility. Multi-group models include group_id
     (model@group_id@hash@rank) to distinguish groups.
     """
+    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
     if num_groups > 1:
-        return f"{model_name}@{group_id}@{block_hash_hex}@{head_or_tp_rank}"
-    else:
-        return f"{model_name}@{block_hash_hex}@{head_or_tp_rank}"
+        return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
+    return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
 
 
 def make_partial_key(
@@ -116,8 +118,11 @@ def make_partial_key(
     block_index: int,
     end_token: int,
     head_or_tp_rank: int,
+    pp_rank: int = 0,
+    pp_size: int = 1,
 ) -> str:
-    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}@{head_or_tp_rank}"
+    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
+    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
 
 
 def make_hit_check_keys(
@@ -126,16 +131,17 @@ def make_hit_check_keys(
     block_hash_hex: str,
     num_ranks: int,
     num_groups: int,
+    pp_size: int = 1,
 ) -> list[str]:
     """All-rank keys for scheduler-side hit check.
 
-    Returns one key per head_or_tp_rank (ranks in the same put_step
-    group share one key for MLA).
+    Returns one key per PP stage and head_or_tp_rank.
     """
-    if num_groups > 1:
-        return [f"{model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(num_ranks)]
-    else:
-        return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+    return [
+        make_full_key(model_name, group_id, block_hash_hex, rank, num_groups, pp_rank, pp_size)
+        for pp_rank in range(pp_size)
+        for rank in range(num_ranks)
+    ]
 
 
 def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:

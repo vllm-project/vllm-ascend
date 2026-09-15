@@ -368,11 +368,12 @@ def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
     adapter.apply.assert_called_once_with(attention.in_proj_qkvgfab, hidden_states, bias=None)
 
 
-def test_prefill_fuses_raw_gate_and_updates_v_first_state():
+@pytest.mark.parametrize("lower_bound", [None, -4.0])
+def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 2
-    attention.gate_lower_bound = None
+    attention.gate_lower_bound = lower_bound
     attention.A_log = nn.Parameter(torch.randn(1))
     attention.dt_bias = nn.Parameter(torch.randn(2))
 
@@ -395,7 +396,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state():
 
     with (
         patch("vllm_ascend.ops.kimi_kda.clear_ssm_states"),
-        patch("vllm_ascend.ops.kimi_kda.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
         patch.object(
             torch.ops._C_ascend,
             "chunk_kda_fwd",
@@ -419,8 +420,38 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state():
     assert chunk_kda_fwd.call_args.args[3] is raw_gate
     assert chunk_kda_fwd.call_args.kwargs["use_gate_in_kernel"] is True
     assert chunk_kda_fwd.call_args.kwargs["state_v_first"] is True
-    assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is False
+    assert chunk_kda_fwd.call_args.args[4] is beta
+    assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is (lower_bound is not None)
+    assert chunk_kda_fwd.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)
     torch.testing.assert_close(recurrent_state[state_indices], final_state)
+
+
+@pytest.mark.parametrize("lower_bound", [None, -4.0])
+@pytest.mark.parametrize("qkv_padding", [0, 64])
+def test_recurrent_preserves_preprocessed_beta_and_mtp_state(lower_bound, qkv_padding):
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.gate_lower_bound = lower_bound
+    attention.A_log, attention.dt_bias = torch.zeros(1), torch.zeros(128)
+    q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
+    beta = torch.full((1, 4, 1), 0.25)
+    state = torch.zeros(8, 1, 128, 128)
+    starts = torch.tensor([0, 4], dtype=torch.int32)
+    slots = torch.tensor([[2, 3, 4, 5]], dtype=torch.int32)
+    accepted = torch.tensor([2], dtype=torch.int32)
+    with patch.object(torch.ops._C_ascend, "recurrent_kda", return_value=q, create=True) as recurrent:
+        output = attention._run_recurrent(q, k, v, q, beta, state, starts, slots, num_accepted_tokens=accepted)
+    assert output is q
+    assert recurrent.call_args.args[0] is q
+    assert recurrent.call_args.args[1] is k
+    assert recurrent.call_args.args[2] is v
+    assert recurrent.call_args.args[4] is beta
+    assert recurrent.call_args.args[5] is state
+    assert recurrent.call_args.args[7] is slots
+    assert recurrent.call_args.kwargs["num_accepted_tokens"] is accepted
+    assert recurrent.call_args.kwargs["use_beta_sigmoid_in_kernel"] is False
+    assert recurrent.call_args.kwargs["safe_gate"] is (lower_bound is not None)
+    assert recurrent.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)
 
 
 def test_kda_empty_forward_context_clears_preallocated_output():

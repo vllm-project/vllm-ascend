@@ -56,10 +56,19 @@ class ParamInfo(VllmParamInfo):
 
 
 def _format_static_buffers_for_nz(
+    module_offloaders: list["_ModuleOffloader"],
     buffer_pool: StaticBufferPool,
     param_infos: list[ParamInfo],
 ) -> None:
-    """Cast static buffers to NZ format for keys whose parameters require it."""
+    """Cast static buffers to NZ format and re-bind params that require it.
+
+    npu_format_cast returns a NEW tensor, so the NZ buffers stored in the pool
+    are not the ones bound by PrefetchOffloader.post_init(): params still point
+    at the pre-cast ND buffers, and NZ-only w8a8 kernels
+    (e.g. npu_grouped_matmul_swiglu_quant) would read ND storage as NZ.
+    Re-bind NZ-marked params to the cast buffers so the subsequent initial
+    prefetches fill NZ storage before the first forward.
+    """
     key_to_use_nz: dict[tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype], bool] = {}
 
     for info in param_infos:
@@ -78,6 +87,54 @@ def _format_static_buffers_for_nz(
         buffer_pool._buffers[key] = [
             torch_npu.npu_format_cast(buffer, ACL_FORMAT_FRACTAL_NZ) for buffer in buffer_pool._buffers[key]
         ]
+
+    for offloader in module_offloaders:
+        for name, param_offloader in offloader._param_offloaders.items():
+            if not _is_prefetch_offload_nz_weight(param_offloader._param):
+                continue
+            cpu_storage = param_offloader._cpu_storage
+            nz_buffer = buffer_pool.get_buffer(
+                name=name,
+                shape=tuple(cpu_storage.shape),
+                stride=tuple(cpu_storage.stride()),
+                dtype=cpu_storage.dtype,
+                slot_idx=offloader._buffer_slot_idx,
+            )
+            param_offloader._gpu_buffer = nz_buffer
+            param_offloader._param.data = nz_buffer
+
+
+def _raise_if_nz_prefetch_incompatible_with_graph(param_infos: list[ParamInfo]) -> None:
+    """Fail fast when NZ static buffers would meet ACL graph capture.
+
+    The prefetch H2D copy from ND pinned CPU storage into a FRACTAL_NZ
+    static buffer requires an ND->NZ format conversion. The current
+    CANN/torch_npu stack does not support running aclop operators during
+    NPU graph capture, and on these versions the conversion is only
+    available as an aclop implementation, so this combination is
+    unsupported for now. Without this check the combo aborts EngineCore
+    at capture time with an opaque 107025 capture_end error.
+    """
+    nz_param_count = sum(1 for info in param_infos if info.use_nz_buffer)
+    if nz_param_count == 0:
+        return
+
+    # Lazy import: vllm.config pulls in platform plugins, which import us.
+    from vllm.config import get_current_vllm_config
+
+    if get_current_vllm_config().model_config.enforce_eager:
+        return
+
+    raise RuntimeError(
+        f"CPU weight offload is incompatible with ACL graph capture for "
+        f"{nz_param_count} offloaded parameter(s) stored in FRACTAL_NZ: the "
+        f"prefetch copy (ND pinned CPU storage -> NZ static buffer) requires "
+        f"an ND->NZ conversion, which is aclop-only on the current "
+        f"CANN/torch_npu versions; running aclop operators during NPU graph "
+        f"capture is not supported yet by these libraries. Use "
+        f"enforce_eager=True, or disable NZ weights "
+        f"(additional_config={{'weight_nz_mode': 0}})."
+    )
 
 
 class AscendPrefetchOffloader(PrefetchOffloader):
@@ -126,7 +183,11 @@ class AscendPrefetchOffloader(PrefetchOffloader):
             # No modules to offload
             return
 
-        _format_static_buffers_for_nz(self.buffer_pool, param_infos)
+        _raise_if_nz_prefetch_incompatible_with_graph(param_infos)
+        _format_static_buffers_for_nz(self.module_offloaders, self.buffer_pool, param_infos)
+
+        for i in range(min(self.prefetch_step, len(self.module_offloaders))):
+            self.module_offloaders[i].start_onload_to_static()
 
 
 class _ModuleOffloader(VllmModuleOffloader):

@@ -252,11 +252,13 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    requires_padded_page_layout,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -1381,7 +1383,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
-        elif self.uses_xdrope_dim > 0:
+        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -1539,7 +1541,7 @@ class NPUModelRunner(GPUModelRunner):
             self.positions[:total_num_scheduled_tokens],
         )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if self.use_async_spec_decode and (self.uses_mrope or (vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0)):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
@@ -3896,7 +3898,7 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
+            elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
@@ -4378,7 +4380,7 @@ class NPUModelRunner(GPUModelRunner):
         """Whether a cache spec requires one block-strided backing tensor."""
         return isinstance(
             kv_cache_spec,
-            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec, AscendIndexerKPoolTailSpec),
         ) and (
             self.use_compress
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
@@ -4516,10 +4518,7 @@ class NPUModelRunner(GPUModelRunner):
         # standardized descriptors, whose ``size`` is the size of one common
         # backing allocation rather than the size of an individual layer.
         use_legacy_shared_by_layout = vllm_version_is("0.28.0")
-        is_glm5_next = any(
-            getattr(spec, "model_version", None) == "glm5_next"
-            for spec in layer_kv_cache_spec.values()
-        )
+        uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = not use_legacy_shared_by_layout and any(
             getattr(spec, "model_version", None) == "deepseek_v4"
             for spec in layer_kv_cache_spec.values()
@@ -4556,7 +4555,7 @@ class NPUModelRunner(GPUModelRunner):
         # the compressed indexer and its state cache). This differs from the
         # generic main layout, which treats descriptor layers as independent
         # regions within one common backing.
-        if is_glm5_next:
+        if uses_padded_page_layout:
             for descriptor in kv_cache_config.kv_cache_tensors:
                 shared_layers = get_kv_cache_tensor_layers(descriptor)
                 if not shared_layers:
@@ -4643,7 +4642,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not use_legacy_shared_by_layout
             and not is_dsv4_main
-            and not is_glm5_next
+            and not uses_padded_page_layout
             and self.hybrid_with_attn_and_mamba
             and supports_shared_backing_with_kv_transfer
             and not self.use_sparse
@@ -4950,7 +4949,7 @@ class NPUModelRunner(GPUModelRunner):
     def _adjust_kv_layout(
         self,
         raw_tensor: torch.Tensor,
-        kv_cache_shape_list: list[int],
+        kv_cache_shape_list: list[tuple[int, ...]],
         kv_cache_dtype_list: list[int],
         page_size_bytes: int,
         overlap_full_kv_cache: bool = False,
@@ -4998,6 +4997,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -5365,6 +5365,19 @@ class NPUModelRunner(GPUModelRunner):
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
+                    if uses_padded_page_layout:
+                        # Recurrent state shares its physical pages with the
+                        # block-strided attention caches of the same pool. Both
+                        # views must advance by the same padded page size so
+                        # different scheduler block IDs cannot overwrite each
+                        # other.
+                        kv_caches[layer_name] = self._adjust_kv_layout(
+                            raw_tensor,
+                            [(num_blocks, *shape) for shape in current_kv_cache_spec.shapes],
+                            current_kv_cache_spec.dtypes,
+                            current_kv_cache_spec.page_size_bytes,
+                        )
+                        continue
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that

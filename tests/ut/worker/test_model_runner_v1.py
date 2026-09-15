@@ -28,14 +28,14 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
-    Glm5NextStateCache,
+    Glm5NextTailCache,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
@@ -604,9 +604,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         )
-        state_spec = AscendIndexerKPoolStateSpec(
+        state_spec = AscendIndexerKPoolTailSpec(
             block_size=2,
             sliding_window=2,
+            compress_ratio=2,
             num_kv_heads=1,
             head_size=3,
             dtype=torch.float32,
@@ -621,13 +622,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
         torch.nn.Module.__init__(indexer_module)
         indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
-        state_module = Glm5NextStateCache.__new__(Glm5NextStateCache)
+        state_module = Glm5NextTailCache.__new__(Glm5NextTailCache)
         torch.nn.Module.__init__(state_module)
         state_module.get_kv_cache_spec = lambda _config: state_spec
         mock_get_layers.return_value = {
             "model.layers.1.attn": main_module,
             "model.layers.1.indexer.k_cache": indexer_module,
-            "model.layers.1.indexer.state_cache": state_module,
+            "model.layers.1.indexer.tail_cache": state_module,
             "model.layers.0.linear_attn": FakeMamba(mamba_spec),
         }
 
@@ -639,7 +640,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             mamba_spec.page_size_bytes,
         )
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
-        self.assertIsNone(specs["model.layers.1.indexer.state_cache"].page_size_padded)
+        self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
