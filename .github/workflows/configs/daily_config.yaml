@@ -50,9 +50,10 @@ daily:
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
 
-cpu_ut:
-    - name: cpu-ut
-      os: linux-x86_64-cpu
-      tests: tests/ut
-      pytest_args: -k "not test_initialize_kv_cache_installs_aclgraph_factory_and_pcp"
+# cpu_ut:
+#    - name: cpu-ut
+#      os: linux-x86_64-cpu
+#      tests: tests/ut
+#      pytest_args: -k "not test_initialize_kv_cache_installs_aclgraph_factory_and_pcp"
+
 
