@@ -152,9 +152,9 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
         self._per_group_manager_block_sizes = {}
         self._per_group_replication_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
-        draft_vllm_config = (
-            self._create_draft_vllm_config() if getattr(self, "replicated_draft_kv", False) else self.vllm_config
-        )
+        draft_vllm_config = self.vllm_config
+        if getattr(self, "replicated_draft_kv", False):
+            draft_vllm_config = self._create_draft_vllm_config()
 
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & self._draft_attn_layer_names
@@ -242,13 +242,7 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
-        if gid in self._per_group_replication_sizes:
-            # Reserve the expanded table before capture; refresh live rows in
-            # the first pass while keeping the backing storage stable.
-            self._build_replicated_block_table(
-                gid, block_table, torch.zeros(block_table.shape[0], dtype=torch.int32, device=self.device)
-            )
-            self._per_group_block_table_buffers[gid] = self._replicated_block_table_storage[gid]
+        self._reserve_replicated_block_table(gid, block_table)
 
     def set_inputs_first_pass(
         self,
@@ -333,15 +327,14 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
                 DCP_RANK=dcp_rank,
                 CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
-            if gid in self._per_group_replication_sizes:
-                self._build_replicated_context_slot_mapping(
-                    gid,
-                    gid_block_table,
-                    target_positions,
-                    cad.query_start_loc,
-                    batch_size,
-                    self._dflash_num_context,
-                )
+            self._build_replicated_context_slot_mapping(
+                gid,
+                gid_block_table,
+                target_positions,
+                cad.query_start_loc,
+                batch_size,
+                self._dflash_num_context,
+            )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
@@ -384,9 +377,7 @@ class AscendDSparkProposer(DCPReplicatedDraftMixin, AscendDflashProposer):
             cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        if getattr(self, "replicated_draft_kv", False):
-            cad.context_parallel_metadata = None
-            cad.dcp_local_seq_lens = None
+        self._prepare_draft_cp_metadata(cad)
 
         if dcp_size > 1:
             if cad.is_prefilling is not None:
