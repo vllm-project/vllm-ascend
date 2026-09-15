@@ -31,14 +31,12 @@ daily:
       changed_files:
         - tests/
         - vllm_ascend/
-        - tests/e2e/pull_request/**  #新增：本次调试，pull_request用例改动触发
     - name: a2-nightly-hf
       os: linux-aarch64-a2b3-1
       changed_files:
         - tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
         - vllm_ascend/
         - .github/workflows/configs/daily_config.yaml
-        - tests/e2e/pull_request/**  #新增：本次调试，pull_request用例改动触发
       tests: >-
         tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
@@ -50,7 +48,6 @@ daily:
         - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
         - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
         - vllm_ascend/
-        - tests/e2e/pull_request/**  #新增：本次调试，pull_request用例改动触发
       tests: >-
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
