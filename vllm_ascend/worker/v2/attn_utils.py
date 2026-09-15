@@ -101,11 +101,6 @@ def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfi
     return replace(kv_cache_config, kv_cache_groups=groups)
 
 
-def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
-    """Keep the upstream normalization entry point for existing callers."""
-    return unwrap_mamba_kv_cache_groups(kv_cache_config)
-
-
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
