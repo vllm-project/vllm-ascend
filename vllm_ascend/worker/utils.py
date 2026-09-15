@@ -120,9 +120,11 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_tuple = static_forward_context[layer_name].kv_cache
-                assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+                kv_cache = static_forward_context[layer_name].kv_cache
+                # Fused MLA由单一tensor表示，zero直接从fused起点清理完整
+                # manager page；legacy K/V协议仍逐个component清理。
+                kv_tensors = (kv_cache,) if isinstance(kv_cache, torch.Tensor) else kv_cache
+                for kv in kv_tensors:
                     block_dim = 0
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:

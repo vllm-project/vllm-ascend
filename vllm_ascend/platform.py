@@ -31,6 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
@@ -229,6 +230,16 @@ class NPUPlatform(Platform):
         use_sparse = attn_selector_config.use_sparse
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
+
+        # FLASHMLA[REF-16468]: select the existing dense MLA backend before
+        # FA3 auto-selection. This draft does not transplant the GQA Flash path.
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            if use_sparse or use_compress or attn_selector_config.use_pcp:
+                raise ValueError(
+                    "FlashMLA requires dense, uncompressed attention with PCP=DCP=1."
+                )
+            if use_mla:
+                return "vllm_ascend.attention.mla_v1.AscendMLABackend"
 
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
@@ -458,6 +469,23 @@ class NPUPlatform(Platform):
         if vllm_config.model_config is None:
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
+
+        # FLASHMLA[REF-16468]: retain the A5/dense/unquantized/PCP=DCP=1
+        # constraints relevant to this MLA consumer. These checks do not
+        # qualify #16468's separate KDA/Mamba or DSpark integrations.
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            from vllm_ascend.device.device_config import is_950
+
+            cache = vllm_config.cache_config
+            parallel = vllm_config.parallel_config
+            if not is_950() or not vllm_config.model_config.use_mla:
+                raise ValueError("FlashMLA requires an A5 dense MLA target.")
+            if parallel.decode_context_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
+                raise ValueError("FlashMLA requires PCP=DCP=1.")
+            if cache.cache_dtype not in ("auto", "bfloat16", "float16"):
+                raise ValueError("FlashMLA requires an unquantized KV cache.")
+            if vllm_config.kv_transfer_config is not None:
+                raise ValueError("FlashMLA does not support KV transfer.")
 
         cls._validate_indexer_pp_config(vllm_config)
 

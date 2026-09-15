@@ -132,6 +132,7 @@ except ImportError:  # pragma: no cover - exercised on v0.28.0
     raise_if_nan_logits = None
 
 # yapf: enable
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
@@ -515,8 +516,17 @@ class NPUModelRunner(GPUModelRunner):
         # AscendMLABackend, and DSV4 compressed attention metadata) need
         # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
         # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+        # FLASHMLA[REF-16468]: its metadata consumes corrected device seq_lens,
+        # so the MLA path can skip the optimistic CPU-mirror correction. Keep
+        # legacy consumers on their old path even when a mixed model enables
+        # FlashMLA globally.
+        flash_mla_consumer = ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and issubclass(
+            self.attn_backend, AscendMLABackend
+        )
+        self._needs_seq_lens_cpu_sync = not flash_mla_consumer and (
+            self.use_compress or issubclass(
+                self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
+            )
         )
 
         # kv role
@@ -4825,6 +4835,7 @@ class NPUModelRunner(GPUModelRunner):
                                 kv_cache_raw_tensors[layer_name_inner] = (
                                     self._allocate_int8_cache_tensor(k_tensor_size, alignment),
                                 )
+                # 普通Attention kv cache分配分支
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
@@ -4836,6 +4847,34 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
+                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
+                    is_fused_mla = (
+                        isinstance(attn_module, MLAAttention)
+                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
+                        and not use_legacy_shared_by_layout
+                        and self.vllm_config.kv_transfer_config is None
+                        and not self.use_sparse
+                        and not self.sparse_kv_offload_enabled
+                        and not self.use_compress
+                        and not current_sparse_sfa_c8
+                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                        and getattr(current_kv_cache_spec, "model_version", None) is None
+                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
+                        and getattr(attn_module, "indexer", None) is None
+                        and not getattr(attn_module.impl, "fa_quant_layer", False)
+                    )
+                    # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
+                    # 使用上方standardized shared backing生成的bare raw tensor。
+                    # is_fused_mla只基于当前layer判断，不能推广到shared_layers。
+                    if is_fused_mla:
+                        fused_raw_size = (
+                            kv_cache_config.num_blocks
+                            * current_kv_cache_spec.page_size_bytes
+                        )
+                        kv_cache_raw_tensors[layer_name] = (
+                            self._allocate_int8_cache_tensor(fused_raw_size, alignment),
+                        )
+                        continue
 
                     # vLLM #51718 packs every layer of a group into a single
                     # KVCacheTensor on main; the per-layer size is the block
@@ -5141,6 +5180,74 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
+                        continue
+
+                    # Fused MLA使用allocate/hybrid阶段的一整块raw backing。
+                    # 这里构造token交错的单一fused view；mla_v1在forward入口
+                    # 派生nope/rope逻辑视图。MHA/GQA继续走raw K/V协议。
+                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
+                    raw_cache = kv_cache_raw_tensors[layer_name]
+                    fused_raw_tensor = None
+                    if isinstance(raw_cache, tuple) and len(raw_cache) == 1:
+                        maybe_raw_tensor = raw_cache[0]
+                        if isinstance(maybe_raw_tensor, torch.Tensor):
+                            fused_raw_tensor = maybe_raw_tensor
+                    elif isinstance(raw_cache, torch.Tensor):
+                        fused_raw_tensor = raw_cache
+
+                    if (
+                        fused_raw_tensor is not None
+                        and isinstance(attn_module, MLAAttention)
+                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
+                        and self.vllm_config.kv_transfer_config is None
+                        and not self.use_sparse
+                        and not self.sparse_kv_offload_enabled
+                        and not self.use_compress
+                        and not current_sparse_sfa_c8
+                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                        and getattr(current_kv_cache_spec, "model_version", None) is None
+                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
+                        and getattr(attn_module, "indexer", None) is None
+                        and not getattr(attn_module.impl, "fa_quant_layer", False)
+                    ):
+                        dtype = current_kv_cache_spec.dtype
+                        element_size = torch.empty((), dtype=dtype).element_size()
+                        manager_block_size = current_kv_cache_spec.block_size
+                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
+                        kernel_blocks_per_manager = manager_block_size // kernel_block_size
+                        physical_page_bytes = current_kv_cache_spec.page_size_bytes
+                        slot_bytes = physical_page_bytes // kernel_blocks_per_manager
+                        nope_dim, rope_dim = self._get_attention_kv_cache_dims(
+                            layer_name, current_kv_cache_spec
+                        )
+                        fused_dim = nope_dim + rope_dim
+                        typed_raw = fused_raw_tensor.view(dtype)
+                        slot_elements = slot_bytes // element_size
+                        fused_shape = (
+                            kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                            kernel_block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            fused_dim,
+                        )
+                        # 每个kernel slot内按token交错存储[nope|rope]：
+                        # token0[nope|rope], token1[nope|rope], ...。
+                        # cache协议只保留这个单一fused tensor，首轴stride
+                        # 携带hybrid page padding信息。
+                        fused_cache = torch.as_strided(
+                            typed_raw,
+                            size=fused_shape,
+                            stride=(
+                                slot_elements,
+                                current_kv_cache_spec.num_kv_heads * fused_dim,
+                                fused_dim,
+                                1,
+                            ),
+                            storage_offset=typed_raw.storage_offset(),
+                        )
+                        # FLASHMLA[ADAPT-16456]: inherited allocation/binding.
+                        # bind_kv_cache passes this whole [P,S,1,576] view to
+                        # attention; _forward_flash consumes it as PA_BBND.
+                        kv_caches[layer_name] = fused_cache
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:
@@ -5451,6 +5558,14 @@ class NPUModelRunner(GPUModelRunner):
                     kv_manager_block_size, backends
                 )
                 self.kernel_block_sizes.append([selected_kernel_size])
+                if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+                    # FLASHMLA[REF-16468]: builders precede kernel-page selection.
+                    # Propagate the chosen size for max_seq_len = table_width
+                    # * kernel_size. Block IDs index kernel pages; cache_lens
+                    # itself remains a token count, not a page count.
+                    for attn_group in attn_groups:
+                        for builder in attn_group.metadata_builders:
+                            builder.set_kernel_block_size(selected_kernel_size)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
@@ -5561,6 +5676,9 @@ class NPUModelRunner(GPUModelRunner):
                     if issubclass(attn_backend, AscendMLABackend)
                     else None
                 )
+                # FLASHMLA[TODO]: #16468 adds num_heads_q to this grouping key.
+                # The current key must be extended before layers with different
+                # Q head counts can safely share FlashMLA metadata builders.
                 key = (full_cls_name, layer_kv_cache_spec, use_mla_rope)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend,
@@ -5611,6 +5729,9 @@ class NPUModelRunner(GPUModelRunner):
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
+        # FLASHMLA[REF-16468]: reuse this provider/executor machinery already
+        # present in the #16456 base. AscendMLAMetadataBuilder now participates;
+        # worker/device_metadata.py itself is unchanged by this integration.
         device_metadata_providers = {
             id(builder): builder
             for attn_groups in self.attn_groups
