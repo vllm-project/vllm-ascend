@@ -212,9 +212,11 @@ def runtime():
             "get_pp_transport_tensors",
             "add_pp_transport_tensors",
             "add_pp_transport_buffers",
+            "make_empty_intermediate_tensors",
         },
         namespace,
     )
+    namespace["make_pp_empty_intermediate_tensors"] = namespace["make_empty_intermediate_tensors"]
     load_definitions("vllm_ascend/models/common/ops/sequence_parallel.py", {"sp_shard", "sp_padding_mask"}, namespace)
     load_definitions(
         "vllm_ascend/models/kimi_k3.py",
@@ -299,6 +301,29 @@ def make_model(namespace, context, start, end, block_size, sp, materialized):
     model.output_attn_res_proj = SimpleNamespace(weight=torch.ones(1, 3) * 0.1)
     model.output_attn_res_norm = SimpleNamespace(weight=torch.ones(3), variance_epsilon=1e-5)
     return model
+
+
+@pytest.mark.parametrize("include_start_layer, expected_count", [(True, 2), (False, 1)])
+def test_pp_aux_factory_preserves_base_tensors_and_capture_boundary(runtime, include_start_layer, expected_count):
+    namespace, _ = runtime
+    model = SimpleNamespace(start_layer=3, aux_hidden_state_layers=(1, 3, 5), config=SimpleNamespace(hidden_size=4))
+    hidden = torch.ones(2, 4)
+    residual = torch.ones(2, 2, 4)
+    base = IntermediateTensors({"hidden_states": hidden, "residual": residual})
+    factory = namespace["make_empty_intermediate_tensors"](
+        model, lambda batch_size, dtype, device: base, include_start_layer=include_start_layer
+    )
+    result = factory(2, torch.bfloat16, "cpu")
+    assert result is base
+    assert result["hidden_states"] is hidden
+    assert result["residual"] is residual
+    aux = namespace["get_pp_transport_tensors"](result, namespace["PPTransportDataType"].AUX_HIDDEN_STATES)
+    assert len(aux) == expected_count
+    for tensor in aux:
+        assert tensor.shape == (2, 4)
+        assert tensor.dtype == torch.bfloat16
+        assert tensor.device.type == "cpu"
+        assert torch.count_nonzero(tensor) == 0
 
 
 @pytest.mark.parametrize("num_tokens", [0, 1, 3, 8])

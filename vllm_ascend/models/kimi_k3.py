@@ -82,9 +82,11 @@ from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[
 from vllm_ascend.utils import enable_kimi_k3_sp, get_rotation_path
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
-    add_pp_transport_buffers,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
 if HAS_TRITON:
@@ -650,23 +652,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         return aux_hidden_states
 
     def make_empty_intermediate_tensors(self, batch_size, dtype, device):
-        tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
         # Materialized DSpark states are captured before a layer; raw states
         # are captured after the preceding layer. Handle a PP cut at either.
-        incoming_aux = sum(
-            layer_idx < self.start_layer
-            if self.dspark_aux_capture_materialized and self.config.attn_res_block_size is not None
-            else layer_idx <= self.start_layer
-            for layer_idx in self.aux_hidden_state_layers
-        )
-        return add_pp_transport_buffers(
-            tensors,
-            PPTransportDataType.AUX_HIDDEN_STATES,
-            incoming_aux,
-            (batch_size, self.config.hidden_size),
-            dtype,
-            device,
-        )
+        return make_pp_empty_intermediate_tensors(
+            self,
+            super().make_empty_intermediate_tensors,
+            include_start_layer=not (
+                self.dspark_aux_capture_materialized and self.config.attn_res_block_size is not None
+            ),
+        )(batch_size, dtype, device)
 
     def load_weights(self, weights):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
