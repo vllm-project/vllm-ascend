@@ -594,7 +594,13 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
-        return {name: parts[0] if len(parts) == 1 else parts for name, parts in caches.items()}
+        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        # Indexer reshape expects a tuple even without a quantization scale.
+        # Single-component main MLA caches still use a raw Tensor.
+        return {
+            name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
+            for name, parts in caches.items()
+        }
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}

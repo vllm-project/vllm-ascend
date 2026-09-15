@@ -1279,3 +1279,17 @@
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
 #
+# ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#    Why:
+#       The upstream adaptive-verification draft-budget allocator is wrapped by
+#       `torch.compile`, whose compiled path is not supported on Ascend.
+#    How:
+#       Replace the compiled wrapper with the original eager allocator while
+#       preserving the upstream budget-allocation algorithm.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/47808
+#    Future Plan:
+#       Remove this patch when the compiled allocator is supported on Ascend.
+#

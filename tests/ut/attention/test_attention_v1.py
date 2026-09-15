@@ -19,6 +19,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
     using_paged_attention,
@@ -97,9 +98,16 @@ class TestAscendAttentionBackend(TestBase):
                 AscendAttentionDCPMetadataBuilder,
             )
 
-    def test_get_kv_cache_shape_not(self):
-        result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
+    def test_get_kv_cache_shape(self):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", None):
+            result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
         self.assertEqual(result, (2, 10, 20, 30, 40))
+
+    def test_get_kv_cache_shape_uses_bnsd_for_hnd_layouts(self):
+        for layout in ("LBHNC", "HND"):
+            with self.subTest(layout=layout), patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", layout):
+                result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
+            self.assertEqual(result, (2, 10, 30, 20, 40))
 
     def test_swap_blocks(self):
         src_kv_cache = [torch.zeros((10, 20)), torch.zeros((10, 20))]
@@ -228,6 +236,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     impl.value_cache = None
     impl.kv_sharing_target_layer_name = None
     impl.is_kv_producer = True
+    impl.use_bnsd_kv_cache = False
 
     query = torch.empty((4, 2, 1))
     output = torch.empty((4, 2, 1))
@@ -445,6 +454,104 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name="producer_layer",
         )
+
+    def test_hnd_layout_is_recorded_during_initialization(self):
+        with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
+            impl = AscendAttentionBackendImpl(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                num_kv_heads=8,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="float16",
+                logits_soft_cap=None,
+                attn_type=self.attention_type.DECODER,
+                kv_sharing_target_layer_name=None,
+            )
+
+        self.assertEqual(impl.kv_cache_layout, "HND")
+        self.assertTrue(impl.use_bnsd_kv_cache)
+
+    def test_hnd_reshape_and_cache_passes_bnsd_to_device_operator(self):
+        self.impl.use_bnsd_kv_cache = True
+        query = torch.empty(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+
+        with (
+            patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+            patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
+        ):
+            self.impl.reshape_and_cache(
+                query,
+                key,
+                value,
+                (key_cache, value_cache),
+                metadata,
+                output,
+            )
+
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
+
+    def test_hnd_do_kv_cache_update_passes_bnsd_to_device_operator(self):
+        self.impl.use_bnsd_kv_cache = True
+        self.impl.key_cache = None
+        self.impl.value_cache = None
+        key = torch.randn(2, 8, 64)
+        value = torch.randn_like(key)
+        key_cache = torch.empty(4, 8, 128, 64)
+        value_cache = torch.empty_like(key_cache)
+        slot_mapping = torch.arange(2)
+
+        with patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache:
+            self.impl.do_kv_cache_update(
+                MagicMock(),
+                key,
+                value,
+                [key_cache, value_cache],
+                slot_mapping,
+            )
+
+        reshape_and_cache.assert_called_once()
+        call_kwargs = reshape_and_cache.call_args.kwargs
+        self.assertIs(call_kwargs["key_cache"], key_cache)
+        self.assertIs(call_kwargs["value_cache"], value_cache)
+        self.assertTrue(call_kwargs["use_bnsd"])
+
+    def test_get_fia_params_uses_layout_specific_cache_view(self):
+        metadata = MagicMock()
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.block_tables = torch.zeros(1, 1)
+        metadata.seq_lens_list = [1]
+        current_key = torch.empty(1, 8, 64)
+        current_value = torch.empty_like(current_key)
+
+        self.impl.use_bnsd_kv_cache = False
+        self.impl.key_cache = torch.empty(4, 128, 8, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        self.assertEqual(key.shape, (4, 128, 512))
+        self.assertEqual(value.shape, (4, 128, 512))
+        self.assertEqual(block_size, 128)
+
+        self.impl.use_bnsd_kv_cache = True
+        self.impl.key_cache = torch.empty(4, 8, 128, 64)
+        self.impl.value_cache = torch.empty_like(self.impl.key_cache)
+        key, value, block_size, _, _ = self.impl._get_fia_params(current_key, current_value, metadata)
+        self.assertEqual(key.shape, (4, 8, 128, 64))
+        self.assertEqual(value.shape, (4, 8, 128, 64))
+        self.assertEqual(block_size, 128)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
@@ -780,3 +887,123 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_fia,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """Test behavior when _ATTN_KEYS_BUFFER is [] after dummy_run."""
+
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        param: list[MagicMock | None] = [MagicMock()] * 22
+        param[16] = None  # sliding_window
+        param[17] = None  # c8_k_aq_scale
+        param[21] = None  # layer_name
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()] * 3}
+
+        attn_metadata_keys = [
+            "model.layers.10.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+        ]
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {key: MagicMock() for key in attn_metadata_keys}
+        # breakpoint()
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        expected = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.5.self_attn.attn",
+            "model.layers.10.self_attn.attn",
+        ]
+        self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
+        self.assertEqual(mock_fia.out.call_count, 3)
+
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params_handles_captured_paged_attention_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_get_workspace,
+        mock_paged_attention,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        query = MagicMock()
+        key_cache = MagicMock()
+        value_cache = MagicMock()
+        block_table = MagicMock()
+        output = MagicMock()
+        captured_seq_lens = MagicMock()
+        current_seq_lens = MagicMock()
+        pa_param = PagedAttentionGraphParam(
+            (
+                query,
+                key_cache,
+                value_cache,
+                8,
+                8,
+                1.0,
+                block_table,
+                captured_seq_lens,
+                output,
+            ),
+            "model.layers.0.self_attn.attn",
+        )
+
+        mock_get_graph_params.return_value.attn_params = {1: [pa_param]}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()]}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()]}
+
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {
+            "model.layers.0.self_attn.attn": MagicMock(
+                seq_lens=current_seq_lens,
+                block_tables=block_table,
+                seq_lens_list=[10],
+            ),
+        }
+
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        mock_get_workspace.assert_called_once()
+        mock_paged_attention.assert_called_once()
+        self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
+        mock_graph_task_update_begin.assert_called_once()
+        mock_graph_task_update_end.assert_called_once()

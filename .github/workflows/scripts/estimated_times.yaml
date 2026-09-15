@@ -9,12 +9,14 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
+  tests/e2e/pull_request/four_card/test_kvpp_pd.py: 180
   tests/e2e/pull_request/two_card/test_kvpp.py: 300
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
   tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 480
   tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 330
-  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 340
+  tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 600
   tests/e2e/pull_request/one_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_batch_invariant.py: 550
   tests/e2e/pull_request/one_card/compile/test_graphex_norm_quant_fusion.py: 170

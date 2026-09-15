@@ -199,6 +199,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
+        impl.g_proj = None
         impl.layer_name = "layers.0.attn"
 
         q_c = MagicMock()
