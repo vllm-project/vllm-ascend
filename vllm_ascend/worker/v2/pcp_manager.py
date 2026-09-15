@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -44,6 +44,8 @@ class AscendPCPAttentionContext:
     hidden_restore_idx: torch.Tensor
     padded_gather_idx: torch.Tensor | None = None
     gathered_kv_write_mask: torch.Tensor | None = None
+    # CPU snapshot of allocated kernel-block counts in global request order.
+    global_block_table_num_blocks: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -91,6 +93,28 @@ class AscendPCPManager(PCPManager):
             # normally reserves one additional FIA padding slot, but PCP never
             # uses that slot; expose the exact upstream-sized view here.
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+
+    @staticmethod
+    def broadcast_replicated_hidden_states(
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+        num_tokens: int,
+        replicated_pcp: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Broadcast actual draft hidden states only when target PCP is replicated."""
+        if not replicated_pcp:
+            return last_hidden_states, hidden_states
+
+        # Draft tokens are replicated: broadcast PCP rank 0 directly,
+        # matching target decode's gather-then-select behavior.
+        pcp_group = get_pcp_group()
+        shared_hidden_states = hidden_states is last_hidden_states
+        last_hidden_states = pcp_group.broadcast(last_hidden_states[:num_tokens].contiguous(), src=0)
+        if shared_hidden_states:
+            hidden_states = last_hidden_states
+        else:
+            hidden_states = pcp_group.broadcast(hidden_states[:num_tokens].contiguous(), src=0)
+        return last_hidden_states, hidden_states
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -470,6 +494,11 @@ class AscendPCPManager(PCPManager):
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
+        global_block_table_num_blocks = None
+        if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
+            global_block_table_num_blocks = torch.from_numpy(
+                self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
+            )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
@@ -480,4 +509,5 @@ class AscendPCPManager(PCPManager):
             hidden_restore_idx=hidden_restore_idx,
             padded_gather_idx=self._padded_gather_idx,
             gathered_kv_write_mask=self._gathered_kv_write_mask,
+            global_block_table_num_blocks=global_block_table_num_blocks,
         )
