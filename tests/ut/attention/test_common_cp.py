@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -9,18 +10,61 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
-    get_dcp_local_seq_lens,
 )
 
 
 class TestCommonCP(unittest.TestCase):
+    def test_dcp_rank_lengths_match_token_ownership(self):
+        for dcp_size in (1, 2, 4):
+            for interleave in (1, 4, 128):
+                lengths = [
+                    0,
+                    1,
+                    interleave - 1,
+                    interleave,
+                    interleave + 1,
+                    dcp_size * interleave - 1,
+                    dcp_size * interleave,
+                    dcp_size * interleave + 1,
+                ]
+                expected = torch.tensor(
+                    [
+                        [
+                            sum((token // interleave) % dcp_size == rank for token in range(length))
+                            for rank in range(dcp_size)
+                        ]
+                        for length in lengths
+                    ],
+                    dtype=torch.int32,
+                ).reshape(2, 4, dcp_size)
+                for dtype in (torch.int32, torch.int64):
+                    seq_lens = torch.tensor(lengths, dtype=dtype).reshape(2, 4)
+                    with self.subTest(size=dcp_size, interleave=interleave, dtype=dtype):
+                        actual = get_dcp_local_seq_lens(
+                            seq_lens, dcp_size=dcp_size, cp_kv_cache_interleave_size=interleave
+                        )
+                        torch.testing.assert_close(actual, expected)
+                        for rank in range(dcp_size):
+                            local = get_dcp_local_seq_lens(
+                                seq_lens, dcp_size=dcp_size, dcp_rank=rank, cp_kv_cache_interleave_size=interleave
+                            )
+                            torch.testing.assert_close(local, expected[..., rank])
+
+    def test_dcp_lengths_empty_batch(self):
+        seq_lens = torch.empty((0, 3), dtype=torch.int32)
+        self.assertEqual(get_dcp_local_seq_lens(seq_lens, dcp_size=4, cp_kv_cache_interleave_size=128).shape, (0, 3, 4))
+        self.assertEqual(
+            get_dcp_local_seq_lens(seq_lens, dcp_size=4, dcp_rank=2, cp_kv_cache_interleave_size=128).shape,
+            (0, 3),
+        )
+
     def test_get_dcp_local_seq_lens(self):
         seq_lens = torch.tensor([1, 4, 5, 8, 9], dtype=torch.int32)
 
         actual = get_dcp_local_seq_lens(
             seq_lens,
             dcp_size=2,
-            interleave_size=4,
+            cp_kv_cache_interleave_size=4,
         )
 
         expected = torch.tensor(
@@ -44,7 +88,7 @@ class TestCommonCP(unittest.TestCase):
         actual = get_dcp_local_seq_lens(
             seq_lens,
             dcp_size=2,
-            interleave_size=4,
+            cp_kv_cache_interleave_size=4,
         )
 
         self.assertEqual(actual.shape, (2, 2, 2))

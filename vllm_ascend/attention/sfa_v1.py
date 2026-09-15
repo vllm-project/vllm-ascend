@@ -1585,7 +1585,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (*main_cache, *indexer_cache)
 
-    def _get_indexer_attn_metadata(self) -> Any | None:
+    def _get_indexer_attn_metadata(self, attn_metadata: M) -> Any | None:
         """Fetch the indexer cache layer's own metadata, built by the indexer
         backend's builder; ``None`` when this layer has no runtime indexer."""
         if not self.runtime_has_indexer:
@@ -1642,7 +1642,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos = attn_metadata.cos
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
-        indexer_attn_metadata = self._get_indexer_attn_metadata()
+        indexer_attn_metadata = self._get_indexer_attn_metadata(attn_metadata)
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens

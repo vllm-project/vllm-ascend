@@ -306,7 +306,7 @@ class TestAscendSFACacheComposition(TestBase):
         )
         mock_get_forward_context.return_value.attn_metadata = {"model.layers.0.indexer": own_metadata}
 
-        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(own_metadata), own_metadata)
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_missing_raises(self, mock_get_forward_context):
@@ -319,7 +319,7 @@ class TestAscendSFACacheComposition(TestBase):
         mock_get_forward_context.return_value.attn_metadata = {}
 
         with self.assertRaises(RuntimeError):
-            impl._get_indexer_attn_metadata()
+            impl._get_indexer_attn_metadata(SimpleNamespace())
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_falls_back_to_main_metadata(self, mock_get_forward_context):
@@ -335,7 +335,7 @@ class TestAscendSFACacheComposition(TestBase):
         main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
         mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
 
-        self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(main_metadata), main_metadata)
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
@@ -354,7 +354,7 @@ class TestAscendSFACacheComposition(TestBase):
             "model.layers.77.self_attn.indexer.k_cache": target_metadata
         }
 
-        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(target_metadata), target_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
@@ -997,7 +997,7 @@ class TestAscendSFAImpl(TestBase):
                 self.impl.preprocess_type = preprocess_type
                 self.impl.has_indexer = has_indexer
                 self.impl._is_mtp_layer = is_mtp
-                self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
+                self.impl._get_indexer_attn_metadata = lambda _: metadata if self.impl.has_indexer else None
                 self.impl.skip_topk = True
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache

@@ -22,11 +22,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from vllm.config import VllmConfig
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.attention.context_parallel.common_cp import (
-    get_dcp_local_seq_lens,
-)
 from vllm_ascend.spec_decode.utils import correct_optimistic_seq_lens_cpu
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -509,8 +507,8 @@ class DCPManager:
         """Return each request's interleave-aware KV length on every DCP rank."""
         return get_dcp_local_seq_lens(
             seq_lens,
-            self.dcp_world_size,
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            dcp_size=self.dcp_world_size,
+            cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
     def prepare_dspark_first_pass_cp_metadata(
@@ -696,7 +694,7 @@ class DCPManager:
             max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
-        if self.speculative_config and not self.use_sparse and not self.vllm_config.model_config.use_mla:
+        if self.speculative_config and not self.vllm_config.model_config.use_mla:
             if self.num_decode_reqs > 0:
                 decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:
@@ -730,9 +728,10 @@ class DCPManager:
         total_lens = histories + q_lens
         k_lens = get_dcp_local_seq_lens(
             total_lens,
-            self.dcp_world_size,
-            interleave_size,
-        )[:, self.dcp_world_rank]
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_world_rank,
+            cp_kv_cache_interleave_size=interleave_size,
+        )
         valid = k_lens > 0
         output = self.dcp_mtp_attn_mask.cpu[:num_decode_reqs]
         output.zero_()
@@ -749,9 +748,10 @@ class DCPManager:
         inclusive_positions = positions + 1
         local_q = get_dcp_local_seq_lens(
             inclusive_positions,
-            self.dcp_world_size,
-            interleave_size,
-        )[..., self.dcp_world_rank]
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_world_rank,
+            cp_kv_cache_interleave_size=interleave_size,
+        )
         upper = local_q - 1
         # Before this rank's first key, upper is -1 and every local key is
         # in the query's future, even if later queries have local context.
