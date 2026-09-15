@@ -1,0 +1,15 @@
+name: Test Liqo 910b
+
+on:
+  push:
+    branches: [test/liqo-sz-lab-runner]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: linux-aarch64-910b-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - run: npu-smi info && sleep 60
