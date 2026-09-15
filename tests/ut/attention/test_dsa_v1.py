@@ -44,6 +44,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     build_compressor_metadata_out,
+    build_dspark_swa_indices,
     build_vision_bidirectional_swa_indices,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -259,7 +260,10 @@ def test_num_compressor_metadata_rows(
     assert builder._num_compressor_metadata_rows(num_reqs) == expected_rows
 
 
-def test_draft_swa_and_sas_share_attention_task():
+@pytest.mark.parametrize("use_sparse_flash", [False, True])
+@patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla")
+def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_sparse_flash):
+    draft_uses_sparse_flash.return_value = use_sparse_flash
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
     assert builder.dspark_swa_indices_buffer is not None
@@ -272,6 +276,11 @@ def test_draft_swa_and_sas_share_attention_task():
     plan.layout_kv = "PA_BBND"
 
     with (
+        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
+        patch(
+            "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
+            return_value=use_sparse_flash,
+        ),
         patch.object(
             DeviceOperator,
             "get_dsa_decode_cu_seqlens_ori_kv",
@@ -294,6 +303,19 @@ def test_draft_swa_and_sas_share_attention_task():
 
         task[0].run()
 
+        assert metadata.use_sparse_flash_mla_for_draft == use_sparse_flash
+        if use_sparse_flash:
+            lengths = metadata.dspark_swa_topk_lengths
+            assert lengths is not None
+            assert builder.dspark_swa_topk_lengths_buffer is not None
+            assert lengths.data_ptr() == builder.dspark_swa_topk_lengths_buffer.data_ptr()
+            assert lengths[:, 0].tolist() == [10] * 3 + [14] * 3
+            kwargs = metadata_op.call_args.kwargs
+            assert kwargs["ori_topk"] == metadata.dspark_swa_indices.shape[-1]
+            assert kwargs["ori_topk_length"] is lengths
+            assert kwargs["ori_mask_mode"] == 0
+            assert kwargs["cmp_mask_mode"] == 0
+            assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
         first_indices = metadata.dspark_swa_indices.clone()
         next_metadata = _build_draft_req_metadata(
             builder,
@@ -304,9 +326,75 @@ def test_draft_swa_and_sas_share_attention_task():
         next_task = builder.take_device_metadata_tasks()
         assert next_metadata.dspark_swa_indices.data_ptr() == metadata.dspark_swa_indices.data_ptr()
         next_task[0].run()
+        if use_sparse_flash:
+            next_lengths = next_metadata.dspark_swa_topk_lengths
+            assert next_lengths is not None
+            assert next_lengths.data_ptr() == lengths.data_ptr()
+            assert next_lengths.shape == (3, 1)
+            assert next_lengths[:, 0].tolist() == [12] * 3
+            assert metadata_op.call_args.kwargs["ori_topk_length"] is next_lengths
 
     assert metadata_op.call_count == 2
     assert not torch.equal(next_metadata.dspark_swa_indices, first_indices[:3])
+    assert torch.equal(metadata.sas_metadata, sas_result)
+
+
+@patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla", return_value=True)
+def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse_flash):
+    builder = _make_builder(1, num_speculative_tokens=3)
+    builder.enable_dspark_device_metadata(max_num_tokens=16)
+    builder.num_actual_tokens = 6
+    builder.num_decode_tokens = 6
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([10, 14], dtype=torch.int32)
+    builder.block_table = torch.tensor([[2, 3], [5, 6]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3, 6], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        num_input_tokens=6,
+        positions=torch.arange(6),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        causal=False,
+    )
+    sas_result = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=sas_result)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_kwargs={},
+        get_dsa_sparse_attn_metadata_op=MagicMock(),
+    )
+    plan.layout_kv = "PA_BBND"
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as get_cmp_offsets,
+    ):
+        metadata = builder.build_req_metadata(
+            common_attn_metadata=common_attn_metadata,
+            seq_lens_cpu=builder.seq_lens,
+            num_actual_reqs=None,
+            cos=torch.ones(6),
+            sin=torch.zeros(6),
+        )
+        tasks = builder.take_device_metadata_tasks()
+        assert len(tasks) == 1
+        tasks[0].run()
+
+    assert metadata.use_sparse_flash_mla_for_draft
+    assert metadata.dspark_swa_topk_lengths is not None
+    assert metadata.dspark_swa_topk_lengths[:, 0].tolist() == [10] * 3 + [14] * 3
+    assert metadata.dspark_swa_indices is not None
+    assert metadata.dspark_swa_indices[0, 0, :10].tolist() == list(range(10))
+    assert metadata.dspark_swa_indices[3, 0, :14].tolist() == list(range(14))
+    get_ori_offsets.assert_not_called()
+    get_cmp_offsets.assert_not_called()
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["ori_topk_length"] is metadata.dspark_swa_topk_lengths
+    assert kwargs["ori_mask_mode"] == kwargs["cmp_mask_mode"] == 0
+    assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
     assert torch.equal(metadata.sas_metadata, sas_result)
 
 
@@ -2119,3 +2207,68 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             output[:local_num_actual_tokens],
             attention_output.view(local_num_actual_tokens, 2),
         )
+
+
+@pytest.mark.parametrize("logical_indices", [False, True])
+def test_dspark_indices_preserve_physical_fallback(logical_indices):
+    indices, lengths = build_dspark_swa_indices(
+        block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        num_speculative_tokens=3,
+        window_size=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=3,
+        index_width=8,
+        logical_indices=logical_indices,
+    )
+    expected = [0, 1, 2, 3, 4, 5] if logical_indices else [20, 21, 22, 23, 8, 9]
+    assert indices[:, 0].tolist() == [expected + [-1, -1]] * 3
+    assert lengths.shape == ((3, 1) if logical_indices else (3,))
+    assert lengths.flatten().tolist() == [6] * 3
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_sparse_flash_forward_requires_draft_metadata(is_draft):
+    impl = _make_impl()
+    impl.compress_ratio = 1
+    impl.multistream_dsv4_dsa_overlap = False
+    req = _make_req_metadata()
+    req.cos = {"layer": torch.ones(2, 1, 1, 2)}
+    req.sin = {"layer": torch.zeros(2, 1, 1, 2)}
+    req.sas_metadata = torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    req.use_sparse_flash_mla_for_draft = is_draft
+    # Indices alone must not switch the main model's operator.
+    req.dspark_swa_indices = torch.zeros((2, 1, 128), dtype=torch.int32)
+    req.dspark_swa_topk_lengths = torch.ones((2, 1), dtype=torch.int32)
+    metadata = AscendDSAMetadata(2, 1, 2, 0, req_metadata=req)
+    layer = AscendDSALayerMetadata(attention=metadata, swa=metadata)
+    output = torch.ones(2, 1, 2)
+    original_op = MagicMock(return_value=(output,))
+    draft_op = MagicMock(return_value=(output,))
+    plan = _mock_dsa_kv_plan(get_dsa_sparse_attn_op=original_op, get_dsa_sparse_attn_base_kwargs={})
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=is_draft),
+        patch.object(
+            DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
+        ),
+        patch.object(impl, "_mla_prolog_single_stream", return_value=(output, output, None)),
+        patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_device_metadata"),
+        patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
+    ):
+        assert impl._forward_attention("layer", torch.ones(2, 4), (), layer) is output
+    selected, unused = (draft_op, original_op) if is_draft else (original_op, draft_op)
+    selected.assert_called_once()
+    unused.assert_not_called()
+    kwargs = selected.call_args.kwargs
+    assert kwargs["cmp_ratio"] == 1
+    assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
+    if is_draft:
+        assert kwargs["cmp_mask_mode"] == 0
+        assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths
+        assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+    else:
+        assert "ori_topk_length" not in kwargs
