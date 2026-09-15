@@ -20,6 +20,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.v1.serial_utils import MsgpackEncoder
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LookupHashMode
 
@@ -36,7 +37,7 @@ RPC_SAMPLES = 1000
 BLOCK_SIZE = 128
 COMMON_PREFIX_BLOCKS = 512
 SERVING_REQUESTS = 64
-SERVING_OUTPUT_TOKENS = 1
+SERVING_OUTPUT_TOKENS = 8
 GPU_BLOCKS = 640
 SERVING_SAMPLES_PER_INSTANCE = 5
 SERVING_MODE_ORDERS = (
@@ -73,6 +74,8 @@ SERVING_PERFORMANCE_FIELDS = (
     "p50_e2el_ms",
     "p90_e2el_ms",
     "p99_e2el_ms",
+    "mean_itl_ms",
+    "p99_itl_ms",
 )
 
 
@@ -518,7 +521,7 @@ def run_serving_mode(
     with SingleNodeMemcacheManager(config, case_name) as pool:
         port = get_open_port()
         # This is intentionally a low-noise upper-bound scenario for lookup
-        # payload savings. A dense model and one-token output minimize
+        # payload savings. A dense model and short output minimize
         # unrelated model, collective, and decode work, while the long local
         # prefix maximizes the hashes that FULL sends and SUFFIX omits.
         args = [
@@ -727,6 +730,8 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
                     "p99_ttft_reduction_percent": (1 - suffix["p99_ttft_ms"] / full["p99_ttft_ms"]) * 100,
                     "mean_e2el_reduction_percent": (1 - suffix["mean_e2el_ms"] / full["mean_e2el_ms"]) * 100,
                     "p99_e2el_reduction_percent": (1 - suffix["p99_e2el_ms"] / full["p99_e2el_ms"]) * 100,
+                    "mean_itl_reduction_percent": (1 - suffix["mean_itl_ms"] / full["mean_itl_ms"]) * 100,
+                    "p99_itl_reduction_percent": (1 - suffix["p99_itl_ms"] / full["p99_itl_ms"]) * 100,
                 }
             )
 
@@ -737,6 +742,8 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "p99_ttft_reduction_percent",
         "mean_e2el_reduction_percent",
         "p99_e2el_reduction_percent",
+        "mean_itl_reduction_percent",
+        "p99_itl_reduction_percent",
     )
     distributions = {
         field: {
@@ -746,15 +753,37 @@ def paired_serving_comparison(runs: list[dict[str, Any]]) -> dict[str, Any]:
         for field in comparison_fields
         if comparisons
     }
+    instance_pair_means = []
+    for round_index in range(len(SERVING_MODE_ORDERS)):
+        samples = [comparison for comparison in comparisons if comparison["round"] == round_index]
+        if len(samples) != SERVING_SAMPLES_PER_INSTANCE:
+            continue
+        instance_pair_means.append(
+            {
+                "round": round_index,
+                **{field: statistics.fmean(sample[field] for sample in samples) for field in comparison_fields},
+            }
+        )
+    instance_pair_distributions = {
+        field: {
+            **value_distribution([comparison[field] for comparison in instance_pair_means]),
+            "suffix_win_count": sum(comparison[field] > 0 for comparison in instance_pair_means),
+        }
+        for field in comparison_fields
+        if instance_pair_means
+    }
     return {
         "pairs": len(comparisons),
         "expected_pairs": len(SERVING_MODE_ORDERS) * SERVING_SAMPLES_PER_INSTANCE,
         "validation_errors": validation_errors,
-        "distributions": distributions,
+        "sample_distributions": distributions,
+        "instance_pair_mean_distributions": instance_pair_distributions,
+        "instance_pair_means": instance_pair_means,
         "raw_pairs": comparisons,
     }
 
 
+@wait_until_npu_memory_free()
 def test_vllm_serve_lookup_payload_benchmark(tmp_path):
     """Compare isolated, counterbalanced serving runs after a long HBM hit."""
     pytest.importorskip("memcache_hybrid")
@@ -768,7 +797,7 @@ def test_vllm_serve_lookup_payload_benchmark(tmp_path):
         "config": {
             "mode_orders": [[mode.value for mode in order] for order in SERVING_MODE_ORDERS],
             "model": MODEL,
-            "scenario": "lookup_payload_upper_bound",
+            "scenario": "lookup_payload_stress",
             "tensor_parallel_size": 1,
             "expert_parallel": False,
             "async_scheduling": False,
