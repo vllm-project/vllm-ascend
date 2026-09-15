@@ -631,7 +631,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --quantization ascend \
   --async-scheduling \
   --enforce-eager \
-  --speculative-config '{"num_speculative_tokens": 1, "method": "qwen3_5_mtp", "enforce_eager": true}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "qwen3_5_mtp", "enforce_eager": true}' \
   --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
