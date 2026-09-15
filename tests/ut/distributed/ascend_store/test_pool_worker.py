@@ -54,13 +54,17 @@ def make_worker(
     enable_kv_events=False,
     num_hidden_layers=None,
     use_kvpp=False,
+    pcp_size=1,
+    pcp_rank=0,
+    dcp_size=1,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
-    pcp_group.return_value.world_size = 1
-    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+    pcp_group.return_value.world_size = pcp_size
+    pcp_group.return_value.rank_in_group = pcp_rank
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
     start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
@@ -78,7 +82,8 @@ def make_worker(
     config.parallel_config.rank = 0
     config.parallel_config.pipeline_parallel_size = 1
     config.parallel_config.tensor_parallel_size = tp_size
-    config.parallel_config.prefill_context_parallel_size = 1
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.parallel_config.decode_context_parallel_size = dcp_size
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
@@ -93,6 +98,35 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise)
+
+
+class TestPCPPoolWorker(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_replica_keys_geometry_and_thread_ownership(self, send_thread, recv_thread, event):
+        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
+            for pcp_rank in range(pcp_size):
+                with self.subTest(pcp_size=pcp_size, pcp_rank=pcp_rank, dcp_size=dcp_size):
+                    worker = make_worker(
+                        self,
+                        kv_role="kv_both",
+                        pcp_size=pcp_size,
+                        pcp_rank=pcp_rank,
+                        dcp_size=dcp_size,
+                        tp_size=dcp_size,
+                        extra_config={"load_async": True},
+                    )
+                    self.assertEqual(worker.grouped_block_size, [16 * dcp_size])
+                    self.assertEqual(worker.hash_block_size, 16 * dcp_size)
+                    key = worker.token_database._make_key_by_hash("h0").to_string()
+                    self.assertEqual(
+                        key,
+                        "llama-7b@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@h0",
+                    )
+                    worker._start_kv_transfer_threads()
+                    self.assertIs(recv_thread.call_args.args[1], worker.token_database)
+                    self.doCleanups()
 
 
 class TestKVPPPoolWorker(unittest.TestCase):

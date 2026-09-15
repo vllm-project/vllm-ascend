@@ -71,7 +71,7 @@ class FakeStore:
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
     def __init__(self, block_size=16):
-        super().__init__([KeyMetadata("m", 0, 0, 0, 0)], [block_size], None)
+        super().__init__([KeyMetadata("m", 0, 0, 0)], [block_size], None)
         self.set_group_buffers({0: [1000]}, {0: [block_size]}, {0: [1]}, group_num_layers={0: 1})
 
 
@@ -691,7 +691,7 @@ class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             is_last_chunk=False,
         )
-        metadata = KeyMetadata("m", 0, 0, 0, 0)
+        metadata = KeyMetadata("m", 0, 0, 0)
         task = LayerTransferTask(
             layer_id=0,
             block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],

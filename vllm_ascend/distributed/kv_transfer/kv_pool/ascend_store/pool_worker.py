@@ -217,14 +217,13 @@ class KVPoolWorker:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        cp_scale = self.pcp_size * self.dcp_size
-        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
+        ) * self.dcp_size
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
@@ -354,7 +353,6 @@ class KVPoolWorker:
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
                     group_tp_rank,
-                    self.pcp_rank,
                     self.dcp_rank,
                     self.pp_rank,
                     group_id,
@@ -2904,7 +2902,7 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # All-rank KV pool lookup currently assumes PCP=1.
+        # PCP replicas share keys; expand only the physical KV partitions.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
