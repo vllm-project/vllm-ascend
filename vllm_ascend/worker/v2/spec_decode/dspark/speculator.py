@@ -15,9 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
+import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as dflash_cudagraph
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -27,11 +29,14 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (
     get_rotation_path,
+    model_uses_sfa_sparse,
     vllm_version_is,
 )
 from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata,
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
@@ -45,6 +50,16 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        draft_config = self.draft_model_config
+        # Compressed MLA and SFA metadata have no dense MLA decode object.
+        uses_compressed_mla = any(
+            hasattr(config, "compress_ratios") for config in (draft_config.hf_config, draft_config.hf_text_config)
+        )
+        self.attn_architecture = (
+            "MLA"
+            if draft_config.use_mla and not uses_compressed_mla and not model_uses_sfa_sparse(draft_config)
+            else None
+        )
 
     def load_draft_model(
         self,
@@ -111,9 +126,36 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
             self.attn_backends = attn_backends
 
+    @contextmanager
+    def draft_capture_context(self):
+        """Supply dense MLA query metadata during upstream graph capture."""
+        if self.attn_architecture != "MLA":
+            yield
+            return
+
+        original = dflash_cudagraph.build_attn_metadata
+
+        def build_mla_metadata(*args, **kwargs):
+            kwargs["positions"] = self.input_buffers.positions[: kwargs["num_tokens"]]
+            kwargs["is_prefilling"] = torch.zeros(kwargs["num_reqs"], dtype=torch.bool)
+            kwargs["attn_state"] = AscendAttentionState.SpecDecoding
+            return build_attn_metadata(*args, **kwargs)
+
+        try:
+            dflash_cudagraph.build_attn_metadata = build_mla_metadata
+            yield
+        finally:
+            dflash_cudagraph.build_attn_metadata = original
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
+        # Dense MLA queries, including padded rows, must not inherit target prefill flags.
+        is_prefilling = (
+            torch.zeros(num_reqs_padded, dtype=torch.bool)
+            if self.attn_architecture == "MLA"
+            else torch.from_numpy(self.input_batch.is_prefilling_np)
+        )
         # The draft attention metadata is built through the generic
         # (Ascend) build_attn_metadata path; the factory forwards the draft
         # query positions that the DSA metadata builder needs for RoPE.
@@ -122,7 +164,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                is_prefilling,
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -135,24 +177,29 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             )
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
-    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
-        mirroring Eagle's ``_update_decode_attn_metadata``.
+    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
+        # Eager DP dispatch can pad tokens while retaining the local request count.
+        # Size every MLA metadata buffer for the query rows actually executed.
+        if self.attn_architecture == "MLA":
+            num_reqs_padded, remainder = divmod(kwargs["num_tokens_padded"], self.num_query_per_req)
+            assert remainder == 0, "MLA draft tokens must contain whole query groups"
+        metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+        if self.attn_architecture == "MLA":
+            return self._update_draft_attn_metadata(metadata, num_reqs_padded)
+        return metadata
 
-        DSpark inherits DFlash's full-graph path, and upstream
-        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
-        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
-        when a batch is padded to a capture size (``num_reqs_padded >
-        num_reqs``) the cumulative query lengths stop at
-        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
-        Ascend FIA operator requires, in TND layout, that the last element of
-        ``actual_seq_lengths_q`` equals the query token count of the graph
-        being replayed; otherwise tiling fails with
-        ``queryT != last element of actualSequenceLengthQ``.
+    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
+        """Extend query boundaries through padded requests.
+
+        FIA requires the last boundary to equal the query token count in TND layout.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
+            if self.attn_architecture == "MLA":
+                # Match capture: a parallel draft block is TND speculative decode.
+                metadata.attn_state = AscendAttentionState.SpecDecoding
+            decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(
