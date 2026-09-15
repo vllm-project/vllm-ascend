@@ -145,7 +145,8 @@ def test_get_global_rank_defaults_to_current_config():
 
 
 @pytest.mark.parametrize("size", [1, 4])
-def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size):
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
     from vllm_ascend.distributed import parallel_state
 
     for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
@@ -177,7 +178,10 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size):
     monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
     parallel_state.init_ascend_model_parallel(
         SimpleNamespace(
-            tensor_parallel_size=4, pipeline_parallel_size=2, data_parallel_size=1, prefill_context_parallel_size=1
+            tensor_parallel_size=4 // pcp_size,
+            pipeline_parallel_size=2,
+            data_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
         )
     )
     if size == 1:

@@ -1782,13 +1782,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 
+        negate_sin = get_current_hardware_profile().supports(HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN)
+        sin_arg = sin[:actual_tokens] if negate_sin else -sin[:actual_tokens]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            sin[:actual_tokens],
+            sin_arg,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         # o
