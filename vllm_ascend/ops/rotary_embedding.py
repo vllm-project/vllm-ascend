@@ -474,6 +474,17 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
     # Empirical safety threshold for large Triton grids on Ascend NPU
     _ASCEND_TRITON_GRID_LIMIT = 65535
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Materialize this together with the module before ACL graph capture.
+        # The inline fused path must not copy an input from CPU on its first
+        # captured invocation.
+        self.register_buffer(
+            "inv_freq",
+            self._compute_inv_freq(self.base).to(dtype=torch.float32),
+            persistent=False,
+        )
+
     def forward_triton(
         self,
         positions: torch.Tensor,

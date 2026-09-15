@@ -10,6 +10,7 @@ from vllm.model_executor.models.qwen3_vl import (
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.patch.worker.mrope_utils import get_rotary_inv_freq
 
 
 def tensor_parallel_wrap(func):
@@ -35,11 +36,19 @@ def tensor_parallel_wrap(func):
 def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_states: torch.Tensor):
     qkv, _ = self.qkv_proj(hidden_states)
     if isinstance(self.rotary_emb, AscendMRotaryEmbedding):
-        cos_sin = self.rotary_emb.cos_sin_cache[positions]
-        if cos_sin.device != qkv.device:
-            cos_sin = cos_sin.to(qkv.device)
-        if cos_sin.dtype != qkv.dtype:
-            cos_sin = cos_sin.to(qkv.dtype)
+        mrope_section = self.rotary_emb.mrope_section
+        rope_dim = self.rotary_emb.rotary_dim
+        inline_cos_sin = positions.ndim == 2 and mrope_section is not None
+        cos_sin = None
+        inv_freq = None
+        if inline_cos_sin:
+            inv_freq = get_rotary_inv_freq(self.rotary_emb, qkv.device)
+        else:
+            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            if cos_sin.device != qkv.device:
+                cos_sin = cos_sin.to(qkv.device)
+            if cos_sin.dtype != qkv.dtype:
+                cos_sin = cos_sin.to(qkv.dtype)
         q, k, v, _ = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
             q_weight=self.q_norm.weight,
@@ -49,9 +58,11 @@ def forward_with_split_qkv_rmsnorm_mrope(self, positions: torch.Tensor, hidden_s
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
             eps=self.q_norm.variance_epsilon,
-            mrope_section=self.rotary_emb.mrope_section,
+            mrope_section=mrope_section,
             is_interleaved=self.rotary_emb.mrope_interleaved,
-            rope_dim=self.rotary_emb.rotary_dim,
+            rope_dim=rope_dim,
+            positions=positions if inline_cos_sin else None,
+            inv_freq=inv_freq,
         )
     else:
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
