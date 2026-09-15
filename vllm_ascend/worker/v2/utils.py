@@ -24,6 +24,8 @@ def torch_cuda_wrapper():
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        # GPU V2 prefetch/offload calls this CUDA API during load_model.
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
         breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
         logger.info_once("Wrapping torch.cuda with torch.npu.")
