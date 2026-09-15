@@ -585,6 +585,20 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert forward_context.additional_kwargs["capturing"] is False
 
 
+def test_is_acl_full_graph_capturing_false_for_mock_stream_status(monkeypatch):
+    monkeypatch.setattr(
+        afc.torch,
+        "npu",
+        SimpleNamespace(is_current_stream_capturing=MagicMock()),
+        raising=False,
+    )
+    mock_get_ctx = MagicMock()
+    monkeypatch.setattr(afc, "get_forward_context", mock_get_ctx)
+
+    assert afc.is_acl_full_graph_capturing() is False
+    mock_get_ctx.assert_not_called()
+
+
 def test_is_acl_full_graph_capturing_ignores_gpu_flag_when_stream_idle(monkeypatch):
     monkeypatch.setattr(
         afc.torch,
