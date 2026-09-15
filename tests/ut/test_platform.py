@@ -711,6 +711,32 @@ class TestNPUPlatform(TestBase):
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
 
+    def test_set_additional_forward_context_v2_whitelist_includes_moe_fields(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        dummy_comm_method = object()
+
+        with (
+            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", None, create=True),
+            patch("vllm_ascend.platform.is_moe_model", return_value=True),
+            patch("vllm_ascend.platform.enable_sp", return_value=False),
+            patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=2),
+            patch("vllm.distributed.get_dp_group", return_value=MagicMock(world_size=1)),
+            patch("vllm_ascend.ascend_forward_context.select_moe_comm_method", return_value=MoECommType.MC2),
+            patch("vllm_ascend.ascend_forward_context.get_mc2_mask", return_value=None),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_moe_comm_method", return_value=dummy_comm_method),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=4,
+            )
+
+        self.assertIn("moe_comm_method", kwargs)
+        self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
+
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = False

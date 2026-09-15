@@ -22,7 +22,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_acl_full_graph_capturing
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
@@ -1765,7 +1765,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             stream = torch_npu.npu.current_stream()
 
             event = torch.npu.ExternalEvent()
