@@ -1,0 +1,4 @@
+import vllm.v1.worker.gpu.spec_decode.adaptive_verification
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import _assign_draft_token_budget
+
+vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled = _assign_draft_token_budget

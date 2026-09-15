@@ -230,6 +230,9 @@ class SparseMLAMetadataState:
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
+# npu_transpose_batchmatmul rejects operand dimensions >= 65536
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
+
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"
@@ -450,6 +453,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -503,6 +513,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # TODO(lzt): Pass the adaptive verification token count explicitly
+            # instead of deriving its padded shape from positions. Need fix.
+            num_input_tokens = common_attn_metadata.positions.shape[0]
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
@@ -551,7 +569,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             )
 
         metadata = self.metadata_cls(  # type: ignore
-            num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
@@ -1086,12 +1104,30 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if (
+            q_nope.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            # Convert from (B, N, P) to (N, B, P) and multiply
+            # (N, B, P) x (N, P, L) -> (B, N, L)
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            # Fallback for torch_npu builds without the fused op, unsupported
+            # dtypes, or a token dim beyond the operand limit.
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape

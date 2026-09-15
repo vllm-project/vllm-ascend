@@ -4,6 +4,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -503,6 +504,7 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
         )
 
         with (
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp", return_value=True) as dcp,
             patch.object(
                 DCPMetadataBuilderMixin,
                 "__init__",
@@ -520,6 +522,8 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
                 torch.device("cpu"),
             )
 
+        dcp.assert_called_once_with()
+        assert builder.dcp_enabled
         assert builder.dcp_local_seq_lens_buf.shape == (expected_num_reqs,)
         assert builder.block_table_replicated_view_buf.shape == (
             expected_num_reqs,
@@ -591,3 +595,57 @@ def test_sfa_dcp_updates_dsa_cp_local_slot_mapping_with_padding() -> None:
         dsa_cp_context.slot_mapping_cp,
         torch.tensor([12, 13, -1], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize(
+    "is_consumer,is_producer,recompute", [(True, False, True), (True, False, False), (False, True, True)]
+)
+@pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
+def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, is_producer, recompute, query_lens):
+    builder = _make_builder()
+    builder.dcp_enabled = True
+    builder.decode_threshold = 3
+    builder.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
+    )
+    builder.dcp_local_seq_lens_buf = torch.empty(2, dtype=torch.int32)
+    slots = torch.arange(sum(query_lens), dtype=torch.int64)
+    blocks = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+    common = SimpleNamespace(
+        context_parallel_metadata=None,
+        max_query_len=max(query_lens),
+        num_reqs=2,
+        num_actual_tokens=sum(query_lens),
+        num_input_tokens=sum(query_lens),
+        query_start_loc_cpu=torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32),
+        is_prefilling=torch.ones(2, dtype=torch.bool),
+        slot_mapping=slots,
+        block_table_tensor=blocks,
+        seq_lens=torch.tensor([10, 20], dtype=torch.int32),
+        dcp_local_seq_lens=torch.tensor([6, 12], dtype=torch.int32),
+    )
+    metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    with (
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=None),
+        patch(
+            "vllm_ascend.utils.get_ascend_config",
+            return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
+        ),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_dcp",
+            side_effect=AssertionError("use cached DCP state"),
+        ),
+        patch.object(builder, "_get_dcp_local_block_table", return_value=blocks),
+        patch.object(builder, "_build_block_table_replicated_view", return_value=blocks),
+        patch.object(builder, "_build_slot_mapping_replicated_view", return_value=slots),
+        patch.object(builder, "_build_compact_kv_gather_metadata", return_value=(torch.arange(4), blocks)) as gather,
+        patch.object(builder, "_update_parallel_slot_mapping"),
+    ):
+        result = builder._build_with_metadata_view(common, lambda: metadata)
+    num_decodes = sum(q <= 3 for q in query_lens) if is_consumer and not is_producer and recompute else 0
+    assert result.num_decodes == num_decodes
+    assert result.num_prefills == 2 - num_decodes
+    assert result.num_decode_tokens == sum(query_lens[:num_decodes])
+    assert gather.call_count == int(result.num_prefills > 0)
+    assert common.slot_mapping is slots
+    assert common.block_table_tensor is blocks
