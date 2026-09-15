@@ -117,6 +117,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     arange: torch.Tensor
 
     def _ensure_query_start_loc_arange_capacity(self) -> None:
+        """Ensure ``arange`` includes the terminal query boundary."""
         required_size = max(self.max_batch_size, self.max_num_tokens) + 1
         if self.arange.numel() < required_size:
             self.arange = torch.arange(
