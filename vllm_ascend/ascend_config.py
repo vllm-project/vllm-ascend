@@ -282,7 +282,7 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
-            
+
         self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
         self.enable_sparse_li_c8 = additional_config.get("enable_sparse_li_c8", False) and use_sparse
         self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and additional_config.get(
