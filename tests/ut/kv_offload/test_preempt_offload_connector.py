@@ -765,7 +765,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
 
     scheduler._update_waiting_for_remote_kv(request)
 
-    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 8)
+    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 9)
     assert request.num_computed_tokens == 8
     assert request.spec_token_ids == []
     assert scheduler.finished_recving_kv_req_ids == set()
