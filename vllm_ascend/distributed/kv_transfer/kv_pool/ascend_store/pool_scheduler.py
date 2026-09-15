@@ -1,5 +1,6 @@
 import importlib
 import math
+import time
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -170,6 +171,9 @@ class KVPoolScheduler:
             self.lookup_hash_mode = LookupHashMode(lookup_hash_mode)
         except ValueError as e:
             raise ValueError(f"lookup_hash_mode must be one of: full, suffix; got {lookup_hash_mode!r}") from e
+        self.profile_lookup = vllm_config.kv_transfer_config.kv_connector_extra_config.get("profile_lookup", False)
+        if not isinstance(self.profile_lookup, bool):
+            raise TypeError(f"profile_lookup must be a bool; got {self.profile_lookup!r}")
 
         use_mla = getattr(vllm_config.model_config, "use_mla", False)
         tp_mismatch_info = infer_tp_mismatch_info(
@@ -709,13 +713,26 @@ class KVPoolScheduler:
                     omitted_hashes,
                     len(lookup_block_hashes),
                 )
-                num_external_hit_tokens = self.client.lookup(
-                    token_len,
-                    lookup_block_hashes,
-                    self.kv_cache_group_ids,
-                    hbm_hit_tokens=num_computed_tokens,
-                    lookup_hash_mode=self.lookup_hash_mode,
-                )
+                if self.profile_lookup:
+                    lookup_started = time.perf_counter()
+                    try:
+                        num_external_hit_tokens = self.client.lookup(
+                            token_len,
+                            lookup_block_hashes,
+                            self.kv_cache_group_ids,
+                            hbm_hit_tokens=num_computed_tokens,
+                            lookup_hash_mode=self.lookup_hash_mode,
+                        )
+                    finally:
+                        self._kv_stats.record_lookup_duration(time.perf_counter() - lookup_started)
+                else:
+                    num_external_hit_tokens = self.client.lookup(
+                        token_len,
+                        lookup_block_hashes,
+                        self.kv_cache_group_ids,
+                        hbm_hit_tokens=num_computed_tokens,
+                        lookup_hash_mode=self.lookup_hash_mode,
+                    )
 
         if num_external_hit_tokens == 0:
             return 0, False

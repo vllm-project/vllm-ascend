@@ -942,13 +942,15 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h0", "h1", "h2", "h3", "h4", "h5"],
         )
         cases = [
-            (None, LookupHashMode.FULL, request.block_hashes, 6, 0),
-            ("suffix", LookupHashMode.SUFFIX, request.block_hashes[2:], 4, 2),
+            (None, False, LookupHashMode.FULL, request.block_hashes, 6, 0),
+            ("suffix", True, LookupHashMode.SUFFIX, request.block_hashes[2:], 4, 2),
         ]
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler"
-        for configured_mode, mode, expected_payload, expected_sent, expected_omitted in cases:
+        for configured_mode, profile_lookup, mode, expected_payload, expected_sent, expected_omitted in cases:
             with self.subTest(mode=mode.value):
-                extra_config = {} if configured_mode is None else {"lookup_hash_mode": configured_mode}
+                extra_config = {"profile_lookup": profile_lookup}
+                if configured_mode is not None:
+                    extra_config["lookup_hash_mode"] = configured_mode
                 config = self._make_config(
                     block_size=16,
                     extra_config=extra_config,
@@ -991,6 +993,11 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
                 self.assertIsNotNone(stats)
                 self.assertEqual(stats.data["lookup_hashes_sent"], expected_sent)
                 self.assertEqual(stats.data["lookup_hashes_omitted"], expected_omitted)
+                if profile_lookup:
+                    self.assertEqual(stats.data["lookup_requests"], 1)
+                    self.assertGreater(stats.data["lookup_duration_seconds"], 0)
+                else:
+                    self.assertNotIn("lookup_requests", stats.data)
 
         invalid_config = self._make_config(
             block_size=16,
@@ -1003,6 +1010,17 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         invalid_config.cache_config.hash_block_size = 16
         with self.assertRaisesRegex(ValueError, "lookup_hash_mode must be one of: full, suffix"):
             KVPoolScheduler(invalid_config, use_layerwise=False)
+
+        invalid_profile_config = self._make_config(
+            block_size=16,
+            extra_config={"profile_lookup": "true"},
+        )
+        invalid_profile_config.parallel_config.prefill_context_parallel_size = 1
+        invalid_profile_config.parallel_config.decode_context_parallel_size = 1
+        invalid_profile_config.parallel_config.world_size = 1
+        invalid_profile_config.cache_config.hash_block_size = 16
+        with self.assertRaisesRegex(TypeError, "profile_lookup must be a bool"):
+            KVPoolScheduler(invalid_profile_config, use_layerwise=False)
 
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()

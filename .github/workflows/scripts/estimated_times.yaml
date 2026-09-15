@@ -12,6 +12,10 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 180
   tests/e2e/pull_request/two_card/test_kvpp.py: 300
+  # Temporary RFC measurements: four isolated Qwen3.5-27B server instances
+  # per file, including deterministic external-cache preparation.
+  tests/e2e/pull_request/two_card/test_kvpp_lookup_cost_breakdown.py: 3600
+  tests/e2e/pull_request/two_card/test_kvpp_lookup_payload_e2e.py: 3600
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
   tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 480
