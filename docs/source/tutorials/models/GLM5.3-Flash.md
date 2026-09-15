@@ -1,4 +1,4 @@
-# GLM-5.3-Flash
+# GLM-5.3-Flash (Experimental)
 
 ## 1 Introduction
 
@@ -144,6 +144,10 @@ It is recommended to download the model weight to the shared directory of multip
     ```
 
 ## 5 Online Service Deployment
+
+!!! note
+
+    Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, otherwise the output quality may degrade.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -416,3 +420,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+
+- **Q: Does GLM-5.3-Flash support `enable_thinking: false`?**
+
+  A: No, GLM-5.3-Flash does not support `enable_thinking`.
