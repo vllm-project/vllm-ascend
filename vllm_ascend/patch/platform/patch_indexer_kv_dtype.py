@@ -55,7 +55,7 @@ from vllm.logger import logger
 # startup. Deriving from the current upstream members keeps this patch in sync
 # if upstream adds more formats.
 _ORIG_INDEXER_KV_DTYPE = _attention_mod.IndexerKVDType
-_INDEXER_KV_DTYPE_WITH_INT8 = typing.Literal[*_ORIG_INDEXER_KV_DTYPE.__args__ + ("int8",)]
+_INDEXER_KV_DTYPE_WITH_INT8 = typing.Literal[*_ORIG_INDEXER_KV_DTYPE.__args__ + ("int8",)]  # noqa
 
 
 def _apply_indexer_kv_dtype_int8_patch() -> None:
