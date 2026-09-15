@@ -124,7 +124,7 @@ def test_packed_multi_component_mla_keeps_existing_whole_page_contract(helpers):
     assert result == (backing.data_ptr(), 128, (32,), 1)
 
 
-@pytest.mark.parametrize("layout", ["head_slots", "planar", "single_mla", "packed_mla"])
+@pytest.mark.parametrize("layout", ["head_slots", "planar", "single_mla", "packed_mla", "replicated_gqa"])
 def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, layout):
     class FullSpec:
         num_kv_heads = 2
@@ -136,6 +136,9 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
     class IndexerSpec:
         pass
 
+    class ReplicatedSpec(FullSpec):
+        dcp_replication_size = 2
+
     scope = dict(vars(helpers))
     engine = MagicMock()
     scope.update(
@@ -143,6 +146,7 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
         MLAAttentionSpec=MLASpec,
         SlidingWindowMLASpec=MLASpec,
         AscendSFAIndexerCacheSpec=IndexerSpec,
+        AscendDCPReplicatedDraftAttentionSpec=ReplicatedSpec,
         global_te=engine,
         validate_register_region_count=lambda regions: None,
         MooncakeTransferMetadata=SimpleNamespace,
@@ -155,7 +159,9 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
     )
     backing = torch.empty(4, 6, 16, 64)
     spec = FullSpec()
-    if layout == "head_slots":
+    if layout in ("head_slots", "replicated_gqa"):
+        if layout == "replicated_gqa":
+            spec = ReplicatedSpec()
         cache = backing[:, :4]
         expected_planes = (backing[:, :2], backing[:, 2:4])
     elif layout == "planar":
@@ -190,6 +196,7 @@ def test_v2_registration_preserves_runner_views_and_payload_boundaries(helpers, 
     assert canonical["layer"] is cache
     assert worker.kv_caches is not canonical
     metadata = worker.transfer_metadata
+    assert metadata.layer_block_sizes == [32 if layout == "replicated_gqa" else 16]
     if layout == "packed_mla":
         assert metadata.block_lens == [[backing.stride(0) * backing.element_size()]]
     else:
