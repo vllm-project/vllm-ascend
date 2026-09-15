@@ -198,6 +198,65 @@ class AscendRMSNormGated(RMSNormGated):
         return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
 
 
+class AscendRMSNorm(RMSNorm):
+    """Ascend RMSNorm with compatibility for nested Mistral text models."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: int | None = None,
+        has_weight: bool = True,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        vllm_config = get_current_vllm_config()
+        self.bias = None
+        self.bias_loaded = False
+        self.mistral_native_add_rms_norm = (
+            getattr(vllm_config.model_config.hf_config, "model_type", None)
+            in {"mistral3", "ministral3", "mistral4"}
+        )
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        if any("norm.bias" in name for name in quant_description):
+            self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
+            self.bias.weight_loader = self._bias_weight_loader
+
+    def _bias_weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        if param.numel() == 1 and loaded_weight.numel() == 1:
+            param.data.fill_(loaded_weight.item())
+        else:
+            assert param.size() == loaded_weight.size(), (
+                f"Attempted to load weight ({loaded_weight.size()}) into parameter ({param.size()})"
+            )
+            param.data.copy_(loaded_weight)
+        self.bias_loaded = True
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        import torch_npu
+
+        if residual is not None:
+            if enable_custom_op() and not self.mistral_native_add_rms_norm:
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+                if self.bias is not None:
+                    x.add_(self.bias)
+            return x, residual
+
+        x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
+        if self.bias_loaded:
+            x.add_(self.bias)
+
+        return x
+
+
 class AscendFusedRMSNormGated(FusedRMSNormGated):
     """Use Ascend's fused kernel at the upstream FLA CustomOp boundary."""
 
