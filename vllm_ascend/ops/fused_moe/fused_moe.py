@@ -22,6 +22,7 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
@@ -76,6 +77,45 @@ direct_register_custom_op(
 )
 
 
+def _ascend_moe_forward_complete(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: str,
+) -> torch.Tensor:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    # Keep the communication-dependent reduction decisions inside the same
+    # opaque boundary as dispatch/combine. vLLM reuses a single Dynamo trace
+    # across ALLGATHER and MC2/ALLTOALL batches.
+    return MoERunner.forward(
+        layer,
+        hidden_states,
+        router_logits,
+        input_ids=input_ids,
+        shared_experts_input=shared_experts_input,
+    )
+
+
+def _ascend_moe_forward_complete_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: str,
+) -> torch.Tensor:
+    output_width = shared_experts_input.shape[-1] if shared_experts_input is not None else hidden_states.shape[-1]
+    return hidden_states.new_empty((*hidden_states.shape[:-1], output_width))
+
+
+direct_register_custom_op(
+    op_name="ascend_moe_forward_complete",
+    op_func=_ascend_moe_forward_complete,
+    fake_impl=_ascend_moe_forward_complete_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def __init__(
         self,
@@ -116,6 +156,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
+        # Internal-router: precast weight_fp32 at load to avoid hot-path Cast.
+        # Use ctor `gate` (not self.is_internal_router): Module.__getattr__ shadows during init.
+        if gate is not None and not hasattr(gate, "weight_fp32"):
+            gate.precast_fp32_weight = True
+
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
@@ -138,6 +183,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.ascend_moe_forward_complete(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+            self.layer_name,
+        )
 
     @property
     def is_internal_router(self) -> bool:
@@ -308,10 +368,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states_fp32 = (
                         router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
                     )
-                    router_logits = F.linear(
-                        hidden_states_fp32,
-                        gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
-                    )
+                    if hasattr(gate, "weight_fp32"):
+                        router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    else:
+                        _gate_out = gate(shared_hidden_states)
+                        router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -333,12 +394,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
                 )
                 before_routed_experts = torch.npu.current_stream().record_event()
-                # main (cdc4824a21): is_internal_router only checks self.gate,
-                # weight_fp32 may be absent, fall back to gate.weight.
-                router_logits = F.linear(
-                    hidden_states_fp32,
-                    gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
-                )
+                if hasattr(gate, "weight_fp32"):
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                else:
+                    _gate_out = gate(shared_hidden_states)
+                    router_logits = _gate_out[0] if isinstance(_gate_out, tuple) else _gate_out
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()

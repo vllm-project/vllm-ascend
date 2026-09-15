@@ -724,7 +724,11 @@
 #    How:
 #       Skip `Indexer` construction only when the layer both skips top-k and is
 #       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       a complete `Indexer`. The runtime `skip_topk` handed to the MLA wrapper
+#       is additionally masked with `not is_mtp_layer` (same as upstream
+#       deepseek_v2.py): MTP layers must never start in skip mode, because they
+#       compute their own indices at draft step 0 and toggle at runtime via
+#       `set_skip_topk` (index_share_for_mtp_iteration).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
@@ -1274,4 +1278,18 @@
 #    Future Plan:
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
+#
+# ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#    Why:
+#       The upstream adaptive-verification draft-budget allocator is wrapped by
+#       `torch.compile`, whose compiled path is not supported on Ascend.
+#    How:
+#       Replace the compiled wrapper with the original eager allocator while
+#       preserving the upstream budget-allocation algorithm.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/47808
+#    Future Plan:
+#       Remove this patch when the compiled allocator is supported on Ascend.
 #

@@ -19,6 +19,7 @@
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -29,6 +30,7 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -36,6 +38,8 @@ class AscendModelState(DefaultModelState):
     """Model state for Ascend NPUs."""
 
     pcp_manager: "AscendPCPManager | None" = None
+    kvpp_runtime: "KVPPRuntime | None" = None
+    kvpp_is_dummy_run: bool = False
 
     def prepare_attn(
         self,
@@ -46,8 +50,11 @@ class AscendModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        # vLLM #50945 adds this contract; Ascend still disables DBO.
+        assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
@@ -65,6 +72,10 @@ class AscendModelState(DefaultModelState):
 
         num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
+        if self.kvpp_runtime is not None and self.kvpp_runtime.scheduler is not None:
+            self.kvpp_runtime.prepare_forward(
+                not self.kvpp_is_dummy_run and bool(np.any(input_batch.num_computed_tokens_np[:num_actual_reqs] > 0))
+            )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()

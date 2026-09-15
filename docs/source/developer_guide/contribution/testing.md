@@ -270,8 +270,10 @@ How tests are selected:
 Adding a new test requires no configuration change: place the UT file under the
 matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
 `tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
-the test tree. Routing metadata (runner mapping, partitions, estimated times)
-lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+the test tree. Routing metadata (runner mapping, partitions) lives in
+[`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+Estimated times used for load balancing live in
+`.github/workflows/scripts/estimated_times.yaml`.
 
 You can preview locally which runners a set of tests would be routed to:
 

@@ -353,8 +353,8 @@ class KVPoolScheduler:
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
+        A block is a hit only when every PP stage has saved it, so the
+        protocol helper enumerates all stages and head/TP ranks.
         """
         head_or_tp_ranks = self.tp_size // self.put_step
         return self.layerwise_protocol.make_hit_check_keys(
@@ -363,6 +363,7 @@ class KVPoolScheduler:
             block_hash_hex,
             head_or_tp_ranks,
             len(self.kv_cache_group_ids),
+            self.pp_size,
         )
 
     def _get_layerwise_hit_tokens(
@@ -645,13 +646,6 @@ class KVPoolScheduler:
             return 0, False
 
         prompt_token_len = len(request.prompt_token_ids)
-        if (
-            self.retention_interval is not None
-            and not self.use_layerwise
-            and prompt_token_len < 2 * self.retention_interval
-        ):
-            return 0, False
-
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
             if token_len < self.cache_transfer_granularity:

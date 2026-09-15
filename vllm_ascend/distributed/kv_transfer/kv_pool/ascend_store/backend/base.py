@@ -5,7 +5,10 @@ from collections.abc import Iterable
 from numbers import Integral
 from typing import Any
 
+import torch
 from vllm.config import ParallelConfig
+from vllm.platforms import current_platform
+from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
 # QoS range supported by the pooled KV store backends. A larger value
 # means a higher transfer priority.
@@ -52,6 +55,19 @@ def require_aligned_batch_results(
     if len(values) != len(keys):
         raise BatchResultShapeError(f"{operation} returned {len(values)} results for {len(keys)} keys")
     return values
+
+
+def get_scheduler_device_id(parallel_config: ParallelConfig) -> int:
+    """Resolve a scheduler's device without creating an NPU context."""
+    assigned_ids = parallel_config.assigned_physical_gpu_ids
+    if assigned_ids is not None:
+        set_assigned_physical_gpu_ids(assigned_ids)
+        return current_platform.logical_device_id_to_visible_device_id(0)
+    return torch.npu.current_device()
+
+
+def set_scheduler_device(parallel_config: ParallelConfig) -> None:
+    torch.npu.set_device(get_scheduler_device_id(parallel_config))
 
 
 class Backend(ABC):
