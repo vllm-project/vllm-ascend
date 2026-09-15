@@ -1717,6 +1717,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     gather_block_tables = MagicMock(return_value=global_block_tables)
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
+    pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
     pcp_manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
