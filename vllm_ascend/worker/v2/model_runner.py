@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 import numpy as np
 import torch
@@ -249,12 +249,19 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_draft_tokens()
         return output
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
         # vLLM 0.28 model-state code recognizes bare MambaSpec groups, while
         # Ascend's hybrid cache planner retains per-layer uniform wrappers.
         kv_cache_config = normalize_mamba_kv_cache_config(kv_cache_config)
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(kv_cache_config)
+            super().initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
