@@ -139,7 +139,7 @@ class ACLGraphWrapper:
         self.use_eagle = use_eagle
         self.update_stream = update_stream
         self.attn_backend = None
-        self.draft_attn_metadata_updates: list[dict[str, Any]] = []
+        self.draft_model_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
 
     def set_update_stream(self, update_stream):
@@ -148,8 +148,9 @@ class ACLGraphWrapper:
     def set_attn_backend(self, attn_backend):
         self.attn_backend = attn_backend
 
-    def set_draft_attn_metadata_updates(self, update_params: list[dict[str, Any]]):
-        self.draft_attn_metadata_updates = update_params
+    def update_draft_model_metadata(self, draft_model_metadata: list[dict[str, Any]]):
+        # This has been prepared for the update full graph of MRV1.
+        self.draft_model_metadata = draft_model_metadata
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -306,9 +307,7 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(
-            self.attn_backend, batch_descriptor.num_tokens, self.vllm_config
-        ):
+        if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
@@ -319,8 +318,9 @@ class ACLGraphWrapper:
         forward_context,
         graph: UpdatableGraph,
     ):
+        assert self.update_stream is not None
         if _EXTRA_CTX.is_draft_model:
-            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_attn_metadata_updates))
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_model_metadata))
         else:
             resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
         if self.enable_enpu:
@@ -349,7 +349,7 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
-    if use_updatable_graph(attn_backend, num_tokens, vllm_config):
+    if use_updatable_graph(attn_backend):
         return
 
     # vLLM >= 0.27.1 (main) makes get_current_vllm_config() raise

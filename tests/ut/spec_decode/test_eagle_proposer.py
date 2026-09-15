@@ -603,6 +603,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
         self.proposer.update_stream = MagicMock()
+        self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
         self.mock_get_ascend_config.stop()
