@@ -326,9 +326,12 @@ def _select_capacity_and_world_size_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    ep_world_size = (
+        vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+    )
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
-    if world_size <= num_experts_per_tok:
+    if ep_world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
