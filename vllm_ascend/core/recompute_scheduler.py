@@ -37,7 +37,13 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -70,12 +76,24 @@ class RecomputeSchedulerConfig(SchedulerConfig):
         return cls(**scheduler_config)
 
 
+@dataclass
+class RecomputeReqInfo:
+    request_id: str
+    client_index: int
+
+
+@dataclass
+class RecomputeSchedulerOutput(SchedulerOutput):
+    recomputed_reqs: list[RecomputeReqInfo] | None = None
+
+
 class RecomputeScheduler(Scheduler):
     """Use vLLM scheduling with best-effort decode-side preemption offload.
 
     This keeps a local copy of vLLM's schedule() only to pad the first decode
-    request for stable Ascend speculative-decode graph shapes. If KV offload
-    is unavailable or fails, preemption falls back to local recomputation.
+    request for stable Ascend speculative-decode graph shapes. Preempted KV is
+    offloaded when possible; otherwise the request is sent back to P to redo
+    prefill.
     """
 
     prefill_capacity_bound: bool
@@ -87,40 +105,70 @@ class RecomputeScheduler(Scheduler):
         """Hook for DyntraLB to filter waiting-request admission."""
         return True
 
-    def _preempt_request(
+    def _preempt_or_recompute(
         self,
         request: Request,
         timestamp: float,
         drop_stale_output: bool = False,
-    ) -> None:
-        # reset_prefix_cache(reset_running_requests=True) deliberately discards
-        # the old cache and passes drop_stale_output=True. Offloading those
-        # blocks would conflict with the requested reset and serve no purpose.
-        if not drop_stale_output and request.num_computed_tokens > 0:
-            connector = self.connector
-            preempt_hook = getattr(connector, "update_state_before_preempt", None) if connector is not None else None
-            offloaded = False
-            if preempt_hook is not None:
+    ) -> bool:
+        connector = self.connector
+        preempt_hook = getattr(connector, "update_state_before_preempt", None) if connector is not None else None
+        offloaded = False
+        offload_raised = False
+        if preempt_hook is not None:
+            try:
                 block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-                offloaded = preempt_hook(
-                    request,
-                    block_ids,
-                    request.num_computed_tokens,
+                offloaded = bool(
+                    preempt_hook(
+                        request,
+                        block_ids,
+                        request.num_computed_tokens,
+                    )
                 )
-            if not offloaded:
+            except Exception:
+                offload_raised = True
                 logger.warning(
-                    "KV offload was unavailable or failed before decode-side "
-                    "preemption; falling back to local recomputation: request_id=%s, "
+                    "KV offload raised before decode-side preemption; sending "
+                    "the request back to P for recomputation: request_id=%s, "
                     "num_computed_tokens=%d",
                     request.request_id,
                     request.num_computed_tokens,
+                    exc_info=True,
                 )
+
+        if not offloaded:
+            if not offload_raised:
+                logger.warning(
+                    "KV offload was unavailable or failed before decode-side "
+                    "preemption; sending the request back to P for recomputation: "
+                    "request_id=%s, num_computed_tokens=%d",
+                    request.request_id,
+                    request.num_computed_tokens,
+                )
+            self._finish_recomputed_request(request)
+            return False
 
         super()._preempt_request(
             request,
             timestamp,
             drop_stale_output=drop_stale_output,
         )
+        return True
+
+    def _finish_recomputed_request(self, request: Request) -> None:
+        self._recomputed_reqs.append(
+            RecomputeReqInfo(
+                request_id=request.request_id,
+                client_index=request.client_index,
+            )
+        )
+        finished_reqs = self.finish_requests(
+            request.request_id,
+            RequestStatus.FINISHED_ABORTED,
+        )
+        assert [(req.request_id, req.client_index) for req in finished_reqs] == [
+            (request.request_id, request.client_index)
+        ]
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -139,6 +187,7 @@ class RecomputeScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        self._recomputed_reqs: list[RecomputeReqInfo] = []
 
         self._apply_load_balance_modifications()
 
@@ -317,12 +366,13 @@ class RecomputeScheduler(Scheduler):
                     else:
                         preempted_req = self.running.pop()
 
-                    self._preempt_request(
+                    locally_preempted = self._preempt_or_recompute(
                         preempted_req,
                         scheduled_timestamp,
                         drop_stale_output=self.requires_kv_delivery,
                     )
-                    preempted_reqs.append(preempted_req)
+                    if locally_preempted:
+                        preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
                         break
@@ -382,7 +432,7 @@ class RecomputeScheduler(Scheduler):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and not self._recomputed_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
@@ -922,7 +972,7 @@ class RecomputeScheduler(Scheduler):
                 "kv_connector_block_state": kv_connector_block_state,
             }
         )
-        scheduler_output = SchedulerOutput(
+        scheduler_output = RecomputeSchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -942,6 +992,7 @@ class RecomputeScheduler(Scheduler):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            recomputed_reqs=self._recomputed_reqs or None,
             **version_specific_output,
         )
 
@@ -972,6 +1023,37 @@ class RecomputeScheduler(Scheduler):
         if getattr(self, "_enable_diagnostics", False):
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> dict[int, EngineCoreOutputs]:
+        outputs = super().update_from_output(
+            scheduler_output,
+            model_runner_output,
+        )
+        recomputed_by_client: dict[int, list[EngineCoreOutput]] = {}
+        for req_info in getattr(scheduler_output, "recomputed_reqs", None) or []:
+            logger.warning(
+                "Recompute triggered for request %s.",
+                req_info.request_id,
+            )
+            recomputed_by_client.setdefault(req_info.client_index, []).append(
+                EngineCoreOutput(
+                    request_id=req_info.request_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.STOP,
+                    stop_reason="recomputed",
+                )
+            )
+        for client_index, recomputed_outputs in recomputed_by_client.items():
+            client_outputs = outputs.setdefault(
+                client_index,
+                EngineCoreOutputs(),
+            )
+            client_outputs.outputs[0:0] = recomputed_outputs
+        return outputs
 
 
 class AsyncRecomputeScheduler(AsyncScheduler, RecomputeScheduler):
