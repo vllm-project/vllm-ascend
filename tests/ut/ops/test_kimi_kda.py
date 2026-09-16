@@ -135,6 +135,66 @@ def test_upstream_kda_dispatch_accepts_beta_keyword_during_profile():
     torch.testing.assert_close(output, expected)
 
 
+@pytest.mark.parametrize(
+    ("query_offsets", "cache_ids", "accepted"),
+    [
+        pytest.param([0, 1, 2], [2, 4], None, id="ordinary-decode"),
+        pytest.param(
+            [0, 1, 2, 2, 2],
+            [[2, 3], [4, 5], [0, 0], [0, 0]],
+            None,
+            id="graph-padding",
+        ),
+        pytest.param(
+            [0, 3, 6, 6],
+            [[2, 3, 4], [5, 6, 7], [-1, -1, -1]],
+            [2, 1, 0],
+            id="explicit-spec-acceptance",
+        ),
+    ],
+)
+def test_causal_conv1d_update_passes_per_sequence_accepted_tokens(query_offsets, cache_ids, accepted):
+    query_start_loc = torch.tensor(query_offsets, dtype=torch.int32)
+    cache_indices = torch.tensor(cache_ids, dtype=torch.int32)
+    metadata = SimpleNamespace(query_start_loc=query_start_loc, cache_indices=cache_indices)
+    mixed_qkv = torch.empty(query_offsets[-1], 6)
+    conv_weights_t = torch.empty(4, 6)
+    conv_state = torch.empty(8, 6, 6)
+    num_accepted_tokens = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
+    expected_output = torch.empty_like(mixed_qkv)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch.ops.cann_ops_transformer.causal_conv1d_update",
+        return_value=expected_output,
+    ) as update:
+        output = AscendKimiGatedDeltaNetAttention._run_causal_conv1d(
+            mixed_qkv,
+            conv_weights_t,
+            conv_state,
+            metadata,
+            run_mode=1,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+
+    update.assert_called_once()
+    kwargs = update.call_args.kwargs
+    actual_accepted = kwargs["num_accepted_tokens"]
+    assert output is expected_output
+    assert kwargs["query_start_loc"] is query_start_loc
+    assert kwargs["x"] is mixed_qkv
+    assert kwargs["conv_state"] is conv_state
+    assert actual_accepted.shape == (len(query_offsets) - 1,)
+    assert actual_accepted.dtype == torch.int32
+    assert actual_accepted.device == mixed_qkv.device
+    if num_accepted_tokens is None:
+        torch.testing.assert_close(actual_accepted, torch.ones_like(actual_accepted))
+    else:
+        assert actual_accepted is num_accepted_tokens
+    expected_indices = cache_indices if cache_indices.ndim == 1 else cache_indices[:, 0]
+    torch.testing.assert_close(kwargs["conv_state_indices"], expected_indices.clamp_min(0))
+    assert kwargs["conv_state_indices"].is_contiguous()
+
+
 def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():
     param = torch.empty(1, 1, 2, 1)
     loaded_weight = torch.arange(6, dtype=torch.float32)

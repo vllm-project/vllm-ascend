@@ -333,6 +333,15 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 has_initial_state=has_initial_state,
             )
         if run_mode == 1:
+            if num_accepted_tokens is None:
+                # The 2-D varlen update requires counts even for ordinary
+                # decode. One selects history offset zero. Graph-padding
+                # rows retain their null cache indices and are skipped.
+                num_accepted_tokens = torch.ones(
+                    cache_indices.shape[0],
+                    dtype=torch.int32,
+                    device=mixed_qkv.device,
+                )
             return torch.ops.cann_ops_transformer.causal_conv1d_update(
                 x=mixed_qkv,
                 conv_state=conv_state,
