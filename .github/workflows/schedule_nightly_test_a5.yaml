@@ -212,7 +212,7 @@ jobs:
     with:
       soc_version: a5
       runner: linux-aarch64-a5-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -261,7 +261,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a5
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
+      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}

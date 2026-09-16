@@ -219,7 +219,7 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       soc_version: 310p
       test_frequency: weekly
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
+      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/single_node/configs/
