@@ -29,9 +29,7 @@ def _seed_and_pos(
     num_tokens: int,
     num_reqs: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    seed = (
-        torch.arange(num_reqs, dtype=torch.int64, device=DEVICE) * 104729 + 17
-    )
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE) * 104729 + 17
     pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE) + 23
     return seed, pos
 
@@ -607,12 +605,8 @@ def test_categorical_sample_random_distribution_sanity():
     sampled_cpu = sampled.cpu()
     support_cpu = support.cpu()
     assert set(sampled_cpu.tolist()).issubset(set(support_cpu.tolist()))
-    counts = torch.tensor(
-        [(sampled_cpu == token).sum().item() for token in support_cpu]
-    )
-    assert (counts >= 12).all() and (counts <= 52).all(), (
-        f"unexpected counts for equal-mass support: {counts.tolist()}"
-    )
+    counts = torch.tensor([(sampled_cpu == token).sum().item() for token in support_cpu])
+    assert (counts >= 12).all() and (counts <= 52).all(), f"unexpected counts for equal-mass support: {counts.tolist()}"
 
 
 def test_categorical_sample_business_shape_distribution_accuracy():
@@ -678,9 +672,7 @@ def test_categorical_sample_business_shape_distribution_accuracy():
 
     torch.npu.synchronize()
 
-    actual_probs = (
-        counts.to(torch.float32).cpu() / (num_tokens * num_trials)
-    )
+    actual_probs = counts.to(torch.float32).cpu() / (num_tokens * num_trials)
     expected_probs = torch.softmax(support_logits, dim=0).cpu()
     abs_error = torch.abs(actual_probs - expected_probs)
     max_abs_error = torch.max(abs_error).item()

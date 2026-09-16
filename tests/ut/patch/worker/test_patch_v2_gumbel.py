@@ -40,18 +40,14 @@ def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
 
 @pytest.mark.parametrize("probabilistic", [False, True])
 def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
-    speculator = dspark_speculator.DSparkSpeculator.__new__(
-        dspark_speculator.DSparkSpeculator
-    )
+    speculator = dspark_speculator.DSparkSpeculator.__new__(dspark_speculator.DSparkSpeculator)
     speculator.model = MagicMock()
     speculator.model.map_draft_to_target.side_effect = lambda tokens: tokens + 10
     speculator._d2t_scatter_index = None
     speculator.temperature = torch.tensor([0.5, 1.5])
     speculator.seeds = torch.tensor([3, 7])
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
-    speculator.draft_logits = (
-        torch.empty(2, 2, 3) if probabilistic else None
-    )
+    speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
     speculator.use_fp64_gumbel = False
 
     # This fixture bypasses __init__, so provide defaults used by current main.
