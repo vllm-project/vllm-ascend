@@ -3,11 +3,12 @@ from unittest.mock import patch
 
 import torch
 
+import vllm_ascend.device.mxfp_kv_cache as mxfp_kv_cache
 from tests.ut.base import TestBase
 from vllm_ascend.device.mxfp_kv_cache import (
     MXFP8_GROUP_SIZE,
-    MXFP_KV_SCALE_GROUP_SIZE,
     MXFP_K_SCALE_NZ_TOKEN_FRAG,
+    MXFP_KV_SCALE_GROUP_SIZE,
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_page_bytes,
     mxfp_v_scale_cache_shape,
@@ -46,67 +47,109 @@ class TestMXFPScaleCacheShapes(TestBase):
 
 
 class TestScatterMXFPPaNzKvCache(TestBase):
-    """PA_NZ KV scatter: tokens land at [block, n, d//32, offset, d%32]."""
+    """PA_NZ KV scatter hands npu_scatter_pa_kv_cache the FIA C8 contract.
+
+    torch_npu is a MagicMock here, so what is checkable on CPU is the call
+    contract -- the shapes, dtypes and slot handling the operator is given.
+    That is also the whole substance of the change: the operator itself is
+    validated on-device by the FIA C8 path, which makes this exact call.
+    """
 
     BLOCK_SIZE = 4
     NUM_KV_HEADS = 2
     HEAD_DIM = 64  # D//32 = 2 fragments
+    NUM_BLOCKS = 2
 
     def setUp(self):
-        torch.manual_seed(0)
         self.key_cache = torch.zeros(
-            (2, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM), dtype=torch.uint8
+            (self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM),
+            dtype=torch.uint8,
         )
         self.value_cache = torch.zeros_like(self.key_cache)
 
-    def _nz(self, cache):
-        return cache.view(2, self.NUM_KV_HEADS, self.HEAD_DIM // 32, self.BLOCK_SIZE, 32)
-
-    def test_scatter_writes_tokens_at_their_nz_coordinates(self):
-        # Byte value encodes (token, head, channel) so every assertion
-        # names its source element.
-        num_tokens = 3
-        idx = torch.arange(num_tokens * self.NUM_KV_HEADS * self.HEAD_DIM)
+    def _scatter(self, num_tokens=3, slots=None, dtype=torch.uint8):
         key = (
-            (idx // (self.NUM_KV_HEADS * self.HEAD_DIM)) * 100
-            + ((idx // self.HEAD_DIM) % self.NUM_KV_HEADS) * 10
-            + (idx % self.HEAD_DIM)
-        ).to(torch.uint8).reshape(num_tokens, self.NUM_KV_HEADS, self.HEAD_DIM)
-        value = key.clone()
-        # slot 2 -> block 0, offset 2; slot 5 -> block 1, offset 1; -1 -> padding.
-        slot_mapping = torch.tensor([2, 5, -1], dtype=torch.int64)
-
-        scatter_mxfp_pa_nz_kv_cache(
-            key, value, self.key_cache, self.value_cache, slot_mapping, self.BLOCK_SIZE
+            torch.arange(num_tokens * self.NUM_KV_HEADS * self.HEAD_DIM, dtype=torch.int32)
+            .remainder(251)
+            .to(torch.uint8)
+            .reshape(num_tokens, self.NUM_KV_HEADS, self.HEAD_DIM)
         )
+        if dtype != torch.uint8:
+            key = key.view(dtype)
+        if slots is None:
+            slots = torch.tensor([2, 5, -1][:num_tokens], dtype=torch.int64)
+        with patch.object(mxfp_kv_cache.torch_npu, "npu_scatter_pa_kv_cache") as op:
+            scatter_mxfp_pa_nz_kv_cache(key, key.clone(), self.key_cache, self.value_cache, slots, self.BLOCK_SIZE)
+        return op, key, slots
 
-        for token, slot in ((0, 2), (1, 5)):
-            block, offset = slot // self.BLOCK_SIZE, slot % self.BLOCK_SIZE
-            for head in range(self.NUM_KV_HEADS):
-                for channel in range(self.HEAD_DIM):
-                    expected = key[token, head, channel]
-                    got = self._nz(self.key_cache)[block, head, channel // 32, offset, channel % 32]
-                    self.assertEqual(got.item(), expected.item())
-                    self.assertEqual(self._nz(self.value_cache)[block, head, channel // 32, offset, channel % 32].item(), expected.item())
-        # Untouched offsets stay zero (both blocks, all heads/channels).
-        untouched = self._nz(self.key_cache).clone()
-        untouched[0, :, :, 2, :] = 0
-        untouched[1, :, :, 1, :] = 0
-        self.assertTrue(torch.all(untouched == 0))
+    def test_caches_are_passed_in_the_nz_five_d_view(self):
+        op, _, _ = self._scatter()
+        op.assert_called_once()
+        for name in ("key_cache", "value_cache"):
+            cache = op.call_args.kwargs[name]
+            self.assertEqual(
+                tuple(cache.shape),
+                (
+                    self.NUM_BLOCKS,
+                    self.NUM_KV_HEADS,
+                    self.HEAD_DIM // 32,
+                    self.BLOCK_SIZE,
+                    32,
+                ),
+                f"{name} must reach the operator as (Bn, KV_N, D/32, Bs, 32)",
+            )
 
-    def test_padded_rows_are_no_ops(self):
-        sentinel = 7
-        self.key_cache[0, 0] = sentinel  # slot 0 payload
-        key = torch.full((2, self.NUM_KV_HEADS, self.HEAD_DIM), 200, dtype=torch.uint8)
-        slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
+    def test_pa_nz_cache_mode_is_declared(self):
+        # Scenario 1 of the ScatterPaKvCache contract is selected by
+        # cache_mode; without it the operator reads the caches as "Norm"
+        # ([num_blocks, block_size, num_head, head_size]) and rejects the
+        # NZ axis order on dim2.
+        op, _, _ = self._scatter()
+        self.assertEqual(op.call_args.kwargs["cache_mode"], "PA_NZ")
 
-        scatter_mxfp_pa_nz_kv_cache(
-            key, key.clone(), self.key_cache, self.value_cache, slot_mapping, self.BLOCK_SIZE
-        )
+    def test_payload_keeps_its_token_row_shape(self):
+        op, key, _ = self._scatter()
+        for name in ("key", "value"):
+            self.assertEqual(tuple(op.call_args.kwargs[name].shape), tuple(key.shape))
 
-        self.assertTrue(torch.all(self.key_cache[0, 0] == sentinel))
-        self.assertTrue(torch.all(self.key_cache[0, 1:] == 0))
-        self.assertTrue(torch.all(self.key_cache[1] == 0))
+    def test_everything_reaches_the_operator_as_one_byte_int8(self):
+        # The FIA C8 path feeds int8; erasing the dtype here is what keeps the
+        # FP8 payload out of the operator's type check.
+        op, _, _ = self._scatter(dtype=torch.float8_e4m3fn)
+        for name in ("key", "value", "key_cache", "value_cache"):
+            self.assertEqual(op.call_args.kwargs[name].dtype, torch.int8, name)
+
+    def test_negative_slots_are_left_for_the_operator(self):
+        # No clamp, no filtering: the operator skips PAD_SLOT_ID itself, and
+        # keeping the tensor untouched is what keeps shapes static under
+        # graph capture.
+        op, _, slots = self._scatter()
+        passed = op.call_args.kwargs["slot_mapping"]
+        self.assertIs(passed, slots)
+        self.assertTrue(bool((passed < 0).any()), "fixture should include a padded row")
+
+    def test_empty_batch_does_not_call_the_operator(self):
+        with patch.object(mxfp_kv_cache.torch_npu, "npu_scatter_pa_kv_cache") as op:
+            scatter_mxfp_pa_nz_kv_cache(
+                torch.zeros(0, self.NUM_KV_HEADS, self.HEAD_DIM, dtype=torch.uint8),
+                torch.zeros(0, self.NUM_KV_HEADS, self.HEAD_DIM, dtype=torch.uint8),
+                self.key_cache,
+                self.value_cache,
+                torch.zeros(0, dtype=torch.int64),
+                self.BLOCK_SIZE,
+            )
+        op.assert_not_called()
+
+    def test_nz_view_places_a_token_at_its_fragment_coordinates(self):
+        # Pure indexing math, independent of the operator: channel c of a
+        # token at in-block offset o lives at [block, head, c//32, o, c%32].
+        cache = torch.zeros((self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, self.HEAD_DIM), dtype=torch.uint8)
+        nz = cache.view(self.NUM_BLOCKS, self.NUM_KV_HEADS, self.HEAD_DIM // 32, self.BLOCK_SIZE, 32)
+        nz[1, 0, 1, 2, 5] = 42
+        flat = cache.reshape(-1)
+        expected = (((1 * self.NUM_KV_HEADS + 0) * (self.HEAD_DIM // 32) + 1) * self.BLOCK_SIZE + 2) * 32 + 5
+        self.assertEqual(flat[expected].item(), 42)
+        self.assertEqual(int((flat != 0).sum()), 1)
 
 
 class TestScatterMXFPKScaleCache(TestBase):

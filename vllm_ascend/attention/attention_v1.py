@@ -2886,10 +2886,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             num_kv_heads = value_scale_cache.shape[1]
             v_dim_frags = value_scale_cache.shape[2]
             v_dim_frag_size = value_scale_cache.shape[4]
-            v_head_dim = v_dim_frags * v_dim_frag_size
-            value_scale_cache.copy_(
-                value_scale.view(num_kv_heads, v_dim_frags, 1, v_dim_frag_size, 1)
-            )
+            value_scale_cache.copy_(value_scale.view(num_kv_heads, v_dim_frags, 1, v_dim_frag_size, 1))
             # Only claim the cache is filled when the copy actually ran. Graph
             # capture records the copy without executing it, while this Python
             # line runs for real -- so marking it there leaves the cache full of

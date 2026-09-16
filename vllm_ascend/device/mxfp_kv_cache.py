@@ -205,52 +205,64 @@ def scatter_mxfp_pa_nz_kv_cache(
 ) -> None:
     """Scatter quantized K/V into the paged caches in QFA's PA_NZ layout.
 
-    The caches keep the natural (num_blocks, block_size, num_kv_heads,
-    head_dim) storage; both this scatter and QFA (layout_kv=PA_NZ) go through
-    the 5-D view (num_blocks, num_kv_heads, head_dim//32, block_size, 32).
-    A token at in-block offset ``o`` lands at ``[block, :, :, o, :]`` and its
-    ``[N, D]`` payload needs only a reshape to ``[N, D//32, 32]`` -- the NZ
-    layout is exactly the natural token row re-fragmented along D, so no
-    permute is involved. npu_scatter_pa_kv_cache cannot be used here: its
-    shape contract requires key_cache.dim2 == num_kv_heads, which the PA_NZ
-    axis order (dim2 == head_dim//32) violates.
+    This is scenario 1 of the ScatterPaKvCache contract (ops-transformer
+    ``attention/scatter_pa_kv_cache/README.md``), which is the operator's
+    native PA_NZ mode::
 
-    Byte views throughout: index_put on float8 either errors or falls back
-    to AICPU. Padded rows (slot -1) are clamped to slot 0 and rewrite the
-    cache's pre-read content, making them no-ops (same pattern as the K-scale
-    scatter).
+        key/value   [batch * seq_len, num_head, head_size]
+        key/valueCache
+                    [num_blocks, num_head, head_size // last_dim, block_size, last_dim]
+        slotMapping [batch * seq_len]
+        cacheMode   "PA_NZ"
+        last_dim = 32 / sizeof(dtype)     -> 32 for any 1-byte dtype
+        (head_size * sizeof(dtype)) % 32 == 0
+
+    ``cache_mode`` is what selects that contract and is not optional: left at
+    the default the operator reads the caches as scenario 2 ("Norm",
+    ``[num_blocks, block_size, num_head, head_size]``), whose dim2 is
+    num_head -- which is where the "shape contract requires
+    key_cache.dim2 == num_kv_heads" rejection comes from. The axis order is
+    not the problem; omitting the mode is.
+
+    Both sides go through int8 views. The operator does accept FLOAT8_E4M3FN,
+    but only on Ascend 950PR/950DT -- A2/A3 are limited to FP16/BF16/INT8,
+    and INT8 is accepted everywhere. sizeof is 1 either way, so last_dim
+    stays 32 and the bytes written are identical; this just keeps one fewer
+    product-dependent assumption in the call.
+
+    Negative slots (vLLM's PAD_SLOT_ID) are left for the operator to skip, so
+    the padded-batch case costs nothing and the shapes stay static for graph
+    capture.
+
+    Constraints checked against this model: head_dim 256 -> 256 % 32 == 0,
+    and block_size (the cache's second-to-last axis under PA_NZ) must stay
+    below UINT16_MAX.
     """
-    slots = slot_mapping.to(torch.long)
-    if slots.numel() == 0:
+    if slot_mapping.numel() == 0:
         return
 
-    valid = slots >= 0
-    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
-    block_ids = safe_slots // block_size
-    offsets = safe_slots % block_size
+    num_kv_heads, head_dim = quant_key.shape[1], quant_key.shape[2]
 
-    for src, cache in ((quant_key, key_cache), (quant_value, value_cache)):
-        num_tokens, num_kv_heads, head_dim = src.shape
-        src_bytes = src.view(torch.uint8) if src.dtype != torch.uint8 else src
-        # aclnnIndex/aclnnIndexPut reject DT_FLOAT8_E4M3FN outright, so the
-        # cache side needs the byte view just like the payload side.
-        cache_bytes = cache.view(torch.uint8) if cache.dtype != torch.uint8 else cache
-        nz = cache_bytes.view(
+    def _as_bytes(t: torch.Tensor) -> torch.Tensor:
+        return t if t.dtype == torch.int8 else t.view(torch.int8)
+
+    def _nz_view(cache: torch.Tensor) -> torch.Tensor:
+        return _as_bytes(cache).view(
             -1,
             num_kv_heads,
             head_dim // MXFP_KV_NZ_DIM_FRAG,
             block_size,
             MXFP_KV_NZ_DIM_FRAG,
         )
-        payload = src_bytes.view(
-            num_tokens,
-            num_kv_heads,
-            head_dim // MXFP_KV_NZ_DIM_FRAG,
-            MXFP_KV_NZ_DIM_FRAG,
-        )
-        cached = nz[block_ids, :, :, offsets, :]
-        updates = torch.where(valid.view(-1, 1, 1, 1), payload, cached)
-        nz[block_ids, :, :, offsets, :] = updates
+
+    torch_npu.npu_scatter_pa_kv_cache(
+        key=_as_bytes(quant_key),
+        value=_as_bytes(quant_value),
+        key_cache=_nz_view(key_cache),
+        value_cache=_nz_view(value_cache),
+        slot_mapping=slot_mapping,
+        cache_mode="PA_NZ",
+    )
 
 
 def scatter_mxfp_k_scale_cache(
@@ -355,5 +367,7 @@ def scatter_mxfp_v_scale_cache(
     # value_scale: [G, N, D, 2] -> [G, N, D // 16, 16, 2]; the advanced
     # indexing below broadcasts the G-length index vectors to the front,
     # so the source lines up group-by-group with the target slots.
-    packed = value_scale.reshape(num_scales, *value_scale.shape[1:2], -1, MXFP_V_SCALE_NZ_DIM_FRAG, MXFP_KV_SCALE_VALUES_PER_GROUP)
+    packed = value_scale.reshape(
+        num_scales, *value_scale.shape[1:2], -1, MXFP_V_SCALE_NZ_DIM_FRAG, MXFP_KV_SCALE_VALUES_PER_GROUP
+    )
     value_scale_cache[block_ids, :, :, v_scale_cache_offsets, :, :] = packed
