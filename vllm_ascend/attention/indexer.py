@@ -519,7 +519,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
         if get_ascend_config().c8_reshape_optim_enabled:
             torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping,
+                # The native metadata kernel reads slot indices as int32.
+                slot_mapping.to(torch.int32),
                 common_attn_metadata.group_len,
                 common_attn_metadata.group_key_idx,
                 common_attn_metadata.group_key_cache_idx,

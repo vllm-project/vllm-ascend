@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -116,6 +117,7 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
     assert metadata.slot_mapping is common.slot_mapping
 
 
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 @patch("vllm_ascend.attention.indexer.torch.ops._C_ascend.store_kv_block_metadata", create=True)
@@ -123,16 +125,23 @@ def test_sfa_indexer_metadata_builder_primes_reshape_optim(
     mock_store_kv_block_metadata,
     mock_cos_sin,
     mock_get_ascend_config,
+    slot_dtype,
 ):
     mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
 
-    builder = _make_builder()
+    builder = _make_builder(pcp_size=2)
     common = _make_common_metadata()
+    common.slot_mapping = torch.tensor([3200, 3201, 3202, 3203, -1], dtype=slot_dtype)
     metadata = builder.build(0, common)
 
+    kernel_slots = mock_store_kv_block_metadata.call_args.args[0]
+    assert kernel_slots.dtype == torch.int32
+    torch.testing.assert_close(kernel_slots, common.slot_mapping.to(torch.int32))
+    assert metadata.slot_mapping is common.slot_mapping
+    assert metadata.slot_mapping.dtype == slot_dtype
     mock_store_kv_block_metadata.assert_called_once_with(
-        metadata.slot_mapping,
+        kernel_slots,
         common.group_len,
         common.group_key_idx,
         common.group_key_cache_idx,
