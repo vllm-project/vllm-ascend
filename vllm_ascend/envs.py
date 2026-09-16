@@ -28,10 +28,20 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
-    # Expose DSV4 prefill attention to direct FX tracing. MoE stays opaque.
+    # Test-only A2 route override: use A3's non-fused AllToAll above MC2
+    # capacity. No effect on other devices or below capacity. Default 0.
+    "VLLM_ASCEND_FXRT_TEST_A3_ALLTOALL": lambda: os.getenv(
+        "VLLM_ASCEND_FXRT_TEST_A3_ALLTOALL", "0"
+    ) == "1",
+    # Expose DSV4 prefill attention to direct FX tracing, independently of MoE.
     # Disabled by default; only the exact value "1" enables it. Not sensitive.
     "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA": lambda: os.getenv(
         "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "0"
+    ) == "1",
+    # Expose DSV4 prefill MoE to direct FX tracing, independently of DSA.
+    # Disabled by default; only the exact value "1" enables it. Not sensitive.
+    "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE": lambda: os.getenv(
+        "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_MOE", "0"
     ) == "1",
     # Test-only compatibility for synthetic DSV4 weights. Default: disabled.
     # Effective only with load_format="dummy", even if inherited by a real
