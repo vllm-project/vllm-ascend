@@ -156,9 +156,9 @@ class AscendMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # The direct FXRT graph is a single-DP prefill graph. Its
-        # ForwardContext has no DP metadata, so this context would be a no-op;
-        # tracing the thread-local lookup itself is unsupported by fullgraph.
+        # Ascend dispatchers consume num_tokens_across_dp_cpu directly, not
+        # the temporary local_sizes field set by _sequence_parallel_context.
+        # Avoid tracing that context manager's thread-local access.
         if fxrt_prefill_decompose_enabled():
             return self.forward_impl(
                 layer,

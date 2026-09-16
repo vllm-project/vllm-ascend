@@ -1283,14 +1283,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
-                    # The transpose-batch-matmul API expects a 3D grouped
-                    # weight. Keep the same layout as the non-CP DSA path.
-                    group_hidden_dim = (
-                        o_proj_input.shape[1] * o_proj_input.shape[2] // o_proj_groups
-                    )
-                    wo_a_weight = self.wo_a.weight.view(
-                        o_proj_groups, -1, group_hidden_dim
-                    ).transpose(1, 2)
+                    wo_a_weight = self.wo_a.weight
+                    # The real weight loader already produces [groups, K, R].
+                    # Only raw 2D weights (e.g. dummy loading) need conversion.
+                    if wo_a_weight.ndim == 2:
+                        group_hidden_dim = o_proj_input.shape[-1]
+                        wo_a_weight = wo_a_weight.view(
+                            o_proj_groups, -1, group_hidden_dim
+                        ).transpose(1, 2)
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
                         wo_a_weight,

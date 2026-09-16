@@ -68,6 +68,12 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _FXRT_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
+_FXRT_DUMMY_QUANT_ACTIVE = False
+
+
+def fxrt_dummy_quant_enabled() -> bool:
+    """Return the engine-resolved test switch; never infer dummy from dtype."""
+    return _FXRT_DUMMY_QUANT_ACTIVE
 
 
 def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
@@ -78,7 +84,12 @@ def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
     implementation; Decode and combined P/D engines must retain the opaque
     custom operators used by ACL graph capture.
     """
-    global _FXRT_PREFILL_DECOMPOSE_ACTIVE
+    global _FXRT_PREFILL_DECOMPOSE_ACTIVE, _FXRT_DUMMY_QUANT_ACTIVE
+
+    _FXRT_DUMMY_QUANT_ACTIVE = (
+        envs_ascend.VLLM_ASCEND_FXRT_DUMMY_QUANT
+        and getattr(getattr(vllm_config, "load_config", None), "load_format", None) == "dummy"
+    )
 
     requested = os.getenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "0") == "1"
     kv_config = vllm_config.kv_transfer_config
@@ -488,6 +499,9 @@ def enable_custom_op():
 
         # register the meta implementation for custom kernel if necessary
         import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+        from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
+
+        register_rms_quant_meta()
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
@@ -499,6 +513,9 @@ def enable_custom_op():
                 bootstrap_custom_op_env(include_vendor_lib=True)
                 import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
                 import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+                from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
+
+                register_rms_quant_meta()
 
                 _CUSTOM_OP_ENABLED = True
             except ImportError:

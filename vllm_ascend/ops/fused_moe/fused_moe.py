@@ -45,6 +45,7 @@ from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    fxrt_prefill_decompose_enabled,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,

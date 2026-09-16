@@ -29,6 +29,7 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.ops.dsa_q_rms import fxrt_dsa_q_rms
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
@@ -950,7 +951,9 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
-        if triton_q_rms is not None and not fxrt_prefill_decompose_enabled():
+        if triton_q_rms is not None:
+            if fxrt_prefill_decompose_enabled():
+                return fxrt_dsa_q_rms(q, eps)
             return triton_q_rms(q, eps)
         else:
             dtype = q.dtype
@@ -1756,7 +1759,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
 
-        if triton_q_rms is not None and not fxrt_prefill_decompose_enabled():
+        if triton_q_rms is not None:
+            if fxrt_prefill_decompose_enabled():
+                return fxrt_dsa_q_rms(q, eps)
             return triton_q_rms(q, eps)
         else:
             dtype = q.dtype

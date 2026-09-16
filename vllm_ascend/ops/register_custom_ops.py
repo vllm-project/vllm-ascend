@@ -1,5 +1,3 @@
-import os
-
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -19,7 +17,13 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import enable_sp_by_pass, is_vl_model, npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import (
+    enable_sp_by_pass,
+    fxrt_dummy_quant_enabled,
+    is_vl_model,
+    npu_stream_switch,
+    prefetch_stream,
+)
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -100,7 +104,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         padded_x = torch.empty((dp_size, _EXTRA_CTX.padded_length, *x.shape[1:]), device=x.device, dtype=x.dtype)
         total_tokens = int(num_tokens_across_dp_cpu.sum())
         if (
-            os.getenv("VLLM_ASCEND_FXRT_DUMMY_QUANT") == "1"
+            fxrt_dummy_quant_enabled()
             and x.shape[0] != total_tokens
         ):
             # Reduced dummy prefill keeps routed-expert output local to each

@@ -28,6 +28,10 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Test-only compatibility for synthetic DSV4 weights. Default: disabled.
+    # Effective only with load_format="dummy", even if inherited by a real
+    # checkpoint worker. Values: "1" enables, all other values disable.
+    "VLLM_ASCEND_FXRT_DUMMY_QUANT": lambda: os.getenv("VLLM_ASCEND_FXRT_DUMMY_QUANT", "0") == "1",
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

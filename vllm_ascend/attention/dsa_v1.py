@@ -1478,9 +1478,10 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self._fxrt_prefill_decompose = fxrt_prefill_decompose_enabled()
+        self._use_cv_prefill_prolog = ascend_config.multistream_dsv4_dsa_overlap
         # Python Stream objects and context managers are not valid fullgraph
-        # FX inputs. Use the equivalent serial DSA path for decomposed FXRT
-        # prefill; eager/opaque execution keeps the configured overlap path.
+        # FX inputs. Serialize the configured prolog for decomposed prefill
+        # without changing its operators or intermediate dtypes.
         self.multistream_dsv4_dsa_overlap = (
             ascend_config.multistream_dsv4_dsa_overlap
             and not self._fxrt_prefill_decompose
@@ -1735,9 +1736,13 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            wo_a_weight = self.wo_a.weight.view(
-                self.n_local_groups, -1, group_hidden_dim
-            ).transpose(1, 2)
+            wo_a_weight = self.wo_a.weight
+            # Real weight loading already produces [groups, K, R].
+            # Dummy loading leaves raw 2D weights and needs one conversion.
+            if wo_a_weight.ndim == 2:
+                wo_a_weight = wo_a_weight.view(
+                    self.n_local_groups, -1, group_hidden_dim
+                ).transpose(1, 2)
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
                 wo_a_weight,
@@ -1792,16 +1797,18 @@ class AscendDSAImpl(DSAAttentionImpl):
         # Process for Flash Comm V1
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
         if self._fxrt_prefill_decompose:
-            # This switch is valid only on the PD prefill process.  Use the
-            # model input's symbolic token count instead of request-dependent
-            # Python integers from AttentionMetadata.  The explicit slice also
-            # corrects the custom all-gather fake shape, which includes TP
-            # padding even though its runtime implementation removes it.
-            assert num_actual_tokens is not None
+            # Positions passed to DSA may be TP-local. The projection buffer
+            # uses the full-token RoPE layout, while the prefill body excludes
+            # padding. Obtain both counts from their respective tensor shapes.
+            o_proj_input_shape = (
+                attn_metadata[0].cos[layer_name].shape[0],
+                self.n_local_heads,
+                self.head_dim,
+            )
             has_prefill = True
             has_decode = False
             decode_tokens = 0
-            actual_tokens = num_actual_tokens
+            actual_tokens = _require_prefill_metadata(attn_metadata[0]).cos[layer_name].shape[0]
             hidden_states = hidden_states[:actual_tokens]
         else:
             has_prefill = attn_metadata[0].num_prefills > 0
@@ -1869,32 +1876,41 @@ class AscendDSAImpl(DSAAttentionImpl):
         Each stream's data is self-contained; no cross-stream sync is needed between blocks.
         Only the tail wait_stream ensures scatter is complete.
         """
-        main_stream = torch.npu.current_stream()
-        aux_stream = dsv4_dsa_overlap_stream()
+        # Preserve the configured prolog's operators and intermediate dtypes
+        # when serializing it for tracing. The other serial prolog uses fused
+        # RMS/quantization and is not numerically equivalent to this path.
+        overlap = self.multistream_dsv4_dsa_overlap
+        main_stream = torch.npu.current_stream() if overlap else None
+        aux_stream = dsv4_dsa_overlap_stream() if overlap else None
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
 
-        e_q_quant_done = _record_dsa_event(
-            "dsa.q_quant_done", self._fxrt_prefill_decompose, main_stream
-        )
+        if overlap:
+            e_q_quant_done = _record_dsa_event(
+                "dsa.q_quant_done", self._fxrt_prefill_decompose, main_stream
+            )
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            _wait_dsa_event(e_q_quant_done, self._fxrt_prefill_decompose, aux_stream)
+        with npu_stream_switch(aux_stream, enabled=overlap):
+            if overlap:
+                _wait_dsa_event(e_q_quant_done, self._fxrt_prefill_decompose, aux_stream)
             kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
+        if overlap:
+            _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
 
         # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
-        e_part2_start = _record_dsa_event(
-            "dsa.part2_start", self._fxrt_prefill_decompose, main_stream
-        )
+        if overlap:
+            e_part2_start = _record_dsa_event(
+                "dsa.part2_start", self._fxrt_prefill_decompose, main_stream
+            )
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            _wait_dsa_event(e_part2_start, self._fxrt_prefill_decompose, aux_stream)
+        with npu_stream_switch(aux_stream, enabled=overlap):
+            if overlap:
+                _wait_dsa_event(e_part2_start, self._fxrt_prefill_decompose, aux_stream)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
         if is_prefill:
@@ -1911,15 +1927,18 @@ class AscendDSAImpl(DSAAttentionImpl):
             q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
 
-        _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
+        if overlap:
+            _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
-        e_part3_start = _record_dsa_event(
-            "dsa.part3_start", self._fxrt_prefill_decompose, main_stream
-        )
+        if overlap:
+            e_part3_start = _record_dsa_event(
+                "dsa.part3_start", self._fxrt_prefill_decompose, main_stream
+            )
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            _wait_dsa_event(e_part3_start, self._fxrt_prefill_decompose, aux_stream)
+        with npu_stream_switch(aux_stream, enabled=overlap):
+            if overlap:
+                _wait_dsa_event(e_part3_start, self._fxrt_prefill_decompose, aux_stream)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -1947,7 +1966,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
         # Serial tail: wait for auxiliary stream then execute q_rms[V] + rope[V]
-        _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
+        if overlap:
+            _wait_dsa_stream(main_stream, aux_stream, self._fxrt_prefill_decompose)
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -1994,9 +2014,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
 
-        if self.multistream_dsv4_dsa_overlap:
-            # mla prolog: q + kv dual-stream parallel
-            q, qr, _ = self._mla_prolog_multistream(
+        if self._use_cv_prefill_prolog:
+            # Same CV prolog, with overlap only when its stream path is enabled.
+            q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
                 hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
             )
         else:
@@ -2017,18 +2037,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
-                if self._fxrt_prefill_decompose:
-                    # The fused custom op's current Meta kernel incorrectly
-                    # reports its quantized output as the input BF16 dtype.
-                    # Decompose it so Dynamo/FXRT see the real INT8 tensor.
-                    qr, _ = torch_npu.npu_rms_norm(
-                        q_a, self.q_norm.weight, self.eps
-                    )
-                    qr, qr_pertoken_scale = torch_npu.npu_dynamic_quant(qr)
-                else:
-                    qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                        q_a, self.q_norm.weight, epsilon=self.eps
-                    )
+                # Keep the fused kernel's rounding behavior in both paths.
+                # Its Meta registration describes INT8 without changing the
+                # runtime computation to two separately rounded operators.
+                qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                    q_a, self.q_norm.weight, epsilon=self.eps
+                )
                 q = torch_npu.npu_quant_matmul(
                     qr,
                     self.wq_b.weight,
