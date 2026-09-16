@@ -48,7 +48,7 @@ class AscendParallelEagleSpeculator(AscendEagleSpeculator):
         super().set_attn(model_state, kv_cache_config, block_tables, target_input_buffers, target_attn_groups)
         # Share the request-to-block registry, but own the expanded draft's
         # slot buffer: target-sized storage cannot hold K-1 extra queries/row.
-        self.block_tables = copy(self.block_tables)
+        self.block_tables = copy(block_tables)
         self.block_tables.max_num_batched_tokens = self.max_num_tokens
         self.block_tables.slot_mappings = torch.full(
             (len(kv_cache_config.kv_cache_groups), self.max_num_tokens),
