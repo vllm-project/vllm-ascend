@@ -562,10 +562,8 @@ def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
 
 
 def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
-    def _unset_config():
-        raise RuntimeError("Current vllm config is not set.")
-
-    monkeypatch.setattr(afc, "get_current_vllm_config", _unset_config)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: MagicMock())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: MagicMock())
     forward_context = MagicMock(capturing=False)
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
 

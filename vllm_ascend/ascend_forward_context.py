@@ -463,30 +463,26 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        try:
-            if use_v2_model_runner(get_current_vllm_config()) is True:
-                additional_kwargs = getattr(ctx, "additional_kwargs", None)
-                if additional_kwargs is None:
-                    return None
-                return additional_kwargs.get(name)
-        except Exception:
-            pass
+        if use_v2_model_runner(get_current_vllm_config()) is True:
+            # Unset known extras default to None so optional flags (e.g. `sinks`)
+            # can be read with truthiness checks before the V2 path populates them.
+            additional_kwargs = getattr(ctx, "additional_kwargs", None)
+            if additional_kwargs is None:
+                return None
+            return additional_kwargs.get(name)
         return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        try:
-            if use_v2_model_runner(get_current_vllm_config()) is True:
-                additional_kwargs = getattr(ctx, "additional_kwargs", None)
-                if additional_kwargs is None:
-                    additional_kwargs = {}
-                    ctx.additional_kwargs = additional_kwargs
-                additional_kwargs[name] = value
-                return
-        except Exception:
-            pass
-        setattr(ctx, name, value)
+        if use_v2_model_runner(get_current_vllm_config()) is True:
+            additional_kwargs = getattr(ctx, "additional_kwargs", None)
+            if additional_kwargs is None:
+                additional_kwargs = {}
+                ctx.additional_kwargs = additional_kwargs
+            additional_kwargs[name] = value
+        else:
+            setattr(ctx, name, value)
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX
