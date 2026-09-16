@@ -1226,3 +1226,68 @@ class TestC8MXFPPerStepDerivations(TestBase):
             self.impl._qfa_k_scale_slot_index(self.attn_metadata, torch.tensor([2, 5, -1], dtype=torch.int64), 4)[0],
             slots[0],
         )
+
+
+class TestC8MXFPQfaMetadataPlan(TestBase):
+    """One AICPU metadata plan a step, capture included.
+
+    The plan's inputs are head counts, head dim, quant mode, the two length
+    tensors, mask mode, window and layouts -- nothing layer-specific -- and
+    the main operator declares ``metadata`` a read-only Input. So the step's
+    full-attention layers share one plan instead of each paying an
+    AICore-to-AICPU round trip. That holds while a graph is captured too: the
+    deriving call is recorded inside the captured region, ahead of every read
+    of its output.
+    """
+
+    LAYERS_PER_STEP = 23
+
+    def setUp(self):
+        self.impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        self.impl.num_heads = 8
+        self.impl.num_kv_heads = 2
+        self.impl.head_size = 128
+
+    def _plans(self, calls, *, capturing=False):
+        """Issue one step's worth of plans; return (plans, operator calls)."""
+        attn_metadata = SimpleNamespace()
+        invocations = []
+
+        def metadata_op(*args, **kwargs):
+            invocations.append((args, kwargs))
+            return MagicMock()
+
+        defaults = {
+            "cu_seqlens_q": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "seqused_kv": torch.tensor([10, 20], dtype=torch.int32),
+            "max_seqlen_q": 1,
+            "layout_q_descale": "N2TGD",
+        }
+        with (
+            patch.object(attn_module, "_get_qfa_ops", return_value=(MagicMock(), metadata_op)),
+            patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(capturing=capturing)),
+        ):
+            plans = [self.impl._get_qfa_metadata(attn_metadata, **{**defaults, **call}) for call in calls]
+        return plans, invocations
+
+    def test_one_plan_serves_every_layer(self):
+        plans, invocations = self._plans([{}] * self.LAYERS_PER_STEP)
+        self.assertEqual(len(invocations), 1)
+        for plan in plans[1:]:
+            self.assertIs(plan, plans[0])
+
+    def test_capture_shares_the_plan_too(self):
+        # This is the regression: the code this replaced bypassed the cache
+        # whenever _EXTRA_CTX.capturing was set, which put one AICPU op per
+        # layer into the captured graph and replayed all of them every step.
+        plans, invocations = self._plans([{}] * self.LAYERS_PER_STEP, capturing=True)
+        self.assertEqual(len(invocations), 1)
+        for plan in plans[1:]:
+            self.assertIs(plan, plans[0])
+
+    def test_a_different_non_tensor_input_gets_its_own_plan(self):
+        for override in ({"layout_q_descale": "TND"}, {"max_seqlen_q": 2}):
+            with self.subTest(**override):
+                plans, invocations = self._plans([{}, override])
+                self.assertEqual(len(invocations), 2)
+                self.assertIsNot(plans[0], plans[1])

@@ -2572,30 +2572,42 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         max_seqlen_q: int,
         layout_q_descale: str,
     ):
-        """Return the QFA metadata plan (AICPU op output).
+        """Return the QFA metadata plan (AICPU op output), derived once a step.
 
-        Eager: computed once per step and cached on the AscendMetadata (the
-        plan depends on heads/batch, identical across full-attention layers).
-        npugraph_ex capture: the Python-side cache is bypassed so the metadata
-        op executes INSIDE the captured region on every layer visit -- the
-        graph then recomputes the plan from the replayed length buffers each
-        step (golden-test GRAPH_PATH=7 methodology: Network.forward calls the
-        metadata op inline before the main op). The per-layer redundant calls
-        during capture are free (AICPU, ~us) and each layer's captured call
-        consumes the plan it just produced.
+        The plan is a load-balance schedule computed on the AICPU, and its
+        inputs are exactly this method's arguments plus the device topology:
+        head counts, head dim, quant mode, cu_seqlens_q, seqused_kv, mask
+        mode, the window and the four layouts. None of them is layer-specific,
+        so one plan serves every full-attention layer of a step -- hence the
+        key below, which is the full set of non-tensor inputs (the tensor ones
+        are per-step by construction).
+
+        Caching it across graph capture is safe for the same reason
+        _qfa_step_lengths is: the deriving call runs INSIDE the captured
+        region. The first layer's metadata op is recorded ahead of every QFA
+        call that reads its output, stream order makes that write-before-read
+        on each replay, and the main operator declares ``metadata`` as a plain
+        read-only Input -- it never writes back into the plan, so layers
+        sharing one cannot interfere. What capture could not tolerate is a
+        plan produced OUTSIDE the region, because replay never re-runs Python
+        and the tensor would freeze at its capture-time contents.
+
+        This used to bypass the cache while capturing so that every layer
+        issued its own metadata op, on the theory that a captured call has to
+        consume the plan it just produced. The operator contract does not ask
+        for that, and the cost was real: one AICore-to-AICPU round trip per
+        full-attention layer per step (23 of them on Qwen3.8-2.4T), each doing
+        work that grows with the batch.
         """
-        # Bypass the cache during ANY graph capture (FULL and PIECEWISE
-        # warmups alike): the metadata op must execute inside the captured
-        # region so each replay recomputes the plan from the replayed
-        # length buffers. During PIECEWISE capture the attention runs
-        # eagerly between the compiled pieces, so the uncached per-layer
-        # calls are just normal eager executions (~us, AICPU).
-        use_step_cache = not _EXTRA_CTX.capturing
-        cache = self._qfa_step_cache(attn_metadata) if use_step_cache else {}
-        # Keyed by layout because that is what picks the prefill or decode
-        # template; every full-attention layer of one step agrees on it, so
-        # in practice this still resolves to a single plan per step.
-        metadata = cache.get(layout_q_descale)
+        cache = self._qfa_step_cache(attn_metadata)
+        plan_key = (
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            max_seqlen_q,
+            layout_q_descale,
+        )
+        metadata = cache.get(plan_key)
         if metadata is None:
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
@@ -2632,8 +2644,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 layout_kv=QFA_LAYOUT_PA_NZ,
                 layout_out=QFA_LAYOUT_TND,
             )
-            if use_step_cache:
-                cache[layout_q_descale] = metadata
+            cache[plan_key] = metadata
         return metadata
 
     def _qfa_int8_mask(self, attn_metadata: AscendMetadata) -> torch.Tensor | None:
