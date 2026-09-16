@@ -1051,8 +1051,9 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         )
         seen = {"source_scale": scale}
 
-        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, layout_q_descale):
+        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale):
             seen["metadata_max_seqlen_q"] = max_seqlen_q
+            seen["metadata_mask_mode"] = mask_mode
             seen["metadata_layout"] = layout_q_descale
             return MagicMock()
 
@@ -1064,11 +1065,13 @@ class TestC8MXFPQfaQueryPlan(TestBase):
             _attn_metadata,
             *,
             max_seqlen_q,
+            mask_mode,
             layout_q_descale,
             output,
             **kwargs,
         ):
             seen["max_seqlen_q"] = max_seqlen_q
+            seen["mask_mode"] = mask_mode
             seen["layout"] = layout_q_descale
             seen["scale"] = query_scale
             return output
@@ -1088,6 +1091,7 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         # A plan computed for one kernel must not be fed to the other.
         self.assertEqual(seen["metadata_max_seqlen_q"], seen["max_seqlen_q"])
         self.assertEqual(seen["metadata_layout"], seen["layout"])
+        self.assertEqual(seen["metadata_mask_mode"], seen["mask_mode"])
         return seen
 
     # --- max_seqlen_q -----------------------------------------------------
@@ -1165,6 +1169,26 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
         self.assertEqual(seen["layout"], "TND")
         self.assertIs(seen["scale"], seen["source_scale"])
+
+    # --- mask mode --------------------------------------------------------
+
+    def test_uniform_decode_drops_the_mask(self):
+        # One query row per request: CAUSAL constrains nothing there (the KV
+        # range is bounded by seqused_kv), and NO_MASK is a separate tiling
+        # key whose kernel never reads the mask.
+        self.assertEqual(self._forward([0, 1, 2, 3, 4], max_query_len=1)["mask_mode"], 0)
+
+    def test_mtp_verify_keeps_the_causal_mask(self):
+        # 1 + num_spec query rows per request: row 0 must not see row 1's KV.
+        self.assertEqual(self._forward([0, 2, 4, 6], max_query_len=2)["mask_mode"], 3)
+
+    def test_prefill_keeps_the_causal_mask(self):
+        self.assertEqual(self._forward([0, 5, 6, 7, 8], max_query_len=5)["mask_mode"], 3)
+
+    def test_unknown_query_length_keeps_the_causal_mask(self):
+        # max_query_len absent falls back to the token total, which is only
+        # 1 for a genuinely single-token step -- never a silent NO_MASK.
+        self.assertEqual(self._forward([0, 1, 2, 3, 4], max_query_len=None)["mask_mode"], 3)
 
 
 class TestC8MXFPPerStepDerivations(TestBase):
@@ -1261,6 +1285,7 @@ class TestC8MXFPQfaMetadataPlan(TestBase):
             "cu_seqlens_q": torch.tensor([0, 1, 2], dtype=torch.int32),
             "seqused_kv": torch.tensor([10, 20], dtype=torch.int32),
             "max_seqlen_q": 1,
+            "mask_mode": 0,
             "layout_q_descale": "N2TGD",
         }
         with (
@@ -1286,8 +1311,14 @@ class TestC8MXFPQfaMetadataPlan(TestBase):
             self.assertIs(plan, plans[0])
 
     def test_a_different_non_tensor_input_gets_its_own_plan(self):
-        for override in ({"layout_q_descale": "TND"}, {"max_seqlen_q": 2}):
+        for override in ({"layout_q_descale": "TND"}, {"mask_mode": 3}, {"max_seqlen_q": 2}):
             with self.subTest(**override):
                 plans, invocations = self._plans([{}, override])
                 self.assertEqual(len(invocations), 2)
                 self.assertIsNot(plans[0], plans[1])
+
+    def test_the_step_mask_mode_reaches_the_operator(self):
+        # The plan is a schedule for one kernel variant, so the mask mode it
+        # was built for has to be the one the main call then uses.
+        _, invocations = self._plans([{"mask_mode": 3}])
+        self.assertEqual(invocations[0][1]["mask_mode"], 3)

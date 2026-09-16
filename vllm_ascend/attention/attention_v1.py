@@ -2359,6 +2359,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
 
 QFA_QUANT_MODE_MXFP8 = 1
+QFA_MASK_MODE_NO_MASK = 0
 QFA_MASK_MODE_CAUSAL = 3
 QFA_LAYOUT_TND = "TND"
 QFA_LAYOUT_N2TGD = "N2TGD"
@@ -2442,10 +2443,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     V: ``[num_blocks, num_kv_heads, head_dim//16, block_size//64, 16, 2]``).
 
     One QFA call per step: decode and prefill requests share a single
-    CAUSAL-masked invocation (cu_seqlens_q over the whole batch), instead of
-    per-subset calls -- the causal mask already covers decode rows and the
-    batch is smaller to feed. PrefillNoCache also reads from pages:
-    reshape_and_cache has written this step's K/V before attention runs.
+    invocation (cu_seqlens_q over the whole batch) instead of per-subset
+    calls -- the causal mask already covers decode rows and the batch is
+    smaller to feed. A step whose every query is one row long drops the mask
+    (NO_MASK), which is equivalent there and picks a cheaper kernel.
+    PrefillNoCache also reads from pages: reshape_and_cache has written this
+    step's K/V before attention runs.
 
     Graph capture: handled natively by torch_npu's npugraph_ex backend (the
     FULL-graph mechanism of this vLLM build), following the ops-transformer
@@ -2570,6 +2573,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
         max_seqlen_q: int,
+        mask_mode: int,
         layout_q_descale: str,
     ):
         """Return the QFA metadata plan (AICPU op output), derived once a step.
@@ -2605,6 +2609,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             self.num_kv_heads,
             self.head_size,
             max_seqlen_q,
+            mask_mode,
             layout_q_descale,
         )
         metadata = cache.get(plan_key)
@@ -2636,7 +2641,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 v_descale=v_descale_stub,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=-1,
-                mask_mode=QFA_MASK_MODE_CAUSAL,
+                mask_mode=mask_mode,
                 win_left=-1,
                 win_right=-1,
                 layout_q=QFA_LAYOUT_TND,
@@ -2709,6 +2714,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         seqused_kv: torch.Tensor,
         qfa_metadata,
         max_seqlen_q: int,
+        mask_mode: int,
         layout_q_descale: str,
         num_tokens: int,
         output: torch.Tensor,
@@ -2755,10 +2761,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             seqused_q=None,
             seqused_kv=seqused_kv,
             sinks=None,
-            attn_mask=self._qfa_int8_mask(attn_metadata),
+            # The doc forbids attn_mask under NO_MASK and requires it under
+            # CAUSAL, so the two travel together.
+            attn_mask=(None if mask_mode == QFA_MASK_MODE_NO_MASK else self._qfa_int8_mask(attn_metadata)),
             metadata=qfa_metadata,
             softmax_scale=self.scale,
-            mask_mode=QFA_MASK_MODE_CAUSAL,
+            mask_mode=mask_mode,
             win_left=-1,
             win_right=-1,
             max_seqlen_q=max_seqlen_q,
@@ -2841,6 +2849,19 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         # that safe for every replay.
         max_seqlen_q = attn_metadata.max_query_len or num_tokens
 
+        # Drop the mask entirely when every request contributes a single query
+        # row. hasAttenMask is one of the six tiling-key axes
+        # (quant_flash_attn_tiling_mxfp8.cpp), so NO_MASK does not merely skip
+        # a load -- it selects a kernel template that never reads the mask at
+        # all. At Q_S == 1 that is exactly equivalent to CAUSAL: the lone
+        # query row sees all of [0, seqused_kv), and the KV range is bounded
+        # by seqused_kv rather than by the mask. Like the layout choice below
+        # this reads max_query_len -- the same quantity vLLM uses to call a
+        # graph uniform-decode -- so a captured decode graph and all of its
+        # replays agree on it. MTP verify steps (Q_S = 1 + num_spec) keep
+        # CAUSAL; MTP draft steps are Q_S == 1 and do not.
+        mask_mode = QFA_MASK_MODE_NO_MASK if max_seqlen_q == 1 else QFA_MASK_MODE_CAUSAL
+
         # Both operators have to agree on the q scale layout: it is what picks
         # the prefill or the decode kernel, and the metadata plan is computed
         # for that kernel. Under graph capture the layout and the permuted
@@ -2855,6 +2876,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
             max_seqlen_q=max_seqlen_q,
+            mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,
         )
         return self._run_qfa(
@@ -2866,6 +2888,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             seqused_kv=seqused_kv,
             qfa_metadata=qfa_metadata,
             max_seqlen_q=max_seqlen_q,
+            mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,
             num_tokens=num_tokens,
             output=output,
