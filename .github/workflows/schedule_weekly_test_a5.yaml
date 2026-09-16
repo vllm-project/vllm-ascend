@@ -76,6 +76,8 @@ on:
         description: 'JSON object containing optional bisect parameters'
         required: false
         default: '{}'
+  pull_request:
+      branches: [ main ]
 permissions:
   contents: read
   pull-requests: read
