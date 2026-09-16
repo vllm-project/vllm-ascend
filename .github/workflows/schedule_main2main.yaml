@@ -243,6 +243,14 @@ jobs:
           path: vllm-upstream
           fetch-depth: 0
 
+      - name: Checkout incremental-cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+          sparse-checkout-cone-mode: false
       - name: Install dependencies
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -265,6 +273,7 @@ jobs:
           set -eu
           # Hide the nested vllm checkout from the ascend repo's git status.
           echo "vllm-upstream/" >> .git/info/exclude
+          echo ".incremental-cache-workflow/" >> .git/info/exclude
 
           TARGET="${TARGET_COMMIT}"
           if [ -n "${TARGET}" ]; then
@@ -467,6 +476,14 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
+      - name: Restore incremental cache for Main2Main fallback
+        id: main2main-l1
+        if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          compatibility-id: main2main-a3-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ runner.arch }}
+          source-root: .
       - name: Install vllm-project/vllm-ascend
         working-directory: ${{ github.workspace }}
         env:
@@ -486,6 +503,12 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Save incremental cache after Main2Main fallback
+        if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          primary-key: ${{ steps.main2main-l1.outputs.primary-key }}
       - name: Save vllm-ascend csrc cache
         # Persist the on-runner build for the next dispatch.
         if: steps.cache-csrc.outputs.cache-hit != 'true'

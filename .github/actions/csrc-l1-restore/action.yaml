@@ -1,0 +1,115 @@
+name: Restore csrc incremental cache
+description: Restore a persistent snapshot for the content-addressed local csrc cache.
+
+inputs:
+  cache-dir:
+    required: true
+    description: Directory exported as VLLM_ASCEND_BUILD_CACHE_DIR.
+  compatibility-id:
+    required: true
+    description: Coarse environment identity used only to rank persistent snapshots.
+  source-root:
+    required: false
+    default: '.'
+  csrc-hash:
+    required: false
+    default: ''
+
+outputs:
+  supported:
+    value: ${{ steps.key.outputs.supported }}
+  primary-key:
+    value: ${{ steps.key.outputs.primary_key }}
+  csrc-hash:
+    value: ${{ steps.key.outputs.csrc_hash }}
+  cache-hit:
+    value: ${{ steps.restore.outputs.cache-hit }}
+  cache-matched-key:
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare L1 key
+      id: key
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        COMPATIBILITY_ID: ${{ inputs.compatibility-id }}
+        SOURCE_ROOT: ${{ inputs.source-root }}
+        CALLER_CSRC_HASH: ${{ inputs.csrc-hash }}
+      run: |
+        set -euo pipefail
+
+        source_root="$(cd "$SOURCE_ROOT" && pwd)"
+        engine="${source_root}/csrc/scripts/build_cache.py"
+
+        rm -rf "$CACHE_DIR"
+        mkdir -p "$CACHE_DIR"
+
+        if [ ! -f "$engine" ]; then
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::This source snapshot predates the fine-grained csrc cache; building without L1."
+          exit 0
+        fi
+        echo "supported=true" >> "$GITHUB_OUTPUT"
+
+        schema="$(python3 - "$engine" <<'PYCODE'
+        import ast
+        import sys
+        from pathlib import Path
+
+        tree = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "SCHEMA_VERSION":
+                        print(ast.literal_eval(node.value))
+                        raise SystemExit(0)
+        raise SystemExit("SCHEMA_VERSION not found")
+        PYCODE
+        )"
+
+        if [ -n "$CALLER_CSRC_HASH" ]; then
+          csrc_hash="$CALLER_CSRC_HASH"
+        else
+          git config --global --add safe.directory "$source_root" || true
+          manifest="$(git -C "$source_root" ls-files -s -- csrc setup.py CMakeLists.txt cmake)"
+          if [ -n "$manifest" ]; then
+            csrc_hash="$(printf '%s\n' "$manifest" | sha256sum | awk '{print $1}')"
+          else
+            csrc_hash="adhoc"
+          fi
+        fi
+
+        compat_digest="$(printf '%s' "$COMPATIBILITY_ID" | sha256sum | awk '{print $1}')"
+        compat_prefix="vllm-ascend-inc-v1-schema${schema}-${compat_digest}-"
+        same_csrc_prefix="${compat_prefix}${csrc_hash}-"
+        primary_key="${same_csrc_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)-$$-${RANDOM}"
+
+        {
+          echo "primary_key=$primary_key"
+          echo "csrc_hash=$csrc_hash"
+          echo "same_csrc_prefix=$same_csrc_prefix"
+          echo "compat_prefix=$compat_prefix"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "VLLM_ASCEND_BUILD_CACHE_DIR=$CACHE_DIR"
+          echo "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG=${RUNNER_TEMP}/csrc-l1-${GITHUB_JOB}.jsonl"
+          echo "VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS=60"
+          echo "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS=120"
+          echo "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS=120"
+        } >> "$GITHUB_ENV"
+
+    - name: Restore L1 snapshot
+      id: restore
+      if: steps.key.outputs.supported == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/restore@v5
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: ${{ steps.key.outputs.primary_key }}
+        restore-keys: |
+          ${{ steps.key.outputs.same_csrc_prefix }}
+          ${{ steps.key.outputs.compat_prefix }}

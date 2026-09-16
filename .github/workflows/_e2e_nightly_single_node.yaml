@@ -189,6 +189,23 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Checkout incremental-cache workflow helpers
+        if: ${{ inputs.request_id != '' }}
+        uses: actions/checkout@v7
+        with:
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+          sparse-checkout-cone-mode: false
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: ${{ inputs.request_id != '' }}
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          compatibility-id: source-${{ inputs.soc_version }}-${{ inputs.image }}-${{ runner.arch }}
+          source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
         run: |
@@ -212,6 +229,12 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install -e .
 
+      - name: Save incremental cache for source checkout
+        if: ${{ success() && inputs.request_id != '' }}
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          primary-key: ${{ steps.source-l1.outputs.primary-key }}
       - name: Uninstall Triton for 310P tests
         if: ${{ inputs.soc_version == '310P' }}
         run: |

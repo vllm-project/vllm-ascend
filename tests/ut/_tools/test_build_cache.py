@@ -6,13 +6,14 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
+import pytest
+import regex as re
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ENGINE = REPO_ROOT / "csrc" / "scripts" / "build_cache.py"
@@ -30,7 +31,7 @@ def _sha256_file(path: Path) -> str:
 def _write_builder(tmp_path: Path) -> Path:
     builder = tmp_path / "fake_builder.py"
     builder.write_text(
-        '''from pathlib import Path
+        """from pathlib import Path
 import sys
 import time
 
@@ -62,7 +63,7 @@ else:
     artifact.parent.mkdir(parents=True, exist_ok=True)
     content = "fixed-artifact" if mode == "fixed" else f"artifact-{count}"
     artifact.write_text(content, encoding="utf-8")
-''',
+""",
         encoding="utf-8",
     )
     return builder
@@ -89,12 +90,8 @@ def _run_cache(
     actual_output = output_dir
     if domain == "custom_operator":
         safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
-        stage_dir = stage_dir or (
-            output_dir.parent / "private-stages" / safe_action
-        )
-        publish_state_dir = publish_state_dir or (
-            output_dir.parent / "publish-state"
-        )
+        stage_dir = stage_dir or (output_dir.parent / "private-stages" / safe_action)
+        publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
         actual_output = stage_dir
 
     command = [
@@ -163,18 +160,14 @@ def _run_cache(
 
     return subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
 
+
 def _assert_success(proc: subprocess.CompletedProcess[str]) -> None:
-    assert proc.returncode == 0, (
-        f"returncode={proc.returncode}\n"
-        f"stdout:\n{proc.stdout}\n"
-        f"stderr:\n{proc.stderr}"
-    )
+    assert proc.returncode == 0, f"returncode={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
 
 
 def _extract_key(proc: subprocess.CompletedProcess[str]) -> str:
@@ -185,8 +178,8 @@ def _extract_key(proc: subprocess.CompletedProcess[str]) -> str:
 
 
 def _find_entries(cache_root: Path, domain: str, final_key: str) -> list[Path]:
-    # Deliberately locate entries from manifest contents rather than assuming
-    # the cache directory layout. This is what the old T6 integration check got wrong.
+    # Locate entries from manifest contents rather than assuming the cache
+    # directory layout.
     domain_root = cache_root / domain
     entries: list[Path] = []
     if not domain_root.exists():
@@ -203,8 +196,7 @@ def _find_entries(cache_root: Path, domain: str, final_key: str) -> list[Path]:
 def _only_entry(cache_root: Path, domain: str, final_key: str) -> Path:
     entries = _find_entries(cache_root, domain, final_key)
     assert len(entries) == 1, (
-        f"expected exactly one entry for domain={domain} key={final_key}, "
-        f"got {len(entries)}: {entries}"
+        f"expected exactly one entry for domain={domain} key={final_key}, got {len(entries)}: {entries}"
     )
     return entries[0]
 
@@ -219,11 +211,7 @@ def _artifact_kind(artifact: dict) -> str:
 
 def _first_file_artifact(entry: Path) -> tuple[dict, Path]:
     manifest = _manifest(entry)
-    files = [
-        artifact
-        for artifact in manifest.get("artifacts", [])
-        if _artifact_kind(artifact) == "file"
-    ]
+    files = [artifact for artifact in manifest.get("artifacts", []) if _artifact_kind(artifact) == "file"]
     assert files, f"entry has no regular-file artifacts: {entry}"
     artifact = files[0]
     return artifact, entry / "artifacts" / artifact["path"]
@@ -361,8 +349,7 @@ def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
     def write_fake_cmake(path: Path, version: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            "#!/bin/sh\n"
-            f'echo "cmake version {version}"\n',
+            f'#!/bin/sh\necho "cmake version {version}"\n',
             encoding="utf-8",
         )
         path.chmod(0o755)
@@ -810,13 +797,9 @@ def _spawn_cache(**kwargs) -> subprocess.Popen[str]:
     artifact_name = kwargs.get("artifact_name", "kernel.o")
     builder_mode = kwargs.get("builder_mode", "sleep")
     recipe_values = kwargs.get("recipe_values") or ["recipe=stable"]
-    publish_state_dir = kwargs.get("publish_state_dir") or (
-        output_dir.parent / "publish-state"
-    )
+    publish_state_dir = kwargs.get("publish_state_dir") or (output_dir.parent / "publish-state")
     safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
-    stage_dir = kwargs.get("stage_dir") or (
-        output_dir.parent / "private-stages" / safe_action
-    )
+    stage_dir = kwargs.get("stage_dir") or (output_dir.parent / "private-stages" / safe_action)
 
     command = [
         sys.executable,
@@ -870,9 +853,7 @@ def _spawn_cache(**kwargs) -> subprocess.Popen[str]:
 
 def _finish_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
     stdout, stderr = proc.communicate(timeout=10)
-    assert proc.returncode == 0, (
-        f"returncode={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    )
+    assert proc.returncode == 0, f"returncode={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     return stdout, stderr
 
 
@@ -1155,7 +1136,6 @@ def test_third_party_entry_without_artifact_model_uses_legacy_model(tmp_path: Pa
     assert counter.read_text() == "1"
 
 
-
 def test_cache_lock_failure_is_fail_open_for_custom_operator(tmp_path: Path):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
@@ -1240,3 +1220,139 @@ def test_first_isolated_publish_cleans_legacy_shared_output(tmp_path: Path):
     _assert_success(proc)
     assert not (output / "legacy-stale.o").exists()
     assert (output / "current.o").is_file()
+
+
+def test_top_level_prepared_input_symlink_tracks_link_and_target_content(
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "kernel.cpp").write_text("int source = 1;\n", encoding="utf-8")
+
+    target_a = tmp_path / "prepared-a"
+    target_b = tmp_path / "prepared-b"
+    target_a.mkdir()
+    target_b.mkdir()
+    for target in (target_a, target_b):
+        (target / "kernel.cpp").write_text("int prepared = 1;\n", encoding="utf-8")
+
+    prepared = tmp_path / "prepared"
+    prepared.symlink_to(target_a.name, target_is_directory=True)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    key_a = _extract_key(first)
+    assert "[build-cache] MISS" in first.stdout
+    assert counter.read_text() == "1"
+
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+    assert _extract_key(warm) == key_a
+    assert counter.read_text() == "1"
+
+    prepared.unlink()
+    prepared.symlink_to(target_b.name, target_is_directory=True)
+    _fresh_dir(output)
+    retargeted = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(retargeted)
+    key_b = _extract_key(retargeted)
+    assert "[build-cache] MISS" in retargeted.stdout
+    assert key_b != key_a
+    assert counter.read_text() == "2"
+
+    (target_b / "kernel.cpp").write_text("int prepared = 2;\n", encoding="utf-8")
+    _fresh_dir(output)
+    changed = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(changed)
+    assert "[build-cache] MISS" in changed.stdout
+    assert _extract_key(changed) != key_b
+    assert counter.read_text() == "3"
+
+
+def test_save_entry_rolls_back_old_entry_if_publish_replace_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    spec = importlib.util.spec_from_file_location(
+        "build_cache_engine_atomic_save_test",
+        ENGINE,
+    )
+    assert spec is not None and spec.loader is not None
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    artifact = output / "kernel.o"
+    artifact.write_text("new artifact", encoding="utf-8")
+
+    entry = tmp_path / "entry"
+    entry.mkdir()
+    marker = entry / "old-marker"
+    marker.write_text("old entry survives", encoding="utf-8")
+
+    artifacts = [
+        {
+            "path": "kernel.o",
+            "kind": "file",
+            "sha256": _sha256_file(artifact),
+        }
+    ]
+
+    real_replace = engine.os.replace
+
+    def fail_new_entry_publish(source, destination):
+        source = Path(source)
+        destination = Path(destination)
+        if destination == entry and source.name.startswith(f".{entry.name}.tmp-"):
+            raise OSError("injected cache-entry publish failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(engine.os, "replace", fail_new_entry_publish)
+
+    with pytest.raises(OSError, match="injected cache-entry publish failure"):
+        engine._save_entry(
+            entry,
+            output,
+            artifacts,
+            {"domain": "custom_operator", "final_key": "test"},
+        )
+
+    assert marker.read_text(encoding="utf-8") == "old entry survives"
+    assert not list(entry.parent.glob(f".{entry.name}.old-*"))

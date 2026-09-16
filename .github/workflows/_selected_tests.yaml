@@ -223,6 +223,13 @@ jobs:
 
           pip show mooncake-transfer-engine-npu || true
 
+      - name: Restore incremental cache for NPU fallback
+        id: fallback-l1
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: ./.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          compatibility-id: selected-${{ matrix.group.npu_type }}-${{ matrix.group.image_tag }}
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
@@ -242,6 +249,12 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Save incremental cache after NPU fallback
+        if: ${{ success() && matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: ./.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |

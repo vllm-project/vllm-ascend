@@ -1,0 +1,36 @@
+name: Save csrc incremental cache
+description: Persist the updated content-addressed local csrc cache.
+
+inputs:
+  cache-dir:
+    required: true
+  primary-key:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Inspect L1 directory
+      id: inspect
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        PRIMARY_KEY: ${{ inputs.primary-key }}
+      run: |
+        set -euo pipefail
+        if [ -n "$PRIMARY_KEY" ] \
+          && [ -d "$CACHE_DIR" ] \
+          && find "$CACHE_DIR" -mindepth 1 -print -quit | grep -q .; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          du -sh "$CACHE_DIR" || true
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save L1 snapshot
+      if: steps.inspect.outputs.present == 'true'
+      continue-on-error: true
+      uses: runs-on/cache/save@v5
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: ${{ inputs.primary-key }}

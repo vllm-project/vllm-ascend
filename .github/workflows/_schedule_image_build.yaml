@@ -263,6 +263,16 @@ jobs:
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
 
+    - name: Checkout incremental-cache workflow helpers
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
+        path: .incremental-cache-workflow
+        sparse-checkout: |
+          .github/actions/csrc-l1-restore
+          .github/actions/csrc-l1-save
+          .github/workflows/scripts/export_csrc_l1_from_image.sh
+        sparse-checkout-cone-mode: false
     - name: Compute cache tag
       id: cache-tag
       run: |
@@ -342,6 +352,14 @@ jobs:
         fi
         echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
 
+    - name: Restore incremental cache for image build
+      id: image-l1
+      if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+      uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+      with:
+        cache-dir: ${{ github.workspace }}/build_cache
+        compatibility-id: image-${{ inputs.soc }}-${{ inputs.cann_image_version }}-${{ inputs.base_os }}-${{ matrix.runner_info.tag }}
+        source-root: .
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
@@ -351,7 +369,9 @@ jobs:
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }},oci-mediatypes=false
+        outputs: ${{ inputs.should_push && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=false', inputs.swr_temp_repo) || '' }}
+        load: ${{ !inputs.should_push }}
+        tags: ${{ !inputs.should_push && format('vllm-ascend-cache-export:{0}-{1}-{2}', inputs.soc, matrix.runner_info.tag, github.run_id) || '' }}
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
@@ -391,6 +411,32 @@ jobs:
 
     # Quay.io/swr automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
     # Add temporary tags to digests to prevent them from being removed.
+    - name: Export incremental cache from image
+      if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+      env:
+        SHOULD_PUSH: ${{ inputs.should_push }}
+        REMOTE_REPO: ${{ inputs.swr_temp_repo }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+        LOCAL_IMAGE: vllm-ascend-cache-export:${{ inputs.soc }}-${{ matrix.runner_info.tag }}-${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        if [ "$SHOULD_PUSH" = "true" ]; then
+          image="${REMOTE_REPO}@${DIGEST}"
+          docker pull "$image"
+        else
+          image="$LOCAL_IMAGE"
+        fi
+        .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
+          "$image" \
+          "$GITHUB_WORKSPACE/build_cache" \
+          "/vllm-workspace/vllm-ascend/build_cache"
+
+    - name: Save incremental cache for image build
+      if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+      uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+      with:
+        cache-dir: ${{ github.workspace }}/build_cache
+        primary-key: ${{ steps.image-l1.outputs.primary-key }}
     - name: Tag digest to prevent GC
       if: ${{ inputs.should_push }}
       run: |

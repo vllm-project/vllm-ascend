@@ -163,6 +163,13 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
+          - name: Restore incremental cache for upstream fallback
+            id: fallback-l1
+            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-restore
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              compatibility-id: upstream-${{ matrix.image_tag }}-${{ runner.arch }}
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -186,6 +193,12 @@ jobs:
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
 
+          - name: Save incremental cache after upstream fallback
+            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-save
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -297,6 +310,13 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
+          - name: Restore incremental cache for upstream fallback
+            id: fallback-l1
+            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-restore
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              compatibility-id: upstream-${{ matrix.image_tag }}-${{ runner.arch }}
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -316,6 +336,12 @@ jobs:
               fi
               uv pip install tblib 
 
+          - name: Save incremental cache after upstream fallback
+            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-save
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -427,6 +453,13 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
+          - name: Restore incremental cache for upstream fallback
+            id: fallback-l1
+            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-restore
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              compatibility-id: upstream-${{ matrix.image_tag }}-${{ runner.arch }}
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -447,6 +480,12 @@ jobs:
               uv pip install tblib 
               uv pip install "runai-model-streamer[s3,gcs]"
 
+          - name: Save incremental cache after upstream fallback
+            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            uses: ./.github/actions/csrc-l1-save
+            with:
+              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:

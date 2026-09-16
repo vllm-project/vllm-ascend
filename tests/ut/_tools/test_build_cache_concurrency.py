@@ -6,11 +6,10 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ENGINE = REPO_ROOT / "csrc" / "scripts" / "build_cache.py"
@@ -108,8 +107,7 @@ def _run(command: list[str], env: dict[str, str] | None = None):
         merged.update(env)
     return subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=merged,
         check=False,
@@ -154,11 +152,7 @@ def _hold_lock(path: Path):
 def _read_events(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_index_lock_is_nonblocking_on_hit(tmp_path: Path):
@@ -298,6 +292,7 @@ def test_many_parallel_hits_complete_without_hang(tmp_path: Path):
     # action-stage path in a fresh build tree, so changing "seed-stages" to
     # "hit-stages" here would incorrectly manufacture a cache MISS.
     import shutil
+
     shutil.rmtree(publish, ignore_errors=True)
     shutil.rmtree(state, ignore_errors=True)
     shutil.rmtree(tmp_path / "seed-stages", ignore_errors=True)
