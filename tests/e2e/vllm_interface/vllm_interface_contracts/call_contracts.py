@@ -36,6 +36,7 @@ from .generator import (
     _function_scope_nodes,
     _inspect_signature,
     _scope_reference_variants,
+    _ScopePrefixCache,
     _statements_must_terminate,
     _tag_guard_names,
 )
@@ -864,6 +865,7 @@ class DirectCallDetector:
         ] = {}
         self._function_locals: dict[int, frozenset[str]] = {}
         self._scope_tag_guards: dict[int, set[str]] = {}
+        self._prefix_cache = _ScopePrefixCache()
 
     def _local_names(
         self,
@@ -1003,6 +1005,7 @@ class DirectCallDetector:
             module=module_info.name,
             is_package=module_info.is_package,
             fallback=self._no_fallback,
+            prefix_cache=self._prefix_cache,
         )
         concrete = {item for item in variants if item is not None}
         if len(variants) != 1 or len(concrete) != 1:
@@ -1229,6 +1232,7 @@ class DirectCallDetector:
             module=module_info.name,
             is_package=module_info.is_package,
             fallback=self._module_fallback(module_info, local_names),
+            prefix_cache=self._prefix_cache,
         )
         concrete = {item for item in variants if item is not None}
         if len(variants) != 1 or len(concrete) != 1:
@@ -1352,6 +1356,7 @@ class DirectCallDetector:
         dependencies: list[DirectCallDependency] = []
         self.historical_candidates = []
         for module_info in self.engine.downstream.modules.values():
+            self._prefix_cache = _ScopePrefixCache()
             tree = module_info.tree
             parents = _parents(tree)
             for node in ast.walk(tree):

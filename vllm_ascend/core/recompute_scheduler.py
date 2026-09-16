@@ -37,12 +37,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-
-# vLLM main added KVConnectorBlockState; v0.28.0 does not ship it.
-try:
-    from vllm.v1.core.sched.output import KVConnectorBlockState
-except ImportError:  # pragma: no cover - exercised on v0.28.0
-    KVConnectorBlockState = None  # type: ignore[misc, assignment]
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
@@ -64,6 +58,10 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.28.0"):
+    from vllm.v1.core.sched.output import KVConnectorBlockState
 
 
 @dataclass
@@ -724,11 +722,13 @@ class RecomputeScheduler(Scheduler):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
+                    # No scheduled_running_reqs check: disaggregated D nodes never mix long prefills, so padding
+                    # always pays off; that check only helps colocated P/D, where prefill_scheduled still guards us.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
-                        and (scheduled_running_reqs and not prefill_scheduled)
+                        and not prefill_scheduled
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if num_new_tokens > token_budget or num_computed_tokens + num_new_tokens > self.max_model_len:
@@ -980,43 +980,33 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Mamba "align" boundary states must be handed off with exact block ids;
-        # they cannot be reconstructed from a connector's append-only block
-        # table. Drain when the API exists; KVConnectorBlockState is main-only.
-        boundary_state_offloads = {}
-        take_boundary_state_offloads = getattr(
-            self.kv_cache_manager,
-            "take_boundary_state_offloads",
-            None,
-        )
-        if callable(take_boundary_state_offloads):
-            boundary_state_offloads = take_boundary_state_offloads()
-
+        pending_partial_tail_offloads = None
         kv_connector_block_state = None
-        if KVConnectorBlockState is not None and self.connector is not None:
-            snapshot_req_ids = {req.req_id for req in new_reqs_data}
-            snapshot_req_ids.update(
-                req_id
-                for req_id, block_ids in zip(
-                    cached_reqs_data.req_ids,
-                    cached_reqs_data.new_block_ids,
-                    strict=True,
+        if vllm_version_is("0.28.0"):
+            if (
+                self.connector is not None
+                and self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.is_kv_producer
+            ):
+                pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
+        else:
+            # #51358 drains boundary offers even without a connector.
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                # A scheduled request can finish a cache chunk without allocating
+                # new blocks. Resolve its current table only when the connector reads it.
+                block_state_req_ids = set(num_scheduled_tokens)
+                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    req_ids=block_state_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
+                    boundary_state_offloads=boundary_state_offloads,
                 )
-                if block_ids
-            )
-            snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-            kv_connector_block_state = KVConnectorBlockState(
-                block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                boundary_state_offloads=boundary_state_offloads,
-            )
 
-        pending_kv_cache_block_copies = None
-        take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
-        if callable(take_kv_cache_block_copies):
-            kv_cache_block_copies, cow_retained_blocks = take_kv_cache_block_copies()
-            if kv_cache_block_copies:
-                self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
-            pending_kv_cache_block_copies = kv_cache_block_copies or None
+        kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
+        if kv_cache_block_copies:
+            self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
+        pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K.
         num_spec_tokens_to_schedule = self.num_spec_tokens
@@ -1044,24 +1034,17 @@ class RecomputeScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            kv_cache_block_copies=pending_kv_cache_block_copies,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
-        output_fields = getattr(RecomputeSchedulerOutput, "__dataclass_fields__", {})
-        if "kv_cache_block_copies" in output_fields:
-            scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
-        if KVConnectorBlockState is not None and "kv_connector_block_state" in output_fields:
+        if not vllm_version_is("0.28.0"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
-        if "ec_manager_metadata" in output_fields:
-            get_manager_metadata = getattr(
-                self.encoder_cache_manager,
-                "get_manager_metadata",
-                None,
-            )
-            if callable(get_manager_metadata):
-                scheduler_output_kwargs["ec_manager_metadata"] = get_manager_metadata()
         scheduler_output = RecomputeSchedulerOutput(**scheduler_output_kwargs)
+        if vllm_version_is("0.28.0"):
+            scheduler_output.partial_tail_offloads = pending_partial_tail_offloads
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1077,7 +1060,7 @@ class RecomputeScheduler(Scheduler):
             scheduler_output.ec_connector_metadata = ec_meta
 
         # Connector-only block state must not be dispatched to workers.
-        if KVConnectorBlockState is not None:
+        if not vllm_version_is("0.28.0"):
             scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps that will later be

@@ -122,8 +122,8 @@ def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
     Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
-    indexer over a hybrid MLA + KDA cache, so they must not be routed through
-    the SFA / DSA layouts.
+    indexer over a hybrid MLA + KDA cache. Its cache geometry is
+    independent of the LightningIndexer layout used by other SFA models.
     """
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
@@ -298,10 +298,46 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(
+    weight: torch.Tensor,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+
+
+def maybe_trans_nz_with_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    transpose_dims: tuple[int, ...],
+    *,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transpose weight/scale and convert to FRACTAL_NZ when NZ applies.
+
+    Preserves the pre-NZ non-contiguous layout when NZ is disabled.
+    """
+    weight = weight.transpose(*transpose_dims)
+    weight_scale = weight_scale.transpose(*transpose_dims)
+    if not _should_trans_nz(weight):
+        return weight, weight_scale
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+    return weight, weight_scale
 
 
 def _round_up(x: int, align: int):
@@ -731,6 +767,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
@@ -789,7 +826,13 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
+        "GateLinear": AscendGateLinear,
     }
+    if not vllm_version_is("0.28.0"):
+        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+
+        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -797,10 +840,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
@@ -975,18 +1014,16 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -998,14 +1035,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1232,6 +1269,17 @@ def refresh_block_size(vllm_config):
     scheduler_config = vllm_config.scheduler_config
     model_config = vllm_config.model_config
 
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and model_config is spec_cfg.draft_model_config
+        and model_config is not spec_cfg.target_model_config
+    ):
+        return
+
     if not cache_config:
         return
 
@@ -1333,7 +1381,7 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 
 
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
-    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 
@@ -1496,6 +1544,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
+
+
 def get_compressed_pos_and_indices(
     num_computed_tokens: np.ndarray,
     num_scheduled_tokens: np.ndarray,
@@ -1647,3 +1716,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

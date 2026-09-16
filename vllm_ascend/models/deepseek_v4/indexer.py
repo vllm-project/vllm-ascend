@@ -44,7 +44,10 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.utils import (
     npu_stream_switch,
     vllm_version_is,
@@ -80,6 +83,17 @@ def _is_w8a8_dynamic(linear) -> bool:
         return False
     inner_method = getattr(quant_method, "quant_method", None)
     return isinstance(inner_method, AscendW8A8DynamicLinearMethod)
+
+
+def _is_mxfp8_dynamic(linear) -> bool:
+    """True iff ``linear`` is wired up with ``AscendW8A8MXFP8DynamicLinearMethod``."""
+    quant_method = getattr(linear, "quant_method", None)
+    if quant_method is None or isinstance(quant_method, AscendUnquantizedLinearMethod):
+        return False
+    if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+        return True
+    inner_method = getattr(quant_method, "quant_method", None)
+    return isinstance(inner_method, AscendW8A8MXFP8DynamicLinearMethod)
 
 
 class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
@@ -209,7 +223,7 @@ class AscendIndexerOps:
             query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
             topk=self.index_topk,
-            quant_mode=2,
+            quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
             cu_seqlens_q=metadata.qli_cu_seqlens_q,
             seqused_k=metadata.qli_seqused_k,
             cmp_residual_k=metadata.qli_cmp_residual_k,
@@ -487,7 +501,9 @@ class DeepseekV4Indexer(nn.Module):
         assert compressor is not None
 
         # ===== Part0: Pre-compute on main =====
-        if _is_w8a8_dynamic(self.wq_b) and qr_pertoken_scale is not None:
+        # Reuse the prolog's pre-quantized qr when this layer's scheme
+        # matches (W8A8 fused quant / MXFP8 split-quant).
+        if qr_pertoken_scale is not None and (_is_w8a8_dynamic(self.wq_b) or _is_mxfp8_dynamic(self.wq_b)):
             qr_quant_ready = qr
             qr_scale_ready = qr_pertoken_scale
         else:

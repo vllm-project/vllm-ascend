@@ -52,6 +52,38 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.argsort(tensor, stable=True)
 
 
+def _remove_spec_graph_padding_queries(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+) -> CommonAttentionMetadata:
+    """Remove inactive FIA graph rows from the GDN-local query view.
+
+    FIA represents every padded graph request with a full K+1 query span.
+    Those rows must be zero-length for the target's recurrent GDN state update.
+    The shared MLA metadata remains unchanged.
+    """
+    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+    if seq_lens is None or num_decode_draft_tokens_cpu is None:
+        return common_attn_metadata
+    num_reqs = common_attn_metadata.num_reqs
+    draft_tokens = num_decode_draft_tokens_cpu[:num_reqs]
+    if draft_tokens.numel() != num_reqs or not torch.any(draft_tokens > 0).item():
+        return common_attn_metadata
+    inactive = (seq_lens[:num_reqs] == 0) & (draft_tokens < 0)
+    if not torch.any(inactive).item():
+        return common_attn_metadata
+    first_inactive = int(torch.nonzero(inactive, as_tuple=True)[0][0])
+    if not torch.all(inactive[first_inactive:]).item():
+        raise ValueError("GDN speculative graph padding must be a request suffix")
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.clone()
+    query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
+    return common_attn_metadata.replace(
+        query_start_loc_cpu=query_start_loc_cpu,
+        query_start_loc=query_start_loc_cpu.to(common_attn_metadata.query_start_loc.device),
+        num_actual_tokens=int(query_start_loc_cpu[-1]),
+    )
+
+
 def _treat_single_token_prefills_with_state_as_decodes(
     common_attn_metadata: CommonAttentionMetadata,
 ) -> CommonAttentionMetadata:
@@ -295,13 +327,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             speculative_config = self.vllm_config.speculative_config
             method = getattr(speculative_config, "method", None)
             num_spec = getattr(speculative_config, "num_speculative_tokens", None)
-            if num_spec is not None:
-                # dflash counts the base token in addition to the N speculative
-                # tokens; dspark's threshold is just N by design.
-                if method == "dflash":
-                    self.reorder_batch_threshold = 1 + num_spec
-                elif method == "dspark":
-                    self.reorder_batch_threshold = num_spec
+            if num_spec is not None and method in ("dflash", "dspark"):
+                # The target-model verification query always contains the
+                # base token plus N speculative tokens. DSpark's
+                # sample_from_anchor only makes the draft-model forward use N
+                # queries; it must not change target batch reordering.
+                self.reorder_batch_threshold = 1 + num_spec
 
     def _copy_sequence_indices_to_device(
         self,
@@ -518,6 +549,11 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
+        if self.use_full_cuda_graph and self.use_spec_decode:
+            common_attn_metadata = _remove_spec_graph_padding_queries(
+                common_attn_metadata,
+                num_decode_draft_tokens_cpu,
+            )
         m = _treat_single_token_prefills_with_state_as_decodes(common_attn_metadata)
 
         query_start_loc = m.query_start_loc
@@ -553,11 +589,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # carries no draft tokens. Treat it as ordinary decode unless a
                 # stateful spec-width prompt chunk must use the spec branch.
                 spec_sequence_masks_cpu.zero_()
-            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
-                m,
-                spec_sequence_masks_cpu,
-                num_accepted_tokens,
-            )
+            # DCP must retain prefill metadata for prompt chunks, even when
+            # their width matches speculative decode. Keep the legacy fold
+            # when decode context parallelism is disabled.
+            if self.vllm_config.parallel_config.decode_context_parallel_size == 1:
+                spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
+                    m,
+                    spec_sequence_masks_cpu,
+                    num_accepted_tokens,
+                )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
