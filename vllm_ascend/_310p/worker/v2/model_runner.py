@@ -1376,6 +1376,16 @@ class NPUModelRunner310V2(NPUModelRunner):
         cached_req_indices = [
             self.req_states.req_id_to_index[req_id] for req_id in scheduler_output.scheduled_cached_reqs.req_ids
         ]
+        if self.speculator is not None:
+            # Upstream update_requests overwrites num_computed_tokens_np with
+            # the scheduler's optimistic value (num_computed + num_scheduled).
+            # For MTP rejection sampling the scheduler has not yet subtracted
+            # rejected tokens, so this optimistic value is too high.
+            # Restore the accurate value that postprocess_sampled wrote into
+            # num_computed_tokens_cpu on the previous step.
+            for req_index in cached_req_indices:
+                correct_val = int(self.req_states.num_computed_tokens_cpu[req_index])
+                self.req_states.num_computed_tokens_np[req_index] = correct_val
         changed_req_indices = [
             req_index
             for req_index in cached_req_indices
