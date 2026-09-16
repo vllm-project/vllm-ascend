@@ -33,6 +33,20 @@ def test_wait_command_ignores_stale_done_when_since_ts_is_newer(tmp_path: Path):
     assert command["commit"] == "abcdef1234567890"
 
 
+def test_wait_command_accepts_done_created_after_start_despite_coarse_mtime(tmp_path: Path):
+    """A stop file absent at worker startup is current even if its filesystem
+    timestamp is rounded below the worker's fractional-second start time."""
+    coord = Coordinator(str(tmp_path), num_nodes=1, node_index=0)
+    coord.publish_done()
+
+    assert coord.wait_command(
+        1,
+        timeout_s=0.1,
+        since_ts=time.time() + 1,
+        done_existed_at_start=False,
+    ) is None
+
+
 def test_wait_command_returns_none_for_release_file(tmp_path: Path):
     coord = Coordinator(str(tmp_path / "coord"), num_nodes=1, node_index=0)
     release_file = tmp_path / "done"

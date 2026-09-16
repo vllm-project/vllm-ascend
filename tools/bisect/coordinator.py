@@ -152,7 +152,13 @@ class Coordinator:
 
     # -------------------------------------------------------------- reads
     def wait_command(
-        self, rnd: int, timeout_s: float, release_file: str | None = None, since_ts: float | None = None
+        self,
+        rnd: int,
+        timeout_s: float,
+        release_file: str | None = None,
+        since_ts: float | None = None,
+        done_existed_at_start: bool | None = None,
+        release_existed_at_start: bool | None = None,
     ) -> dict | None:
         """Worker: block until the round command appears, or a stop signal.
 
@@ -160,15 +166,20 @@ class Coordinator:
         either the coordinator DONE sentinel or an external ``release_file`` (the
         AOP leader's ``done`` file, touched even when it decides not to bisect).
         ``since_ts`` (the worker's start time) makes a *stale* DONE/release file
-        from a previous run on a persistent PVC be ignored.
+        from a previous run on a persistent PVC be ignored. A worker can also
+        pass whether each stop signal existed at startup: when it did not, a
+        signal that appears during slow startup is unambiguously current even
+        if the PVC rounds file mtimes more coarsely than ``time.time()``.
         """
         path = self._round_dir(rnd) / "command.json"
         release = Path(release_file) if release_file else None
+        done_since_ts = None if done_existed_at_start is False else since_ts
+        release_since_ts = None if release_existed_at_start is False else since_ts
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            if self._fresh(self._done_flag, since_ts):
+            if self._fresh(self._done_flag, done_since_ts):
                 return None
-            if release is not None and self._fresh(release, since_ts):
+            if release is not None and self._fresh(release, release_since_ts):
                 logger.info("[coord] external release file %s present; worker exiting", release)
                 return None
             if path.exists():

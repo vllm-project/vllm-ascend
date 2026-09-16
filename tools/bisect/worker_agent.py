@@ -102,6 +102,9 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     # and publish DONE while this worker is recovering a shallow clone; that is
     # a real stop signal for this run, not stale state to ignore.
     start_ts = time.time()
+    done_existed_at_start = coord.is_done()
+    release_path = Path(opt.release_file) if opt.release_file else None
+    release_existed_at_start = release_path.exists() if release_path is not None else None
     # Recover the full history up front: the nightly clone is depth-1 and only
     # the tip exists locally, while every commanded commit is an ancestor.
     # Doing this before the first round keeps the slow, network-bound unshallow
@@ -113,7 +116,14 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     rnd = 0
     while True:
         rnd += 1
-        cmd = coord.wait_command(rnd, opt.barrier_timeout_s, release_file=opt.release_file, since_ts=start_ts)
+        cmd = coord.wait_command(
+            rnd,
+            opt.barrier_timeout_s,
+            release_file=opt.release_file,
+            since_ts=start_ts,
+            done_existed_at_start=done_existed_at_start,
+            release_existed_at_start=release_existed_at_start,
+        )
         if cmd is None:
             logger.info("[worker] stop signal received; exiting after %d rounds", rnd - 1)
             return 0
