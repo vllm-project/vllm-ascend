@@ -888,7 +888,7 @@ function(add_dependent_ops dependent_ops)
 endfunction()
 
 if (BUILD_OPEN_PROJECT)
-    if (TESTS_UT_OPS_TEST)
+    if (ENABLE_TEST OR TESTS_UT_OPS_TEST)
         include(${OPS_ADV_CMAKE_DIR}/func_utest.cmake)
     endif ()
     if (TESTS_EXAMPLE_OPS_TEST)

@@ -5,6 +5,7 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+#include "aclnn_torch_adapter/mixed_quant_sparse_flash_mla_torch_adpt.h"
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -1019,6 +1020,38 @@ std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
     at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+
+at::Tensor npu_mixed_quant_sparse_flash_mla_metadata_meta(
+    int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDim, int64_t quantMode,
+    const c10::optional<at::Tensor> &cuSeqlensQ, const c10::optional<at::Tensor> &cuSeqlensOriKv,
+    const c10::optional<at::Tensor> &cuSeqlensCmpKv, const c10::optional<at::Tensor> &sequsedQ,
+    const c10::optional<at::Tensor> &sequsedOriKv, const c10::optional<at::Tensor> &sequsedCmpKv,
+    const c10::optional<at::Tensor> &cmpResidualKv, const c10::optional<at::Tensor> &oriTopkLength,
+    const c10::optional<at::Tensor> &cmpTopkLength, c10::optional<int64_t> batchSize, c10::optional<int64_t> maxSeqlenQ, c10::optional<int64_t> maxSeqlenOriKv,
+    c10::optional<int64_t> maxSeqlenCmpKv, c10::optional<int64_t> oriTopk, c10::optional<int64_t> cmpTopk, c10::optional<int64_t> ropeHeadDim, c10::optional<int64_t> cmpRatio,
+    c10::optional<int64_t> oriMaskMode, c10::optional<int64_t> cmpMaskMode, c10::optional<int64_t> oriWinLeft, c10::optional<int64_t> oriWinRight, c10::optional<c10::string_view> layoutQ,
+    c10::optional<c10::string_view> layoutKv, c10::optional<bool> hasOriKv, c10::optional<bool> hasCmpKv)
+{
+    return at::empty({mqsmla::MQSMLA_METADATA_SIZE}, at::TensorOptions().dtype(at::kInt).device(c10::kMeta));
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_mixed_quant_sparse_flash_mla_meta(
+    const at::Tensor &q, const c10::optional<at::Tensor> &oriKv, const c10::optional<at::Tensor> &cmpKv,
+    const c10::optional<at::Tensor> &oriSparseIndices, const c10::optional<at::Tensor> &cmpSparseIndices,
+    const c10::optional<at::Tensor> &oriBlockTable, const c10::optional<at::Tensor> &cmpBlockTable,
+    const c10::optional<at::Tensor> &cuSeqlensQ, const c10::optional<at::Tensor> &cuSeqlensOriKv,
+    const c10::optional<at::Tensor> &cuSeqlensCmpKv, const c10::optional<at::Tensor> &sequsedQ,
+    const c10::optional<at::Tensor> &sequsedOriKv, const c10::optional<at::Tensor> &sequsedCmpKv,
+    const c10::optional<at::Tensor> &cmpResidualKv, const c10::optional<at::Tensor> &oriTopkLength,
+    const c10::optional<at::Tensor> &cmpTopkLength, const c10::optional<at::Tensor> &sinks,
+    const c10::optional<at::Tensor> &metadata, int64_t quantMode, int64_t ropeHeadDim, double softmaxScale,
+    int64_t cmpRatio, int64_t oriMaskMode, int64_t cmpMaskMode, int64_t oriWinLeft, int64_t oriWinRight,
+    c10::string_view layoutQ, c10::string_view layoutKv, int64_t topkValueMode, bool returnSoftmaxLse,
+    c10::optional<int64_t> keyDtype, c10::optional<int64_t> valueDtype)
+{
+    return mqsmla::ConstructOutputs(q, oriKv, layoutQ, layoutKv, returnSoftmaxLse);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
@@ -2217,6 +2250,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);
+    ops.impl("npu_mixed_quant_sparse_flash_mla", &vllm_ascend::meta::npu_mixed_quant_sparse_flash_mla_meta);
+    ops.impl("npu_mixed_quant_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_mixed_quant_sparse_flash_mla_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);

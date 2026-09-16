@@ -29,6 +29,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
+#include "aclnn_torch_adapter/mixed_quant_sparse_flash_mla_torch_adpt.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
@@ -3145,6 +3146,35 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+
+    ops.def(
+        "npu_mixed_quant_sparse_flash_mla_metadata(int num_heads_q, int num_heads_kv, int head_dim,int quant_mode, *, "
+        "Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None,Tensor? cu_seqlens_cmp_kv=None, Tensor? "
+        "seqused_q=None, Tensor? seqused_ori_kv=None,Tensor? seqused_cmp_kv=None, Tensor? cmp_residual_kv=None, "
+        "Tensor? ori_topk_length=None,Tensor? cmp_topk_length=None, int? batch_size=None, int? max_seqlen_q=None, "
+        "int? max_seqlen_ori_kv=None,int? max_seqlen_cmp_kv=None, int? ori_topk=None, int? cmp_topk=None, int? "
+        "rope_head_dim=None,int? cmp_ratio=None, int? ori_mask_mode=None, int? cmp_mask_mode=None, int? "
+        "ori_win_left=None,int? ori_win_right=None, str? layout_q=None, str? layout_kv=None, bool? "
+        "has_ori_kv=None,bool? has_cmp_kv=None) -> Tensor"
+    );
+    ops.impl("npu_mixed_quant_sparse_flash_mla_metadata", torch::kPrivateUse1, &vllm_ascend::mqsmla::MixedQuantSparseFlashMlaMetadata);
+    // Metadata also supports calls with all optional tensor inputs omitted.
+    ops.impl("npu_mixed_quant_sparse_flash_mla_metadata", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::mqsmla::MixedQuantSparseFlashMlaMetadata);
+
+    ops.def(
+        "npu_mixed_quant_sparse_flash_mla(Tensor q, *,Tensor? ori_kv=None, Tensor? cmp_kv=None, Tensor? "
+        "ori_sparse_indices=None, Tensor? cmp_sparse_indices=None, Tensor? ori_block_table=None, Tensor? "
+        "cmp_block_table=None, Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None, Tensor? "
+        "cu_seqlens_cmp_kv=None, Tensor? seqused_q=None, Tensor? seqused_ori_kv=None, Tensor? seqused_cmp_kv=None, "
+        "Tensor? cmp_residual_kv=None, Tensor? ori_topk_length=None, Tensor? cmp_topk_length=None, Tensor? "
+        "sinks=None, Tensor? metadata=None, int quant_mode=None, int rope_head_dim=None, float softmax_scale=None, "
+        "int cmp_ratio=1, int ori_mask_mode=0, int cmp_mask_mode=0, int ori_win_left=-1, int ori_win_right=-1, str "
+        "layout_q=\"BSND\", str layout_kv=\"BSND\", int topk_value_mode=1, bool return_softmax_lse=False, int? "
+        "key_dtype=None, int? value_dtype=None) -> (Tensor, Tensor)"
+    );
+    ops.impl("npu_mixed_quant_sparse_flash_mla", torch::kPrivateUse1, &vllm_ascend::mqsmla::MixedQuantSparseFlashMla);
 
     ops.def(
         "npu_quant_lightning_indexer_v2_metadata(int num_heads_q, int num_heads_k, int head_dim, int topk, "

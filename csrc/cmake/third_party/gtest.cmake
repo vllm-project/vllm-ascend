@@ -90,13 +90,19 @@ endif()
 set(GTEST_INCLUDE ${GTEST_INSTALL_PATH}/include)
 
 add_library(gtest STATIC IMPORTED)
-add_dependencies(gtest third_party_gtest)
+if(TARGET third_party_gtest)
+    add_dependencies(gtest third_party_gtest)
+endif()
 
 add_library(gmock STATIC IMPORTED)
-add_dependencies(gmock third_party_gtest)
+if(TARGET third_party_gtest)
+    add_dependencies(gmock third_party_gtest)
+endif()
 
 add_library(gtest_main STATIC IMPORTED)
-add_dependencies(gtest_main third_party_gtest)
+if(TARGET third_party_gtest)
+    add_dependencies(gtest_main third_party_gtest)
+endif()
 
 if (NOT EXISTS ${GTEST_INSTALL_PATH}/include)
   file(MAKE_DIRECTORY "${GTEST_INSTALL_PATH}/include")
