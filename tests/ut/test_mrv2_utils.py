@@ -53,11 +53,10 @@ def _make_vllm_config(
     )
 
 
-def _make_speculative_config(method: str, num_speculative_tokens_per_batch_size=None, parallel_drafting=False):
+def _make_speculative_config(method: str, num_speculative_tokens_per_batch_size=None):
     return SimpleNamespace(
         method=method,
         num_speculative_tokens_per_batch_size=num_speculative_tokens_per_batch_size,
-        parallel_drafting=parallel_drafting,
     )
 
 
@@ -284,20 +283,6 @@ class TestUseV2ModelRunner:
         )
 
         assert use_v2_model_runner(config) is False
-
-    @pytest.mark.parametrize("method", ["eagle3", "dflash", "dspark"])
-    @pytest.mark.parametrize("env_value", [None, False, True])
-    def test_parallel_drafting_default_and_override(self, monkeypatch, method, env_value):
-        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
-        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
-        config = _make_vllm_config(
-            model_config=_make_model_config(architectures=["Qwen3MoeForCausalLM"]),
-            speculative_config=_make_speculative_config(method, parallel_drafting=True),
-        )
-
-        expected = env_value if env_value is not None else method in ("dflash", "dspark")
-        assert use_v2_model_runner(config) is expected
 
     def test_env_override_wins_with_lora(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)

@@ -102,7 +102,7 @@ def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
 def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
     """Feature whitelist: only whitelisted features may be enabled with a whitelisted model.
 
-    LoRA, parallel EAGLE drafting, and batch-size-based dynamic speculative decoding
+    LoRA and batch-size-based dynamic speculative decoding
     (``num_speculative_tokens_per_batch_size``) are excluded from the
     default-V2 feature whitelist. Static ``eagle3`` / ``mtp`` / ``dflash``
     / ``dspark`` remain supported. ``VLLM_USE_V2_MODEL_RUNNER`` still overrides this
@@ -122,18 +122,6 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
         logger.warning_once(
             "Model Runner V2 default is disabled because dynamic speculative "
             "decoding (num_speculative_tokens_per_batch_size) is enabled; "
-            "using the V1 model runner instead."
-        )
-        return False
-
-    # V2 EagleSpeculator is autoregressive; P-EAGLE needs the V1 parallel
-    # drafting path. DFlash and DSpark have native V2 parallel speculators.
-    if getattr(speculative_config, "parallel_drafting", False) and speculative_config.method not in (
-        "dflash",
-        "dspark",
-    ):
-        logger.warning_once(
-            "Model Runner V2 default is disabled because parallel EAGLE drafting is enabled; "
             "using the V1 model runner instead."
         )
         return False
