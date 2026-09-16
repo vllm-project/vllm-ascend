@@ -363,6 +363,9 @@ a3-560t:
       - name: MiniMax-M3-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MiniMax-M3-W8A8-A3.yaml
+      - name: minimax-m3-w8a8-eagle3-a3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MiniMax-M3-W8A8-EAGLE3-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
