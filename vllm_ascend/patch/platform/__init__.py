@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import vllm_ascend.patch.platform.patch_chat_template_content_format  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_fusion_matcher_compat_ops  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa

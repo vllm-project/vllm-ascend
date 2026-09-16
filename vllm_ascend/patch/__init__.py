@@ -258,6 +258,25 @@
 #       Remove this patch once the upstream forced-tool-choice fix is included
 #       in the runtime vLLM version used by vllm-ascend.
 #
+#
+# ** 12. File: platform/patch_chat_template_content_format.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.hf._iter_nodes_assign_content_item`
+#    Why:
+#       vLLM v0.18.0 detects Qwen3.5 chat templates as `string` because
+#       `message.content` is consumed by a macro loop (`for item in content`),
+#       while the detector only recognizes direct `message['content']` loops.
+#       The string path reorders multimodal tool responses and prevents the
+#       template from restoring historical assistant reasoning on later turns.
+#    How:
+#       Extend content-format detection with the upstream `content` loop
+#       fallback from vLLM #42660, while preserving existing detection results.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/42660
+#    Future Plan:
+#       Remove this patch once the vLLM runtime used by vllm-ascend contains
+#       the Qwen3.5 content-format fix (v0.22.1 or later).
+#
 # * Worker Patch:
 # ===============
 #
