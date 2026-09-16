@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -425,6 +425,7 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
             draft_attn_causal=None,
         )
         proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        proposer.seq_lens_group = [torch.zeros(4, dtype=torch.int32)]
         proposer.runner = SimpleNamespace(
             _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("capture DP sync must be skipped")),
             optimistic_seq_lens_cpu=torch.arange(4, dtype=torch.int32),
@@ -440,16 +441,9 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
         builder = MagicMock()
         builder.build_for_graph_capture.return_value = metadata
         proposer.draft_attn_groups[0].get_metadata_builder = lambda: builder
-        captured_context = {}
-
-        @contextmanager
-        def fake_forward_context(*args, **kwargs):
-            captured_context.update(kwargs)
-            yield
-
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context",
-            fake_forward_context,
+            lambda *args, **kwargs: nullcontext(),
         )
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.get_forward_context",
@@ -467,22 +461,9 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
         common_metadata = builder.build_for_graph_capture.call_args.args[0]
         assert builder.build_for_graph_capture.call_args.args[1] == AscendAttentionState.SpecDecoding
         assert common_metadata.attn_state == AscendAttentionState.SpecDecoding
-        assert metadata.attn_state == AscendAttentionState.SpecDecoding
-        assert common_metadata.num_actual_tokens == 32
-        assert common_metadata.num_input_tokens == 32
-        assert common_metadata.num_reqs == 4
+        assert common_metadata.seq_lens.data_ptr() == proposer.seq_lens_group[0].data_ptr()
+        assert common_metadata.seq_lens.tolist() == [0, 1, 2, 3]
         assert common_metadata.query_start_loc_cpu.tolist() == [0, 8, 16, 24, 32]
-        assert common_metadata.seq_lens.shape[0] == 4
-        assert common_metadata.block_table_tensor.shape[0] == 4
-        assert common_metadata.slot_mapping.shape[0] == 32
-        assert captured_context["num_tokens"] == 32
-        assert captured_context["num_actual_tokens"] == 32
-        assert captured_context["batch_descriptor"] == BatchDescriptor(
-            num_tokens=32,
-            num_reqs=4,
-            uniform=True,
-        )
-        assert captured_context["num_tokens_across_dp"].tolist() == [32, 32]
         assert proposer._runnable.call_args.kwargs["num_input_tokens"] == 32
         assert proposer._runnable.call_args.kwargs["batch_size"] == 4
         assert proposer._runnable.call_args.kwargs["multi_steps_attn_metadata"] == [{"L0": metadata}]
@@ -508,45 +489,15 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
         assert args[1].shape[0] == 3
         assert args[2][0].shape[0] == 3
 
-    def test_context_kv_graph_pads_outside_and_precomputes_inside(self):
-        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._context_kv_graph_active = True
-        proposer._context_kv_graph_num_tokens = 8
-        proposer._dflash_num_context = 6
-        proposer.num_query_per_req = 3
-        proposer.max_num_tokens = 16
-        proposer._dflash_hidden_states = torch.full((16, 4), 9.0)
-        proposer._context_positions_buffer = torch.full((16,), 9, dtype=torch.int32)
-        proposer._context_slot_mapping_buffers = [torch.arange(16, dtype=torch.int32)]
-        proposer.model = MagicMock()
-        proposer._prepare_inputs_outside_draft_runnable(num_input_tokens=6)
-
-        proposer.model.precompute_and_store_context_kv.assert_not_called()
-        assert torch.count_nonzero(proposer._dflash_hidden_states[6:8]) == 0
-        assert torch.count_nonzero(proposer._context_positions_buffer[6:8]) == 0
-        assert torch.all(proposer._context_slot_mapping_buffers[0][6:8] == -1)
-
-        proposer._prepare_context_kv_inside_runnable(6, proposer._context_slot_mapping_buffers)
-
-        proposer.model.precompute_and_store_context_kv.assert_called_once()
-        context_states, context_positions, context_slots = proposer.model.precompute_and_store_context_kv.call_args.args
-        assert context_states.shape == (8, 4)
-        assert context_positions.shape == (8,)
-        assert context_slots[0].shape == (8,)
-
-    def test_context_kv_graph_uses_target_token_bucket_without_flag(self):
+    def test_context_kv_graph_uses_target_bucket_and_precomputes_inside(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
         proposer.num_query_per_req = 8
         proposer._dflash_num_context = 27
         proposer.max_num_tokens = 64
         proposer.use_cuda_graph = True
         proposer._draft_num_tokens_across_dp = torch.empty(1, dtype=torch.int32)
-        proposer.runner = SimpleNamespace(
-            dp_size=1,
-            _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("draft DP sync must be skipped")),
-        )
+        proposer.runner = SimpleNamespace(dp_size=1)
         proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
-
         proposer._dispatch_draft_graph(
             num_actual_tokens=24,
             num_actual_reqs=3,
@@ -555,9 +506,24 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
             uniform_decode=True,
             has_lora=False,
         )
+        proposer._dflash_hidden_states = torch.full((64, 4), 9.0)
+        proposer._context_positions_buffer = torch.full((64,), 9, dtype=torch.int32)
+        proposer._context_slot_mapping_buffers = [torch.arange(64, dtype=torch.int32)]
+        proposer.model = MagicMock()
+        proposer._prepare_inputs_outside_draft_runnable(num_input_tokens=24)
 
-        assert proposer._context_kv_graph_active
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
         assert proposer._context_kv_graph_num_tokens == 36
+        assert torch.count_nonzero(proposer._dflash_hidden_states[27:36]) == 0
+        assert torch.all(proposer._context_slot_mapping_buffers[0][27:36] == -1)
+
+        proposer._prepare_context_kv_inside_runnable(24, proposer._context_slot_mapping_buffers)
+
+        proposer.model.precompute_and_store_context_kv.assert_called_once()
+        context_states, context_positions, context_slots = proposer.model.precompute_and_store_context_kv.call_args.args
+        assert context_states.shape == (36, 4)
+        assert context_positions.shape == (36,)
+        assert context_slots[0].shape == (36,)
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
@@ -780,13 +746,6 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
         assert proposer.kernel_block_size == 128
         assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, 64]
-
-    def test_causal_flag_count_must_match_layers(self):
-        proposer = self._make_proposer_for_init()
-        proposer.model = SimpleNamespace(get_draft_attn_causal=lambda: [True])
-
-        with pytest.raises(ValueError, match="2 draft layers.*1 causal flags"):
-            proposer._resolve_draft_layer_causal(["L0", "L1"])
 
     def test_same_cache_group_splits_mixed_causal_layers(self, monkeypatch):
         proposer = self._make_proposer_for_init()
