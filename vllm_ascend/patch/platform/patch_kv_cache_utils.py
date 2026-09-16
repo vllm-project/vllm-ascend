@@ -49,7 +49,7 @@ _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
 _orig_max_concurrency = vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config
 
 
-def _ascend_max_concurrency(vllm_config, kv_cache_config):
+def _ascend_max_concurrency(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> float:
     groups = kv_cache_config.kv_cache_groups
 
     if (layout := get_kv_cache_layout(groups)) is not None:

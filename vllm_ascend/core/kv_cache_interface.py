@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from typing import Protocol, cast
 
 import torch
 from typing_extensions import Self
@@ -13,7 +14,10 @@ from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager, Ful
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -405,17 +409,43 @@ def register_ascend_kv_cache_specs() -> None:
     )
 
 
-def get_kv_cache_layout(specs):
+class CacheLayoutProtocol(Protocol):
+    """Physical cache planner supported by the Ascend KV-cache bridge."""
+
+    include_private_groups_in_block_alignment: bool
+
+    def group_specs(self, specs: dict[str, KVCacheSpec]) -> list[UniformTypeKVCacheSpecs] | None: ...
+
+    def make_groups(self, grouped_specs: list[UniformTypeKVCacheSpecs]) -> list[KVCacheGroupSpec]: ...
+
+    def allocate(
+        self, vllm_config: VllmConfig, groups: list[KVCacheGroupSpec], available_memory: int
+    ) -> tuple[int, list[KVCacheTensor]]: ...
+
+    def pool_bytes_per_block(self, groups: list[KVCacheGroupSpec]) -> int: ...
+
+    def max_memory_usage(self, vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]) -> int: ...
+
+    def max_concurrency(self, vllm_config: VllmConfig, cache_config: KVCacheConfig) -> float: ...
+
+
+def get_kv_cache_layout(
+    specs: Iterable[KVCacheSpec | KVCacheGroupSpec | UniformTypeKVCacheSpecs],
+) -> CacheLayoutProtocol | None:
     """Resolve an optional physical layout from cache capabilities, not model names.
 
     Group wrappers do not change layout ownership. Reject incompatible custom
     layouts instead of silently planning their pages with one model's allocator.
     """
-    layouts = set()
+    layouts: set[CacheLayoutProtocol] = set()
     for spec in specs:
         spec = getattr(spec, "kv_cache_spec", spec)
         members = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-        layouts.update(layout for member in members if (layout := getattr(member, "cache_layout", None)) is not None)
+        layouts.update(
+            cast(CacheLayoutProtocol, layout)
+            for member in members
+            if (layout := getattr(member, "cache_layout", None)) is not None
+        )
     if len(layouts) > 1:
         raise ValueError("KV cache groups contain incompatible physical layouts")
     return next(iter(layouts), None)

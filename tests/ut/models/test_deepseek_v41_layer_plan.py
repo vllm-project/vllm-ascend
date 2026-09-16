@@ -15,9 +15,9 @@ def text_config() -> dict:
     return {
         "num_hidden_layers": 40,
         "compress_ratios": [0, 0] + [2] * 18 + [1] * 20 + [0] * 3,
-        "kv_source_layers": [2, 8, 14, 20],
-        "index_source_layers": [2, 8, 14, 20, 24, 28, 32, 36],
-        "candidate_source_layer": 20,
+        "kv_source_layer_ids": [2, 8, 14, 20],
+        "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+        "candidate_source_layer_id": 20,
         "candidate_topk_blocks": 2048,
         "candidate_block_size": 8,
         "index_topk": 512,

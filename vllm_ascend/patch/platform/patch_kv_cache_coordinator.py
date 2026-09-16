@@ -212,9 +212,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         tail_alignment = getattr(self, "tail_pool_alignment", 1)
         if self.enable_partial_hash_hits:
             return lcm(self.hash_block_size, tail_alignment)
-        alignment = self.scheduler_block_size or self.lcm_block_size
-        assert alignment is not None
-        return lcm(alignment, tail_alignment)
+        return lcm(self.scheduler_block_size or self.lcm_block_size, tail_alignment)
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
@@ -258,11 +256,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             else:
                 self.attention_groups.append(SpecGroup(spec, [i], manager_cls, use_eagle))
 
-        self.full_attention_group_id: int | None
-        if not self.attention_groups:
-            self.full_attention_group_id = None
-            self.lcm_block_size = self.scheduler_block_size
-            return
+        assert self.attention_groups, "Prefix caching requires at least one cacheable KV cache group."
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
@@ -273,7 +267,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # so any group reporting a longer per-group hit implies the union of
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
-        self.full_attention_group_id = first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
+        self.full_attention_group_id: int | None = (
+            first.group_ids[0] if isinstance(first.spec, FullAttentionSpec) else None
+        )
 
         # Propagate the eagle bit to every manager in an eagle-containing
         # attention group, mirroring upstream
@@ -334,8 +330,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             return block_hashes
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
-        if not self.attention_groups:
-            return tuple([] for _ in range(num_groups)), 0
         hit_length = max_cache_hit_length
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups

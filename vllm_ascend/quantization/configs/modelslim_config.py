@@ -92,7 +92,7 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
 # in the vLLM upstream need to be added here.
 UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
-    "deepseek_v4.1": {
+    "deepseek_v41": {
         "gate_up_proj": ["w1", "w3"],
         "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
     },
@@ -170,7 +170,7 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
         "embed.": "model.embed_tokens.",
         "head.": "lm_head.",
     },
-    "deepseek_v4.1": {
+    "deepseek_v41": {
         # V4.1 ModelSlim descriptions keep the original checkpoint names,
         # while the runtime reuses the V4 module tree. Map runtime prefixes
         # back to the checkpoint namespace for quant-scheme lookup.
@@ -198,7 +198,7 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".ffn_norm.": ".post_attention_layernorm.",
         ".attn_norm.": ".input_layernorm.",
     },
-    "deepseek_v4.1": {
+    "deepseek_v41": {
         ".self_attn.": ".attn.",
         ".gate_proj.": ".w1.",
         ".gate_proj": ".w1",
@@ -235,12 +235,6 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
         ".moe.experts": ".experts",
     },
 }
-
-# The released config renamed the V4.1 model type without changing its
-# ModelSlim module namespace. Keep pre-release checkpoints compatible.
-QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v41"] = QUANT_MODEL_PREFIX_MAPPINGS["deepseek_v4.1"]
-QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v41"] = QUANT_MODEL_SUBSTR_MAPPINGS["deepseek_v4.1"]
-
 
 def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bool:
     """Return whether the missing shard is Gemma4's replicated v_proj.

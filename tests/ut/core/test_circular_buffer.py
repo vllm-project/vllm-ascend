@@ -6,12 +6,12 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41CompressorStateSpec
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
-from vllm_ascend.patch.platform.patch_circular_buffer import _truncate_computed_blocks
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.worker.block_table import BlockTable
 
@@ -90,10 +90,16 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
         ),
         create_kv_cache_blocks=lambda blocks: blocks,
     )
-    assert _truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [])), 128) == ([1], [])
-    coordinator.kv_cache_config.kv_cache_groups = [groups[1]]
-    AscendHybridKVCacheCoordinator.verify_and_split_kv_cache_groups(coordinator)
-    assert AscendHybridKVCacheCoordinator.find_longest_cache_hit(coordinator, [], 128) == (([],), 0)
+    assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [])), 128) == ([1], [])
+
+    mamba = MambaSpec(block_size=128, shapes=((1,),), dtypes=(torch.float32,))
+    host.kv_cache_config.kv_cache_groups = [groups[0], KVCacheGroupSpec(["mamba"], mamba), groups[1]]
+    host.coordinator.single_type_managers = [
+        SimpleNamespace(block_size=128), SimpleNamespace(block_size=128), SimpleNamespace(block_size=32)
+    ]
+    assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [], [])), 128) == (
+        [1], [], []
+    )
 
 
 @pytest.mark.parametrize("draft", [False, True])

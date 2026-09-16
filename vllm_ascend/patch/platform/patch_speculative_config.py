@@ -53,7 +53,7 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
     return hf_config
 
 
-def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
+def _normalize_deepseek_dspark_draft(draft_model_config) -> None:
     """Restore the DSpark draft architecture after VL config conversion.
 
     DeepSeek-V4-Vision uses the same checkpoint for the target and DSpark
@@ -66,13 +66,13 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
     """
     hf_config = getattr(draft_model_config, "hf_config", None)
     text_config = getattr(hf_config, "text_config", None)
-    draft_hf_config = text_config if text_config is not None else hf_config
+    draft_text_config = text_config if text_config is not None else hf_config
     root_model_type = getattr(hf_config, "model_type", None)
     is_deepseek_v41_model = is_deepseek_v41(hf_config)
     if (
         hf_config is None
         or (root_model_type != "deepseek_v4" and not is_deepseek_v41_model)
-        or getattr(draft_hf_config, "dspark_target_layer_ids", None) is None
+        or getattr(draft_text_config, "dspark_target_layer_ids", None) is None
     ):
         return
 
@@ -81,14 +81,14 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
         # The DeepSeek V4.1 target and draft experts intentionally have different
         # widths.  SpeculativeConfig owns a private config copy, so adapting
         # these fields cannot alter the target model.
-        draft_hf_config.update(
-            {
-                "n_routed_experts": draft_hf_config.dspark_n_routed_experts,
-                "num_experts_per_tok": getattr(draft_hf_config, "dspark_num_experts_per_tok", None)
-                or draft_hf_config.dspark_n_activated_experts,
-                "n_mtp_layers": getattr(draft_hf_config, "num_nextn_predict_layers", 3),
-            }
-        )
+        draft_experts_per_token = getattr(draft_text_config, "dspark_num_experts_per_tok", None)
+        draft_updates = {
+            "n_routed_experts": draft_text_config.dspark_n_routed_experts,
+            "n_mtp_layers": getattr(draft_text_config, "num_nextn_predict_layers", 3),
+        }
+        if draft_experts_per_token is not None:
+            draft_updates["num_experts_per_tok"] = draft_experts_per_token
+        draft_text_config.update(draft_updates)
     normalized_model_type = "deepseek_v41" if is_deepseek_v41_model else str(root_model_type)
     hf_config.update(
         {
@@ -103,9 +103,11 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
     )
     if is_deepseek_v41_model:
         arch_updates.update(
-            num_experts=draft_hf_config.n_routed_experts,
-            num_experts_per_token=draft_hf_config.num_experts_per_tok,
+            num_experts=draft_text_config.n_routed_experts,
+            text_model_type=getattr(draft_text_config, "model_type", None),
         )
+        if draft_experts_per_token is not None:
+            arch_updates["num_experts_per_token"] = draft_experts_per_token
     draft_model_config.model_arch_config = replace(
         draft_model_config.model_arch_config,
         **arch_updates,
@@ -142,7 +144,7 @@ def _dspark_post_init(self):
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
-        _normalize_deepseek_v4_dspark_draft(draft_model_config)
+        _normalize_deepseek_dspark_draft(draft_model_config)
         # deepseek v4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore

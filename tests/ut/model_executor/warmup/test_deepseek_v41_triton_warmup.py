@@ -25,7 +25,7 @@ def test_collect_indexer_warmup_token_counts(topk, cores, max_tokens, expected):
     assert warmup.collect_indexer_warmup_token_counts(topk, cores, max_tokens) == expected
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v4.1", "deepseek_v41", "deepseek_v4.1_text", "deepseek_v41_text"])
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v41_text"])
 def test_warmup_covers_tiles_and_active_compression_ratios(monkeypatch, model_type):
     config = SimpleNamespace(
         model_type=model_type,

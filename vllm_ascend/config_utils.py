@@ -51,8 +51,8 @@ def config(
 
 
 def is_deepseek_v41(hf_config: Any) -> bool:
-    """Identify released and legacy V4.1 configs at the model boundary."""
-    model_types = ("deepseek_v41", "deepseek_v4.1", "deepseek_v41_text", "deepseek_v4.1_text")
+    """Identify the released V4.1 config at the model boundary."""
+    model_types = ("deepseek_v41", "deepseek_v41_text")
     if isinstance(hf_config, dict):
         return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
     # SpeculativeConfig may overwrite the instance model_type for DSpark.
@@ -65,23 +65,7 @@ def is_deepseek_v41(hf_config: Any) -> bool:
 
 
 def normalize_deepseek_v41_config(hf_config: Any) -> Any:
-    """Normalize legacy checkpoint fields without replacing upstream config classes."""
-    aliases = {
-        "kv_source_layers": "kv_source_layer_ids",
-        "index_source_layers": "index_source_layer_ids",
-        "candidate_source_layer": "candidate_source_layer_id",
-        "engram_pad_id": "engram_pad_token_id",
-        "dspark_n_activated_experts": "dspark_num_experts_per_tok",
-    }
-    for legacy_name, released_name in aliases.items():
-        legacy = getattr(hf_config, legacy_name, None)
-        released = getattr(hf_config, released_name, None)
-        if legacy is not None and released is not None and legacy != released:
-            raise ValueError(f"Conflicting DeepSeek V4.1 config fields: {legacy_name}, {released_name}")
-        value = released if released is not None else legacy
-        if value is not None:
-            setattr(hf_config, legacy_name, value)
-            setattr(hf_config, released_name, value)
+    """Prepare runtime defaults not supplied by upstream's released config."""
     for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
         if not hasattr(hf_config, name):
             setattr(hf_config, name, default)

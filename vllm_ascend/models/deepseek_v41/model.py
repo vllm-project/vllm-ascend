@@ -510,10 +510,10 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
     config = text_config_of(config)
     num_layers = int(_read(config, "num_hidden_layers"))
     ratios = _as_int_tuple(config, "compress_ratios")
-    kv_sources = _as_int_tuple(config, "kv_source_layers")
-    index_sources = _as_int_tuple(config, "index_source_layers")
+    kv_sources = _as_int_tuple(config, "kv_source_layer_ids")
+    index_sources = _as_int_tuple(config, "index_source_layer_ids")
     engram_layers = _as_int_tuple(config, "engram_layer_ids")
-    candidate_source = int(_read(config, "candidate_source_layer"))
+    candidate_source = int(_read(config, "candidate_source_layer_id"))
     candidate_topk_blocks = int(_read(config, "candidate_topk_blocks"))
     candidate_block_size = int(_read(config, "candidate_block_size"))
     index_topk = int(_read(config, "index_topk"))
@@ -529,7 +529,7 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
     if any(ratio not in (0, 1, 2) for ratio in ratios):
         raise ValueError(f"DeepSeek V4.1 backbone only supports compression ratios 0, 1 and 2; got {ratios}")
 
-    for name, sources in (("kv_source_layers", kv_sources), ("index_source_layers", index_sources)):
+    for name, sources in (("kv_source_layer_ids", kv_sources), ("index_source_layer_ids", index_sources)):
         if tuple(sorted(set(sources))) != sources:
             raise ValueError(f"DeepSeek V4.1 {name} must be sorted and unique")
         if any(source < 0 or source >= num_layers for source in sources):
@@ -540,7 +540,7 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
     if not set(kv_sources).issubset(index_sources):
         raise ValueError("Every DeepSeek V4.1 KV source must also be an index source")
     if candidate_source not in kv_sources:
-        raise ValueError("DeepSeek V4.1 candidate_source_layer must be a KV source")
+        raise ValueError("DeepSeek V4.1 candidate_source_layer_id must be a KV source")
     if candidate_topk_blocks <= 0 or candidate_block_size <= 0 or index_topk <= 0:
         raise ValueError("DeepSeek V4.1 candidate and index TopK values must be positive")
     if len(set(engram_layers)) != len(engram_layers):
