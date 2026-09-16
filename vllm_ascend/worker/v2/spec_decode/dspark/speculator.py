@@ -30,12 +30,11 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.models.qwen3_dspark import process_weight
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import (
-    get_rotation_matrix,
     get_rotation_path,
-    model_uses_sfa_sparse,
 )
+from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata,
     build_attn_metadata_wrapper,
@@ -51,35 +50,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
-        draft_config = self.draft_model_config
-        # Compressed MLA and SFA metadata have no dense MLA decode object.
-        uses_compressed_mla = any(
-            hasattr(config, "compress_ratios") for config in (draft_config.hf_config, draft_config.hf_text_config)
-        )
-        self.attn_architecture = (
-            "MLA"
-            if draft_config.use_mla and not uses_compressed_mla and not model_uses_sfa_sparse(draft_config)
-            else None
-        )
+        self.attn_architecture: str | None = None
 
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
-        # Upstream load_dspark_model overrides the drafter's quant_config with
-        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
-        # __init__ derives rotation_path=None and its fc projection is loaded
-        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
-        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
-        # project them back to model space.
+        # Upstream replaces quant_config with None for a BF16 draft. Pass only
+        # the target QuaRot path so the draft's existing load_weights can fold
+        # input inverse rotation into FC (W @ R) and align fallback embedding /
+        # lm_head before upstream decides weight sharing. Do not rotate again
+        # after loading or replace the draft's own quantization configuration.
+        draft_hf_config = self.draft_model_config.hf_config
         rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None and hasattr(model.model, "fc"):
-            rotation_weight = get_rotation_matrix(rotation_path)
-            fc = model.model.fc
-            with torch.no_grad():
-                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
+
         return model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -116,7 +105,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    # Preserve cache-group order so captured graph tasks and
+                    # runtime metadata stay aligned.
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
@@ -125,6 +116,8 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
+            backend = _get_graph_update_backend(self.attn_groups)
+            self.attn_architecture = "MLA" if issubclass(backend, AscendMLABackend) else None
 
     @contextmanager
     def draft_capture_context(self):
