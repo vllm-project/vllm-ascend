@@ -15,6 +15,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -108,6 +109,52 @@ class CompressorSPMetadata:
     # Global state slots with invalid/null rows mapped to the safe sink [0, 0].
     # Shape: [num_tokens_pad, 2].
     scatter_slot_mapping: torch.Tensor
+    # Preallocated rank-major result buffer for the suffix all-gather.
+    # Shape: [tp_size * window_size, hidden_dim].
+    gathered_suffix_buffer: torch.Tensor
+
+
+@dataclass
+class CompressorSPGatherHandle:
+    """One fixed-shape Compressor SP all-gather and the buffers it references.
+
+    ``work`` None means the collective was queued inline on the issuing stream
+    and is already ordered there, so :meth:`wait` only returns the rows.
+    Otherwise the collective runs on the communication stream and :meth:`wait`
+    orders the current stream after it. Both buffers are held here to record
+    that the collective still owns them until that join.
+    """
+
+    recv_buffer: torch.Tensor
+    send_buffer: torch.Tensor
+    work: Any = None
+    comm_stream: Any = None
+
+    def wait(self) -> torch.Tensor:
+        """Order the current stream after the collective and return the rows."""
+        if self.work is None:
+            return self.recv_buffer
+        self.work.wait()
+        torch.npu.current_stream().wait_stream(self.comm_stream)
+        return self.recv_buffer
+
+
+@dataclass
+class CompressorSPPending:
+    """Deferred tail of one sequence-parallel Compressor execution.
+
+    :meth:`CompressorExecutor.launch_sp` runs this rank's Compressor and starts
+    the compressed-row all-gather; :meth:`CompressorExecutor.finalize_sp` joins
+    it, restores global row order and writes the output cache. Everything the
+    epilogue still needs is held here so the caller can place unrelated compute
+    between the two phases and cover the collective with it.
+    """
+
+    sp_metadata: CompressorSPMetadata
+    metadata: Any
+    output_cache: Any
+    gather_handle: CompressorSPGatherHandle
+    hadamard: torch.Tensor | None = None
 
 
 class CompressorSPMetadataBuilder:
@@ -164,6 +211,9 @@ class CompressorSPMetadataBuilder:
         self._packed_query_start_loc_buffer = CpuGpuBuffer(max_num_seqs + 1, dtype=torch.int32, device=device)
         self._packed_start_pos_buffer = CpuGpuBuffer(max_num_seqs, dtype=torch.int32, device=device)
         self._suffix_buffer = torch.empty((self._window_size, hidden_dim), dtype=dtype, device=device)
+        self._gathered_suffix_buffer = torch.empty(
+            (tp_size * self._window_size, hidden_dim), dtype=dtype, device=device
+        )
         self._pack_indices_buffer = CpuGpuBuffer(max_pack_indices, dtype=torch.int64, device=device)
 
         # Compressed KV aggregation metadata.
@@ -430,6 +480,7 @@ class CompressorSPMetadataBuilder:
             packed_query_start_loc=self._copy_to_gpu(self._packed_query_start_loc_buffer, packed_query_start_loc),
             packed_start_pos=self._copy_to_gpu(self._packed_start_pos_buffer, packed_start_pos),
             suffix_buffer=self._suffix_buffer,
+            gathered_suffix_buffer=self._gathered_suffix_buffer,
             pack_indices=self._copy_to_gpu(self._pack_indices_buffer, pack_indices),
             local_suffix_start=local_suffix_start,
             local_suffix_valid_len=local_suffix_valid_len,
@@ -715,12 +766,58 @@ class CompressorExecutor:
     # SP Execution
     ############################################################
 
-    def prepare_sp_input(
+    def _all_gather_sp(
+        self,
+        send_buffer: torch.Tensor,
+        recv_buffer: torch.Tensor,
+        comm_stream: Any | None = None,
+    ) -> CompressorSPGatherHandle:
+        """Issue one fixed-shape Compressor SP all-gather.
+
+        ``comm_stream`` None keeps the collective inline on the issuing stream,
+        which is the original blocking behaviour. Otherwise the collective is
+        queued on that one stream: every SP collective stays in a single
+        deterministic order across TP ranks, it never serializes behind
+        unrelated kernels on a compute stream, and the caller decides where to
+        join it.
+        """
+        if comm_stream is None:
+            dist.all_gather_into_tensor(
+                recv_buffer,
+                send_buffer,
+                group=self.tp_group.device_group,
+                async_op=False,
+            )
+            return CompressorSPGatherHandle(recv_buffer=recv_buffer, send_buffer=send_buffer)
+
+        # The send buffer is filled on the current stream, so the collective
+        # must not start before those writes retire.
+        comm_stream.wait_stream(torch.npu.current_stream())
+        with torch_npu.npu.stream(comm_stream):
+            work = dist.all_gather_into_tensor(
+                recv_buffer,
+                send_buffer,
+                group=self.tp_group.device_group,
+                async_op=True,
+            )
+        return CompressorSPGatherHandle(
+            recv_buffer=recv_buffer,
+            send_buffer=send_buffer,
+            work=work,
+            comm_stream=comm_stream,
+        )
+
+    def launch_sp_input(
         self,
         hidden_states_local: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
-    ) -> torch.Tensor:
-        """Gather boundary history and form this rank's request-major input."""
+        comm_stream: Any | None = None,
+    ) -> CompressorSPGatherHandle:
+        """Fill the local suffix window and start the suffix all-gather.
+
+        Split from :meth:`prepare_sp_input` so the caller can cover this
+        collective with unrelated compute between the launch and the join.
+        """
         local_suffix = sp_metadata.suffix_buffer
         suffix_size = local_suffix.shape[0]
         valid_len = sp_metadata.local_suffix_valid_len
@@ -736,32 +833,45 @@ class CompressorExecutor:
 
         # The fixed window keeps all ranks on the fast equal-shape all-gather.
         # Every rank must participate, even when its valid suffix is empty.
-        gathered_suffixes = torch.empty(
-            (
-                self.tp_group.world_size * suffix_size,
-                hidden_states_local.shape[-1],
-            ),
-            dtype=hidden_states_local.dtype,
-            device=hidden_states_local.device,
-        )
-        dist.all_gather_into_tensor(
-            gathered_suffixes,
+        return self._all_gather_sp(
             local_suffix.contiguous(),
-            group=self.tp_group.device_group,
-            async_op=False,
+            sp_metadata.gathered_suffix_buffer,
+            comm_stream,
         )
+
+    def finish_sp_input(
+        self,
+        handle: CompressorSPGatherHandle,
+        hidden_states_local: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+    ) -> torch.Tensor:
+        """Join the suffix all-gather and pack this rank's compressor input."""
+        gathered_suffixes = handle.wait()
 
         # pack_indices address this exact concatenation: all-rank boundary
         # suffixes first, followed by the complete local hidden-state shard.
         pack_source = torch.cat([gathered_suffixes, hidden_states_local], dim=0)
         return pack_source.index_select(0, sp_metadata.pack_indices).contiguous()
 
-    def _gather_sp_output(
+    def prepare_sp_input(
+        self,
+        hidden_states_local: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+    ) -> torch.Tensor:
+        """Gather boundary history and form this rank's request-major input."""
+        return self.finish_sp_input(
+            self.launch_sp_input(hidden_states_local, sp_metadata),
+            hidden_states_local,
+            sp_metadata,
+        )
+
+    def _launch_sp_output(
         self,
         compressed_kv: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
-    ) -> torch.Tensor:
-        """All-gather fixed-capacity raw rows before global owner reorder."""
+        comm_stream: Any | None = None,
+    ) -> CompressorSPGatherHandle:
+        """Start the fixed-capacity raw-row gather that precedes owner reorder."""
         target_rows = sp_metadata.gathered_compressed_tokens
         pad_rows = target_rows - compressed_kv.shape[0]
         if pad_rows < 0:
@@ -772,25 +882,51 @@ class CompressorExecutor:
         # produced prefix must be refreshed on each invocation.
         send_buffer[: compressed_kv.shape[0]].copy_(compressed_kv)
 
-        gathered_kv = sp_metadata.gathered_compressed_kv_buffer
-        dist.all_gather_into_tensor(
-            gathered_kv,
+        return self._all_gather_sp(
             send_buffer,
-            group=self.tp_group.device_group,
-            async_op=False,
+            sp_metadata.gathered_compressed_kv_buffer,
+            comm_stream,
         )
-        return gathered_kv
+
+    def _gather_sp_output(
+        self,
+        compressed_kv: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+    ) -> torch.Tensor:
+        """All-gather fixed-capacity raw rows before global owner reorder."""
+        return self._launch_sp_output(compressed_kv, sp_metadata).wait()
 
     def _sync_sp_state(
         self,
         state_cache: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
+        comm_stream: Any | None = None,
     ) -> None:
         """Replicate the complete non-SP state write-set on every TP rank.
 
         Synchronizing only request tails would make internal prefix-cache
         checkpoints invalid on ranks that did not compute those tokens.
+
+        With ``comm_stream`` the whole read-gather-mask-scatter chain is queued
+        on the communication stream and NOT joined here: the state cache has no
+        reader inside the forward that wrote it, so the caller joins the
+        communication stream at the next forward's entry, hiding this
+        collective under the rest of the forward instead of one layer tail.
         """
+        if comm_stream is not None:
+            # The state rows were produced on the current stream; the gather
+            # must not start before those writes retire.
+            comm_stream.wait_stream(torch.npu.current_stream())
+            with torch_npu.npu.stream(comm_stream):
+                self._sync_sp_state_inline(state_cache, sp_metadata)
+            return
+        self._sync_sp_state_inline(state_cache, sp_metadata)
+
+    def _sync_sp_state_inline(
+        self,
+        state_cache: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+    ) -> None:
         if sp_metadata.local_block_indices.shape[0] != sp_metadata.tokens_per_rank:
             raise ValueError("Compressor SP local state slots do not match the token partition")
         if sp_metadata.scatter_slot_mapping.shape[0] != sp_metadata.num_tokens_pad:
@@ -844,7 +980,7 @@ class CompressorExecutor:
             sp_metadata.scatter_slot_mapping,
         )
 
-    def _run_sp(
+    def launch_sp(
         self,
         compressor_input: torch.Tensor,
         state_cache: torch.Tensor,
@@ -854,11 +990,16 @@ class CompressorExecutor:
         state_block_table: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
         hadamard: torch.Tensor | None = None,
-        delay_sync_sp_state: bool = False,
-    ) -> None:
-        """Run local compute, aggregate owned KV rows, then replicate state."""
+        comm_stream: Any | None = None,
+    ) -> CompressorSPPending:
+        """Run this rank's Compressor and start the compressed-row all-gather.
+
+        The returned pending tail must be passed to :meth:`finalize_sp` before
+        anything reads the output cache. With ``comm_stream`` set, the caller
+        can run unrelated compute in between and cover the collective with it.
+        """
         if sp_metadata.input_count == 0:
-            # Empty ranks still enter both fixed-shape collectives below.
+            # Empty ranks still enter the fixed-shape collective below.
             compressed_kv = compressor_input.new_empty((0, self.compressor.norm.weight.shape[0]))
         else:
             # The local packed input has different request offsets and output
@@ -880,7 +1021,27 @@ class CompressorExecutor:
                 start_pos=sp_metadata.packed_start_pos,
             )
 
-        gathered_kv = self._gather_sp_output(compressed_kv, sp_metadata)
+        if comm_stream is None:
+            # Inline path preserved for graph capture, the disabled-overlap
+            # fallback and the unit tests that patch _gather_sp_output.
+            handle = CompressorSPGatherHandle(
+                recv_buffer=self._gather_sp_output(compressed_kv, sp_metadata),
+                send_buffer=compressed_kv,
+            )
+        else:
+            handle = self._launch_sp_output(compressed_kv, sp_metadata, comm_stream)
+        return CompressorSPPending(
+            sp_metadata=sp_metadata,
+            metadata=metadata,
+            output_cache=output_cache,
+            gather_handle=handle,
+            hadamard=hadamard,
+        )
+
+    def finalize_sp(self, pending: CompressorSPPending) -> None:
+        """Join the row all-gather, restore global order and write the cache."""
+        sp_metadata = pending.sp_metadata
+        gathered_kv = pending.gather_handle.wait()
         # C4 overlap may produce the same group on adjacent ranks. The builder
         # chooses the owner row whose final token lies in that rank's shard.
         reordered_kv = gathered_kv.index_select(
@@ -888,7 +1049,7 @@ class CompressorExecutor:
             sp_metadata.gathered_kv_reorder_indices,
         )
         _, _, global_slot_mapping = get_or_compute_compressor_metadata(
-            metadata,
+            pending.metadata,
             self.compress_ratio,
         )
         if global_slot_mapping.shape[0] != sp_metadata.global_num_compressed_tokens:
@@ -899,8 +1060,33 @@ class CompressorExecutor:
         self._write_cache(
             reordered_kv,
             global_slot_mapping,
-            output_cache,
-            hadamard=hadamard,
+            pending.output_cache,
+            hadamard=pending.hadamard,
+        )
+
+    def _run_sp(
+        self,
+        compressor_input: torch.Tensor,
+        state_cache: torch.Tensor,
+        output_cache: Any,
+        *,
+        metadata: Any,
+        state_block_table: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+        hadamard: torch.Tensor | None = None,
+        delay_sync_sp_state: bool = False,
+    ) -> None:
+        """Run local compute, aggregate owned KV rows, then replicate state."""
+        self.finalize_sp(
+            self.launch_sp(
+                compressor_input,
+                state_cache,
+                output_cache,
+                metadata=metadata,
+                state_block_table=state_block_table,
+                sp_metadata=sp_metadata,
+                hadamard=hadamard,
+            )
         )
 
         if not delay_sync_sp_state:
