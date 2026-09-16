@@ -20,7 +20,7 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 |  Weight Version    | Hardware Requirements                                            | Download Links |
 |--------------------|------------------------------------------------------------------|----------------|
-| BF16               | one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
+| BF16               | one Ascend Atlas 800I A2 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
 
