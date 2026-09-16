@@ -20,8 +20,8 @@
 
 Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py`.
 """
-import time
 import os
+import time
 from unittest.mock import patch
 
 import pytest
