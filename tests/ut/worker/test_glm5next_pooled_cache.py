@@ -57,7 +57,7 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
-        return num_blocks, 2, block_size, head_size
+        return num_blocks, block_size, 2 * head_size
 
 
 def _make_config():
@@ -200,7 +200,7 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
-    assert tail_cache.shape == (3, 2, 2, 1)
+    assert tail_cache.shape == (3, 2, 2)
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),

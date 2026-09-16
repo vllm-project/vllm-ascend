@@ -1,0 +1,162 @@
+/**
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#ifndef POOL_KEY_INDEXER_TEMPLATE_TILING_KEY_H_
+#define POOL_KEY_INDEXER_TEMPLATE_TILING_KEY_H_
+
+#include "ascendc/host_api/tiling/template_argument.h"
+
+#define PKI_TPL_FP16 1
+#define PKI_TPL_BF16 27
+#define PKI_TPL_FP8 2
+#define PKI_TPL_INT32 3
+#define PKI_TPL_FLOAT 0
+
+#define PKI_LAYOUT_BSND 0
+#define PKI_LAYOUT_TND 1
+#define PKI_LAYOUT_PA_BBND 2
+
+// Convert template int param to PkiLayout enum
+#define PKI_LAYOUT(x) static_cast<PkiCommon::PkiLayout>(x)
+
+// mask_mode template values (same as host, already non-negative, no offset needed)
+#define PKI_TPL_MASK_DEFAULT 0
+#define PKI_TPL_MASK_CAUSAL 3
+
+// quant_mode template values = host value (def.cpp attr) + 1:
+// host -1/0/1(none/per-token/mxfp8) → tpl 0/1/2(TPL 框架仅支持 UINT, 负值需偏移)
+#define PKI_TPL_QUANT_NONE 0
+#define PKI_TPL_QUANT_FP8_PER_TOKEN 1
+#define PKI_TPL_QUANT_MXFP8 2
+
+#define ASCENDC_TPL_4_BW 4
+
+ASCENDC_TPL_ARGS_DECL(PoolKeyIndexer, ASCENDC_TPL_DTYPE_DECL(DT_Q, PKI_TPL_FP16, PKI_TPL_BF16, PKI_TPL_FP8),
+                      ASCENDC_TPL_DTYPE_DECL(DT_K, PKI_TPL_FP16, PKI_TPL_BF16, PKI_TPL_FP8),
+                      ASCENDC_TPL_DTYPE_DECL(DT_OUT, PKI_TPL_INT32),
+                      ASCENDC_TPL_UINT_DECL(LAYOUT_Q, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND,
+                                            PKI_LAYOUT_TND),
+                      ASCENDC_TPL_UINT_DECL(LAYOUT_K, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND,
+                                            PKI_LAYOUT_TND, PKI_LAYOUT_PA_BBND),
+                      ASCENDC_TPL_UINT_DECL(MASK_MODE, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                            PKI_TPL_MASK_CAUSAL),
+                      ASCENDC_TPL_UINT_DECL(QUANT_MODE, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE,
+                                            PKI_TPL_QUANT_FP8_PER_TOKEN, PKI_TPL_QUANT_MXFP8),
+                      ASCENDC_TPL_BOOL_DECL(RETURN_VALUE, 0, 1), );
+
+// Supported template combinations
+ASCENDC_TPL_SEL(
+    // FP16 BSND/BSND mask=default
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // FP16 BSND/BSND mask=causal
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // BF16 BSND/BSND mask=default
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_BF16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_BF16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // BF16 BSND/BSND mask=causal
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_BF16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_BF16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // FP16 TND/TND mask=default & causal
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // BF16 TND/TND mask=default & causal
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_BF16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_BF16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // FP16 TND/PA_BBND mask=default & causal (PageAttention, TND query)
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_PA_BBND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // BF16 TND/PA_BBND mask=default & causal (PageAttention, TND query)
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_BF16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_BF16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_TND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_PA_BBND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // FP16 BSND/PA_BBND mask=default & causal (PageAttention)
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_PA_BBND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // BF16 BSND/PA_BBND mask=default & causal (PageAttention)
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_BF16), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_BF16),
+                         ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND),
+                         ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_PA_BBND),
+                         ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT,
+                                              PKI_TPL_MASK_CAUSAL),
+                         ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_NONE),
+                         ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ),
+
+    // FP8 mxFP8 (ascend950 only)
+    ASCENDC_TPL_ARGS_SEL(
+        ASCENDC_TPL_DTYPE_SEL(DT_Q, PKI_TPL_FP8), ASCENDC_TPL_DTYPE_SEL(DT_K, PKI_TPL_FP8),
+        ASCENDC_TPL_DTYPE_SEL(DT_OUT, PKI_TPL_INT32),
+        ASCENDC_TPL_UINT_SEL(LAYOUT_Q, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND, PKI_LAYOUT_TND),
+        ASCENDC_TPL_UINT_SEL(LAYOUT_K, ASCENDC_TPL_UI_LIST, PKI_LAYOUT_BSND, PKI_LAYOUT_TND, PKI_LAYOUT_PA_BBND),
+        ASCENDC_TPL_UINT_SEL(MASK_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_MASK_DEFAULT, PKI_TPL_MASK_CAUSAL),
+        ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, PKI_TPL_QUANT_MXFP8, PKI_TPL_QUANT_FP8_PER_TOKEN),
+        ASCENDC_TPL_BOOL_SEL(RETURN_VALUE, 0, 1), ), );
+
+#endif // POOL_KEY_INDEXER_TEMPLATE_TILING_KEY_H_

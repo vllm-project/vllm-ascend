@@ -39,6 +39,8 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
+#include "attention/key_pool/key_pool_torch_adpt.h"
+#include "attention/pool_key_indexer/pool_key_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
@@ -3093,6 +3095,32 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                                  (Tensor output, Tensor output_scale)"
     );
     ops.impl("grouped_matmul_swiglu_quant_v2", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_v2);
+
+    ops.def(
+        "npu_key_pool("
+            "Tensor hidden_states, Tensor wk, Tensor gate_weight, Tensor ape, "
+            "Tensor(a!) state_cache, Tensor cache_block_table, Tensor start_pos, "
+            "*, "
+            "Tensor? norm_weight=None, Tensor? norm_bias=None, "
+            "Tensor? cos=None, Tensor? sin=None, "
+            "Tensor? cu_seqlens=None, Tensor? seqused=None, "
+            "int cmp_ratio=4, float norm_eps=1e-6, int rotary_mode=1"
+        ") -> Tensor"
+    );
+    ops.impl("npu_key_pool", torch::kPrivateUse1, &vllm_ascend::npu_key_pool);
+
+    ops.def(
+        "npu_pool_key_indexer("
+            "Tensor query, Tensor pool_key, Tensor weights, Tensor pool_tail_k, "
+            "*, "
+            "Tensor? actual_seq_q=None, Tensor? actual_seq_k=None, "
+            "Tensor? block_table=None, Tensor? q_descale=None, Tensor? k_descale=None, "
+            "str layout_q=\"BSND\", str layout_k=\"BSND\", "
+            "int topk=2048, int pool_size=16, int mask_mode=3, int quant_mode=-1, "
+            "bool return_value=False"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
+    );
+    ops.impl("npu_pool_key_indexer", torch::kPrivateUse1, &vllm_ascend::npu_pool_key_indexer);
 
     ops.def(
         "npu_lightning_indexer("

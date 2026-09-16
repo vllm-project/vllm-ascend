@@ -703,9 +703,14 @@ typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
 
 #define EXEC_NPU_CMD(aclnn_api, ...)                                          \
+    EXEC_NPU_CMD_WITH_WORKSPACE(aclnn_api, aclnn_api##GetWorkspaceSize, __VA_ARGS__)
+
+// Value-dependent ACLNN inputs expose a Tensor workspace API but share the
+// execution entry point with the host-array API.
+#define EXEC_NPU_CMD_WITH_WORKSPACE(aclnn_api, workspace_api, ...)              \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
-        GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                      \
+        GetOpApiFuncAddr(#workspace_api);                                     \
     static const auto opApiFuncAddr = GetOpApiFuncAddr(#aclnn_api);           \
     static const auto initMemAddr =                                           \
         GetOpApiFuncAddr("InitHugeMemThreadLocal");                           \
@@ -714,7 +719,7 @@ typedef void (*ReleaseHugeMem)(void *, bool);
     static const auto releaseMemAddr = GetOpApiFuncAddr("ReleaseHugeMem");    \
     TORCH_CHECK(                                                              \
         getWorkspaceSizeFuncAddr != nullptr && opApiFuncAddr != nullptr,      \
-        #aclnn_api, " or ", #aclnn_api "GetWorkspaceSize", " not in ",        \
+        #aclnn_api, " or ", #workspace_api, " not in ",                        \
         GetOpApiLibName(), ", or ", GetOpApiLibName(), "not found.");         \
     auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);           \
     uint64_t workspace_size = 0;                                              \
