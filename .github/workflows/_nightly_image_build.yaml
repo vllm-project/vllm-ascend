@@ -74,6 +74,8 @@ on:
         required: false
       SWR_PASSWORD:
         required: false
+      SYNC_TOOLS_TOKEN:
+        required: false
 
 jobs:
   generate-matrix:
@@ -328,3 +330,15 @@ jobs:
           if [ "${MISSING_VARIANT}" = "1" ]; then
             echo "::warning::Some variants were skipped due to missing arch images."
           fi
+
+      - name: Dispatch quay.io sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
