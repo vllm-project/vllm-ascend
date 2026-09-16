@@ -23,6 +23,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreSendingThread,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -877,7 +880,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
+        worker.kv_send_thread.add_stored_request.assert_called_with(req)
         worker.kv_send_thread.add_request.assert_called_once()
         worker.kv_send_thread.request_queue.join.assert_called_once()
 
@@ -1921,23 +1924,25 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)
-        worker.kv_send_thread = MagicMock()
-        worker.kv_send_thread.is_stored_request.return_value = False
+        worker.m_store = MagicMock()
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.is_live_store_job.return_value = False
         req = ReqMeta(
             req_id="r1", token_len_chunk=4, block_ids_by_group=[[5]], block_hashes=[b"h0"], current_event=None
         )
         worker._store_kv_tp_mismatch(req)
-        worker.kv_send_thread.dec_stored_request.assert_not_called()
+        worker.m_store.put.assert_not_called()
 
-    def test_store_kv_tp_mismatch_decrements_on_success_and_error(self):
+    def test_store_kv_tp_mismatch_leaves_lifecycle_to_sending_thread(self):
         for put_error in (None, RuntimeError("put failed")):
             with self.subTest(put_error=put_error):
                 worker = self._make_strided_worker()
                 worker.m_store = MagicMock()
                 worker.m_store.put.side_effect = put_error
                 worker.enable_kv_events = False
-                send_thread = MagicMock()
-                send_thread.is_stored_request.return_value = True
+                send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+                send_thread.is_live_store_job.return_value = True
+                send_thread.get_saved_offset.return_value = 0
                 send_thread.lookup.return_value = [False, True]
                 worker.kv_send_thread = send_thread
                 req = ReqMeta(
@@ -1954,7 +1959,66 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 else:
                     worker._store_kv_tp_mismatch(req)
                     self.assertEqual(len(worker.m_store.put.call_args.args[0]), 1)
-                send_thread.dec_stored_request.assert_called_once_with("r1")
+                send_thread.finish_store_job.assert_not_called()
+
+    def test_store_kv_tp_mismatch_events_follow_missing_blocks(self):
+        worker = self._make_strided_worker()
+        worker.m_store = MagicMock()
+        worker.m_store.put.return_value = [True, True]
+        worker.enable_kv_events = True
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
+        # Two sub-keys per block: block 0 exists, block 1 is missing.
+        send_thread.lookup.return_value = [True, True, False, False]
+        send_thread.get_event_token_ids.side_effect = lambda req, start, end: req.get_event_token_ids(start, end)
+        worker.kv_send_thread = send_thread
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[5, 6]],
+            block_hashes=[b"h0", b"h1"],
+            token_ids=list(range(8)),
+            original_block_size=4,
+            store_job_id=1,
+        )
+
+        worker._store_kv_tp_mismatch(req)
+
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, [b"h1"])
+        self.assertEqual(events[0].parent_block_hash, b"h0")
+        self.assertEqual(events[0].token_ids, list(range(4, 8)))
+
+    def test_store_kv_tp_mismatch_partial_put_emits_only_complete_blocks(self):
+        worker = self._make_strided_worker()
+        worker.m_store = MagicMock()
+        worker.m_store.put.return_value = [True, False]
+        worker.enable_kv_events = True
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.is_live_store_job.return_value = True
+        send_thread.get_saved_offset.return_value = 0
+        # One missing sub-key in each block; only block 0 is repaired.
+        send_thread.lookup.return_value = [False, True, False, True]
+        send_thread.get_event_token_ids.side_effect = lambda req, start, end: req.get_event_token_ids(start, end)
+        worker.kv_send_thread = send_thread
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[5, 6]],
+            block_hashes=[b"h0", b"h1"],
+            token_ids=list(range(8)),
+            original_block_size=4,
+            store_job_id=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "partially failed"):
+            worker._store_kv_tp_mismatch(req)
+
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].block_hashes, [b"h0"])
 
 
 class TestKVPoolWorkerReachableMasks(unittest.TestCase):

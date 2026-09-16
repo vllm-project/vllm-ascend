@@ -206,6 +206,16 @@ def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
     )
 
     assert get_layerwise_reuse_config(multi_config) is ascend_store_config
+    for connector_name in (
+        "AscendStoreConnector",
+        "MooncakeConnectorStoreV1",
+        "MooncakeStoreConnector",
+    ):
+        direct_config = SimpleNamespace(
+            kv_connector=connector_name,
+            kv_connector_extra_config=ascend_store_config,
+        )
+        assert get_layerwise_reuse_config(direct_config) is ascend_store_config
     assert get_layerwise_reuse_config(unsupported) is None
     assert get_layerwise_reuse_config(not_opted_in) is None
 
