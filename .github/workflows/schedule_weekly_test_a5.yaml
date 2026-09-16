@@ -103,8 +103,6 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    if: >-
-      github.event_name == 'workflow_dispatch'
     runs-on: linux-aarch64-a5-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
@@ -148,7 +146,11 @@ jobs:
         run: |
           {
             echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              input_branch="${{ github.base_ref }}"
+            else
+              input_branch="${{ inputs.vllm_ascend_branch }}"
+            fi
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
@@ -182,6 +184,8 @@ jobs:
     name: Build weekly-a5 image
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
+      || github.event_name == 'schedule'
+
     strategy:
       matrix:
         vllm_ascend_branch: >-
@@ -230,7 +234,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref) }}
       request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -289,7 +293,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      vllm_ascend_ref: ${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || '') }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
@@ -318,8 +322,8 @@ jobs:
     needs: [parse-trigger, single-node-tests, multi-node-tests]
     if: >-
       always() &&
-      github.event_name == 'workflow_dispatch' &&
-      needs.parse-trigger.result == 'success'
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+      && needs.parse-trigger.result == 'success'
     runs-on: linux-aarch64-a5-0
     steps:
       - name: Merge all benchmark result artifacts
