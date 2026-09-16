@@ -7,8 +7,8 @@ import torch
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.vllm import get_cached_compilation_config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from tests.ut.base import TestBase
 
+from tests.ut.base import TestBase
 from vllm_ascend.ops import mm_encoder_attention as mm_encoder_attention_module
 from vllm_ascend.ops.mm_encoder_attention import (
     MAX_PAD_SIZE,
