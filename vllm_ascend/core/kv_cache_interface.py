@@ -434,8 +434,7 @@ def get_kv_cache_layout(
 ) -> CacheLayoutProtocol | None:
     """Resolve an optional physical layout from cache capabilities, not model names.
 
-    Group wrappers do not change layout ownership. Reject incompatible custom
-    layouts instead of silently planning their pages with one model's allocator.
+    Group wrappers do not change layout ownership.
     """
     layouts: set[CacheLayoutProtocol] = set()
     for spec in specs:
@@ -446,6 +445,4 @@ def get_kv_cache_layout(
             for member in members
             if (layout := getattr(member, "cache_layout", None)) is not None
         )
-    if len(layouts) > 1:
-        raise ValueError("KV cache groups contain incompatible physical layouts")
     return next(iter(layouts), None)

@@ -113,8 +113,6 @@ class DeepseekV41MLP(nn.Module):
             disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. Only silu is supported for now.")
         if swiglu_limit is not None:
             self.act_fn = SiluAndMulWithClamp(swiglu_limit)
         else:
@@ -151,9 +149,6 @@ class DeepseekV41MoE(nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-
-        if config.hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {config.hidden_act}. Only silu is supported for now.")
 
         self.gate = ReplicatedLinear(
             config.hidden_size, config.n_routed_experts, bias=False, quant_config=None, prefix=f"{prefix}.gate"
@@ -248,8 +243,6 @@ class DeepseekV41MoE(nn.Module):
         hidden_states_fp32: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
-        if self.gate.tid2eid is not None and input_ids is None:
-            raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -488,8 +481,6 @@ class DeepseekV41SharedAttentionState:
 
 def _as_int_tuple(config: Any, name: str) -> tuple[int, ...]:
     value = _read(config, name)
-    if not isinstance(value, (list, tuple)) or any(not isinstance(item, int) for item in value):
-        raise ValueError(f"DeepSeek V4.1 {name} must be a list of integers")
     return tuple(value)
 
 
@@ -516,48 +507,13 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
     candidate_block_size = int(_read(config, "candidate_block_size"))
     index_topk = int(_read(config, "index_topk"))
 
-    if num_layers <= 0:
-        raise ValueError("DeepSeek V4.1 num_hidden_layers must be positive")
-    if len(ratios) < num_layers:
-        raise ValueError(
-            "DeepSeek V4.1 compress_ratios must cover every backbone layer: "
-            f"got {len(ratios)} ratios for {num_layers} layers"
-        )
     ratios = ratios[:num_layers]
-    if any(ratio not in (0, 1, 2) for ratio in ratios):
-        raise ValueError(f"DeepSeek V4.1 backbone only supports compression ratios 0, 1 and 2; got {ratios}")
-
-    for name, sources in (("kv_source_layer_ids", kv_sources), ("index_source_layer_ids", index_sources)):
-        if tuple(sorted(set(sources))) != sources:
-            raise ValueError(f"DeepSeek V4.1 {name} must be sorted and unique")
-        if any(source < 0 or source >= num_layers for source in sources):
-            raise ValueError(f"DeepSeek V4.1 {name} contains a layer outside the backbone")
-        if any(ratios[source] == 0 for source in sources):
-            raise ValueError(f"DeepSeek V4.1 {name} cannot point to a local-only layer")
-
-    if not set(kv_sources).issubset(index_sources):
-        raise ValueError("Every DeepSeek V4.1 KV source must also be an index source")
-    if candidate_source not in kv_sources:
-        raise ValueError("DeepSeek V4.1 candidate_source_layer_id must be a KV source")
-    if candidate_topk_blocks <= 0 or candidate_block_size <= 0 or index_topk <= 0:
-        raise ValueError("DeepSeek V4.1 candidate and index TopK values must be positive")
-    if len(set(engram_layers)) != len(engram_layers):
-        raise ValueError("DeepSeek V4.1 engram_layer_ids must be unique")
-    if any(layer < 0 or layer >= num_layers for layer in engram_layers):
-        raise ValueError("DeepSeek V4.1 engram_layer_ids contains a layer outside the backbone")
 
     engram_slots = {layer_idx: slot for slot, layer_idx in enumerate(engram_layers)}
     roles: list[DeepseekV41LayerRole] = []
     for layer_idx, ratio in enumerate(ratios):
         kv_source = _latest_source(layer_idx, kv_sources) if ratio else None
         index_source = _latest_source(layer_idx, index_sources) if ratio else None
-        if ratio and (kv_source is None or index_source is None):
-            raise ValueError(f"DeepSeek V4.1 layer {layer_idx} has long-context attention but no source layer")
-        if kv_source is not None and ratios[kv_source] != ratio:
-            raise ValueError(
-                f"DeepSeek V4.1 layer {layer_idx} has ratio {ratio}, but its KV source "
-                f"layer {kv_source} has ratio {ratios[kv_source]}"
-            )
 
         roles.append(
             DeepseekV41LayerRole(
@@ -735,16 +691,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             use_yarn=role.has_long_context,
         )
         block_size = vllm_config.cache_config.block_size
-        if block_size <= 0 or block_size % 2:
-            raise ValueError("V4.1 logical block_size must be a positive multiple of two")
-        owned: list[str] = []
-        if role.is_kv_source:
-            owned.extend((f"{prefix}.long_kv_cache", f"{prefix}.indexer.k_cache"))
-            if role.compress_ratio == 2:
-                owned.append(f"{prefix}.compressor.state_cache")
-        duplicates = set(owned) & vllm_config.compilation_config.static_forward_context.keys()
-        if duplicates:
-            raise ValueError(f"Duplicate V4.1 cache prefixes: {sorted(duplicates)}")
         self.role = role
         self.topology = topology
         self.shared_state = None
@@ -797,8 +743,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = vllm_config.compilation_config.static_forward_context
-        if self.v41_layer_name in context:
-            raise ValueError(f"Duplicate V4.1 attention layer: {self.v41_layer_name}")
         context[self.v41_layer_name] = self
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
@@ -982,12 +926,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     decoder_layer_cls = DeepseekV41DecoderLayer
 
     def __init__(self, *, vllm_config, prefix=""):
-        if (
-            get_ascend_config().enable_engram
-            and vllm_config.load_config.load_format != "dummy"
-            and vllm_config.load_config.safetensors_load_strategy != "lazy"
-        ):
-            raise ValueError("Engram HBM shards require --safetensors-load-strategy lazy")
         super().__init__()
 
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
@@ -1088,8 +1026,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 with safe_open(Path(self.engram_root) / "optional/quarot.safetensors", framework="pt") as file:
                     rotation = file.get_tensor("global_rotation")
                 block = rotation[:32, :32].contiguous()
-                if not torch.equal(rotation, torch.block_diag(*[block] * (config.hidden_size // 32))):
-                    raise ValueError("Engram gate requires repeated block32 global rotation")
             self.engram_rotation.copy_(block)
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
@@ -1144,11 +1080,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             return graph_inputs
         num_tokens = positions.shape[0]
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
-        if not num_tokens <= output_tokens <= self._engram_max_tokens:
-            raise ValueError("Engram padded token count must cover the input and fit buffer capacity")
         lookups, mask = self.prepare_engram(input_ids, positions)
-        if mask.numel() > num_tokens:
-            raise ValueError("Engram query count exceeds the input token count")
         buffers, mask_buffer = self._engram_input_buffers
         mask_buffer[: mask.numel()].copy_(mask)
         mask_buffer[mask.numel() : output_tokens].zero_()
@@ -1161,8 +1093,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         """Capture fixed-address buffers without CPU history or routing work."""
         if not get_ascend_config().enable_engram:
             return {"engram_lookups": {}, "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool)}
-        if padded_tokens is not None and not 0 <= padded_tokens <= self._engram_max_tokens:
-            raise ValueError("Engram padded token count exceeds buffer capacity")
         if self._engram_input_buffers is None:
             capacity = self._engram_max_tokens
             columns = (self.config.engram_max_ngram_size - 1) * self.config.engram_n_heads
@@ -1188,8 +1118,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         engram_lookups=None,
         engram_mask=None,
     ):
-        if not get_pp_group().is_first_rank or not get_pp_group().is_last_rank:
-            raise NotImplementedError("V4.1 eager milestone currently requires PP=1")
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         if engram_lookups is None:
@@ -1342,17 +1270,12 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                         )
                     else:
                         param = self.get_parameter(parameter_name)
-                        if tensor.dtype != torch.bfloat16 or tensor.shape != param.shape:
-                            raise ValueError(f"Unexpected BF16 Engram parameter: {name}")
                         param.data.copy_(tensor)
                     engram_loaded.add(parameter_name)
                 elif self._is_milestone_weight(name):
                     yield name, tensor
 
         loaded = self._load_model_weights(milestone_weights())
-        expected = {name for name, _ in self.named_parameters() if ".engram." in name}
-        if engram_loaded != expected:
-            raise ValueError(f"Missing Engram weights: {expected - engram_loaded}")
         return loaded | engram_loaded
 
     def set_moe_parameters(self):

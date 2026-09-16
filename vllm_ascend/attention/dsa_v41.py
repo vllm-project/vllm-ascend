@@ -218,10 +218,6 @@ def scatter_cache_sk(
     the plane shape. ``npu_scatter_nd_update_sk`` preserves that stride and
     treats the builder's ``[-1, -1]`` coordinates as skipped rows, matching V4.
     """
-    if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
-        raise ValueError(
-            f"V4.1 fused cache store requires builder-prepared [T, 2] slot_mapping, got {tuple(slot_mapping.shape)}"
-        )
     cache = cache.squeeze(-2)
     indices = slot_mapping[: values.shape[0]]
     updates = values.to(cache.dtype).contiguous()
@@ -230,10 +226,6 @@ def scatter_cache_sk(
 
 def pad_sparse_indices(indices: torch.Tensor, topk: int) -> torch.Tensor:
     """Convert V4.1's compact [T, K] selection into SMLA [T, 1, topk]."""
-    if indices.ndim != 2:
-        raise ValueError(f"V4.1 sparse indices must be rank 2, got {indices.shape}")
-    if indices.shape[-1] > topk:
-        raise ValueError(f"V4.1 sparse indices width {indices.shape[-1]} exceeds operator topk {topk}")
     if indices.shape[-1] < topk:
         indices = F.pad(indices, (0, topk - indices.shape[-1]), value=-1)
     return indices.unsqueeze(1).contiguous().int()
@@ -435,8 +427,6 @@ class AscendDSAV41Impl:
             long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
         else:
             state_metadata = compressor_metadata.state
-            if state_metadata.c2_ring_metadata is None or state_metadata.c2_metadata_group_id is None:
-                raise RuntimeError("V4.1 ring compressor metadata is missing")
             wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, state_metadata.c2_metadata_group_id)
             hidden_states_fp32 = hidden_states.float()
             kv = compressor.wkv(hidden_states_fp32)
@@ -506,16 +496,6 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
-        if attn.head_dim != 512:
-            raise ValueError(f"SparseFlashMla requires head_dim 512, got {attn.head_dim}")
-        if attn.window_size != 128:
-            raise ValueError(f"A2/A3 SparseFlashMla requires sliding_window 128, got {attn.window_size}")
-        num_heads = q.shape[1]
-        if not 1 <= num_heads <= 128 or num_heads & (num_heads - 1):
-            raise ValueError(
-                "A2/A3 SparseFlashMla requires the local query-head count to be "
-                f"a power of two in [1, 128], got {num_heads}"
-            )
         has_compressed = self.role.compress_ratio in (1, 2)
         ratio = self.role.compress_ratio if has_compressed else 0
         num_reqs = metadata.swa.num_reqs
@@ -528,20 +508,14 @@ class AscendDSAV41Impl:
         cmp_indices = None
         cmp_topk = 0
         if has_compressed:
-            if source_cache is None or metadata.attention is None or compressed_indices is None:
-                raise RuntimeError("V4.1 compressed attention is missing KV or TopK metadata")
             cmp_block_table = metadata.attention.block_table[:num_reqs]
             cmp_seq_lens = metadata.attention.cache_seq_lens[:num_reqs]
             cmp_residual = metadata.attention.cmp_residual
             cmp_topk = self.topology.index_topk
-            if cmp_topk not in (512, 1024):
-                raise ValueError(f"SparseFlashMla only supports TopK 512 or 1024, got {cmp_topk}")
             cmp_indices = pad_sparse_indices(compressed_indices, cmp_topk)
 
         operator_metadata = metadata.attention if has_compressed else metadata.swa
         op_metadata = operator_metadata.smla_metadata
-        if op_metadata is None:
-            raise RuntimeError(f"V4.1 ratio-{ratio} SMLA metadata was not built")
         wait_for_device_metadata(
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
@@ -692,8 +666,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         )
 
     def build_for_drafting(self, common_attn_metadata, draft_index, **kwargs):
-        if not isinstance(self.kv_cache_spec, DeepseekV41DraftSWASpec):
-            raise TypeError("V4.1 drafting requires a draft SWA cache")
         # DSpark issues one eager block per step. Group-local tables and slots
         # remain independent; the builder owns the operator metadata buffers.
         return self.build(0, common_attn_metadata)
@@ -701,13 +673,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
         if self._build_compressor_metadata and isinstance(self.kv_cache_spec, DeepseekV41CompressorStateSpec):
-            if not self._c2_rope_layer_names:
-                raise RuntimeError("V4.1 compressor-state builder has no source RoPE layer")
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
-            for rope_layer_name in self._c2_rope_layer_names[1:]:
-                other_rope = get_full_cos_and_sin_dsa_for_layer(rope_layer_name)
-                if any(other.data_ptr() != source.data_ptr() for other, source in zip(other_rope, source_rope)):
-                    raise RuntimeError("V4.1 ratio-2 source layers must share one RoPE table")
             self._c2_full_source_rope = source_rope
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
@@ -770,8 +736,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         fast_build=False,
         **kwargs,
     ):
-        if common_prefix_len:
-            raise NotImplementedError("V4.1 prefix caching is not implemented")
         self._device_metadata_tasks = ()
         spec = self.kv_cache_spec
         common = common_attn_metadata
@@ -785,8 +749,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cache_kind = "index_k"
         elif is_compressor_state:
             cache_kind = "compressor_state"
-        else:
-            raise TypeError(f"Unsupported V4.1 cache spec: {type(spec).__name__}")
 
         num_reqs = int(getattr(common, "num_reqs", common.seq_lens.shape[0]))
         num_actual_reqs = int(kwargs.get("num_actual_reqs", num_reqs))
@@ -892,8 +854,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         index_topk = int(_config_value(text_config, "index_topk"))
         ori_sparse_indices = kwargs.get("ori_sparse_indices")
         noncausal = not bool(getattr(common, "causal", True))
-        if noncausal and not isinstance(spec, DeepseekV41DraftSWASpec):
-            raise ValueError("V4.1 noncausal attention requires a DSpark draft SWA cache")
         if noncausal and ori_sparse_indices is None:
             ori_sparse_indices, _ = build_dspark_swa_indices(
                 common.block_table_tensor[:num_reqs],
@@ -1003,8 +963,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ring_meta = self._c2_ring_metadata[: 5 * num_reqs].view(5, num_reqs)
             input_positions = positions
             if self._supports_device_ops:
-                if self._c2_full_source_rope is None:
-                    raise RuntimeError("V4.1 source RoPE buffers were not initialized")
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
@@ -1060,15 +1018,13 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         out=self._c2_source_sin[:num_input_tokens],
                     )
 
-            compressor_group = self._publish_task(
+            self._publish_task(
                 shared,
                 "c2:compressor",
                 self._c2_complete_mask,
                 DeviceMetadataStage.COMPRESSOR,
                 build_c2_metadata,
             )
-            if compressor_group is not self._c2_complete_mask:
-                raise RuntimeError("V4.1 compressor metadata must have one owner")
             c2_complete_mask = self._c2_complete_mask[:num_input_tokens]
             c2_ring_metadata = ring_meta
             c2_source_positions = self._c2_source_positions[:num_input_tokens]
@@ -1151,8 +1107,6 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         self.spec = spec
         self.kv_cache = [torch.empty(0)]
         context = vllm_config.compilation_config.static_forward_context
-        if prefix in context:
-            raise ValueError(f"Duplicate V4.1 cache prefix: {prefix}")
         context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config):

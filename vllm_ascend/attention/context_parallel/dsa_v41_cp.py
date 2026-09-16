@@ -17,13 +17,10 @@ from vllm_ascend.attention.dsa_v41 import (
     _config_value,
     scatter_cache_sk,
 )
-from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
 
 
 def get_v41_cp_classes():
-    if enable_pcp():
-        raise NotImplementedError("V4.1 PCP is not supported")
     if enable_dsa_cp():
         return AscendDSAV41CPMetadataBuilder, AscendDSAV41CPImpl
     return AscendDSAV41MetadataBuilder, AscendDSAV41Impl
@@ -207,8 +204,6 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             if prefix is None:
                 continue
             metadata = metadata_by_prefix[prefix]
-            if metadata.global_metadata is None:
-                raise ValueError(f"V4.1 CP is missing global cache metadata for {prefix}")
             global_by_prefix[prefix] = metadata.global_metadata
         return self._get_layer_metadata(global_by_prefix)
 

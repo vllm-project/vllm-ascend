@@ -174,22 +174,7 @@ class DeepseekV41Indexer(nn.Module):
         block IDs only within this forward. Query quantization and position
         ordering stay outside the native QLI/candidate operator.
         """
-        if uses_candidate_filter and candidates is None:
-            raise RuntimeError("V4.1 candidate-filtering indexer ran before its source")
-        if self.width != 128 or self.n_heads not in (32, 64):
-            raise ValueError("A3 QLI requires index_head_dim=128 and 32 or 64 index heads")
-        if not 1 <= self.index_topk <= 2048:
-            raise ValueError("A3 QLI requires index_topk in [1, 2048]")
-        if self.compress_ratio not in (1, 2):
-            raise ValueError("DeepSeek V4.1 QLI supports compression ratios 1 and 2")
-        if is_candidate_source or uses_candidate_filter:
-            if not 0 < candidate_topk_blocks <= 2048 or candidate_topk_blocks % 64:
-                raise ValueError("candidate_topk_blocks must be a multiple of 64 in [64, 2048]")
-            if candidate_block_size != 8:
-                raise ValueError("The current A3 candidate kernel requires candidate_block_size=8")
         candidate_shape = (query.shape[0], 1, candidate_topk_blocks)
-        if uses_candidate_filter and (candidates.shape != candidate_shape or candidates.dtype != torch.int32):
-            raise ValueError("Candidate consumer requires INT32 block IDs with matching query rows")
         topk = self.index_topk
         if query.shape[0] == 0:
             selected = torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
@@ -220,8 +205,6 @@ class DeepseekV41Indexer(nn.Module):
             cmp_ratio=self.compress_ratio,
         )
         op_metadata = source_metadata.qli_metadata
-        if op_metadata is None:
-            raise RuntimeError("V4.1 QLI metadata was not built")
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(op_metadata))
         mode = 1 if is_candidate_source else 2 if uses_candidate_filter else 3
         selected, _, candidate_out = torch.ops._C_ascend.npu_quant_lightning_indexer_v3(

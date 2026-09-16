@@ -59,7 +59,6 @@ class AscendDeepseekV41ForCausalLM(
         del i
         if modality == "image":
             return IMAGE_PLACEHOLDER
-        raise ValueError(f"Unsupported modality: {modality!r}")
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
@@ -106,8 +105,6 @@ class AscendDeepseekV41ForCausalLM(
         vit_grid = kwargs.pop("vit_grid", None)
         llm_grid = kwargs.pop("llm_grid", None)
         types = kwargs.pop("types", None)
-        if vit_grid is None or llm_grid is None or types is None:
-            raise ValueError("DeepSeek V4.1 vision input requires patches, vit_grid, llm_grid, and types.")
         return {
             "patches": patches,
             "vit_grid": vit_grid,
@@ -202,8 +199,6 @@ class AscendDeepseekV41ForCausalLM(
         inputs_embeds = self.language_model.embed_input_ids(embedding_ids)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
-        if is_multimodal is None:
-            raise ValueError("is_multimodal is required when merging image embeddings.")
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
@@ -261,8 +256,6 @@ class AscendDeepseekV41ForCausalLM(
                 if vision_name is None:
                     yield name, loaded_weight
                     continue
-                if vision_name not in params:
-                    raise KeyError(f"Vision weight {name!r} has no parameter {vision_name!r}.")
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)
                 loader(param, loaded_weight)

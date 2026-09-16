@@ -40,17 +40,12 @@ def dequantize_engram_rows(codes, scale):
 
 def pack_engram_int8_rows(codes, scale):
     """Pack INT8 codes and FP32 group scales as one row-oriented wire buffer."""
-    if codes.dtype != torch.int8 or scale.dtype != torch.float32:
-        raise TypeError("Engram INT8 wire packing expects int8 codes and FP32 scales")
     return torch.cat((codes.view(torch.uint8), scale.view(torch.uint8)), dim=-1).contiguous()
 
 
 def unpack_engram_int8_rows(payload, width):
     """Decode the packed INT8 wire buffer without changing BF16 lookup semantics."""
     groups = width // 32
-    expected = width + groups * 4
-    if payload.dtype != torch.uint8 or payload.shape[-1] != expected:
-        raise ValueError(f"Invalid Engram INT8 wire payload: {tuple(payload.shape)}")
     codes = payload[..., :width].contiguous().view(torch.int8)
     scale = payload[..., width:].contiguous().view(torch.float32).reshape(*payload.shape[:-1], groups)
     return dequantize_engram_rows(codes, scale)
@@ -81,28 +76,16 @@ class EngramQueryGroup:
         # Lazy imports keep the transport usable in standalone distributed probes.
         from vllm.distributed import get_ep_group, get_tp_group
 
-        if (
-            parallel.pipeline_parallel_size != 1
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or not parallel.enable_expert_parallel
-        ):
-            raise ValueError("Engram HBM sharing requires EP and PP=PCP=DCP=1")
         ep, tp = get_ep_group(), get_tp_group()
         hosts = [None] * ep.world_size
         dist.all_gather_object(hosts, socket.gethostname(), group=ep.cpu_group)
         node_groups = [[ep.ranks[i] for i, host in enumerate(hosts) if host == name] for name in dict.fromkeys(hosts)]
-        node_sizes = {len(ranks) for ranks in node_groups}
-        if len(node_sizes) != 1:
-            raise ValueError(f"Engram requires equal rank counts on every node: {node_groups}")
         selected = None
         for ranks in node_groups:
             # Every world rank creates groups in the same order.
             cpu = dist.new_group(ranks, backend="gloo")
             device = dist.new_group(ranks, backend=dist.get_backend(ep.device_group))
             if dist.get_rank() in ranks:
-                if not set(tp.ranks).issubset(ranks):
-                    raise ValueError("Engram requires each TP group to stay within one node")
                 selected = cls(device, cpu, tp.device_group, tp.ranks[0])
         return selected
 
@@ -112,10 +95,6 @@ class NodeShardedEngram(nn.Module):
 
     def __init__(self, rows, width, query_group, device=None, storage_format="bf16", cpu_offload=False):
         super().__init__()
-        if storage_format not in ("bf16", "int8", "fp8", "mxfp8"):
-            raise ValueError("Engram storage_format must be bf16, int8, fp8, or mxfp8")
-        if storage_format in ("int8", "fp8", "mxfp8") and width % 32:
-            raise ValueError("INT8 Engram requires a width divisible by 32")
         self.storage_format = storage_format
         self.rows, self.width = rows, width
         self.query_group = query_group
@@ -136,8 +115,6 @@ class NodeShardedEngram(nn.Module):
         self.shard_rows = (rows + query_group.size - 1) // query_group.size
         self.start = query_group.rank * self.shard_rows
         self.end = min(self.start + self.shard_rows, rows)
-        if self.start >= rows:
-            raise ValueError("Engram table must have at least one row per rank")
         self._empty_flat = torch.empty(0, dtype=torch.int64, device="cpu")
         # Reuse fixed-size HCCL metadata buffers across requests.
         self._metadata_device_buffers = {}
@@ -178,8 +155,6 @@ class NodeShardedEngram(nn.Module):
         end = start + rows.shape[0]
         if self.storage_format == "int8":
             codes, scales = quantize_engram_rows(rows.to(self.weight.device))
-            if not bool((torch.isfinite(scales) & (scales > 0)).all()):
-                raise ValueError("INT8 Engram requires finite positive group scales")
             self.weight.data[start:end].copy_(codes)
             self.weight_scale[start:end].copy_(scales)
         else:
@@ -301,64 +276,37 @@ class NodeShardedEngram(nn.Module):
         if self.storage_format in ("fp8", "mxfp8"):
             names = names[::-1]
             source_dtypes = ("F8_E4M3", "F8_E4M3FN")
-        found = False
-        key_found = False
         for name in names:
             path = root / name
             if not path.is_file():
                 continue
-            found = True
             index = json.loads(path.read_text())["weight_map"]
             if key not in index:
                 continue
-            key_found = True
             with safe_open(root / index[key], framework="pt", device="cpu") as file:
                 source_dtype = file.get_slice(key).get_dtype()
             if source_dtype not in source_dtypes or (source_dtype != "BF16" and scale_key not in index):
                 continue
             break
-        else:
-            if key_found:
-                raise ValueError(
-                    f"{key}: expected {'/'.join(source_dtypes)} source for {self.storage_format} with required scales"
-                )
-            if found:
-                raise KeyError(f"{key}: no matching Engram tensors in checkpoint indexes")
-            raise FileNotFoundError(f"{root}: Engram loader requires a safetensors index")
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
-            if tensor.get_shape() != [self.rows, self.width]:
-                raise ValueError(f"{key}: expected BF16/FP8 [{self.rows}, {self.width}]")
             source_dtype = tensor.get_dtype()
             if self.storage_format == "int8" and source_dtype in ("I8", "INT8"):
-                if scale_key not in index:
-                    raise ValueError(f"{key}: INT8 source requires .scale")
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
-                    if scale.get_shape() != [self.rows, self.width // 32] or scale.get_dtype() != "F32":
-                        raise ValueError(f"{scale_key}: expected FP32 [{self.rows}, {self.width // 32}]")
                     for start in range(self.start, self.end, chunk_rows):
                         stop = min(start + chunk_rows, self.end)
                         self.weight.data[start - self.start : stop - self.start].copy_(tensor[start:stop])
                         self.weight_scale[start - self.start : stop - self.start].copy_(scale[start:stop])
                 return
             if self.storage_format in ("fp8", "mxfp8"):
-                if source_dtype not in ("F8_E4M3", "F8_E4M3FN") or scale_key not in index:
-                    raise ValueError(f"{key}: {self.storage_format} requires FP8 weight and .scale")
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
-                    if scale.get_shape() != [self.rows, self.width // 32] or scale.get_dtype() not in (
-                        "F8_E8M0",
-                        "F8_E8M0FNU",
-                    ):
-                        raise ValueError(f"{scale_key}: expected FP8 UE8M0 [{self.rows}, {self.width // 32}]")
                     for start in range(self.start, self.end, chunk_rows):
                         stop = min(start + chunk_rows, self.end)
                         self.weight.data[start - self.start : stop - self.start].copy_(tensor[start:stop])
                         self.weight_scale[start - self.start : stop - self.start].copy_(scale[start:stop])
                 return
-            if source_dtype != "BF16":
-                raise ValueError(f"{key}: expected BF16 source for {self.storage_format}")
             for start in range(self.start, self.end, chunk_rows):
                 stop = min(start + chunk_rows, self.end)
                 self.set_rows(start - self.start, tensor[start:stop])
@@ -388,15 +336,11 @@ class NodeShardedEngram(nn.Module):
         reverse all-to-all restores requester order before the TP broadcast.
         """
         q = self.query_group
-        if ids.device.type != "cpu" or ids.dtype != torch.int64:
-            raise ValueError("Engram routing expects CPU int64 IDs")
         if routing is None:
             flat, order, metadata = self._metadata(ids)
         else:
             flat, order, metadata = routing
         counts = [row.tolist() for row in gathered]
-        if any(row[-1] for row in counts):
-            raise IndexError("Engram hash ID outside table")
         send = metadata[:-1].tolist()
         recv = [row[q.rank] for row in counts]
         total_recv = sum(recv)
@@ -445,8 +389,6 @@ class NodeShardedEngram(nn.Module):
             result = torch.empty((ids.numel(), self.width), dtype=torch.bfloat16, device=device)
         else:
             result = output
-            if result.shape != (ids.numel(), self.width) or result.device != device:
-                raise ValueError("Engram output buffer has an incompatible shape or device")
         if q.is_source:
             result[order.to(device)] = returned
         if broadcast and result.numel():
@@ -474,8 +416,6 @@ class NodeShardedEngram(nn.Module):
     @torch.inference_mode()
     def forward(self, ids):
         q = self.query_group
-        if ids.device.type != "cpu" or ids.dtype != torch.int64:
-            raise ValueError("Engram routing expects CPU int64 IDs")
         routing = self._metadata(ids)
         metadata = routing[2]
         if q.metadata_on_device:
@@ -497,8 +437,6 @@ class NodeShardedEngram(nn.Module):
         if not ids_list:
             return []
         q = self.query_group
-        if len(tables) != len(ids_list):
-            raise ValueError("tables and ids_list must have the same length")
         routing = [table._metadata(ids) for table, ids in zip(tables, ids_list)]
         metadata = [item[2] for item in routing]
         packed = torch.cat(metadata)

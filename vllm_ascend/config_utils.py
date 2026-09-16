@@ -88,7 +88,5 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
         "runtime_delta_rotation": False,
     }
     rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
-    if any(rotation.get(name) != value for name, value in supported_rotation.items()):
-        raise ValueError(f"Unsupported DeepSeek V4.1 Engram rotation contract: {rotation!r}")
     hf_config.engram_rotation_config = dict(rotation)
     return hf_config

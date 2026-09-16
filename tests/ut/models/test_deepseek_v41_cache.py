@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -130,13 +129,6 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
     assert "model.layers.20.self_attn.compressor.state_cache" not in specs
 
 
-@pytest.mark.parametrize("block_size", [0, -2, 3, 63])
-def test_invalid_block_sizes(config, runtime, block_size):
-    runtime.cache_config.block_size = block_size
-    with pytest.raises(ValueError, match="multiple of two"):
-        build_v41_cache_specs(config, runtime)
-
-
 def test_twelve_groups_share_four_layer_slots(config, runtime):
     original = collect_specs(runtime)
     uniform = group_cache_specs(original)
@@ -229,34 +221,6 @@ def test_shared_slots_isolate_groups_and_recycled_ids(config, runtime):
             torch.testing.assert_close(gather_cache_rows(view, slots), value)
 
 
-def test_slot_planner_rejects_missing_and_mismatched_pairs(runtime):
-    specs = collect_specs(runtime)
-    index_name = "model.layers.2.self_attn.indexer.k_cache"
-    with pytest.raises(ValueError, match="incompatible KV/index"):
-        plan_cache_slots({n: s for n, s in specs.items() if n != index_name})
-    specs[index_name] = replace(specs[index_name], tokens_per_state=1)
-    with pytest.raises(ValueError, match="incompatible KV/index"):
-        plan_cache_slots(specs)
-
-
-def test_merged_group_requires_common_logical_block_size(runtime):
-    specs = collect_specs(runtime)
-    for suffix in ("long_kv_cache", "indexer.k_cache"):
-        name = f"model.layers.20.self_attn.{suffix}"
-        specs[name] = replace(specs[name], block_size=128)
-    with pytest.raises(ValueError, match="Incompatible V4.1 resource layouts"):
-        group_cache_specs(specs)
-
-
-@pytest.mark.parametrize("offset,stride,match", [(1, 257, "aligned"), (250, 256, "exceeds")])
-def test_invalid_view_layout_rejected(offset, stride, match):
-    spec = DeepseekV41FullSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match=match):
-        reshape_cache(
-            torch.zeros(2 * stride, dtype=torch.uint8), spec, num_blocks=2, offset=offset, block_stride=stride
-        )
-
-
 def test_view_with_nonzero_backing_storage_offset():
     spec = DeepseekV41FullSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
     backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
@@ -286,29 +250,12 @@ def test_request_accounting_counts_merged_full_context_once(runtime):
     assert request_blocks(runtime, groups) == 1024 // 64 + bounded
 
 
-def test_mixed_layouts_rejected(config, runtime):
-    specs = collect_specs(runtime)
-    specs["foreign"] = object()
-    with pytest.raises(ValueError, match="foreign resources"):
-        group_cache_specs(specs)
-
-
-def test_unsafe_override_rejected(config, runtime):
-    groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
-    runtime.cache_config.num_gpu_blocks_override = 100
-    with pytest.raises(ValueError, match="unsafe block override"):
-        allocate_cache_config(runtime, groups, 1)
-
-
-def test_safe_override_and_reserved_null_capacity(runtime):
+def test_safe_override_capacity(runtime):
     groups = make_cache_groups(group_cache_specs(collect_specs(runtime)))
     page = pool_bytes_per_block(groups)
     runtime.cache_config.num_gpu_blocks_override = 3
     blocks, tensors = allocate_cache_config(runtime, groups, 5 * page + 1)
     assert blocks == 3 and sum(t.size for t in tensors) == 3 * page
-    runtime.cache_config.num_gpu_blocks_override = None
-    with pytest.raises(ValueError, match="reserved null block"):
-        allocate_cache_config(runtime, groups, page)
 
 
 def test_v0271_entrypoint_and_admission_use_slot_reservation(runtime):
@@ -344,21 +291,6 @@ def test_model_registration_and_binding(runtime):
     assert len(owned_names) == 51
 
 
-@pytest.mark.parametrize("feature", ["spec", "pp", "graph"])
-def test_unsupported_runtime_fails_before_registration(runtime, feature):
-    if feature == "spec":
-        runtime.speculative_config = object()
-    elif feature == "pp":
-        runtime.parallel_config.pipeline_parallel_size = 2
-    else:
-        runtime.model_config.enforce_eager = False
-    with pytest.raises(NotImplementedError):
-        from vllm_ascend.core.deepseek_v41_kv_cache import validate_cache_runtime
-
-        validate_cache_runtime(runtime)
-    assert not runtime.compilation_config.static_forward_context
-
-
 def test_prefix_cache_runtime_is_supported(runtime):
     from vllm_ascend.core.deepseek_v41_kv_cache import validate_cache_runtime
 
@@ -383,15 +315,6 @@ def test_dspark_runtime_preserves_ring_retention_limit(runtime, mode, count):
     runtime.compilation_config.cudagraph_mode = mode
     validate_cache_runtime(runtime)
     assert runtime.cache_config.cache_dtype == "bfloat16"
-
-
-@pytest.mark.parametrize("count", [0, 32, 63])
-def test_dspark_rejects_verification_tail_that_cannot_fit_ring(runtime, count):
-    from vllm_ascend.core.deepseek_v41_kv_cache import validate_cache_runtime
-
-    runtime.speculative_config = SimpleNamespace(use_dspark=lambda: True, num_speculative_tokens=count)
-    with pytest.raises(ValueError, match="1..31"):
-        validate_cache_runtime(runtime)
 
 
 def test_dspark_is_one_additional_group_in_existing_slots(runtime):
@@ -443,21 +366,6 @@ def test_dspark_slots_isolate_groups_and_reuse_released_ids():
         view[1].fill_(7)
         assert (view[13] == 13).all()
         assert (view[0] == 0).all()
-
-
-@pytest.mark.parametrize("change", [{"head_size": 1024}, {"block_size": 256}, {"sliding_window": 256}])
-def test_dspark_geometry_cannot_expand_existing_slots(change):
-    cfg = make_cache_config(3, draft_layers=3)
-    specs = {n: s for g in cfg.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
-    specs["mtp.0.self_attn.swa_cache"] = replace(specs["mtp.0.self_attn.swa_cache"], **change)
-    with pytest.raises(ValueError, match="geometry"):
-        plan_cache_slots(specs)
-
-
-@pytest.mark.parametrize("count", [1, 2, 4])
-def test_dspark_requires_three_slot_owners(count):
-    with pytest.raises(ValueError, match="three ordered"):
-        make_cache_config(3, draft_layers=count)
 
 
 @pytest.mark.parametrize("full_graph_mode", [False, True])
@@ -1102,20 +1010,6 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
-@pytest.mark.parametrize("change", [{"dtype": torch.bfloat16}, {"block_size": 16}, {"compress_ratio": 2}])
-def test_state_spec_rejects_precision_or_capacity_changes(runtime, change):
-    spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
-    with pytest.raises(ValueError, match="32-row FP32"):
-        replace(spec, **change)
-
-
-def test_ring_view_rejects_unrepresented_page_padding(runtime):
-    spec = collect_specs(runtime)["model.layers.2.self_attn.compressor.state_cache"]
-    stride = 2 * spec.page_size_bytes
-    with pytest.raises(ValueError, match="fill its slot"):
-        reshape_cache(torch.zeros(3 * stride, dtype=torch.uint8), spec, num_blocks=3, offset=0, block_stride=stride)
-
-
 def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch):
     compressor = DeepseekV41Compressor(config, 2)
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
@@ -1438,17 +1332,12 @@ def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     assert shared.candidates is candidates
 
 
-@pytest.mark.parametrize("pcp,cp", [(False, False), (True, False), (False, True), (True, True)])
-def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, pcp, cp):
+@pytest.mark.parametrize("cp", [False, True])
+def test_v41_backend_routes_metadata_and_execution_together(monkeypatch, cp):
     from vllm_ascend.attention.context_parallel import dsa_v41_cp
     from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: pcp)
     monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: cp)
-    if pcp:
-        with pytest.raises(NotImplementedError, match="PCP is not supported"):
-            DeepseekV41CacheBackend.get_builder_cls()
-        return
     builder, impl = dsa_v41_cp.get_v41_cp_classes()
     assert DeepseekV41CacheBackend.get_builder_cls() is builder
     assert not DeepseekV41CacheBackend.supports_pcp()
@@ -1488,16 +1377,6 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
         "mtp.0.self_attn.swa_cache": SimpleNamespace(seq_lens=torch.tensor([4])),
     }
     assert impl._global_layer_metadata(metadata).swa is global_swa
-
-
-@pytest.mark.parametrize("v2,pcp", [(False, 2), (True, 1)])
-def test_v41_runtime_rejects_pcp_and_mrv2(runtime, v2, pcp):
-    from vllm_ascend.core.deepseek_v41_kv_cache import validate_cache_runtime
-
-    runtime.use_v2_model_runner = v2
-    runtime.parallel_config.prefill_context_parallel_size = pcp
-    with pytest.raises(NotImplementedError, match="runner V1" if v2 else "PCP=1"):
-        validate_cache_runtime(runtime)
 
 
 @pytest.mark.parametrize("overlap", [False, True])

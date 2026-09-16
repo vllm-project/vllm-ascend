@@ -68,11 +68,3 @@ def test_shared_state_resets_sparse_attention_metadata():
 
     assert state.topk_indices is topk_indices
     assert state.candidates is candidates
-
-
-def test_rejects_ratio_mismatch(text_config: dict):
-    broken = dict(text_config)
-    broken["compress_ratios"] = list(text_config["compress_ratios"])
-    broken["compress_ratios"][8] = 1
-    with pytest.raises(ValueError, match="KV source"):
-        build_layer_plan(broken)

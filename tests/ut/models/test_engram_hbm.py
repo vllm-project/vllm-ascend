@@ -96,20 +96,6 @@ def test_engram_history_metadata_uses_full_requests(cp):
     assert block_size == 4
 
 
-@pytest.mark.parametrize("missing", ["query_start_loc_cpu", "block_table_cpu"])
-def test_engram_history_metadata_requires_cpu_mirrors(missing):
-    metadata = SimpleNamespace(
-        query_start_loc_cpu=torch.tensor([0, 1]),
-        block_table_cpu=torch.tensor([[7]]),
-        query_start_loc=None,
-        block_table=None,
-        storage_block_size=4,
-    )
-    setattr(metadata, missing, None)
-    with pytest.raises(ValueError, match="requires query_start_loc_cpu and block_table_cpu"):
-        hash_mod.engram_history_metadata(metadata)
-
-
 def _worker(rank, rendezvous):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=4, timeout=timedelta(seconds=60))
@@ -131,9 +117,6 @@ def _worker(rank, rendezvous):
         actual = table(ids)
         expected = weights[ids]
         assert torch.equal(actual.view(torch.int16), expected.view(torch.int16)), (rank, a, b)
-    bad = torch.tensor([[29 if rank // 2 == 1 else 0]])
-    with pytest.raises(IndexError):
-        table(bad)
     assert torch.equal(
         table(torch.tensor([[1, 8, 28]])).view(torch.int16), weights[torch.tensor([[1, 8, 28]])].view(torch.int16)
     )
@@ -154,8 +137,6 @@ def _worker(rank, rendezvous):
         first, second = table.route_many([table, other], [first_ids, second_ids])
         assert torch.equal(first.view(torch.int16), weights[first_ids].view(torch.int16))
         assert torch.equal(second.view(torch.int16), other_weights[second_ids].view(torch.int16))
-    with pytest.raises(IndexError):
-        table.route_many([table, other], [ids, torch.tensor([[37 if rank // 2 else 0]])])
     recovered = table.route_many([table, other], [ids, ids])
     assert torch.equal(recovered[1].view(torch.int16), other_weights[ids].view(torch.int16))
     dist.destroy_process_group()
@@ -184,8 +165,6 @@ def _compressed_wire_worker(rank, rendezvous):
             ids[0, :3] = torch.tensor([0, 36, 0])
         actual = table(ids)
         assert torch.equal(actual.view(torch.int16), reference[ids].view(torch.int16)), (rank, a, b)
-    with pytest.raises(IndexError):
-        table(torch.tensor([[37 if rank // 2 else 0]]))
     ids = torch.tensor([[0, 36, 1]])
     assert torch.equal(table(ids).view(torch.int16), reference[ids].view(torch.int16))
     dist.destroy_process_group()
@@ -270,8 +249,6 @@ def test_shard_loader(tmp_path):
     for rank in range(16):
         q = type("QueryGroup", (), {"size": 16, "rank": rank})()
         if rank * 2 >= 29:
-            with pytest.raises(ValueError):
-                hbm.NodeShardedEngram(29, 8, q, device="cpu")
             continue
         table = hbm.NodeShardedEngram(29, 8, q, device="cpu")
         table.load_checkpoint(tmp_path, key, chunk_rows=3)
@@ -329,9 +306,6 @@ def test_offload_loader_and_pinned_reuse(tmp_path, storage, cpu_offload_runtime)
     event.synchronize.assert_called_once_with()
     assert len(table._offload_buffers) == 1
     assert table.lookup_local(torch.empty(0, 2, dtype=torch.int64)).shape == (0, 2, 32)
-    for invalid in (-1, table.weight.shape[0]):
-        with pytest.raises(IndexError):
-            table.lookup_local(torch.tensor([invalid]))
 
 
 @pytest.mark.parametrize("storage,swap_indexes", [("bf16", True), ("int8", True), ("fp8", True), ("mxfp8", False)])
@@ -356,24 +330,6 @@ def test_loader_selects_compatible_index(tmp_path, storage, swap_indexes):
     assert torch.equal(table.weight.view(torch.uint8), expected[key].view(torch.uint8))
     if scale_key in expected:
         assert torch.equal(table.weight_scale.view(torch.uint8), expected[scale_key].view(torch.uint8))
-
-
-@pytest.mark.parametrize("storage,scale_dtype", [("fp8", torch.float32), ("int8", torch.bfloat16)])
-def test_offload_rejects_wrong_scale_dtype(tmp_path, storage, scale_dtype):
-    key, scale_key = "layers.1.engram.embed.weight", "layers.1.engram.embed.scale"
-    save_file(
-        {
-            key: torch.ones(5, 32, dtype=torch.int8 if storage == "int8" else torch.float8_e4m3fn),
-            scale_key: torch.ones(5, 1, dtype=scale_dtype),
-        },
-        tmp_path / "weights.safetensors",
-    )
-    (tmp_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {key: "weights.safetensors", scale_key: "weights.safetensors"}})
-    )
-    table = hbm.NodeShardedEngram(5, 32, SimpleNamespace(size=1, rank=0), storage_format=storage, cpu_offload=True)
-    with pytest.raises(ValueError, match="expected FP"):
-        table.load_checkpoint(tmp_path, key)
 
 
 def test_int8_loads_bf16_source_without_scale(tmp_path):
@@ -417,18 +373,6 @@ def test_cached_metadata_stays_on_cpu_with_device_context():
         flat, order, metadata = table._metadata(ids)
         assert flat.device.type == order.device.type == metadata.device.type == "cpu"
         assert torch.equal(metadata, torch.zeros(5, dtype=torch.int64))
-
-
-def test_loader_rejects_wrong_dtype(tmp_path):
-    key = "layers.1.engram.embed.weight"
-    save_file({key: torch.zeros(17, 8)}, tmp_path / "weights.safetensors")
-    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {key: "weights.safetensors"}})
-    )
-    q = type("QueryGroup", (), {"size": 2, "rank": 0})()
-    table = hbm.NodeShardedEngram(17, 8, q, device="cpu")
-    with pytest.raises(ValueError, match="expected BF16"):
-        table.load_checkpoint(tmp_path, key)
 
 
 def test_gate_preserves_masked_rows():

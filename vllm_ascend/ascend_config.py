@@ -565,8 +565,6 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         if self.enable_engram_ple_offload:
-            if not self.enable_engram:
-                raise ValueError("PLE_OFFLOAD requires enable_engram=True")
             if "engram_storage" not in (vc.additional_config or {}):
                 self.engram_storage = "fp8"
         if (

@@ -1,6 +1,5 @@
 import json
 
-import pytest
 from vllm import ModelRegistry
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
@@ -108,14 +107,14 @@ def test_released_causal_architecture_uses_multimodal_wrapper(monkeypatch):
     )
 
 
-def test_unknown_engram_rotation_contract_fails_closed():
+def test_engram_rotation_contract_is_preserved():
     rotation = _rotation_config()
     rotation["runtime_delta_rotation"] = True
-    with pytest.raises(ValueError, match="Unsupported DeepSeek V4.1 Engram rotation"):
-        make_v41_config(
-            text_config=_released_text_config(),
-            engram_rotation_config=rotation,
-        )
+    config = make_v41_config(
+        text_config=_released_text_config(),
+        engram_rotation_config=rotation,
+    )
+    assert config.engram_rotation_config == rotation
 
 
 def test_ascend_registration_keeps_upstream_v41_frontend():

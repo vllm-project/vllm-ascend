@@ -22,10 +22,6 @@ def engram_history_metadata(metadata):
         request_metadata = metadata
     boundaries = getattr(request_metadata, "query_start_loc_cpu", None)
     block_table = getattr(request_metadata, "block_table_cpu", None)
-    if boundaries is None or block_table is None:
-        raise ValueError("Engram requires query_start_loc_cpu and block_table_cpu in request metadata")
-    if boundaries.device.type != "cpu" or block_table.device.type != "cpu":
-        raise ValueError("Engram request metadata mirrors must reside on CPU")
     return boundaries.long(), block_table, request_metadata.storage_block_size
 
 
@@ -176,11 +172,7 @@ class PagedNgramHistory:
 
     def __init__(self, config, tokenizer):
         layout = EngramLayout.from_args(config)
-        if layout is None:
-            raise ValueError("PagedNgramHistory requires at least one Engram layer")
         token_map, vocab_size = build_compressed_token_map(tokenizer)
-        if vocab_size != config.engram_compressed_vocab_size:
-            raise ValueError(f"Engram compressed vocabulary mismatch: {vocab_size}")
         self.token_map = torch.tensor(token_map, dtype=torch.int64)
         self.pad_id = token_map[config.engram_pad_token_id]
         self.image_token_id = config.image_token_id

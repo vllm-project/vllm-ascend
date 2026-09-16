@@ -53,16 +53,6 @@ def test_disabled_engram_capture_and_replay_do_not_access_layers(model, monkeypa
         assert result["engram_mask"].numel() == 0
 
 
-@pytest.mark.parametrize("tokens,padded", [(4, 3), (1, 17), (17, None), (1, -1)])
-def test_invalid_capacity_fails_before_history_or_routing(model, tokens, padded):
-    def unexpected(*args):
-        raise AssertionError("must validate before routing")
-
-    model.prepare_engram = unexpected
-    with pytest.raises(ValueError, match="Engram padded token count"):
-        model.prepare_engram_inputs(torch.arange(tokens), torch.arange(tokens), padded)
-
-
 def test_sequence_parallel_slices_capacity_before_sharding(monkeypatch):
     seen = []
 

@@ -97,8 +97,6 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.compress_ratio != 0:
-            raise ValueError("DeepSeek V4.1 DSpark supports only uncompressed draft SWA layers")
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
@@ -121,8 +119,6 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = kwargs["vllm_config"].compilation_config.static_forward_context
-        if self.v41_layer_name in context:
-            raise ValueError(f"Duplicate V4.1 attention layer: {self.v41_layer_name}")
         context[self.v41_layer_name] = self
 
     forward = DeepseekV41Attention.forward
@@ -149,8 +145,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.block_size = int(config.dspark_block_size)
         self.target_layer_ids = list(config.dspark_target_layer_ids)
         self.num_dspark_layers = _get_dspark_num_mtp_layers(config)
-        if self.num_dspark_layers != 3:
-            raise ValueError("DeepSeek V4.1's DSpark cache group requires exactly three draft layers")
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
 

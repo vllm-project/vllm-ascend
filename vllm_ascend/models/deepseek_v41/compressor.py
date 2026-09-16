@@ -52,8 +52,6 @@ class DeepseekV41RMSNorm(nn.Module):
 class DeepseekV41Compressor(nn.Module):
     def __init__(self, config, ratio, vllm_config=None, prefix="compressor"):
         super().__init__()
-        if ratio not in (1, 2):
-            raise ValueError("V4.1 compressor requires ratio 1 or 2")
         self.ratio = ratio
         self.width = _read(config, "head_dim")
         dim = _read(config, "hidden_size")
@@ -84,24 +82,14 @@ class DeepseekV41Compressor(nn.Module):
                 )
 
     def prepare_ring_compressor(self, max_tokens, device):
-        """Check the profiled per-source buffer and resolve hardware before capture."""
+        """Resolve ring-compressor hardware before capture."""
         from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
 
-        actual_device = self._ring_pooled.device
-        compatible_device = actual_device.type == device.type and (
-            device.index is None or actual_device.index == device.index
-        )
-        if self._ring_pooled.shape[0] < max_tokens or not compatible_device:
-            raise ValueError("Ring output capacity/device must be established before memory profiling")
         self._ring_num_cores = _cube_core_num()
 
     def pool_projected(self, kv, scores, metadata):
         from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
 
-        if not hasattr(self, "_ring_pooled") or not hasattr(self, "_ring_num_cores"):
-            raise RuntimeError("Ring compressor must be initialized before graph capture")
-        if kv.shape[0] > self._ring_pooled.shape[0]:
-            raise ValueError("Compressor batch exceeds its prepared output capacity")
         pooled = compressor_from_projected(
             kv,
             scores,
@@ -115,8 +103,4 @@ class DeepseekV41Compressor(nn.Module):
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""
-        if x.ndim != 2:
-            raise ValueError("Expected [tokens, hidden] input")
-        if self.ratio != 1:
-            raise RuntimeError("Ratio-2 compression must use pool_projected")
         return self.norm(self.wkv(x))

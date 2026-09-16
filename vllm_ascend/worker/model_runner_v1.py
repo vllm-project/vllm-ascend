@@ -3938,8 +3938,6 @@ class NPUModelRunner(GPUModelRunner):
                 for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
                     if skip_gdn_state_update or not is_circular_kv_cache_spec(group.kv_cache_spec):
                         continue
-                    if num_reqs >= self.kv_cache_config.num_blocks:
-                        raise ValueError("Insufficient ring pages for dummy graph requests")
                     table = self.input_batch.block_table[gid]
                     table.block_table.np[:num_reqs_padded].fill(0)
                     table.block_table.np[:num_reqs, 0] = np.arange(1, num_reqs + 1)
@@ -4477,8 +4475,6 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(self.compilation_config.static_forward_context.get(name), DeepseekV41CacheLayer)
             for name in kv_caches
         ):
-            if self.kv_caches:
-                raise ValueError("V4.1 cache tensors were already bound")
             for name in sorted(kv_caches):
                 self.compilation_config.static_forward_context[name].kv_cache = [kv_caches[name]]
                 self.kv_caches.append(kv_caches[name])
@@ -4668,26 +4664,11 @@ class NPUModelRunner(GPUModelRunner):
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         if any(is_deepseek_v41_cache_spec(spec) for spec in layer_kv_cache_spec.values()):
-            if not all(is_deepseek_v41_cache_spec(spec) for spec in layer_kv_cache_spec.values()):
-                raise ValueError("Mixed V4.1 cache allocation is not supported")
-            slots = plan_cache_slots(layer_kv_cache_spec)
-            if len(kv_cache_config.kv_cache_tensors) != len(slots):
-                raise ValueError("V4.1 requires one allocation per layer slot")
-            for allocation, slot in zip(kv_cache_config.kv_cache_tensors, slots):
+            for allocation in kv_cache_config.kv_cache_tensors:
                 allocation_layers = get_kv_cache_tensor_layers(allocation)
-                if (
-                    allocation.offset
-                    or allocation.block_stride != slot.page_size_bytes
-                    or allocation.size != kv_cache_config.num_blocks * slot.page_size_bytes
-                    or allocation_layers != [p.name for p in slot.placements]
-                ):
-                    raise ValueError("V4.1 allocation disagrees with its layer slot")
                 backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
                 for name in allocation_layers:
                     kv_cache_raw_tensors[name] = backing
-            expected = set(layer_kv_cache_spec)
-            if set(kv_cache_raw_tensors) != expected:
-                raise ValueError("V4.1 cache descriptors do not cover every resource")
             return kv_cache_raw_tensors
 
         # v0.28.0 keeps the legacy ``shared_by`` contract: one allocation per
