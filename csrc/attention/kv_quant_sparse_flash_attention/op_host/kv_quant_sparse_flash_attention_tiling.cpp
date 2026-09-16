@@ -32,6 +32,20 @@ using namespace ge;
 using namespace AscendC;
 namespace optiling {
 
+inline std::string QSFAShapeToString(const gert::Shape &shape)
+{
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < shape.GetDimNum(); ++i) {
+        if (i != 0) {
+            oss << ", ";
+        }
+        oss << shape.GetDim(i);
+    }
+    oss << "]";
+    return oss.str();
+}
+
 inline std::string QSFAErrorToString(const char *value)
 {
     return value == nullptr ? std::string() : std::string(value);
@@ -973,7 +987,7 @@ ge::graphStatus QSFATilingCheck::CheckBlockTable() const
     if (kvStorageMode_ != KvStorageMode::PAGE_ATTENTION) {
         OP_CHECK_IF(opParamInfo_.blockTable.tensor != nullptr,
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, BLOCK_TABLE_NAME.c_str(),
-                Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+                QSFAShapeToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
                 "When the layout_kv is " + QSFALayoutToSerialString(kvLayout_) + ", block_table should be null."),
             return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
@@ -982,7 +996,7 @@ ge::graphStatus QSFATilingCheck::CheckBlockTable() const
     uint32_t blockTableBatch = opParamInfo_.blockTable.tensor->GetStorageShape().GetDim(0);
     OP_CHECK_IF(blockTableBatch != bSize_,
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, BLOCK_TABLE_NAME.c_str(),
-            Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+            QSFAShapeToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
             "The first dim of " + BLOCK_TABLE_NAME + " should be equal to batch size " + std::to_string(bSize_)),
         return ge::GRAPH_FAILED);
 
@@ -1385,10 +1399,15 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantAttr() const
             std::to_string(tileSize_).c_str(), "tile_size should be 128."),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(ropeHeadDim_ != static_cast<int32_t>(MLA_ROPE_HEAD_DIM) && (isA5_ || ropeHeadDim_ != 0),
+    OP_CHECK_IF(ropeHeadDim_ != static_cast<int32_t>(MLA_ROPE_HEAD_DIM) && ropeHeadDim_ != 0,
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "rope_head_dim",
             std::to_string(ropeHeadDim_).c_str(),
-            isA5_ ? "rope_head_dim should be 64." : "rope_head_dim should be 0 or 64."),
+            "rope_head_dim should be 0 or 64."),
+        return ge::GRAPH_FAILED);
+
+    OP_CHECK_IF(isA5_ && ropeHeadDim_ == 0 && inputKvType_ != ge::DT_INT8,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "rope_head_dim", "0",
+            "A5 rope_head_dim=0 currently supports INT8 key and value only."),
         return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -1833,7 +1852,7 @@ ge::graphStatus QSFAInfoParser::GetMaxBlockNumPerBatch()
     }
     if (opParamInfo_.blockTable.tensor->GetStorageShape().GetDim(1) <= 0) {
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName_, "block_table",
-            Ops::Base::ToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
+            QSFAShapeToString(opParamInfo_.blockTable.tensor->GetStorageShape()).c_str(),
             "block_table's second dim should be greater than 0.");
         return ge::GRAPH_FAILED;
     }

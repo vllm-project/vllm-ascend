@@ -22,12 +22,12 @@
 #if __has_include("../../common/op_kernel/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h")
 #include "../../common/op_kernel/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h"
 #else
-#include "../../common/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h"
+#include "../../../common/op_kernel/arch35/vf/vf_mul_sel_softmaxflashv2_cast_nz_sfa.h"
 #endif
 #if __has_include("../../common/op_kernel/arch35/vf/vf_flashupdate_new.h")
 #include "../../common/op_kernel/arch35/vf/vf_flashupdate_new.h"
 #else
-#include "../../common/arch35/vf/vf_flashupdate_new.h"
+#include "../../../common/op_kernel/arch35/vf/vf_flashupdate_new.h"
 #endif
 
 using namespace AscendC;
@@ -233,7 +233,8 @@ QSFAVectorService<TEMPLATE_ARGS>::CopyInSingleKv(LocalTensor<KV_T> kvInUb, int64
     padParams.leftPadding = 0;
     padParams.rightPadding = combineDimAlign - combineDim;
     padParams.paddingValue = 0;
-    DataCopyPad(kvInUb[startRow * combineDimAlign], keyGm[keyOffset], intriParams, padParams);
+    // Keep the dequantizer's original UB row pitch even for compact GM input.
+    DataCopyPad(kvInUb[startRow * dVTemplateTypeInput], keyGm[keyOffset], intriParams, padParams);
 }
 
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t QSFAVectorService<TEMPLATE_ARGS>::CopyInKvSparse(LocalTensor<KV_T> kvInUb , int64_t startRow,
@@ -267,11 +268,12 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t QSFAVectorService<TEMPLATE_A
         // 当前仅支持COMBINE模式
         uint32_t combineDim = combineBytes / sizeof(KV_T);
         uint32_t combineDimAlign = CeilAlign(combineBytes, BUFFER_SIZE_BYTE_32B) / sizeof(KV_T);
+        intriParams.dstStride = (dVTemplateTypeInput - combineDimAlign) * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
         padParams.isPad = true;
         padParams.leftPadding = 0;
         padParams.rightPadding = combineDimAlign - combineDim;
         padParams.paddingValue = 0;
-        DataCopyPad(kvInUb[startRow *  combineDimAlign], keyGm[keyOffset], intriParams, padParams);
+        DataCopyPad(kvInUb[startRow * dVTemplateTypeInput], keyGm[keyOffset], intriParams, padParams);
     }
     return (keyOffset0 > -1) + (keyOffset1 > -1);
 }
@@ -367,11 +369,12 @@ __simd_vf__ void AntiquantVFImplFp8D448(__ubuf__ int8_t* ubSrcAddr, __ubuf__ Q_T
 }
 
 template <typename Q_T, typename KV_T>
-__aicore__ inline void AntiquantVFFp8D448(LocalTensor<Q_T>& outputUb,  LocalTensor<KV_T>& inputUb, uint32_t dealRowCount)
+__aicore__ inline void AntiquantVFFp8D448(LocalTensor<Q_T>& outputUb, LocalTensor<KV_T>& inputUb,
+    uint32_t dealRowCount, uint32_t scaleOffset)
 {
     __ubuf__ int8_t* ubSrcAddr = (__ubuf__ int8_t*)(inputUb.GetPhyAddr()); // nope改成在左，所以起始位置是0
     __ubuf__ Q_T* ubDstAddr = (__ubuf__ Q_T*)(outputUb.GetPhyAddr());
-    __ubuf__ float* ubScaleAddr = (__ubuf__ float*)(inputUb[512 + 64 * 2].GetPhyAddr());
+    __ubuf__ float* ubScaleAddr = (__ubuf__ float*)(inputUb[scaleOffset].GetPhyAddr());
 
     AntiquantVFImplFp8D448<Q_T, KV_T>(ubSrcAddr, ubDstAddr, ubScaleAddr, dealRowCount);
 }
@@ -379,11 +382,17 @@ __aicore__ inline void AntiquantVFFp8D448(LocalTensor<Q_T>& outputUb,  LocalTens
 TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::DequantKv(LocalTensor<Q_T> antiKvTensorAsB16,
     LocalTensor<KV_T> srcTensor, int64_t dealRow, ConstInfo &constInfo)
 {
-    // srcTensor是nope(512) + nope(64) + scale + pad, dstTensor是nope(512) + rope(64)
-    AntiquantVFFp8D448<Q_T, KV_T>(antiKvTensorAsB16, srcTensor, dealRow);
+    // External rows contain NoPE, optional RoPE, then four FP32 scales.
+    const uint32_t scaleOffset = constInfo.dSizeVInput - QSFA_SCALE_BYTES / sizeof(KV_T);
+    AntiquantVFFp8D448<Q_T, KV_T>(antiKvTensorAsB16, srcTensor, dealRow, scaleOffset);
 
     LocalTensor<Q_T> kRopeUb = srcTensor[constInfo.dSizeNope].template ReinterpretCast<Q_T>();
     LocalTensor<Q_T> kRopeUbNz = antiKvTensorAsB16[constInfo.dSizeNope * (16 + 1)]; // V0单次处理16行数据
+    if (QueryInputDim(constInfo) == QSFA_NOPE_DIM) {
+        Duplicate(kRopeUbNz.template ReinterpretCast<uint16_t>(), static_cast<uint16_t>(0),
+            QSFA_ROPE_DIM * (16 + 1));
+        return;
+    }
     Copy(kRopeUbNz, kRopeUb,
         constInfo.dSizeRope, // mask 处理多少列数据
         static_cast<uint8_t>(dealRow), // repeatTime, 每次处理多少个block
@@ -470,8 +479,8 @@ __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>::ProcessVec0(
     const RunInfo &runInfo, ConstInfo &constInfo)
 {
     outputL1.WaitCrossCore(); // 核间同步
-    blockSize = constInfo.blockSize;
-    maxBlockNumPerBatch = constInfo.maxBlockNumPerBatch;
+    blockSize = constInfo.oriBlockSize;
+    maxBlockNumPerBatch = constInfo.oriMaxBlockNumPerBatch;
 
     CalSparseCalSize(runInfo, constInfo);
     ProcessSparseKv(outputL1, v0ResGm, runInfo, constInfo);
@@ -798,7 +807,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>
     sharedParams.gSize = sparseAttnSharedkvBaseParams.nNumOfQInOneGroup;
 
     sharedParams.sparseBlockCount = sparseAttnSharedkvBaseParams.sparseBlockCount;
-    sharedParams.maskMode = sparseAttnSharedkvBaseParams.sparseMode;
+    sharedParams.oriMaskMode = sparseAttnSharedkvBaseParams.sparseMode;
     sharedParams.layoutType = sparseAttnSharedkvBaseParams.outputLayout;
     sharedParams.dSizeRope = 64; // 64: 编码维度
     sharedParams.softmaxScale = sparseAttnSharedkvBaseParams.scaleValue;
@@ -806,8 +815,8 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAVectorService<TEMPLATE_ARGS>
     sharedParams.dSizeVInput = sparseAttnSharedkvBaseParams.dSizeVInput;
     sharedParams.usedCoreNum = this->tilingData->singleCoreParams.usedCoreNum;
     if constexpr (isPa) {
-        sharedParams.blockSize = sparseAttnSharedkvBaseParams.blockSize;
-        sharedParams.maxBlockNumPerBatch = sparseAttnSharedkvBaseParams.maxBlockNumPerBatch;
+        sharedParams.oriBlockSize = sparseAttnSharedkvBaseParams.blockSize;
+        sharedParams.oriMaxBlockNumPerBatch = sparseAttnSharedkvBaseParams.maxBlockNumPerBatch;
     }
 
     sharedParams.isActualSeqLengthsNull = sparseAttnSharedkvBaseParams.isActualLenDimsNull;

@@ -48,14 +48,14 @@
       <tr>
           <td>query</td>
           <td>输入</td>
-          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D = 512 + rope_head_dim。A2/A3支持Q_D为512（rope_head_dim=0）或576（rope_head_dim=64）；A5仍仅支持576。rope_head_dim=0时query仅包含q_nope；Q_N值支持1/2/4/8/16/32/48/64/128。</td>
+          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D = 512 + rope_head_dim。A2/A3支持Q_D为512（rope_head_dim=0）或576（rope_head_dim=64）；A5 INT8场景同样支持这两种Q_D，FP8/HiFloat8场景仍仅支持576。rope_head_dim=0时query仅包含q_nope；Q_N值支持1/2/4/8/16/32/48/64/128。</td>
           <td>FLOAT16、BFLOAT16</td>
           <td>ND</td>
       </tr>
       <tr>
           <td>key</td>
           <td>输入</td>
-          <td>attention结构的K输入，不支持非连续。k_nope、query相同数据类型的k_rope和float32的量化参数按D维度拼接得到。layout_kv为"BSND"时shape为[B, KV_S, KV_N, KV_D]。layout_kv为"TND"时shape为[KV_T, KV_N, KV_D]。layout_kv为"PA_BSND"时shape为[block_num, block_size, KV_N, KV_D]，其中block_num为PageAttention时block总数，block_size为一个block的token数，block_size取值为16的整数倍，最大支持到1024。KV_N仅支持1；KV_D = 512 + rope_head_dim*2 + 4*4，表示每行拼接数据的字节数。A2/A3 C8支持528（rope_head_dim=0）或656（rope_head_dim=64）；A5仍仅支持656。4个FLOAT32 scale组成的区域起始偏移分别为512或640字节，偏移从0开始。</td>
+          <td>attention结构的K输入，不支持非连续。k_nope、query相同数据类型的k_rope和float32的量化参数按D维度拼接得到。layout_kv为"BSND"时shape为[B, KV_S, KV_N, KV_D]。layout_kv为"TND"时shape为[KV_T, KV_N, KV_D]。layout_kv为"PA_BSND"时shape为[block_num, block_size, KV_N, KV_D]，其中block_num为PageAttention时block总数，block_size为一个block的token数，block_size取值为16的整数倍，最大支持到1024。KV_N仅支持1；KV_D = 512 + rope_head_dim*2 + 4*4，表示每行拼接数据的字节数。A2/A3 C8支持528（rope_head_dim=0）或656（rope_head_dim=64）；A5 INT8场景同样支持528或656，FP8/HiFloat8场景仍仅支持656。4个FLOAT32 scale组成的区域起始偏移分别为512或640字节，偏移从0开始。</td>
           <td>FLOAT8_E4M3、INT8、HIFLOAT8</td>
           <td>ND</td>
       </tr>
@@ -195,14 +195,14 @@
       <tr>
           <td>rope_head_dim</td>
           <td>属性</td>
-          <td>表示MLA架构下的RoPE维度，仅在attention_mode为2时有效。A2/A3 C8支持0或64：0表示省略输入中的RoPE分支；A5仍仅支持64。默认值保持64。</td>
+          <td>表示MLA架构下的RoPE维度，仅在attention_mode为2时有效。A2/A3 C8支持0或64：0表示省略输入中的RoPE分支；A5 INT8场景同样支持0或64，FP8/HiFloat8场景仍仅支持64。默认值保持64。</td>
           <td>INT64</td>
           <td>-</td>
       </tr>
       <tr>
           <td>return_softmax_lse</td>
           <td>属性</td>
-          <td>默认False。为True时返回softmax_max和softmax_sum；有效query行的LSE可由softmax_max + log(softmax_sum)计算。rope_head_dim为0或64时均保留此行为。</td>
+          <td>默认False。A2/A3为True时返回softmax_max和softmax_sum；有效query行的LSE可由softmax_max + log(softmax_sum)计算。rope_head_dim为0或64时均保留此行为。A5当前仅写attention输出，应使用False。</td>
           <td>BOOL</td>
           <td>-</td>
       </tr>
@@ -216,7 +216,7 @@
       <tr>
           <td>softmax_max / softmax_sum</td>
           <td>输出</td>
-          <td>return_softmax_lse为False时均为空张量；为True时，layout_query为"BSND"的shape为[B, KV_N, Q_S, Q_N/KV_N]，为"TND"的shape为[KV_N, Q_T, Q_N/KV_N]。</td>
+          <td>return_softmax_lse为False时均为空张量；A2/A3为True时，layout_query为"BSND"的shape为[B, KV_N, Q_S, Q_N/KV_N]，为"TND"的shape为[KV_N, Q_T, Q_N/KV_N]。</td>
           <td>FLOAT32</td>
           <td>ND</td>
       </tr>
@@ -237,7 +237,7 @@
 
 ## A2/A3 C8 NoPE（rope_head_dim=0）
 
-本功能仅扩展A2/A3的INT8 C8路径，A5保持rope_head_dim=64。两种输入合同如下：
+本节描述A2/A3的INT8 C8路径；A5 INT8扩展见下方独立章节。两种输入合同如下：
 
 | rope_head_dim | Q最后一维（元素） | packed Key每行（字节） | scale起始偏移（字节，从0开始） | 有效V / output最后一维 |
 | --- | --- | --- | --- | --- |
@@ -265,3 +265,7 @@ python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_qu
 LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
 并校验有效query行的softmax_max、softmax_sum及LSE。
+
+## Ascend 950 INT8 RoPE0
+
+接口约束、缓存布局和测试入口见 [A5 INT8 C8 with RoPE0](ROPE0_A5.md)。
