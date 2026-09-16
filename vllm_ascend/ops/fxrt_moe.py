@@ -3,7 +3,7 @@
 import torch
 from vllm.distributed.parallel_state import get_dp_group
 
-from vllm_ascend.utils import fxrt_dummy_quant_enabled, fxrt_prefill_decompose_enabled
+from vllm_ascend.utils import fxrt_dummy_quant_enabled, fxrt_moe_prefill_decompose_enabled
 
 
 @torch.library.custom_op("vllm_ascend::fxrt_moe_gating_top_k_hash", mutates_args=())
@@ -74,6 +74,6 @@ def _fake(
 
 
 def moe_gating_top_k_hash_for_prefill(*args, **kwargs):
-    if fxrt_prefill_decompose_enabled():
+    if fxrt_moe_prefill_decompose_enabled():
         return fxrt_moe_gating_top_k_hash(*args, **kwargs)
     return torch.ops._C_ascend.moe_gating_top_k_hash(*args, **kwargs)

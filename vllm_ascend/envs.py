@@ -28,6 +28,11 @@ from typing import Any
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Expose DSV4 prefill attention to direct FX tracing. MoE stays opaque.
+    # Disabled by default; only the exact value "1" enables it. Not sensitive.
+    "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA": lambda: os.getenv(
+        "VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "0"
+    ) == "1",
     # Test-only compatibility for synthetic DSV4 weights. Default: disabled.
     # Effective only with load_format="dummy", even if inherited by a real
     # checkpoint worker. Values: "1" enables, all other values disable.

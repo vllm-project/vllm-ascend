@@ -67,7 +67,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
-_FXRT_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
+_FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
 _FXRT_DUMMY_QUANT_ACTIVE = False
 
 
@@ -84,14 +84,14 @@ def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
     implementation; Decode and combined P/D engines must retain the opaque
     custom operators used by ACL graph capture.
     """
-    global _FXRT_PREFILL_DECOMPOSE_ACTIVE, _FXRT_DUMMY_QUANT_ACTIVE
+    global _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE, _FXRT_DUMMY_QUANT_ACTIVE
 
     _FXRT_DUMMY_QUANT_ACTIVE = (
         envs_ascend.VLLM_ASCEND_FXRT_DUMMY_QUANT
         and getattr(getattr(vllm_config, "load_config", None), "load_format", None) == "dummy"
     )
 
-    requested = os.getenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "0") == "1"
+    requested = envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA
     kv_config = vllm_config.kv_transfer_config
     is_prefill_only = kv_config is None or (
         kv_config.is_kv_producer and not kv_config.is_kv_consumer
@@ -107,27 +107,36 @@ def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
         getattr(cudagraph_mode, "name", None) == "NONE"
         or cudagraph_mode == 0
     )
-    _FXRT_PREFILL_DECOMPOSE_ACTIVE = (
+    _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = (
         requested and is_prefill_only and is_direct_fx_mode and has_no_cudagraph
     )
-    if requested and not _FXRT_PREFILL_DECOMPOSE_ACTIVE:
+    if requested and not _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE:
         logger.info(
-            "Ignoring VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL because this "
+            "Ignoring VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA because this "
             "engine is not a prefill-only direct-FX process"
         )
-    return _FXRT_PREFILL_DECOMPOSE_ACTIVE
+    return _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE
 
 
 def fxrt_prefill_decompose_enabled() -> bool:
-    """Whether P workers should expose DSV4 internals to the FXRT backend.
+    """Whether P workers should expose DSV4 attention to the FXRT backend.
 
     The environment switch is resolved against the engine's PD role before
     model construction. Decode workers rely on opaque custom ops for ACL graph
     capture even when they inherit the switch from a shared launch environment.
     """
-    if _FXRT_PREFILL_DECOMPOSE_ACTIVE is not None:
-        return _FXRT_PREFILL_DECOMPOSE_ACTIVE
-    return os.getenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "0") == "1"
+    if _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE is not None:
+        return _FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE
+    return envs_ascend.VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA
+
+
+def fxrt_moe_prefill_decompose_enabled() -> bool:
+    """Keep the original opaque MoE entry and eager internals on this branch.
+
+    Attention's decomposition switch must not disable MoE overlap/events or
+    alter its routing path. The MoE development branch overrides this policy.
+    """
+    return False
 
 
 _IS_MOE_MODEL = None
@@ -757,7 +766,7 @@ def dispose_tensor(x: torch.Tensor):
     # FXRT graph it mutates the producer tensor's metadata before the consumer
     # custom call executes, turning e.g. routed MoE activations into shape [0].
     # FXRT owns graph-buffer liveness, so the hint is unnecessary there.
-    if fxrt_prefill_decompose_enabled():
+    if fxrt_moe_prefill_decompose_enabled():
         return
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 

@@ -44,7 +44,6 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
-    fxrt_prefill_decompose_enabled,
     get_ascend_device_type,
     is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
@@ -391,8 +390,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
-            selected_expert_map = expert_map[topk_ids]
-            mask = selected_expert_map != (selected_expert_map * 0 - 1)
+            mask = expert_map[topk_ids] != -1
             topk_weights = topk_weights * mask
             first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
@@ -404,10 +402,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             hidden_states,
             topk_ids,
             scale=dynamic_scale,
-            # active_num is an ordinary int in the routing schema. Passing a
-            # symbolic token count specializes the entire prefill graph.
-            # -1 selects all token/expert pairs, just like num_tokens * top_k.
-            active_num=-1 if fxrt_prefill_decompose_enabled() else num_tokens * self.top_k,
+            active_num=num_tokens * self.top_k,
             expert_num=global_num_experts,
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,

@@ -23,8 +23,6 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -60,31 +58,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     torch_npu,
     wraps,
 )
-from vllm_ascend.ops.fxrt_side_effects import (
-    fxrt_record_event,
-    fxrt_wait_event,
-    fxrt_wait_stream,
-    get_fxrt_event_index,
-    get_npu_stream_index,
-)
-from vllm_ascend.utils import enable_sp, fxrt_prefill_decompose_enabled
-
-def _record_moe_event(name: str) -> int | torch.npu.Event | None:
-    if fxrt_prefill_decompose_enabled():
-        # FXRT prefill runs this MoE path on one stream.  Pure-scalar event
-        # custom ops are unnecessary here and are not representable by the
-        # current FXRT custom-call ABI, which expects Tensor values.
-        return None
-    return torch.npu.current_stream().record_event()
-
-
-def _wait_moe_event(event: int | torch.npu.Event | None) -> None:
-    if event is None:
-        return
-    if isinstance(event, int):
-        fxrt_wait_event(event, -1)
-    else:
-        torch.npu.current_stream().wait_event(event)
+from vllm_ascend.utils import enable_sp
 
 
 class AscendMoERunner(MoERunner):
@@ -156,16 +130,6 @@ class AscendMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Ascend dispatchers consume num_tokens_across_dp_cpu directly, not
-        # the temporary local_sizes field set by _sequence_parallel_context.
-        # Avoid tracing that context manager's thread-local access.
-        if fxrt_prefill_decompose_enabled():
-            return self.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
         with self._sequence_parallel_context():
             return self.forward_impl(
                 layer,
@@ -189,9 +153,6 @@ class AscendFusedMoE(FusedMoE):
 
         self._original_routed_scaling_factor = kwargs.get("routed_scaling_factor", 1.0)
         super().__init__(*args, **kwargs)
-        self._fxrt_prefill_decompose = fxrt_prefill_decompose_enabled()
-        self._fxrt_gate_stream_index = -1
-        self._fxrt_shared_expert_stream_index = -1
         self.use_overlapped = True
         self._routed_input_transform = kwargs.get("routed_input_transform")
         self._shared_experts = kwargs.get("shared_experts")
@@ -229,14 +190,8 @@ class AscendFusedMoE(FusedMoE):
             self.moe_config.mc2_group = get_mc2_group()
         self.moe_config.supports_eplb = self.quant_method.supports_eplb
         ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = (
-            ascend_config.multistream_overlap_shared_expert and has_shared_experts
-            and not self._fxrt_prefill_decompose
-        )
-        self.shared_multistream_overlap_gate = (
-            ascend_config.multistream_overlap_gate and has_shared_experts
-            and not self._fxrt_prefill_decompose
-        )
+        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert and has_shared_experts
+        self.shared_multistream_overlap_gate = ascend_config.multistream_overlap_gate and has_shared_experts
         if self.multistream_overlap_shared_expert:
             logger.info_once("[fused_moe/layer] Multistream overlap shared expert is enabled.")
         if enable_sp() and has_shared_experts:
@@ -245,33 +200,11 @@ class AscendFusedMoE(FusedMoE):
             )
 
         # flashcommon3 gate stream
-        self.multistream_overlap_gate = (
-            ascend_config.multistream_overlap_gate
-            and not self._fxrt_prefill_decompose
-        )
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
         if self.multistream_overlap_gate:
             logger.info_once("[fused_moe/layer] Multistream overlap gate is enabled.")
-        if self._fxrt_prefill_decompose:
-            # Allocate all FXRT-visible side-effect handles before Dynamo
-            # tracing.  The forward path then only reads integer handles.
-            for event_name in (
-                "moe.before_dispatch",
-                "moe.before_gmm2",
-                "moe.before_combine",
-                "moe.before_routed_experts",
-                "moe.after_routed_experts",
-            ):
-                get_fxrt_event_index(event_name)
-            if self.multistream_overlap_gate:
-                self._fxrt_gate_stream_index = get_npu_stream_index(
-                    AscendFusedMoE.gate_stream
-                )
-            if self.multistream_overlap_shared_expert:
-                self._fxrt_shared_expert_stream_index = get_npu_stream_index(
-                    shared_experts_calculation_stream()
-                )
         vllm_config = get_current_vllm_config()
         if (
             self.custom_routing_function is None
@@ -355,11 +288,6 @@ class AscendFusedMoE(FusedMoE):
             self.quant_method,
             self.vllm_config.parallel_config.enable_dbo,
         )
-        if self._fxrt_prefill_decompose:
-            # Bypass vllm::moe_forward_shared and the ForwardContext layer
-            # lookup.  The runner enters this concrete layer directly, which
-            # gives Dynamo/FXRT one contiguous tensor implementation.
-            self.runner.enable_decomposed_forward(self)
 
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -511,10 +439,7 @@ class AscendFusedMoE(FusedMoE):
             assert AscendFusedMoE.gate_stream is not None
             fc3_context = get_flash_common3_context()
             assert fc3_context is not None
-            if self._fxrt_prefill_decompose:
-                fxrt_wait_stream(self._fxrt_gate_stream_index, -1)
-            else:
-                AscendFusedMoE.gate_stream.wait_stream(torch.npu.current_stream())
+            AscendFusedMoE.gate_stream.wait_stream(torch.npu.current_stream())
             with npu_stream_switch(AscendFusedMoE.gate_stream, enabled=self.multistream_overlap_gate):
                 # share_expert
                 assert fc3_context.shared_experts is not None
@@ -566,10 +491,7 @@ class AscendFusedMoE(FusedMoE):
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
-            if self._fxrt_prefill_decompose:
-                fxrt_wait_stream(-1, self._fxrt_gate_stream_index)
-            else:
-                torch.npu.current_stream().wait_stream(AscendFusedMoE.gate_stream)
+            torch.npu.current_stream().wait_stream(AscendFusedMoE.gate_stream)
 
         # Matrix multiply.
         fused_experts_results: FusedExpertsResult = self.quant_method.apply(
@@ -638,15 +560,11 @@ class AscendFusedMoE(FusedMoE):
         if self._shared_experts is None:
             return None
 
-        def maybe_wait_event(evt: int | torch.npu.Event | None):
-            _wait_moe_event(evt)
+        def maybe_wait_event(evt: torch.npu.Event | None):
+            if evt is not None:
+                torch.npu.current_stream().wait_event(evt)
 
-        shared_expert_context = (
-            npu_stream_switch(shared_experts_calculation_stream())
-            if self.multistream_overlap_shared_expert
-            else nullcontext()
-        )
-        with shared_expert_context:
+        with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
                 self._shared_experts.down_proj, "weight_scale"
@@ -654,7 +572,7 @@ class AscendFusedMoE(FusedMoE):
             if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
@@ -702,7 +620,7 @@ class AscendFusedMoE(FusedMoE):
             elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                     hidden_states, dst_type=torch.float8_e4m3fn
                 )
@@ -726,7 +644,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
@@ -739,10 +657,7 @@ class AscendFusedMoE(FusedMoE):
         # Make sure the default stream waits for the shared experts stream to
         # finish.
         if self.multistream_overlap_shared_expert:
-            if self._fxrt_prefill_decompose:
-                fxrt_wait_stream(-1, self._fxrt_shared_expert_stream_index)
-            else:
-                torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
+            torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         # NOTE: This is exactly the opposite of
         # `maybe_all_reduce_tensor_model_parallel`
@@ -768,11 +683,11 @@ class AscendFusedMoE(FusedMoE):
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
             hidden_states_fp32 = hidden_states.float()
-            before_routed_experts = _record_moe_event("moe.before_routed_experts")
+            before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-            after_routed_experts = _record_moe_event("moe.after_routed_experts")
+            after_routed_experts = torch.npu.current_stream().record_event()
         else:
-            before_routed_experts = _record_moe_event("moe.before_routed_experts")
+            before_routed_experts = torch.npu.current_stream().record_event()
             after_routed_experts = None
 
         fused_moe_results = self.forward_impl(

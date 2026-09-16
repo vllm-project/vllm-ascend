@@ -45,7 +45,6 @@ from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
-    fxrt_prefill_decompose_enabled,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,
@@ -60,7 +59,7 @@ else:
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
-    global_indices = torch.where(expert_map != (expert_map * 0 - 1))[0]
+    global_indices = torch.where(expert_map != -1)[0]
     local_indices = expert_map[global_indices]
     return ", ".join(
         f"{local_index.item()}->{global_index.item()}"
@@ -71,21 +70,19 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 @dataclass
 class FusedMoEResult:
     routed_out: torch.Tensor
-    before_dispatch_evt: int | torch.npu.Event | None = None
-    before_gmm2_evt: int | torch.npu.Event | None = None
-    before_combine_evt: int | torch.npu.Event | None = None
+    before_dispatch_evt: torch.npu.Event | None = None
+    before_gmm2_evt: torch.npu.Event | None = None
+    before_combine_evt: torch.npu.Event | None = None
     swiglu_limit: float = 0.0
 
 
 @dataclass
 class FusedMoEEvents:
-    # FXRT uses integer handles for events; the normal Decode path retains
-    # torch.npu.Event objects.  Both represent the same stream dependency.
-    before_routed_experts: int | torch.npu.Event | None = None
-    after_routed_experts: int | torch.npu.Event | None = field(default=None)
-    before_dispatch: int | torch.npu.Event | None = field(default=None)
-    before_gmm2: int | torch.npu.Event | None = field(default=None)
-    before_combine: int | torch.npu.Event | None = field(default=None)
+    before_routed_experts: torch.npu.Event
+    after_routed_experts: torch.npu.Event | None = field(default=None)
+    before_dispatch: torch.npu.Event | None = field(default=None)
+    before_gmm2: torch.npu.Event | None = field(default=None)
+    before_combine: torch.npu.Event | None = field(default=None)
     swiglu_limit: float = 0.0
 
 
@@ -742,8 +739,7 @@ else:
                 if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
                     original_dtype = hidden_states.dtype
                     # Execute dynamic quant concurrently with MoE gate.
-                    if fused_moe_evts.before_routed_experts is not None:
-                        torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                    torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                     quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                     # Execute the gate projection and activation concurrently with the
                     # dispatch communication.
@@ -786,8 +782,7 @@ else:
                 elif has_quantized_shared and self.quant_type == QuantType.W4A8MXFP:
                     original_dtype = hidden_states.dtype
                     # Execute dynamic quant concurrently with MoE gate.
-                    if fused_moe_evts.before_routed_experts is not None:
-                        torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                    torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                     quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                         hidden_states, dst_type=torch.float8_e4m3fn
                     )
@@ -811,8 +806,7 @@ else:
                     shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
                 else:
                     # Ensure the shared experts wait for hidden_states to be ready.
-                    if fused_moe_evts.before_routed_experts is not None:
-                        torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                    torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                     # Execute the gate projection and activation concurrently with the
                     # dispatch communication.
                     maybe_wait_event(fused_moe_evts.before_dispatch)
@@ -893,10 +887,6 @@ else:
             shared_experts_input: torch.Tensor | None,
             input_ids: torch.Tensor | None = None,
         ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-            if fxrt_prefill_decompose_enabled():
-                if self.shared_experts is None:
-                    return self.no_shared_forward_impl(hidden_states, router_logits)
-                return self.shared_forward_impl(hidden_states, router_logits)
             with self._sequence_parallel_context():
                 if self.shared_experts is None:
                     return self.no_shared_forward_impl(hidden_states, router_logits)

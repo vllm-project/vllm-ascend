@@ -433,7 +433,7 @@ def test_is_pd_decode_recompute_scheduler_enabled_without_config():
 def test_configure_fxrt_prefill_decompose_by_pd_role(
     monkeypatch, is_producer, is_consumer, expected
 ):
-    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "1")
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "1")
     kv_config = mock.MagicMock(
         is_kv_producer=is_producer,
         is_kv_consumer=is_consumer,
@@ -448,11 +448,11 @@ def test_configure_fxrt_prefill_decompose_by_pd_role(
         assert utils.configure_fxrt_prefill_decompose(vllm_config) is expected
         assert utils.fxrt_prefill_decompose_enabled() is expected
     finally:
-        utils._FXRT_PREFILL_DECOMPOSE_ACTIVE = None
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
 
 
 def test_configure_fxrt_prefill_decompose_rejects_acl_decode(monkeypatch):
-    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "1")
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", "1")
     kv_config = mock.MagicMock(
         is_kv_producer=False,
         is_kv_consumer=True,
@@ -469,7 +469,29 @@ def test_configure_fxrt_prefill_decompose_rejects_acl_decode(monkeypatch):
     try:
         assert utils.configure_fxrt_prefill_decompose(vllm_config) is False
     finally:
-        utils._FXRT_PREFILL_DECOMPOSE_ACTIVE = None
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
+
+
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_dsa_decomposition_does_not_decompose_moe(monkeypatch, enabled):
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", enabled)
+    config = mock.MagicMock(
+        kv_transfer_config=mock.MagicMock(is_kv_producer=True, is_kv_consumer=False),
+        compilation_config=mock.MagicMock(mode=1, cudagraph_mode=0),
+    )
+    try:
+        assert utils.configure_fxrt_prefill_decompose(config) is (enabled == "1")
+        assert utils.fxrt_moe_prefill_decompose_enabled() is False
+    finally:
+        utils._FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE = None
+
+
+def test_old_combined_decomposition_switch_is_not_an_alias(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "1")
+    monkeypatch.delenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL_DSA", raising=False)
+    monkeypatch.setattr(utils, "_FXRT_DSA_PREFILL_DECOMPOSE_ACTIVE", None)
+    assert utils.fxrt_prefill_decompose_enabled() is False
+    assert utils.fxrt_moe_prefill_decompose_enabled() is False
 
 
 def test_is_pd_decode_recompute_scheduler_enabled_kv_producer():

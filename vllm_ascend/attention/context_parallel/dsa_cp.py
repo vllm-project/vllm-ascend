@@ -38,6 +38,7 @@ from vllm_ascend.ops.fxrt_side_effects import (
     get_attention_event_index,
 )
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
@@ -1008,6 +1009,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.vllm_config = get_current_vllm_config()
         self._fxrt_prefill_decompose = fxrt_prefill_decompose_enabled()
+        # The extension can already be loaded by the device allocator without
+        # enable_custom_op(). Install its corrected Meta before Dynamo traces
+        # the exposed attention; eager execution uses the same fused kernel.
+        register_rms_quant_meta()
         self._fxrt_attention_event_index = (
             get_attention_event_index() if self._fxrt_prefill_decompose else -1
         )
