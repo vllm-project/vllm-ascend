@@ -53,8 +53,6 @@ You can use the official all-in-one Docker image. For the available image tags a
       export NAME=minimax-m3-dev
 
       # Start the container with the variables defined above.
-      # Atlas A3 has 16 NPUs (/dev/davinci[0-15]).
-      # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
       docker run --rm \
       --name $NAME \
       --net=host \
@@ -96,10 +94,6 @@ You can use the official all-in-one Docker image. For the available image tags a
       export NAME=minimax-m3-dev
 
       # 950DT products have 8 NPUs and use Device UB.
-      # /dev/ummu and /dev/uburma are required for Device UB.
-      # /etc/hixlep is required for UBOE / Ascend direct KV transfer.
-      # /etc/hccn.conf is required for HCCL multi-card communication.
-      # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
       docker run --rm \
       --name $NAME \
       --net=host \
@@ -578,7 +572,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
 
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
@@ -608,7 +601,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -640,7 +633,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
 
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
@@ -670,7 +662,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -765,7 +757,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
+
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
@@ -817,7 +809,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
 
     vllm serve "$model_path" \
         --host 0.0.0.0 \
@@ -956,7 +947,6 @@ For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant op
 | Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
 | Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
 | `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
-| `PYTHONHASHSEED` | Recommended | **Must** be identical on every Prefill and Decode node (block hash for pool lookup) |
 | `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
 | Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [kv_pool.md §5.1](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) |
 | Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
@@ -1102,7 +1092,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --gpu-memory-utilization 0.85 \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
     ```
@@ -1156,7 +1146,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --gpu-memory-utilization 0.92 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
     ```
