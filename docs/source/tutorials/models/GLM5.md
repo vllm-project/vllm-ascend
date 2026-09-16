@@ -207,7 +207,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --seed 1024 \
@@ -248,7 +248,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 16 \
     --enable-expert-parallel \
@@ -284,7 +284,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
@@ -361,7 +361,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
     --data-parallel-address $local_ip \
@@ -404,7 +404,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
@@ -460,7 +460,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 2 \
     --data-parallel-size-local 1 \
     --data-parallel-address $node0_ip \
@@ -502,7 +502,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 2 \
     --data-parallel-size-local 1 \
@@ -612,7 +612,7 @@ def parse_args():
     parser.add_argument(
         "--vllm-start-port",
         type=int,
-        default=9000,
+        default=8000,
         help="Starting port for the engine."
     )
     return parser.parse_args()
@@ -1032,7 +1032,7 @@ if __name__ == "__main__":
 
     1. Prefill node 0
 
-        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 (PP master node, engine port `9081`) and `node_rank=1` on prefill node 1 (non-master node, `--headless`, no API server).
+        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 (PP master node, engine port `8000`) and `node_rank=1` on prefill node 1 (non-master node, `--headless`, no API server).
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -1052,7 +1052,7 @@ if __name__ == "__main__":
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
             --host 0.0.0.0 \
-            --port 9081 \
+            --port 8000 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
             --master-addr $local_ip \
@@ -1353,12 +1353,12 @@ unset http_proxy
 unset https_proxy
 
 python load_balance_proxy_server_example.py \
-    --port 9000 \
+    --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
     $node_p0_ip \
     --prefiller-ports \
-    9081 \
+    8000 \
     --decoder-hosts \
     $node_d0_ip \
     $node_d0_ip \

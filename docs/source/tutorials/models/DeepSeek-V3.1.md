@@ -1096,7 +1096,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 Here is one accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1107,13 +1107,13 @@ Here is one accuracy evaluation method.
 | ceval | - | accuracy | gen | 90.94 | 1 Atlas 800 A3 (64GB × 16) |
 | gsm8k | - | accuracy | gen | 96.28 | 1 Atlas 800 A3 (64GB × 16) |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Not test yet.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -1127,7 +1127,7 @@ The performance result is:
 
 **Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Second).
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
