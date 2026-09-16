@@ -281,9 +281,14 @@ class TestUseV2ModelRunner:
         assert use_v2_model_runner(config) is True
 
 
+def _is_dynamo_disabled(fn) -> bool:
+    # torch 2.10 tags `_torchdynamo_disable`; older torch used `_dynamo_disable`.
+    return bool(getattr(fn, "_torchdynamo_disable", False) or getattr(fn, "_dynamo_disable", False))
+
+
 class TestV2ModelRunnerValidationPatch:
     def test_use_v2_model_runner_is_dynamo_disabled(self):
-        assert getattr(mrv2_utils.use_v2_model_runner, "_dynamo_disable", False)
+        assert _is_dynamo_disabled(mrv2_utils.use_v2_model_runner)
 
     def test_validation_is_decoupled_from_upstream(self):
         # The Ascend V2 runner decision is fully owned by use_v2_model_runner,

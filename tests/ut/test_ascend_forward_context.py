@@ -514,12 +514,17 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     assert seen["inside"] is False
 
 
+def _is_dynamo_disabled(fn) -> bool:
+    # torch 2.10 tags `_torchdynamo_disable`; older torch used `_dynamo_disable`.
+    return bool(getattr(fn, "_torchdynamo_disable", False) or getattr(fn, "_dynamo_disable", False))
+
+
 def test_extra_ctx_v2_isolation_is_dynamo_disabled():
     # Compiled attention/MoE read _EXTRA_CTX. Dynamo cannot trace
     # use_v2_model_runner's logger.warning_once / info_once.
-    assert getattr(afc._use_v2_extra_kwargs, "_dynamo_disable", False)
-    assert getattr(afc._extra_ctx_getattr, "_dynamo_disable", False)
-    assert getattr(afc._extra_ctx_setattr, "_dynamo_disable", False)
+    assert _is_dynamo_disabled(afc._use_v2_extra_kwargs)
+    assert _is_dynamo_disabled(afc._extra_ctx_getattr)
+    assert _is_dynamo_disabled(afc._extra_ctx_setattr)
 
 
 def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
