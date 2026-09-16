@@ -92,8 +92,32 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine/mega_moe` operator.
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
-    # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
+    # `mega_moe` can be used only with moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # How a deferred Compressor SP row all-gather is joined at finalize time.
+    # - "event": the finalize waits only the per-collective done event recorded
+    #   on the communication stream.
+    # - "both": additionally calls Work.wait() first. This is the conservative
+    #   default until a sentinel micro-benchmark confirms that the recorded
+    #   event fully covers HCCL completion (recv buffer written) on the target
+    #   torch_npu build. Switch to "event" after validation for full overlap.
+    # Sensitive: no. Valid values: "event" | "both".
+    "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_COMPRESSOR_SP_AGG_WAIT_MODE", "both"
+    ),
+    # Emit per-step Compressor SP state-stream observability logs (submitted
+    # layers, backlog depth, drain wait). 0 disables. Valid values: 0 | 1.
+    "VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG": lambda: int(
+        os.getenv("VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG", "0")
+    ),
+    # Create a dedicated HCCL process group for Compressor SP state
+    # replication so the multi-millisecond state all-gathers cannot serialize
+    # behind row all-gathers inside one communicator. Group creation is
+    # rank-uniform (every world rank builds all TP subgroups in canonical
+    # contiguous order). 0 reuses the TP group (phase A). Valid values: 0 | 1.
+    "VLLM_ASCEND_COMPRESSOR_SP_STATE_PG": lambda: int(
+        os.getenv("VLLM_ASCEND_COMPRESSOR_SP_STATE_PG", "0")
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

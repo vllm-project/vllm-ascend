@@ -1,6 +1,8 @@
+import logging
 import math
+import time
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -13,6 +15,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -63,10 +66,199 @@ def dsv4_overlap_stream(name: str) -> torch.npu.Stream:
 _DSV4_SWA_OVERLAP_STREAM = None
 _DSV4_QUERY_OVERLAP_STREAM = None
 
+logger = logging.getLogger(__name__)
+
 _COMPRESSOR_SP_METADATA_KEY = "_compressor_sp_metadata"
 _COMPRESSOR_SP_STATE_KEY = "_compressor_sp_state"
 _MAIN_COMPRESSOR = "main"
 _INDEXER_COMPRESSOR = "indexer"
+
+
+class CompressorSPStateRuntime:
+    """Per-process coordinator for deferred Compressor SP state replication.
+
+    All layers append their state chains (gather -> all-gather -> where ->
+    scatter) onto ``state_stream`` and never join inside the step. The only
+    regular consumer join is :meth:`drain`, called at the ``execute_model``
+    entry (and ``_dummy_run`` entry), which must run before preemption
+    handling, ``_update_states``, block reuse or metadata rebuilds: freed or
+    reused state blocks may still be written by in-flight chains.
+
+    ``pending_refs`` keeps every submitted chain's metadata (which owns the
+    preallocated send/recv buffers), state cache tensor, HCCL work and events
+    alive until the drain edge is inserted; buffers may only be recycled
+    afterwards.
+    """
+
+    def __init__(self, tp_group: Any) -> None:
+        self.tp_group = tp_group
+        self.state_stream = torch_npu.npu.Stream()
+        # Sentinel verdict (torch_npu 2.10.0.post2): kernels enqueued on the
+        # SAME stream after an async HCCL all-gather are NOT ordered behind
+        # the collective -- not even via a same-stream event self-wait. Only
+        # a CROSS-stream wait_event on an event recorded behind the gather
+        # reliably covers completion. Therefore the state chain runs on two
+        # streams: the gather on ``state_stream``, the where/scatter epilogue
+        # on ``state_apply_stream`` waiting the gather's done event.
+        self.state_apply_stream = torch_npu.npu.Stream()
+        self.state_group = _create_compressor_sp_state_group(tp_group)
+        self.last_done_event: torch.npu.Event | None = None
+        self.pending_refs: list[Any] = []
+        self.layers_submitted = 0
+        self.layers_submitted_total = 0
+
+    def submit(
+        self,
+        state_done_event: torch.npu.Event,
+        work: Any,
+        sp_metadata: Any,
+        state_cache: torch.Tensor,
+    ) -> None:
+        self.last_done_event = state_done_event
+        self.pending_refs.append((sp_metadata, state_cache, work, state_done_event))
+        self.layers_submitted += 1
+        self.layers_submitted_total += 1
+
+    def drain(self) -> None:
+        """Physically complete every in-flight state chain before returning.
+
+        ``wait_event`` alone only inserts a device-side dependency while the
+        host returns immediately; the callers of this drain (execute_model /
+        _dummy_run entry) need the state writes physically retired before
+        preemption handling, _update_states, CPU-side block release/reuse or
+        any other independent stream may observe them. Therefore this drain
+        host-synchronizes the tail event, which also makes the drain wait
+        time measurable for STATE_DEBUG.
+        """
+        if self.last_done_event is not None:
+            debug = envs.VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG
+            if debug not in (0, 1):
+                raise ValueError(
+                    f"VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG must be 0 or 1, got {debug!r}"
+                )
+            begin = time.perf_counter()
+            self.last_done_event.synchronize()
+            if debug:
+                logger.info(
+                    "CompressorSPStateRuntime.drain: step layers=%d total=%d "
+                    "drain_wait_ms=%.3f",
+                    self.layers_submitted,
+                    self.layers_submitted_total,
+                    (time.perf_counter() - begin) * 1e3,
+                )
+        # Host-side completion is proven; buffers owned by the chains can now
+        # be recycled and the step bookkeeping starts fresh.
+        self.pending_refs.clear()
+        self.last_done_event = None
+        self.layers_submitted = 0
+
+
+def _create_compressor_sp_state_group(tp_group: Any) -> Any:
+    """Return a dedicated process group for state replication (or the TP group).
+
+    A separate HCCL communicator lets the multi-millisecond state all-gathers
+    progress without serializing behind the latency-critical row all-gathers
+    inside one communicator. ``dist.new_group`` is collective across ALL world
+    ranks: every rank must create the groups for ALL TP subgroups in the same
+    canonical order and only then pick its own -- returning early after the
+    own subgroup would deadlock the remaining ranks inside new_group.
+
+    TODO: derive the subgroup list from the project rank generator instead of
+    assuming the contiguous layout, and hoist creation into the distributed
+    initialization phase instead of the first layer constructor.
+    """
+    raw = envs.VLLM_ASCEND_COMPRESSOR_SP_STATE_PG
+    if raw not in (0, 1):
+        raise ValueError(
+            f"VLLM_ASCEND_COMPRESSOR_SP_STATE_PG must be 0 or 1, got {raw!r}"
+        )
+    if not raw:
+        return tp_group.device_group
+    if not hasattr(dist, "new_group") or not hasattr(tp_group, "ranks"):
+        logger.warning(
+            "Compressor SP state PG requested but unavailable; reusing the TP group"
+        )
+        return tp_group.device_group
+    world = dist.get_world_size()
+    tp_size = len(tp_group.ranks)
+    if tp_size == 0 or world % tp_size != 0:
+        raise RuntimeError(
+            f"world_size {world} is not divisible by TP size {tp_size}; cannot "
+            "derive canonical subgroups for the Compressor SP state PG"
+        )
+    my_subgroup = sorted(tp_group.ranks)
+    own_group = None
+    for start in range(0, world, tp_size):
+        # Canonical contiguous layout: subgroup i = [i*tp_size, (i+1)*tp_size).
+        # Every world rank creates EVERY subgroup (new_group is collective);
+        # non-members receive GroupMember.NON_GROUP_MEMBER.
+        subgroup = list(range(start, start + tp_size))
+        group = dist.new_group(ranks=subgroup)
+        if subgroup == my_subgroup:
+            if group is None:
+                raise RuntimeError("Compressor SP state PG creation failed on a member rank")
+            own_group = group
+    if own_group is None:
+        raise RuntimeError(
+            f"TP ranks {my_subgroup} do not match the canonical contiguous "
+            "layout required by the Compressor SP state PG; unset "
+            "VLLM_ASCEND_COMPRESSOR_SP_STATE_PG or extend the layout derivation."
+        )
+    logger.info(
+        "Compressor SP state PG created for ranks %s (extra HCCL buffers apply)",
+        my_subgroup,
+    )
+    return own_group
+
+
+_COMPRESSOR_SP_STATE_RUNTIMES: dict[Any, CompressorSPStateRuntime] = {}
+
+
+def _compressor_sp_state_runtime_key(tp_group: Any) -> Any:
+    """Registry key: (device index, sorted TP ranks).
+
+    A single process-global singleton would silently reuse the first model's
+    communicator for a second runner, a draft/target pair with different TP
+    membership, or a reloaded model. Keying by device and exact TP rank set
+    makes that reuse impossible; mismatches assert loudly instead of hanging
+    in a collective.
+    """
+    ranks = tuple(sorted(getattr(tp_group, "ranks", []) or []))
+    device = torch.npu.current_device() if torch.npu.is_initialized() else -1
+    return (device, ranks)
+
+
+def compressor_sp_state_runtime(tp_group: Any) -> CompressorSPStateRuntime:
+    """Build (once per device + TP membership) the state runtime.
+
+    Rank-uniform by construction: every rank builds layers in the same order,
+    so any env-gated group creation runs the same number of times everywhere.
+    """
+    key = _compressor_sp_state_runtime_key(tp_group)
+    runtime = _COMPRESSOR_SP_STATE_RUNTIMES.get(key)
+    if runtime is None:
+        runtime = CompressorSPStateRuntime(tp_group)
+        _COMPRESSOR_SP_STATE_RUNTIMES[key] = runtime
+    else:
+        current_group = getattr(tp_group, "device_group", None)
+        if current_group is not None and current_group is not runtime.tp_group.device_group:
+            raise RuntimeError(
+                "Compressor SP state runtime was already created with a "
+                "different TP process group for the same device/ranks; call "
+                "reset_compressor_sp_state_runtimes() between model reloads."
+            )
+    return runtime
+
+
+def reset_compressor_sp_state_runtimes() -> None:
+    """Drop all state runtimes (tests, teardown, model reload)."""
+    _COMPRESSOR_SP_STATE_RUNTIMES.clear()
+
+
+def drain_compressor_sp_state() -> None:
+    """Public drain hook for ``execute_model``/``_dummy_run`` entry points."""
+    for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
+        runtime.drain()
 
 
 def dsv4_swa_overlap_stream() -> torch.npu.Stream:
@@ -1294,10 +1486,16 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
             self.index_topk = self.indexer.index_topk
+            # The shared state runtime (dedicated stream + process group) is
+            # built once per process at model construction: every rank builds
+            # layers in the same order, so any env-gated group creation stays
+            # rank-uniform.
+            state_runtime = compressor_sp_state_runtime(self.tp_group)
             self.indexer_compressor_executor = IndexerCompressorExecutor(
                 self.indexer.compressor,
                 self.rope_head_dim,
                 self.tp_group,
+                state_group=state_runtime.state_group,
             )
 
         # compress param
@@ -1306,6 +1504,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 self.compressor,
                 self.rope_head_dim,
                 self.tp_group,
+                state_group=compressor_sp_state_runtime(self.tp_group).state_group,
             )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1534,17 +1733,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
 
-        if (
-            self.compress_ratio > 1
-            and self.multistream_dsv4_dsa_overlap
-            and has_kv_transfer_group()
-        ):
+        if self.compress_ratio > 1 and self.multistream_dsv4_dsa_overlap and has_kv_transfer_group():
             # A KV connector may export this layer's caches right after this
-            # forward, including the state group, so the deferred replication
-            # queued on the communication stream must complete first. Without
-            # a connector there is no reader until the next forward's entry
-            # join, which keeps the whole remaining forward as cover.
-            torch.npu.current_stream().wait_stream(dsv4_overlap_stream("compressor_sp_comm"))
+            # forward, including the state group. Wait exactly THIS layer's
+            # state chain completion event -- structurally the last chain
+            # submitted by this layer's _forward -- and never the mutable
+            # runtime tail, so capture/inline/no-SP paths and future
+            # scheduling changes cannot wait on a stale or unrelated event.
+            layer_event = getattr(self, "_compressor_sp_layer_state_event", None)
+            if layer_event is not None:
+                layer_event.synchronize()
+                self._compressor_sp_layer_state_event = None
         notify_kv_cache_written(layer_name)
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
@@ -1732,19 +1931,19 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     raise ValueError("Main and indexer compressors must use the same SP execution mode")
 
         # Compute/communication dual stream: every kernel runs on this stream
-        # in a fixed order, and every Compressor SP collective is queued on
-        # one FIFO communication stream. Only resource-orthogonal work
-        # overlaps (HCCL on SDMA/AICPU vs compute on cube/vector cores), so
-        # concurrent kernels never contend for the same cores, and the single
-        # collective stream keeps the issue order identical on every TP rank.
-        # Graph capture cannot host-join deferred handles, so it stays inline.
+        # in a fixed order, and every Compressor SP row collective is queued
+        # on one FIFO communication stream (suffix -> LI rows -> main rows per
+        # layer, rank-uniform). Only resource-orthogonal work overlaps (HCCL
+        # on SDMA/AICPU vs compute on cube/vector cores). Graph capture cannot
+        # host-join deferred handles, so it stays inline.
+        #
+        # There is deliberately NO per-layer entry join any more: row
+        # all-gathers are consumed inside their own layer through per-
+        # collective done events, and deferred state replication lives on the
+        # dedicated state stream drained once at the execute_model entry.
         compressor_sp_comm = None
         if self.multistream_dsv4_dsa_overlap and not torch.npu.is_current_stream_capturing():
             compressor_sp_comm = dsv4_overlap_stream("compressor_sp_comm")
-            # The state cache has no reader inside the forward that wrote it,
-            # so the deferred state replication queued by the previous forward
-            # is joined here, before the first reader of those rows.
-            torch.npu.current_stream().wait_stream(compressor_sp_comm)
 
         suffix_gather_handle = None
         if (
@@ -1825,13 +2024,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 comm_stream=sp_comm,
             )
 
-            # Join the row all-gathers, restore global order and write the
-            # caches. The main epilogue covers the indexer all-gather while it
-            # runs; TopK then reads the finished indexer caches.
-            if main_pending is not None:
-                self.compressor_executor.finalize_sp(main_pending)
+            # Join the row all-gathers per collective, restore global order
+            # and write the caches. Both all-gathers are already launched
+            # (LI rows before the main kernel, main rows right after it), so
+            # finalizing LI first lets its rotate/quant/scatter compute cover
+            # the main all-gather; waiting per-event (never per-stream) is
+            # what makes this ordering pay off. TopK then reads the finished
+            # indexer caches.
             if indexer_pending is not None:
                 self.indexer_compressor_executor.finalize_sp(indexer_pending)
+            if main_pending is not None:
+                self.compressor_executor.finalize_sp(main_pending)
 
             if self.compress_ratio == 4:
                 compress_topk_idxs = self._indexer_select_topk(
@@ -1846,28 +2049,41 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     qr_pertoken_scale=qr_pertoken_scale_local,
                 )
 
-            if compressor_sp_comm is not None and main_compressor_sp_metadata is not None:
+            if sp_comm is not None and main_compressor_sp_metadata is not None and main_pending is not None:
                 # Queue the complete state write-set replication on the
-                # communication stream without joining it. The state cache has
-                # no reader in this forward, so this collective is hidden
-                # under the rest of the forward and joined at the next
-                # forward's entry instead of one single layer tail.
+                # dedicated state stream (and state process group) without
+                # joining it. Each chain waits only the producer event
+                # recorded behind its Compressor kernel. The only regular
+                # join is the next execute_model entry drain; a KV connector
+                # joins this layer's chain at the end of forward instead.
+                state_runtime = compressor_sp_state_runtime(self.tp_group)
                 main_state_cache = DeviceOperator.unpack_dsa_forward_kv_cache(
                     kv_cache, self.compress_ratio
                 )[2]
-                self.compressor_executor._sync_sp_state(
+                main_state_done_event = self.compressor_executor._sync_sp_state(
                     main_state_cache,
                     main_compressor_sp_metadata,
-                    compressor_sp_comm,
+                    state_stream=state_runtime.state_stream,
+                    state_ready_event=main_pending.state_ready_event,
+                    runtime=state_runtime,
+                    state_apply_stream=state_runtime.state_apply_stream,
                 )
-                if self.compress_ratio == 4:
+                layer_state_done_event = main_state_done_event
+                if self.compress_ratio == 4 and indexer_pending is not None:
                     assert indexer_compressor_sp_metadata is not None
                     indexer_state_cache = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0]
-                    self.indexer_compressor_executor._sync_sp_state(
+                    layer_state_done_event = self.indexer_compressor_executor._sync_sp_state(
                         indexer_state_cache,
                         indexer_compressor_sp_metadata,
-                        compressor_sp_comm,
+                        state_stream=state_runtime.state_stream,
+                        state_ready_event=indexer_pending.state_ready_event,
+                        runtime=state_runtime,
+                        state_apply_stream=state_runtime.state_apply_stream,
                     )
+                # Layer-local tail: the LAST chain of THIS layer (indexer's
+                # when present). forward() waits exactly this event before a
+                # connector publish, never the mutable global stream tail.
+                self._compressor_sp_layer_state_event = layer_state_done_event
 
         # SWA does not depend on preprocessing communication, so it is scheduled
         # after the Compressor section and its all-gather is issued last.

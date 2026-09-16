@@ -113,7 +113,10 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+from vllm_ascend.attention.context_parallel.dsa_cp import (
+    AscendDSACPMetadataBuilder,
+    drain_compressor_sp_state,
+)
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
@@ -1729,6 +1732,13 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # Drain deferred Compressor SP state replication BEFORE any scheduling
+        # side effect (preemption handling, _update_states, block reuse or
+        # metadata rebuilds, zero-token early returns): freed or reused state
+        # blocks may still be written by in-flight chains on the state stream.
+        # No-op unless the runtime exists (DSA-CP with Compressor SP built).
+        drain_compressor_sp_state()
+
         if self.vllm_config.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
@@ -3224,6 +3234,11 @@ class NPUModelRunner(GPUModelRunner):
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Dummy runs capture/replay graphs and probe memory; any deferred
+        # Compressor SP state chains must be drained first for the same
+        # reasons as execute_model.
+        drain_compressor_sp_state()
+
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
         # If cudagraph_mode.decode_mode() == FULL and
