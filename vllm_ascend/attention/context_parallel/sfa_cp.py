@@ -1137,6 +1137,38 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
         self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        result = super().process_weights_after_loading(act_dtype)
+        self._register_remap_buffers()
+        return result
+
+    def _register_remap_buffers(self) -> None:
+        """Expose the DCP remap constants to the level-2 sleep restore path.
+
+        ``_remap_order``/``_remap_invalid_index`` are created while the
+        sleep-mode weights mem-pool is active and are read by the non-Triton
+        remap fallback in ``_remap_sparse_indices``. Attention impls are not
+        ``nn.Module`` instances, so without an owning buffer a level-2 wake
+        would leave them pointing at remapped, discarded storage. Own them as
+        non-persistent buffers of this layer's attention module, the same owner
+        pattern the DSA/SFA Hadamard buffers use.
+        """
+        static_forward_context = self.vllm_config.compilation_config.static_forward_context
+        owner = static_forward_context.get(self.layer_name)
+        if not isinstance(owner, torch.nn.Module):
+            # Integrations that do not forward ``layer_name`` to the impl still
+            # keep the projections in this impl's model tree.
+            owner = self.o_proj
+        for name, tensor in (
+            ("_dcp_sfa_remap_order", self._remap_order),
+            ("_dcp_sfa_remap_invalid_index", self._remap_invalid_index),
+        ):
+            existing = getattr(owner, name, None)
+            if existing is None:
+                owner.register_buffer(name, tensor, persistent=False)
+            elif existing is not tensor:
+                raise RuntimeError(f"DCP SFA remap buffer {name!r} is already registered with a different tensor.")
+
     def _get_indexer_attn_metadata(self, attn_metadata: M) -> Any | None:
         indexer_metadata = super()._get_indexer_attn_metadata(attn_metadata)
         if indexer_metadata is not None:

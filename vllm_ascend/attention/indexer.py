@@ -114,10 +114,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
         return (positions + 1).clamp(min=0, max=self.topk_tokens)
 
-    # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
-    q_hadamard: torch.Tensor | None = None
-    k_hadamard: torch.Tensor | None = None
-
     @staticmethod
     def get_impl_cls():
         return None
@@ -190,13 +186,24 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._dsa_cp_active = enable_dsa_cp()
 
+        # The LI C8 Hadamard matrices are created while the sleep-mode weights
+        # mem-pool is active and are read by every forward, so they must survive
+        # a level-2 sleep. Keep them as non-persistent buffers of this module so
+        # the worker's buffer backup path (``model.named_buffers()``) restores
+        # them; a plain attribute keeps its Python reference across sleep while
+        # its device storage is discarded and remapped empty.
+        self.register_buffer("q_hadamard", None, persistent=False)
+        self.register_buffer("k_hadamard", None, persistent=False)
+
     def process_weights_after_loading(self) -> None:
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
+        if not self.enable_sparse_li_c8:
+            return
+        if self.q_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
-            AscendSFAIndexerBackend.q_hadamard = hadamard / (128**0.5)
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.k_hadamard is None:
+            self.q_hadamard = hadamard / (128**0.5)
+        if self.k_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
-            AscendSFAIndexerBackend.k_hadamard = hadamard / (128**0.5)
+            self.k_hadamard = hadamard / (128**0.5)
 
     @property
     def num_cache_tensors(self) -> int:
@@ -303,7 +310,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAIndexerBackend.k_hadamard
+            assert self.k_hadamard is not None
+            k_li = k_li @ self.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
             k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
@@ -435,8 +443,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         q_li_scale = None
         q_li_shape_ori = None
         if self.enable_sparse_li_c8:
+            assert self.q_hadamard is not None
             q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAIndexerBackend.q_hadamard
+            q_li = q_li @ self.q_hadamard
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
