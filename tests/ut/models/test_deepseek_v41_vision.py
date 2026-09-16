@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 from PIL import Image
 from torch import nn
-from vllm.model_executor.models.interfaces import supports_multimodal
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens, supports_multimodal
 from vllm.models.deepseek_v4_1.common.mm_preprocess import (
     COMPRESS_PAD_TO,
     IMAGE,
@@ -36,6 +36,7 @@ def make_v41_config(**kwargs):
 
 def test_v41_vision_wrapper_uses_v41_language_backbone():
     assert supports_multimodal(AscendDeepseekV41ForCausalLM)
+    assert requires_raw_input_tokens(AscendDeepseekV41ForCausalLM)
     assert AscendDeepseekV41ForCausalLM.language_model_cls is AscendDeepseekV41LLMForCausalLM
     assert "_processor_factory" in AscendDeepseekV41ForCausalLM.__dict__
 

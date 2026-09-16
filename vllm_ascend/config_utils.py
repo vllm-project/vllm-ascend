@@ -55,8 +55,12 @@ def is_deepseek_v41(hf_config: Any) -> bool:
     model_types = ("deepseek_v41", "deepseek_v4.1", "deepseek_v41_text", "deepseek_v4.1_text")
     if isinstance(hf_config, dict):
         return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
-    return getattr(hf_config, "model_type", None) in model_types or (
-        getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config)
+    # SpeculativeConfig may overwrite the instance model_type for DSpark.
+    # The upstream flattened config class still identifies the V4.1 checkpoint.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
     )
 
 

@@ -323,6 +323,9 @@ def test_v0271_entrypoint_and_admission_use_slot_reservation(runtime):
     assert kv_cache_utils._pool_bytes_per_block(groups) == page
     assert kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) == (demand + 1) * page
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, config) == 99 / demand
+    scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config([config])
+    assert request_blocks(runtime, scheduler_config.kv_cache_groups) == demand
+    assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, scheduler_config) == 99 / demand
 
 
 def test_model_registration_and_binding(runtime):

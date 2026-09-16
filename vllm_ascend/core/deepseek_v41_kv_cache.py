@@ -271,13 +271,15 @@ def pool_bytes_per_block(groups):
 
 def request_blocks(vllm_config, groups):
     # Different logical groups consume different IDs in one global block pool.
-    return sum(
-        max(
-            (s.max_memory_usage_bytes(vllm_config) + s.page_size_bytes - 1) // s.page_size_bytes
-            for s in g.kv_cache_spec.kv_cache_specs.values()
+    total = 0
+    for group in groups:
+        spec = group.kv_cache_spec
+        # The scheduler replaces uniform groups with a representative layer spec.
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        total += max(
+            (s.max_memory_usage_bytes(vllm_config) + s.page_size_bytes - 1) // s.page_size_bytes for s in specs
         )
-        for g in groups
-    )
+    return total
 
 
 def allocate_cache_config(vllm_config, groups, available_memory):

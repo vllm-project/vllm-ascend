@@ -5,6 +5,7 @@ import pytest
 from transformers import Qwen3Config
 from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
@@ -184,7 +185,8 @@ def test_non_dcp_dspark_config_is_not_replaced_during_validation(
         ("deepseek_v41", "DeepseekV41ForCausalLM", "dspark_num_experts_per_tok"),
     ],
 )
-def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(model_type, architecture, expert_key):
+@pytest.mark.parametrize("flattened", [False, True])
+def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(model_type, architecture, expert_key, flattened):
     text_config = SimpleNamespace(
         model_type=f"{model_type}_text",
         dspark_target_layer_ids=[37, 38, 39],
@@ -200,6 +202,18 @@ def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(model_type, ar
         text_config=text_config,
     )
     hf_config.update = lambda values: hf_config.__dict__.update(values)
+    if flattened:
+        hf_config = DeepseekV41Config(
+            text_config={
+                "dspark_target_layer_ids": [37, 38, 39],
+                "dspark_n_routed_experts": 128,
+                "num_nextn_predict_layers": 3,
+                expert_key: 3,
+            }
+        )
+        hf_config.model_type = "deepseek_v4"
+        hf_config.architectures = ["DSparkDraftModel"]
+        text_config = hf_config
     model_arch_config = ModelArchitectureConfig(
         architectures=[architecture],
         model_type=model_type,
