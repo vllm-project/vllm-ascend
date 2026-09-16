@@ -62,7 +62,7 @@
       <tr>
           <td>value</td>
           <td>输入</td>
-          <td>attention结构的V输入，不支持非连续。A2/A3 C8 MLA场景下，有效V为key反量化后的512维NoPE部分。当前vLLM接入中key和value复用同一份packed KV缓存，物理最后一维为528（rope_head_dim=0）或656（rope_head_dim=64）；原独立算子测试也支持传入最后一维为512的NoPE value张量。输出最后一维始终为512。</td>
+          <td>attention结构的V输入，不支持非连续。A2/A3 C8 MLA场景下，有效V为key反量化后的512维NoPE部分。算子调用时key和value可复用同一份packed KV缓存，物理最后一维为528（rope_head_dim=0）或656（rope_head_dim=64）；原独立算子测试也支持传入最后一维为512的NoPE value张量。输出最后一维始终为512。</td>
           <td>FLOAT8_E4M3、INT8、HIFLOAT8</td>
           <td>ND</td>
       </tr>
@@ -244,7 +244,7 @@
 | 0 | 512 | 528 = 512 INT8 NoPE + 4 FLOAT32 scale | 512 | 512 |
 | 64 | 576 | 656 = 512 INT8 NoPE + 64 FP16/BF16 RoPE + 4 FLOAT32 scale | 640 | 512 |
 
-表中的V维度指有效计算数据。当前vLLM调用中Key/Value复用同一份528或656字节的packed缓存。
+表中的V维度指有效计算数据。算子调用时Key/Value可复用同一份528或656字节的packed缓存。
 
 rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维RoPE。
 内核跳过RoPE输入读取，在内部原有计算区域补零，保留原计算分块和缓冲区大小。
@@ -261,9 +261,7 @@ python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_qu
 ```
 
 原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py)
-共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
+共51项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
 LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
 并校验有效query行的softmax_max、softmax_sum及LSE。
-两项Python接入测试调用真实RMSNorm/INT8量化、cache写入和attention路径，
-验证空RoPE、FLOAT32 scale字节、slot=-1不写cache以及独立均值精度。

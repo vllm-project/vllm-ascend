@@ -5675,10 +5675,9 @@ class NPUModelRunner(GPUModelRunner):
                         getattr(impl, "enable_sparse_sfa_c8", False)
                     )
                     if cache_sparse_sfa_c8:
-                        # NoPE layer dimensions may override the model-wide defaults.
                         head_size = get_sfa_qsfa_packed_head_dim(
-                            impl.kv_lora_rank,
-                            impl.qk_rope_head_dim,
+                            self.model_config.hf_text_config.kv_lora_rank,
+                            self.model_config.hf_text_config.qk_rope_head_dim,
                         )
                         dtype = self.c8_k_cache_dtype
                     else:

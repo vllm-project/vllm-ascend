@@ -10,12 +10,10 @@ the known normalized-probability versus unnormalized-exp rounding difference.
 import math
 from dataclasses import dataclass
 from itertools import accumulate
-from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, custom_kv_rmsnorm_rope
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 
@@ -320,86 +318,3 @@ def test_rope_invalid_shape_or_dimension(rope_dim, query_dim, key_dim):
     inputs["rope_head_dim"] = rope_dim
     with pytest.raises(RuntimeError):
         _run_custom_op(inputs)
-
-
-@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
-@torch.inference_mode()
-def test_rope0_python_quant_cache_attention_pipeline(dtype):
-    """Exercise native RMSNorm/INT8 quantization, cache scatter and C8 dispatch."""
-    valid_kv_tokens = 5
-    input_tokens = valid_kv_tokens + 1
-    valid_query_tokens = 2
-    query_capacity = valid_query_tokens + 1
-    heads = 4
-    packed_dim = NOPE_DIM + SCALE_GROUPS * torch.float32.itemsize
-    token_ids = torch.arange(input_tokens).view(-1, 1, 1, 1)
-    lanes = torch.arange(NOPE_DIM).view(1, 1, 1, -1)
-    kv = (((lanes * (token_ids + 1) + 3 * token_ids) % 31 + 1) / 16).to(dtype)
-    kv[..., 0] = 0
-    gamma = torch.tensor([0.5, 1.0, 1.5, 2.0], dtype=dtype).repeat_interleave(QUANT_TILE_SIZE)
-    k_rope, k_nope, scale_bytes = custom_kv_rmsnorm_rope(
-        kv.npu(), gamma.npu(), None, None, NOPE_DIM, 0, dst_type=torch.int8, tile_size=QUANT_TILE_SIZE
-    )
-    assert k_rope.shape == (input_tokens, 1, 1, 0)
-    assert k_nope.shape == (input_tokens, 1, 1, NOPE_DIM)
-    assert scale_bytes.shape == (input_tokens, 1, 1, SCALE_GROUPS * torch.float32.itemsize)
-    assert k_rope.dtype == k_nope.dtype == scale_bytes.dtype == torch.int8
-    quantized = k_nope.cpu()
-    scales = scale_bytes.cpu().contiguous().view(torch.float32)
-    assert torch.isfinite(scales).all() and (scales > 0).all()
-    assert torch.count_nonzero(quantized[..., 0]) == 0
-    assert torch.count_nonzero(quantized[..., 1:]) > 0
-    assert torch.unique(scales).numel() > 1
-
-    impl = SimpleNamespace(
-        enable_sparse_sfa_c8=True,
-        qk_rope_head_dim=0,
-        sfa_qsfa_packed_kv_head_dim=packed_dim,
-        sfa_qsfa_tile_size=QUANT_TILE_SIZE,
-        scale=SCALE_VALUE,
-    )
-    metadata = SimpleNamespace(block_size=PAGE_SIZE, block_table=torch.tensor([[0]], dtype=torch.int32).npu())
-    cache = torch.full((1, PAGE_SIZE, 1, packed_dim), 17, dtype=torch.int8).npu()
-    expected_cache = cache.cpu()
-    packed = torch.cat((quantized.flatten(0, -2), scale_bytes.cpu().flatten(0, -2)), dim=-1)
-    expected_cache[0, :valid_kv_tokens, 0] = packed[:valid_kv_tokens]
-    slots = torch.cat((torch.arange(valid_kv_tokens), torch.tensor([-1]))).npu()
-    AscendSFAImpl._store_parallel_kv(impl, k_rope, k_nope, scale_bytes, None, [], (cache,), slots, metadata, False)
-    # This includes a valid slot zero together with an invalid slot. Every
-    # unwritten byte must retain its sentinel, including the end of the cache.
-    assert torch.equal(cache.cpu(), expected_cache)
-    AscendSFAImpl._store_parallel_kv(
-        impl, k_rope, k_nope, scale_bytes, None, [], (cache,), torch.full_like(slots, -1), metadata, False
-    )
-    assert torch.equal(cache.cpu(), expected_cache)
-
-    query = torch.zeros((query_capacity, heads, NOPE_DIM), dtype=dtype)
-    query[..., 0] = torch.arange(1, heads + 1, dtype=dtype)
-    query_rope = torch.empty((query_capacity, heads, 0), dtype=dtype)
-    sparse = torch.full((query_capacity, 1, QUANT_TILE_SIZE), -1, dtype=torch.int32)
-    sparse[:valid_query_tokens, 0, :valid_kv_tokens] = torch.arange(valid_kv_tokens, dtype=torch.int32)
-    output = AscendSFAImpl._execute_sparse_flash_attention_process(
-        impl,
-        query.npu(),
-        query_rope.npu(),
-        (cache,),
-        sparse.npu(),
-        metadata,
-        torch.tensor([valid_query_tokens], dtype=torch.int32).npu(),
-        torch.tensor([valid_kv_tokens], dtype=torch.int32).npu(),
-    )
-
-    # Q is nonzero only where the real quantizer emitted K=0, so every score
-    # is exactly zero. Decode producer scales, round dequantized V to its
-    # compute dtype, then independently average the causally selected rows.
-    values = (quantized.float() * scales.repeat_interleave(QUANT_TILE_SIZE, dim=-1)).to(dtype).double()
-    expected = torch.zeros_like(query)
-    for query_index in range(valid_query_tokens):
-        selected = valid_kv_tokens - valid_query_tokens + query_index + 1
-        expected[query_index] = values[:selected, 0, 0].mean(dim=0).to(dtype)
-    actual = output.cpu()
-    assert actual.shape == expected.shape and actual.dtype == dtype
-    assert torch.isfinite(actual).all()
-    assert torch.count_nonzero(actual[valid_query_tokens:]) == 0
-    atol, rtol = (BF16_ATOL, BF16_RTOL) if dtype == torch.bfloat16 else (FP16_ATOL, FP16_RTOL)
-    torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)

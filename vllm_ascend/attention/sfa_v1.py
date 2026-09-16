@@ -734,12 +734,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        if (
-            self.qk_rope_head_dim == 0
-            and self.enable_sparse_sfa_c8
-            and get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.STANDARD
-        ):
-            raise NotImplementedError("NoPE C8 SFA is supported only on A2/A3 with an INT8 latent KV cache.")
+        if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_c8:
+            raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
@@ -1071,7 +1067,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+        if self.qk_rope_head_dim == 0:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
@@ -1384,13 +1380,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
-        if self.qk_rope_head_dim == 0 and not self.enable_sparse_sfa_c8:
+        if self.qk_rope_head_dim == 0:
             return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
-        if self.qk_rope_head_dim == 0 and kv_cache[0].shape[1] != attn_metadata.block_size:
-            # Match the logical pages selected by NoPE metadata for hybrid caches.
-            cache = kv_cache[0]
-            kv_cache = (cache.view(-1, attn_metadata.block_size, *cache.shape[2:]), *kv_cache[1:])
-        output = DeviceOperator.execute_sparse_flash_attention_process(
+        return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
             q_pe,
@@ -1401,11 +1393,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
             block_table=block_table,
         )
-        if self.qk_rope_head_dim == 0:
-            # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
-            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
-            output = output.masked_fill(~valid[:, None, None], 0)
-        return output
 
     def _record_query_gather_context(
         self,
@@ -1455,7 +1442,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_kv = torch.cat(
                 [
                     k_nope.view(-1, k_nope.shape[-1]),
-                    k_pe.flatten(0, -2),
+                    k_pe.view(-1, k_pe.shape[-1]),
                     knope_scale.view(-1, knope_scale.shape[-1]),
                 ],
                 dim=-1,
@@ -1463,16 +1450,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             packed_head_dim = self.sfa_qsfa_packed_kv_head_dim
             assert packed_kv.shape[-1] == packed_head_dim
             assert kv_cache is not None
-            if self.qk_rope_head_dim == 0:
-                # NoPE retains padded input rows during graph replay. Ignore their -1 slots.
-                cache = kv_cache[0]
-                scatter_paged_cache(cache, slot_mapping_sfa[: packed_kv.shape[0]].long(), packed_kv, cache.shape[1])
-            else:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, packed_head_dim),
-                    slot_mapping_sfa.view(-1, 1),
-                    packed_kv.view(-1, packed_head_dim),
-                )
+            torch_npu.npu_scatter_nd_update_(
+                kv_cache[0].view(-1, packed_head_dim),
+                slot_mapping_sfa.view(-1, 1),
+                packed_kv.view(-1, packed_head_dim),
+            )
 
         return k_pe, k_nope
 
@@ -1723,9 +1705,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata,
             )
             k_pe, k_nope = kv_outputs[:2]
-            knope_scale = kv_outputs[2] if len(kv_outputs) >= 3 else None
-            # PCP removes replicated decode writes when gathering prefill KV.
-            slot_mapping_sfa = kv_outputs[3] if len(kv_outputs) == 4 else self._get_sfa_kv_slot_mapping(attn_metadata)
+            knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             # k_li no longer exists at this point: it is computed by
             # indexer.forward_k below and gathered at cache-write time, so
             # the fused gather below only carries the main KV.
@@ -1755,7 +1735,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
-                slot_mapping_sfa,
+                self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
             )
@@ -1838,8 +1818,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 def custom_kv_rmsnorm_rope(
     kv: torch.Tensor,
     gamma: torch.Tensor,
-    cos: torch.Tensor | None,
-    sin: torch.Tensor | None,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
     kv_lora_rank: int,
     qk_rope_head_dim: int,
     *,
@@ -1849,7 +1829,7 @@ def custom_kv_rmsnorm_rope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     rms_in, rope_in = kv.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
     k_nope, _ = torch_npu.npu_rms_norm(rms_in, gamma, epsilon=epsilon)
-    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin) if qk_rope_head_dim else rope_in
+    k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     prefix_shape = k_nope.shape[:-1]
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
@@ -1861,7 +1841,7 @@ def custom_kv_rmsnorm_rope(
     if dst_type == torch.int8:
         # Return byte views so the caller can concatenate all three components.
         return (
-            k_rope.contiguous().view(torch.int8) if qk_rope_head_dim else k_nope.new_empty((*prefix_shape, 0)),
+            k_rope.contiguous().view(torch.int8),
             k_nope.view(*prefix_shape, kv_lora_rank),
             knope_scale.to(torch.float32).view(*prefix_shape, -1).contiguous().view(torch.int8),
         )

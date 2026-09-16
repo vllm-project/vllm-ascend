@@ -163,29 +163,20 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
-        cos: torch.Tensor | None,
-        sin: torch.Tensor | None,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         kv_cache: tuple,
         slots: torch.Tensor,
         attn_metadata: M,
     ):
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        if self.qk_rope_head_dim == 0:
-            (kv_no_split,), slots = _gather_prefill_cache_inputs((kv_no_split,), slots, num_decode_tokens)
-        else:
-            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
-                (kv_no_split, cos, sin), slots, num_decode_tokens
-            )
+        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "
             f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
         )
 
-        kv_outputs = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-        if self.enable_sparse_sfa_c8:
-            # C8 writes after preprocessing; keep its rows paired with the gathered slots.
-            return (*kv_outputs, slots)
-        return kv_outputs
+        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
 @dataclass
@@ -281,13 +272,13 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
     def _prepare_parallel_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        cos: torch.Tensor | None,
-        sin: torch.Tensor | None,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         slot_mapping: torch.Tensor,
         cum_query_lens: torch.Tensor,
         seq_lens: torch.Tensor,
         draft_index: int | None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         cos, sin, slot_mapping, extra = super()._prepare_parallel_metadata(
             common_attn_metadata,
             cos,
@@ -305,12 +296,11 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         local_end_with_pad = local_start + num_tokens_per_device
         local_end = min(local_end_with_pad, common_attn_metadata.num_actual_tokens)
 
-        if cos is not None and sin is not None:
-            assert cos.shape == sin.shape, f"cos.shape must equal sin.shape, got {cos.shape} and {sin.shape}"
-            pad_size = num_tokens_pad - cos.shape[0]
-            if pad_size > 0:
-                cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
-                sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
+        assert cos.shape == sin.shape, f"cos.shape must equal sin.shape, got {cos.shape} and {sin.shape}"
+        pad_size = num_tokens_pad - cos.shape[0]
+        if pad_size > 0:
+            cos = nn.functional.pad(cos, (0, 0, 0, 0, 0, 0, 0, pad_size))
+            sin = nn.functional.pad(sin, (0, 0, 0, 0, 0, 0, 0, pad_size))
         pad_size_slot = num_tokens_pad - slot_mapping.shape[0]
         if pad_size_slot > 0:
             slot_mapping = nn.functional.pad(slot_mapping, (0, pad_size_slot), value=-1)
@@ -318,10 +308,9 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             slot_mapping = slot_mapping[:num_tokens_pad]
 
         slot_mapping_cp = slot_mapping[local_start:local_end_with_pad]
-        if cos is not None and sin is not None:
-            cos = cos[local_start:local_end_with_pad]
-            sin = sin[local_start:local_end_with_pad]
-            assert cos.shape[0] == num_tokens_per_device
+        cos = cos[local_start:local_end_with_pad]
+        sin = sin[local_start:local_end_with_pad]
+        assert cos.shape[0] == num_tokens_per_device
         assert slot_mapping_cp.shape[0] == num_tokens_per_device
         assert slot_mapping.shape[0] == num_tokens_pad
 
@@ -495,7 +484,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             assert knope_scale is not None
             parts = [
                 k_nope.view(-1, k_nope.shape[-1]),
-                k_pe.flatten(0, -2),
+                k_pe.view(-1, k_pe.shape[-1]),
                 knope_scale.view(-1, knope_scale.shape[-1]),
             ]
         else:
