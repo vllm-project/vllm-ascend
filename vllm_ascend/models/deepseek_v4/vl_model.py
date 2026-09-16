@@ -161,25 +161,33 @@ class AscendDeepseekV4ForConditionalGeneration(
             llm_offset += n_llm
         return tuple(embeds)
 
-    def _get_sentinel_table(self, dtype: torch.dtype) -> torch.Tensor:
+    def _get_sentinel_table(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         """Stacked sentinel vectors in ``dtype``, cached across steps.
 
         The raw ``image_*`` parameters are float32, so stacking + casting per
-        forward would repeat an avoidable copy in this hot path.
+        forward would repeat an avoidable copy in this hot path. The cache is
+        keyed on dtype and device: it is rebuilt if the model is moved (e.g.
+        pipeline-parallel sharding or device placement) after the first
+        forward pass, since a plain attribute does not follow
+        ``nn.Module.to(device)``.
         """
         table = self._sentinel_table
-        if table is None or table.dtype != dtype:
+        if table is None or table.dtype != dtype or table.device != device:
             # Detach: this is an inference-only cache, and a grad-enabled
             # table would break torch.where(..., out=) below.
-            table = torch.stack(
-                [
-                    self.image_start,
-                    self.image_pad,
-                    self.image_pad,
-                    self.image_newline,
-                    self.image_end,
-                ]
-            ).to(dtype).detach()
+            table = (
+                torch.stack(
+                    [
+                        self.image_start,
+                        self.image_pad,
+                        self.image_pad,
+                        self.image_newline,
+                        self.image_end,
+                    ]
+                )
+                .to(dtype=dtype, device=device)
+                .detach()
+            )
             self._sentinel_table = table
         return table
 
@@ -208,7 +216,7 @@ class AscendDeepseekV4ForConditionalGeneration(
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if self.image_start is not None:
             sentinel_mask = image_sentinel_mask(input_ids)
-            table = self._get_sentinel_table(inputs_embeds.dtype)
+            table = self._get_sentinel_table(inputs_embeds.dtype, inputs_embeds.device)
             idx = (input_ids - IMAGE_SENTINEL_BASE_ID).clamp(0, 4)
             # In-place write avoids one full-size allocation per step. The
             # `is_multimodal` exclusion is unnecessary here: those positions

@@ -72,6 +72,27 @@ def test_embed_input_ids_replaces_sentinels_and_caches_table(vision_wrapper):
     assert vision_wrapper._sentinel_table is table_before
 
 
+def test_sentinel_table_rebuilt_on_device_change(vision_wrapper):
+    # The fixture mock returns a (6, 8) embedding; align it with the
+    # shorter ids used below so the in-place where can broadcast.
+    vision_wrapper.language_model.embed_input_ids.return_value = torch.randn(2, 8, dtype=torch.bfloat16)
+    ids = torch.tensor([IMAGE_SENTINEL_BASE_ID, 100])
+    vision_wrapper.embed_input_ids(ids)
+    assert vision_wrapper._sentinel_table.device.type == "cpu"
+
+    # The table is a plain attribute and does not follow nn.Module.to();
+    # a device move after the first forward must invalidate the cache.
+    meta_table = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("meta"))
+    assert meta_table.device.type == "meta"
+    assert vision_wrapper._sentinel_table is meta_table
+
+    # Moving back rebuilds again instead of returning the stale table.
+    rebuilt = vision_wrapper._get_sentinel_table(torch.bfloat16, torch.device("cpu"))
+    assert rebuilt.device.type == "cpu"
+    assert rebuilt is not meta_table
+    assert vision_wrapper._sentinel_table is rebuilt
+
+
 def test_embed_input_ids_without_image_params_is_passthrough(vision_wrapper):
     vision_wrapper.image_start = None
     ids = torch.tensor([IMAGE_SENTINEL_BASE_ID, 100])
