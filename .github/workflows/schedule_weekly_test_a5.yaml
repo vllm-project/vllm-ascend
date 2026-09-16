@@ -15,9 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# This workflow related to the resources atlas 800 A3
-# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
-# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+# This workflow related to the resources atlas 800 A5
+# **Please note**: current A5 resource pool's maximum allowed concurrency is 5*16 NPUs
+# We will limit the concurrency of jobs on A5 to avoid the risk of insufficient resources
 name: Weekly-A5
 
 on:
@@ -77,7 +77,7 @@ on:
         required: false
         default: '{}'
   pull_request:
-      branches: [ main ]
+      branches: [ weekly_a5 ]
 permissions:
   contents: read
   pull-requests: read
@@ -222,7 +222,7 @@ jobs:
       soc_version: a5
       test_frequency: weekly
       runner: linux-aarch64-a5-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
