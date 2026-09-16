@@ -164,12 +164,6 @@ jobs:
         # are present on disk. The hash is consumed by both the restore
         # (below) and the save (at the end of the job).
         run: |
-          # hashFiles() resolves against the runner agent's view of the
-          # workspace and returns "" for files checked out inside the job
-          # container, so compute the key hash in bash instead (same
-          # approach as get_csrc_hash below). Fail closed so a missing
-          # file cannot be converted into sha256(empty) and then appear
-          # to be a legitimate cache miss.
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           for f in requirements-dev.txt requirements.txt pyproject.toml; do
@@ -184,27 +178,9 @@ jobs:
 
       - name: Restore uv wheel cache
         id: uv-cache
-        # Allowlist-based: only runner classes whose storage has proven
-        # able to sustain the small-file I/O of cache restore/prune/save
-        # participate. Observed on A2 and on the amd64 CPU runner:
-        # `uv cache prune --ci` alone (pure unlink/metadata ops over the
-        # wheel cache) can exceed 30 minutes — slower than the ~7 min
-        # cold install it is meant to amortize. Everything not on the
-        # allowlist (a2, cpu, a5) stays on the cold-install baseline.
-        #
-        # Positioned immediately after the vllm-ascend checkout so that
-        # the cache is warm before the "Install vllm-ascend" steps that
-        # actually consume it. The "Install vllm-project/vllm from
-        # source" step (vllm-empty) is intentionally placed before this
-        # restore because the runner has no access to the
-        # vllm-ascend requirements file at that point; that step pays
-        # the cold-install cost on the first run only.
         if: ${{ matrix.group.npu_type == 'a3' || matrix.group.npu_type == '310p' }}
         uses: runs-on/cache/restore@v5
         with:
-          # Use an explicit absolute path: `~` resolves to the runner
-          # agent's home, not the job container's, so the cache would
-          # otherwise land in a directory the container cannot see.
           path: /root/.cache/uv
           key: uv-wheels-v1-${{ matrix.group.image_tag }}-${{ inputs.vllm }}-${{ steps.get_req_hash.outputs.REQ_HASH }}
           restore-keys: |
@@ -330,23 +306,7 @@ jobs:
         # Runs only when a save will follow, and only on allowlisted
         # runners (see the restore step above: a2/cpu runners cannot
         # sustain the small-file I/O, so the whole cache mechanism is
-        # skipped there). `uv cache prune --ci` is uv's official CI
-        # command: it keeps the reusable wheel/sdist/metadata entries and
-        # drops cache content with no reuse value across runs. The
-        # explicit rm also removes `builds-v0/`, uv's ephemeral
-        # build-isolation envs (GB-scale for packages like torch) that
-        # are rebuilt on every install. Without this the save step packs
-        # multi-GB garbage into the archive. The `du -sh` line surfaces
-        # the pruned size in the log for verification.
-        #
-        # Non-blocking by design: sibling matrix shards can be scheduled
-        # onto runners that share one physical cache dir on the same
-        # host (observed: three a3-2 shards on one host all failing prune
-        # with ENOENT within the same minute). A concurrent shard's
-        # install mutates/removes entries mid-prune, and uv exits 2 on
-        # files already deleted. Retry once, then keep going: a partially
-        # pruned cache only inflates the save archive, it never breaks
-        # the tests. Hence continue-on-error + retry + || true.
+        # skipped there). 
         if: ${{ (matrix.group.npu_type == 'a3' || matrix.group.npu_type == '310p') && steps.uv-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         run: |
@@ -357,15 +317,7 @@ jobs:
       - name: Save uv wheel cache
         # Skipped on exact cache hit so steady-state runs pay zero save
         # cost, and only runs on allowlisted runners (see the restore
-        # step above). Shards that missed (including restore-keys
-        # partial hits) may still race to write the same key, which is
-        # fine because `runs-on/cache/save@v5` is idempotent for
-        # identical key+path payloads. timeout-minutes +
-        # continue-on-error cap the worst case: a save that still
-        # degrades on some runner is killed after 10 minutes and turned
-        # into a warning instead of skipping the test run and failing
-        # the PR gate (same best-effort pattern as the upload steps
-        # below).
+        # step above). 
         if: ${{ (matrix.group.npu_type == 'a3' || matrix.group.npu_type == '310p') && steps.uv-cache.outputs.cache-hit != 'true' }}
         timeout-minutes: 10
         continue-on-error: true
