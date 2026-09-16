@@ -44,7 +44,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true,"enable_shared_expert_dp":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
