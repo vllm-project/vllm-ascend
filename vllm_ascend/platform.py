@@ -1410,7 +1410,7 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
     max_cudagraph_capture_size = min(max_num_seqs * decode_query_len, 512)
 
     # Pad to multiple of 8/16 to avoid eager fallback.
-    if max_cudagraph_capture_size >= 8:
+    if max_cudagraph_capture_size > 4:
         max_cudagraph_capture_size = (max_cudagraph_capture_size + 7) // 8 * 8
     if max_cudagraph_capture_size >= 256:
         max_cudagraph_capture_size = (max_cudagraph_capture_size + 15) // 16 * 16
