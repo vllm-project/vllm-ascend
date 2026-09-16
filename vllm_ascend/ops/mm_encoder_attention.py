@@ -458,10 +458,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             # A single packed sequence [0, T] needs no host conversion.
             actual_seq_lengths: Sequence[int] = (token_count,)
         else:
-            actual_seq_lengths = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, token_count)
-            if actual_seq_lengths is None:
+            converted_lengths = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, token_count)
+            if converted_lengths is None:
                 _record_vit_fusion_stat("cu_seqlens_values")
                 return None
+            actual_seq_lengths = converted_lengths
 
         from vllm_ascend.ops.triton.vision_qkv_rope_pad import vision_qkv_rope_pad
 
