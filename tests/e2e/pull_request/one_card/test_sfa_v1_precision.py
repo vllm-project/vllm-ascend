@@ -51,8 +51,6 @@ def _emit_metric(line: str) -> None:
 if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
-from vllm.forward_context import set_forward_context  # noqa: E402
-
 from tests.e2e.pull_request.one_card.attention_utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
@@ -377,18 +375,19 @@ def _run_precision_check(
     )
     seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32, device=device)
 
-    with set_forward_context(attn_metadata=None, vllm_config=vllm_config):
-        backend_output = _run_sfa_kernel(
-            ql_nope=ql_nope,
-            q_pe=q_pe,
-            k_nope_cache=k_nope_cache,
-            k_rope_cache=k_rope_cache,
-            block_table=block_table,
-            topk_indices=topk_indices,
-            cum_query_lens=cum_query_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            scale=scale,
-        )
+    # This isolated kernel takes all metadata explicitly. A model forward
+    # context would also initialize MRv2 runtime state and require TP/DP groups.
+    backend_output = _run_sfa_kernel(
+        ql_nope=ql_nope,
+        q_pe=q_pe,
+        k_nope_cache=k_nope_cache,
+        k_rope_cache=k_rope_cache,
+        block_table=block_table,
+        topk_indices=topk_indices,
+        cum_query_lens=cum_query_lens,
+        seq_lens_tensor=seq_lens_tensor,
+        scale=scale,
+    )
     reference_output = _reference_sparse_attention(
         ql_nope=ql_nope,
         q_pe=q_pe,
