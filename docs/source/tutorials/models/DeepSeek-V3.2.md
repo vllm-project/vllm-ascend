@@ -16,10 +16,12 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+|  Weight Version                              | Hardware Requirements                                                      | Download Links |
+|----------------------------------------------|----------------------------------------------------------------------------|----------------|
+| `DeepSeek-V3.2-Exp-W8A8` (Quantized version) | **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) |
+|  `DeepSeek-V3.2-w8a8` (Quantized version)    | **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -133,6 +135,7 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
 --host 0.0.0.0 \
 --port 8000 \
@@ -184,6 +187,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
@@ -229,6 +233,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
@@ -281,6 +286,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
@@ -330,6 +336,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
@@ -414,7 +421,7 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
         --port $2 \
@@ -486,7 +493,7 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
         --port $2 \
@@ -561,6 +568,7 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
         --port $2 \
@@ -635,6 +643,7 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
         --port $2 \

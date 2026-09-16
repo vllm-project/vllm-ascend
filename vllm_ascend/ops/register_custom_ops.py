@@ -3,6 +3,7 @@ import torch_npu
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
@@ -24,8 +25,21 @@ def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
     except (AssertionError, AttributeError):
         return None
 
-    if local_sizes is None or len(local_sizes) != ep_group.world_size:
+    if local_sizes is None:
         return None
+    if len(local_sizes) != ep_group.world_size:
+        pcp_size = get_pcp_group().world_size
+        dp_size = get_dp_group().world_size
+        if len(local_sizes) * pcp_size != ep_group.world_size or len(local_sizes) % dp_size:
+            return None
+        sp_size = len(local_sizes) // dp_size
+        # Upstream describes DP x SP; EP ranks are ordered DP x PCP x TP.
+        local_sizes = [
+            size
+            for dp_rank in range(dp_size)
+            for _ in range(pcp_size)
+            for size in local_sizes[dp_rank * sp_size : (dp_rank + 1) * sp_size]
+        ]
     return [int(size) for size in local_sizes]
 
 

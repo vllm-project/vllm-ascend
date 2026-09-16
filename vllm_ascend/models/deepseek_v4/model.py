@@ -339,14 +339,14 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # MC2 dispatch/combine fails
+            # in the dummy profile run if a token repeats an expert id
+            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+
             self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
-                    config.vocab_size,
-                    config.num_experts_per_tok,
-                    dtype=torch.int32,
-                ),
+                token_to_expert,
                 requires_grad=False,
             )
             self.gate.e_score_correction_bias = None

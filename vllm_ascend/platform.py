@@ -1258,6 +1258,9 @@ def _setup_worker_and_scheduler(
         vllm_config.scheduler_config.scheduler_cls = (
             "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
+        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
+        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
+        # has been moved to patch_engine_core.py.
         import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
     # Extend original scheduler_config to use BatchJobAwareScheduler.

@@ -24,6 +24,8 @@ The `Mixtral-8x7B-Instruct-v0.1` model is supported in vllm-ascend.
 
 It is recommended to download the model weight to a local directory, such as `/data/models/`.
 
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
 ### Installation
 
 You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` directly.
@@ -81,6 +83,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 ``` bash
 
+# Ensure the model path matches the directory recorded during download
 vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" --additional-config '{"enable_mlapo":true}' \
   --tensor-parallel-size 4 \
   --max-model-len 4096 \

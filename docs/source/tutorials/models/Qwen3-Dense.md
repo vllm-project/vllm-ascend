@@ -24,29 +24,31 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Hardware Requirement | Download |
 |-------|---------------------|----------|
-| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
-| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
-| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
-| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
-| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
-| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Download](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
+| Qwen3-0.6B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-0.6B) |
+| Qwen3-1.7B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-1.7B) |
+| Qwen3-4B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-4B) |
+| Qwen3-8B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-8B) |
+| Qwen3-14B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-14B) |
+| Qwen3-32B | 1 Atlas A3 inference products (64GB × 16), 1 Atlas A2 inference products (64GB × 8) | [Modelers](https://modelers.cn/models/Modelers_Park/Qwen3-32B) |
 
 **Quantized Versions for Atlas A2/A3 inference products:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 **Quantized Versions for Atlas 300I DUO:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
-| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
-| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -233,7 +235,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
         --served-model-name qwen3 \
         --trust-remote-code \
@@ -252,6 +254,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES=0,1
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
         --port 8004 \
         --data-parallel-size 1 \
@@ -275,7 +278,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
         --port 8080 \
@@ -298,6 +302,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-14B-w8a8sc-310-vllm/TP1/Qwen3-14B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
         --port 8080 \
@@ -319,7 +324,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4 \
         --host 127.0.0.1 \
         --port 8080 \
