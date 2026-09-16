@@ -681,7 +681,7 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
 @pytest.mark.parametrize("hidden_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
 def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, hidden_dtype, input_dtype):
-    input_ids = torch.tensor([0, 22], dtype=input_dtype)
+    input_ids = torch.tensor([-1, 22], dtype=input_dtype)
     hidden_states = torch.randn(2, 4, dtype=hidden_dtype)
     router_logits = torch.randn(2, 4)
     topk_weights = torch.randn(2, 2)
@@ -725,23 +725,21 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
     assert ids is topk_ids
-    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], input_ids.to(torch.int64))
-    if input_dtype == torch.int64:
-        assert hash_op.call_args.kwargs["input_ids"] is input_ids
+    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], torch.tensor([0, 22], dtype=torch.int64))
     prepare_finalize.all_gather_input_id_with_dp_group.assert_called_once()
 
     with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
         router._compute_routing(hidden_states, router_logits, torch.int32)
 
 
-def test_vision_router_fuses_bias_and_image_sentinel(monkeypatch):
-    input_ids = torch.tensor([11, 129259], dtype=torch.int32)
+@pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
+@pytest.mark.parametrize("renormalize", [True, False])
+def test_vision_router_preserves_reference_routing(monkeypatch, image_sentinel_lo, renormalize):
+    input_ids = torch.tensor([-1, image_sentinel_lo], dtype=torch.int32)
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 4, dtype=torch.float32)
     text_bias = torch.randn(4, dtype=torch.float32)
     bias_vl = torch.randn(4, dtype=torch.bfloat16)
-    topk_weights = torch.randn(2, 2)
-    topk_ids = torch.zeros(2, 2, dtype=torch.int32)
     prepare_finalize = SimpleNamespace(all_gather_input_id_with_dp_group=MagicMock(side_effect=lambda value: value))
     monkeypatch.setattr(
         fused_topk_router_module,
@@ -751,7 +749,7 @@ def test_vision_router_fuses_bias_and_image_sentinel(monkeypatch):
             moe_comm_method=SimpleNamespace(prepare_finalize=prepare_finalize),
         ),
     )
-    hash_op = MagicMock(return_value=(topk_weights, topk_ids, None))
+    hash_op = MagicMock(side_effect=AssertionError("Vision routing must not call the hash kernel"))
     monkeypatch.setattr(
         fused_topk_router_module.torch.ops._C_ascend,
         "moe_gating_top_k_hash",
@@ -766,7 +764,9 @@ def test_vision_router_fuses_bias_and_image_sentinel(monkeypatch):
         scoring_func="sqrtsoftplus",
         e_score_correction_bias=text_bias,
         bias_vl=bias_vl,
-        image_sentinel_lo=129257,
+        image_sentinel_lo=image_sentinel_lo,
+        renormalize=renormalize,
+        routed_scaling_factor=2.0,
     )
 
     weights, ids = router._compute_routing(
@@ -776,14 +776,16 @@ def test_vision_router_fuses_bias_and_image_sentinel(monkeypatch):
         input_ids=input_ids,
     )
 
-    kwargs = hash_op.call_args.kwargs
-    assert weights is topk_weights
-    assert ids.dtype == torch.int64
-    assert kwargs["bias"] is text_bias
-    assert kwargs["bias_vl"].dtype == router_logits.dtype
-    torch.testing.assert_close(kwargs["input_ids"], input_ids.to(torch.int64))
-    assert kwargs["image_sentinel_lo"] == 129257
-    assert kwargs["image_sentinel_count"] == 5
+    scores = torch.nn.functional.softplus(router_logits).sqrt()
+    row_bias = torch.stack((text_bias, bias_vl.float()))
+    expected_ids = (scores + row_bias).topk(2, dim=-1).indices
+    expected_weights = scores.gather(1, expected_ids)
+    if renormalize:
+        expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(ids, expected_ids)
+    torch.testing.assert_close(weights, expected_weights * 2.0)
+    assert weights.dtype == torch.float32
+    hash_op.assert_not_called()
 
 
 def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatch):
