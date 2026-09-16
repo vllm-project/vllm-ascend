@@ -519,6 +519,18 @@ def test_should_skip_allreduce_across_dp_group(
             "vllm_ascend.ascend_forward_context.select_moe_comm_method",
             return_value=MoECommType.MC2,
         ),
+        mock.patch("vllm_ascend.ascend_forward_context.is_a3_mega_moe_enabled", return_value=False),
         mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
     ):
         assert utils.should_skip_allreduce_across_dp_group(vllm_config) is expected
+
+
+def test_should_not_skip_allreduce_for_a3_mega_moe():
+    vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+
+    with (
+        mock.patch("vllm_ascend.utils.is_hierarchical_communication_enabled", return_value=False),
+        mock.patch("vllm_ascend.utils.is_moe_model", return_value=True),
+        mock.patch("vllm_ascend.ascend_forward_context.is_a3_mega_moe_enabled", return_value=True),
+    ):
+        assert not utils.should_skip_allreduce_across_dp_group(vllm_config)

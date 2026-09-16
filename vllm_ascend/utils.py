@@ -1289,6 +1289,14 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_context_moe_model:
         return True
 
+    # CANN MegaMoE on A3 requires the same num_tokens on every participating
+    # rank. Keep DP metadata synchronization enabled so PrepareAndFinalizeWithMC2
+    # pads all ranks to one shape and supplies x_active_mask for padded rows.
+    from vllm_ascend.ascend_forward_context import is_a3_mega_moe_enabled
+
+    if is_a3_mega_moe_enabled(vllm_config):
+        return False
+
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer:

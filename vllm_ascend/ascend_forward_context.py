@@ -11,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT, get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -29,6 +29,14 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+
+
+def is_a3_mega_moe_enabled(vllm_config: VllmConfig | None = None) -> bool:
+    # Import lazily because importing the fused_moe package initializes this
+    # module through its communication-method registration path.
+    from vllm_ascend.ops.fused_moe.a3_mega_moe import is_a3_mega_moe_enabled as _is_enabled
+
+    return _is_enabled(vllm_config)
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -212,8 +220,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    # NOTE: To save memory, we cap the max number of tokens to 512.
-    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
+    # A3 MegaMoE uses a larger symmetric buffer than the legacy fused-MC2
+    # backends. The named cap bounds its persistent communication memory.
+    tokens_per_rank_limit = A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT if is_a3_mega_moe_enabled(vllm_config) else 512
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, tokens_per_rank_limit)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -259,6 +269,11 @@ def _select_a3_moe_comm_method(
     mc2_tokens_capacity: int,
     enable_fused_mc2: int,
 ) -> MoECommType:
+    if enable_fused_mc2 == 1 and is_a3_mega_moe_enabled(vllm_config):
+        # The A3 implementation registered for FUSED_MC2 owns this enum. Do not
+        # fall through to the legacy backend when the input exceeds its buffer.
+        return MoECommType.FUSED_MC2 if num_tokens <= mc2_tokens_capacity else MoECommType.ALLTOALL
+
     # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
     # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
     dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
@@ -308,9 +323,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     2. Without expert parallel, fall back to all-gather.
     3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
        and the DP size is large enough; otherwise use all-gather.
-    4. On A3 with expert parallel, prefer fused MC2 when using w8a8_dynamic
-       quantization with small EP size, no dynamic_eplb, and not in MTP
-       mode; otherwise use MC2 within capacity or all-to-all.
+    4. On A3 with expert parallel, use MegaMoE for supported BF16, W8A8,
+       and W4A8 configurations that fit its symmetric buffer. Otherwise retain
+       the legacy fused-MC2, MC2, and all-to-all selection.
     5. On 310P, always use all-gather.
     6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
        and the EP size is large enough; otherwise use all-gather when
