@@ -1538,6 +1538,16 @@ def init_ascend_config(vllm_config):
             "FlashComm is deprecated; remove enable_flashcomm1 and "
             "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
         )
+    # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
+    # into additional_config, but Ascend has no corresponding kernel consumer.
+    # Strip them here with a warning instead of letting extra="forbid" reject.
+    for _dead_key in ("gdn_prefill_backend", "kda_prefill_backend"):
+        if _dead_key in additional_config:
+            logger.warning(
+                "Ascend does not support %s (no corresponding kernel); the option is ignored.",
+                _dead_key,
+            )
+
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -1573,6 +1583,11 @@ def init_ascend_config(vllm_config):
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
+        # Upstream-injected by EngineArgs for NVIDIA/AMD-only prefill kernels;
+        # Ascend has no consumer, so warn (above) and strip instead of letting
+        # extra="forbid" report them as typos.
+        "gdn_prefill_backend",
+        "kda_prefill_backend",
         # Removed upstream option: warn above, but do not pass it into the
         # strict AscendConfig schema where it would be reported as a typo.
         "enable_flashcomm1",

@@ -222,6 +222,48 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.rl_config.enabled)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_strips_dead_prefill_backend_keys(self, mock_fix_incompatible_config, mock_logger):
+        # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
+        # into additional_config. Ascend has no consumer for them, so they must
+        # be stripped (with a warning) instead of being rejected as typos.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "gdn_prefill_backend": "flashinfer",
+            "kda_prefill_backend": "flashkda",
+        }
+        # extra="forbid" would raise if the dead keys reached AscendConfig.
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertIsNotNone(ascend_config)
+
+        warned_keys = [
+            call.args[1]
+            for call in mock_logger.warning.call_args_list
+            if len(call.args) > 1 and "does not support" in str(call.args[0])
+        ]
+        self.assertIn("gdn_prefill_backend", warned_keys)
+        self.assertIn("kda_prefill_backend", warned_keys)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_without_dead_prefill_backend_keys(self, mock_fix_incompatible_config, mock_logger):
+        # Without the dead keys, initialization succeeds and emits no
+        # "does not support" warning.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"mega_moe_max_tokens": 65536}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertIsNotNone(ascend_config)
+
+        warned_keys = [
+            call.args[1]
+            for call in mock_logger.warning.call_args_list
+            if len(call.args) > 1 and "does not support" in str(call.args[0])
+        ]
+        self.assertEqual(warned_keys, [])
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rl_config_enabled_applies_runtime_defaults(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
