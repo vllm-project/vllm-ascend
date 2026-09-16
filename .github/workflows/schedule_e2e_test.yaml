@@ -240,7 +240,12 @@ jobs:
         run: |
           set -x
           python3 -m pip install pyyaml -q
-          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+          # 注释原脚本调用，当前脚本返回空数组，临时硬编码矩阵
+          # python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+          cat >> "$GITHUB_OUTPUT" <<'EOF'
+a2_nightly_hf=[{"os":"linux-aarch64-a2b3-1","tests":"tests/e2e/hf/","name":"nightly-hf-a2"}]
+a3_nightly_hf=[{"os":"linux-aarch64-a2b3-1","tests":"tests/e2e/hf/","name":"nightly-hf-a3"}]
+EOF
           echo "======== GITHUB_OUTPUT raw dump ========"
           cat "$GITHUB_OUTPUT"
 
