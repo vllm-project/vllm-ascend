@@ -11,7 +11,7 @@ from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
-from vllm_ascend.utils import weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensor, weak_ref_tensors
 
 
 class AscendV2KVBlockZeroer(KVBlockZeroer):
@@ -31,10 +31,13 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
         static_forward_context: dict[str, Any],
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
+        cache_dtype: str | None = None,
     ) -> None:
-        # Initialize the base metadata to an empty state, then build component
-        # zeroers from the V1-compatible tuple bindings used by Ascend.
-        super().__init__(device, [], [], {}, num_blocks)
+        # The upstream constructor changed between v0.28 and main. Set the two
+        # fields consumed by this subclass directly, then delegate each logical
+        # component to the version-specific upstream constructor below.
+        self.device = device
+        self._meta = None
         runner_only_attn_layers = runner_only_attn_layers or set()
         groups = list(attn_groups_iter)
         component_count = 1
@@ -69,14 +72,25 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
 
             if not component_groups:
                 continue
+            zeroer_kwargs: dict[str, Any]
+            if vllm_version_is("0.28.0"):
+                zeroer_kwargs = {
+                    "cache_dtype": cache_dtype,
+                    "static_forward_context": component_context,
+                    "runner_only_attn_layers": runner_only_attn_layers,
+                }
+            else:
+                zeroer_kwargs = {
+                    "static_forward_context": component_context,
+                    "num_blocks": num_blocks,
+                    "runner_only_attn_layers": runner_only_attn_layers,
+                }
             self._zeroers.append(
                 KVBlockZeroer(
                     device,
                     attn_groups_iter=component_groups,
                     kernel_block_sizes=kernel_block_sizes,
-                    static_forward_context=component_context,
-                    num_blocks=num_blocks,
-                    runner_only_attn_layers=runner_only_attn_layers,
+                    **zeroer_kwargs,
                 )
             )
 

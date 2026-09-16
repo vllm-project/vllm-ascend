@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -44,6 +45,9 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 )
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2 import model_runner as v2_model_runner
+from vllm_ascend.worker.v2 import utils as v2_utils
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
@@ -177,6 +181,8 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
 
     raw_caches = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    assert isinstance(raw_caches[layer_name], tuple)
+    assert len(raw_caches[layer_name]) == 1
     (raw_cache,) = raw_caches[layer_name]
     assert raw_cache.numel() == num_blocks * 488448
 
@@ -213,6 +219,152 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
             assert nope.untyped_storage() is rope.untyped_storage()
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
+def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    attn_module = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(attn_module)
+    attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+    spec = AscendMLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    vllm_config = SimpleNamespace(kv_transfer_config=None)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: attn_module},
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+
+    vllm_config.kv_transfer_config = object()
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    vllm_config.kv_transfer_config = None
+
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: True)
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+
+    attn_module.impl.fa_quant_layer = True
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.fa_quant_layer = False
+
+    blocked_spec = replace(spec, indexes_kv_by_block_stride=True)
+    assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
+
+
+def test_v2_zeroer_constructs_component_zeroers_on_both_vllm_lanes(monkeypatch):
+    class RecordingZeroer:
+        calls: list[dict[str, Any]] = []
+
+        def __init__(self, device, attn_groups_iter, kernel_block_sizes, **kwargs):
+            self.calls = type(self).calls
+            self.calls.append(
+                {
+                    "device": device,
+                    "attn_groups": list(attn_groups_iter),
+                    "kernel_block_sizes": kernel_block_sizes,
+                    **kwargs,
+                }
+            )
+
+    spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+    )
+    group = AttentionGroup(
+        backend=AscendAttentionBackend,
+        layer_names=["layer"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    context = {
+        "layer": SimpleNamespace(kv_cache=(torch.zeros(2, dtype=torch.float16), torch.zeros(2, dtype=torch.float16)))
+    }
+    monkeypatch.setattr(v2_utils, "KVBlockZeroer", RecordingZeroer)
+
+    for is_v028, expected_kwargs in (
+        (False, {"num_blocks": 2}),
+        (True, {"cache_dtype": "auto"}),
+    ):
+        RecordingZeroer.calls.clear()
+        monkeypatch.setattr(v2_utils, "vllm_version_is", lambda _version, result=is_v028: result)
+        AscendV2KVBlockZeroer(
+            torch.device("cpu"),
+            attn_groups_iter=[group],
+            kernel_block_sizes=[4],
+            static_forward_context=context,
+            num_blocks=2,
+            cache_dtype="auto",
+        )
+
+        assert len(RecordingZeroer.calls) == 2
+        assert all(call["kernel_block_sizes"] == [4] for call in RecordingZeroer.calls)
+        assert all(call["attn_groups"] == [group] for call in RecordingZeroer.calls)
+        for component_id, call in enumerate(RecordingZeroer.calls):
+            assert call["static_forward_context"] == {
+                "layer": SimpleNamespace(kv_cache=context["layer"].kv_cache[component_id])
+            }
+            assert call["runner_only_attn_layers"] == set()
+            for key, value in expected_kwargs.items():
+                assert call[key] == value
+            assert set(call) == {
+                "device",
+                "attn_groups",
+                "kernel_block_sizes",
+                "static_forward_context",
+                "runner_only_attn_layers",
+                *expected_kwargs,
+            }
+
+
+def test_v2_model_runner_binds_tuple_aware_zeroer(monkeypatch):
+    class RecordingZeroer:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = dict(kwargs)
+            self.kwargs["attn_groups_iter"] = list(self.kwargs["attn_groups_iter"])
+
+    spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+    )
+    group = AttentionGroup(
+        backend=AscendAttentionBackend,
+        layer_names=["layer"],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.attn_groups = [[group]]
+    runner.kernel_block_sizes = [4]
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    monkeypatch.setattr(v2_model_runner, "AscendV2KVBlockZeroer", RecordingZeroer)
+
+    runner._init_kv_zero_meta()
+
+    zeroer = runner.kv_block_zeroer
+    assert isinstance(zeroer, RecordingZeroer)
+    assert zeroer.kwargs == {
+        "attn_groups_iter": [group],
+        "kernel_block_sizes": [4],
+        "static_forward_context": {},
+        "num_blocks": 2,
+        "cache_dtype": "auto",
+    }
+
+
 def test_v2_zeroer_covers_each_mla_component_view():
     raw = torch.zeros(2 * 488448, dtype=torch.uint8)
     typed_raw = raw.view(torch.bfloat16)
@@ -247,6 +399,7 @@ def test_v2_zeroer_covers_each_mla_component_view():
         kernel_block_sizes=[128],
         static_forward_context={"layer": SimpleNamespace(kv_cache=(nope, rope))},
         num_blocks=2,
+        cache_dtype="auto",
     )
 
     assert len(zeroer._zeroers) == 2

@@ -602,7 +602,7 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -1134,10 +1134,14 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = mamba_cache
                 continue
 
-            if isinstance(raw_cache, torch.Tensor) and _uses_single_raw_mla_cache(
-                vllm_config, layer_name, kv_cache_spec
-            ):
-                typed_raw = raw_cache.view(kv_cache_spec.dtype)
+            single_raw_mla_cache = None
+            if isinstance(raw_cache, torch.Tensor):
+                single_raw_mla_cache = raw_cache
+            elif isinstance(raw_cache, tuple) and len(raw_cache) == 1 and isinstance(raw_cache[0], torch.Tensor):
+                single_raw_mla_cache = raw_cache[0]
+
+            if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
+                typed_raw = single_raw_mla_cache.view(kv_cache_spec.dtype)
                 element_size = torch.empty((), dtype=kv_cache_spec.dtype).element_size()
                 kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
                 slot_elements = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager // element_size
