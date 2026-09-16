@@ -457,9 +457,9 @@ class DeepseekV41Topology:
     """Validated, immutable model-wide source/consumer topology."""
 
     layers: tuple[DeepseekV41LayerRole, ...]
-    kv_source_layers: tuple[int, ...]
-    index_source_layers: tuple[int, ...]
-    candidate_source_layer: int
+    kv_source_layer_ids: tuple[int, ...]
+    index_source_layer_ids: tuple[int, ...]
+    candidate_source_layer_id: int
     candidate_topk_blocks: int
     candidate_block_size: int
     index_topk: int
@@ -580,9 +580,9 @@ def build_layer_plan(config: Any) -> DeepseekV41Topology:
 
     return DeepseekV41Topology(
         layers=tuple(roles),
-        kv_source_layers=kv_sources,
-        index_source_layers=index_sources,
-        candidate_source_layer=candidate_source,
+        kv_source_layer_ids=kv_sources,
+        index_source_layer_ids=index_sources,
+        candidate_source_layer_id=candidate_source,
         candidate_topk_blocks=candidate_topk_blocks,
         candidate_block_size=candidate_block_size,
         index_topk=index_topk,

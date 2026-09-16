@@ -68,12 +68,19 @@ def test_released_config_names_are_available_to_runtime():
     )
 
     assert config.model_type == "deepseek_v41"
-    assert config.kv_source_layer_ids == [2, 8, 14, 20]
-    assert config.index_source_layer_ids == [2, 8, 14, 20, 24, 28, 32, 36]
-    assert config.candidate_source_layer_id == 20
-    assert config.engram_pad_token_id == 2
-    assert config.dspark_num_experts_per_tok == 3
+    for name, value in _released_text_config().items():
+        if name != "model_type":
+            assert getattr(config, name) == value
     assert config.vision_max_n_token == 1024
+    # Runtime defaults must not manufacture the private port's old aliases.
+    for name in (
+        "kv_source_layers",
+        "index_source_layers",
+        "candidate_source_layer",
+        "engram_pad_id",
+        "dspark_n_activated_experts",
+    ):
+        assert not hasattr(config, name)
     assert config.engram_rotation_config == _rotation_config()
     # The released CausalLM architecture still carries the complete vision path.
     assert config.is_mm_prefix_lm

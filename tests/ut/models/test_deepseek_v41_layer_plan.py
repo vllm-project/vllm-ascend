@@ -43,7 +43,7 @@ def test_layer_26_resolves_layer_20_kv_and_layer_24_index(text_config: dict):
     role = topology.layer(26)
     assert role.kv_source_layer == 20
     assert role.index_source_layer == 24
-    assert topology.candidate_source_layer == 20
+    assert topology.candidate_source_layer_id == 20
     assert role.compress_ratio == 1
     assert role.uses_candidate_filter
 

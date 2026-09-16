@@ -256,12 +256,22 @@ def test_deepseek_v41_dspark_keeps_expert_count_when_optional_field_is_absent():
     hf_config = SimpleNamespace(model_type="deepseek_v41", text_config=text_config, architectures=["DSparkDraftModel"])
     hf_config.update = lambda values: hf_config.__dict__.update(values)
     model_arch_config = ModelArchitectureConfig(
-        architectures=["DeepseekV41ForCausalLM"], model_type="deepseek_v41",
-        text_model_type="deepseek_v41_text", hidden_size=5120, total_num_hidden_layers=43,
-        total_num_attention_heads=64, head_size=512, vocab_size=129280,
-        total_num_kv_heads=1, num_experts=384, num_experts_per_token=6,
-        quantization_config=None, is_deepseek_mla=True, is_mm_prefix_lm=True,
-        rswa_window=128, derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
+        architectures=["DeepseekV41ForCausalLM"],
+        model_type="deepseek_v41",
+        text_model_type="deepseek_v41_text",
+        hidden_size=5120,
+        total_num_hidden_layers=43,
+        total_num_attention_heads=64,
+        head_size=512,
+        vocab_size=129280,
+        total_num_kv_heads=1,
+        num_experts=384,
+        num_experts_per_token=6,
+        quantization_config=None,
+        is_deepseek_mla=True,
+        is_mm_prefix_lm=True,
+        rswa_window=128,
+        derived_max_model_len_and_key=(1048576, "max_position_embeddings"),
     )
     registry = MagicMock()
     registry.inspect_model_cls.return_value = ("model-info", "DeepseekV41DSparkModel")
