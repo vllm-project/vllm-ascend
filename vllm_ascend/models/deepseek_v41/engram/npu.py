@@ -309,8 +309,12 @@ class NodeShardedEngram(nn.Module):
 
     def set_rows(self, start, rows):
         """Quantize BF16 rows into local storage without an INT8 table copy."""
-        end = start + rows.shape[0]
         codes, scales = quantize_engram_rows(rows.to(self.weight.device))
+        self.set_int8_rows(start, codes, scales)
+
+    def set_int8_rows(self, start, codes, scales):
+        """Publish one shard-relative chunk through the selected storage backend."""
+        end = start + codes.shape[0]
         self.weight.data[start:end].copy_(codes)
         self.weight_scale[start:end].copy_(scales)
 
@@ -336,8 +340,7 @@ class NodeShardedEngram(nn.Module):
                     scale = sf.get_slice(scale_key)
                     for start in range(self.start, self.end, chunk_rows):
                         stop = min(start + chunk_rows, self.end)
-                        self.weight.data[start - self.start : stop - self.start].copy_(tensor[start:stop])
-                        self.weight_scale[start - self.start : stop - self.start].copy_(scale[start:stop])
+                        self.set_int8_rows(start - self.start, tensor[start:stop], scale[start:stop])
         if not quantized:
             for start in range(self.start, self.end, chunk_rows):
                 stop = min(start + chunk_rows, self.end)

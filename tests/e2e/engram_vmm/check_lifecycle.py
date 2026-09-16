@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Real CANN lifecycle tests; no model restart or invalid device kernels."""
 
 import ctypes
@@ -10,7 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from engram_vmm import mapping
+
+from vllm_ascend.models.deepseek_v41.engram_vmm import mapping
 
 torch.npu.set_device(0)
 owner = SimpleNamespace(rank=0)

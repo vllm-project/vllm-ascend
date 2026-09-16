@@ -21,6 +21,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import regex as re
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
@@ -456,6 +457,8 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Opt-in mapped-host INT8 tables. Fresh capability namespace shared by job ranks.
+    engram_vmm_run: str | None = None
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -561,6 +564,19 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.engram_vmm_run is not None:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", self.engram_vmm_run):
+                raise ValueError("engram_vmm_run must be a fresh 1-96 character alphanumeric/underscore/hyphen ID")
+            text_config = getattr(vc.model_config, "hf_text_config", None)
+            if not getattr(text_config, "engram_layer_ids", None):
+                raise ValueError("Engram VMM requires a model with Engram layers")
+            engram_config = getattr(vc, "engram_config", None)
+            if engram_config is not None and engram_config.cpu_offload:
+                raise ValueError("Engram VMM and EngramConfig.cpu_offload are mutually exclusive")
+            if vc.load_config.load_format == "dummy":
+                raise ValueError("Engram VMM requires a real checkpoint; dummy loading is unsupported")
+            if vc.model_config is not None and vc.model_config.enable_sleep_mode:
+                raise ValueError("Engram VMM does not support sleep mode")
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

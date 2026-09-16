@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Persistent host VMM mappings; no allocation or registration in lookup."""
 
 import atexit
@@ -41,7 +42,10 @@ def tensor_at(ptr, shape, dtype, device):
 
 @functools.lru_cache(maxsize=1)
 def library():
-    lib = ctypes.CDLL(str(Path(__file__).with_name("libengram_host_vmm.so")))
+    path = Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
+    if not path.is_file():
+        raise RuntimeError("Engram VMM requires an A3 build with CANN host-VMM/fabric-handle support")
+    lib = ctypes.CDLL(str(path))
     if lib.host_vmm_abi_version() != 2:
         raise RuntimeError("VMM native/Python ABI mismatch")
     lib.host_shared_registered_alloc.argtypes = [
@@ -73,6 +77,14 @@ def _shutdown(lib):
         print("ENGRAM_VMM_EXIT_CLEAN", flush=True)
     except Exception as exc:
         print(f"ENGRAM_VMM_EXIT_ERROR: {exc}; driver process cleanup required", file=sys.stderr)
+
+
+def retry_rollbacks():
+    """Retry failed construction cleanup without opening a previously unused library."""
+    if library.cache_info().currsize:
+        lib = library()
+        if lib.host_vmm_retry_rollbacks():
+            raise RuntimeError(lib.host_shared_last_error().decode())
 
 
 class VmmMapping:

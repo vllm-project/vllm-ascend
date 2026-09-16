@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Fused grouped gather/dequant, with final-buffer stores and padding."""
 
 import torch
@@ -119,6 +120,15 @@ class Inputs:
         n = hashes.shape[0]
         if n > self.capacity:
             raise ValueError("Engram input exceeds static capacity")
+        if hashes.device.type != "cpu" or hashes.dtype != torch.int64 or hashes.shape != (n, len(self.tables), self.k):
+            raise ValueError("Engram hashes must be CPU INT64 [tokens, layers, heads]")
+        if mask.device.type != "cpu" or mask.dtype != torch.bool or mask.shape != (n,):
+            raise ValueError("Engram mask must be CPU BOOL [tokens]")
+        # Hashes originate on CPU. Reject invalid addresses before launching
+        # a direct mapped-host load, without synchronizing an NPU tensor.
+        for i, table in enumerate(self.tables):
+            if n and (hashes[:, i].min() < 0 or hashes[:, i].max() >= table.codes_map.rows):
+                raise ValueError("Engram row ID outside table")
         for i in range(len(self.tables)):
             if n:
                 self.ids[i][: n * self.k].copy_(hashes[:, i].reshape(-1))

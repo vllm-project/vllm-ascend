@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Separate persistent-mapping correctness from full-scale capacity gates."""
 
 import argparse
@@ -7,8 +8,9 @@ from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
-from engram_vmm.lookup import Inputs
-from engram_vmm.mapping import VmmMapping
+
+from vllm_ascend.models.deepseek_v41.engram_vmm.lookup import Inputs
+from vllm_ascend.models.deepseek_v41.engram_vmm.mapping import VmmMapping
 
 p = argparse.ArgumentParser()
 p.add_argument("--root", required=True)
