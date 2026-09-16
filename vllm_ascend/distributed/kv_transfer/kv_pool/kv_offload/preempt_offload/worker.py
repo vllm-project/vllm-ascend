@@ -47,6 +47,7 @@ class PreemptOffloadWorker:
         self._connector_metadata: PreemptOffloadMetadata | None = None
         self._pending_load_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
+        self._submitted_store_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
         self._load_stream_waited = False
 
@@ -141,6 +142,8 @@ class PreemptOffloadWorker:
 
     def clear_connector_metadata(self) -> None:
         """Clear metadata after the model runner finishes the current step."""
+        if self._connector_metadata is not None:
+            self._submitted_store_event_indices.discard(self._connector_metadata.preempt_store_event)
         self._connector_metadata = None
 
     def handle_preemptions(
@@ -151,16 +154,22 @@ class PreemptOffloadWorker:
         if kv_connector_metadata.need_flush:
             self._flush_and_sync_all()
 
+        store_event = kv_connector_metadata.preempt_store_event
+        if store_event in self._submitted_store_event_indices:
+            return
+
         # The scheduler may immediately reuse preempted block IDs in this same
         # step. This blocking D2H must therefore run before _update_states()
         # processes new_block_ids_to_zero and before model forward writes KV.
         self._submit_transfer(
             kv_connector_metadata.preempt_store_gpu_blocks,
             kv_connector_metadata.preempt_store_cpu_blocks,
-            kv_connector_metadata.preempt_store_event,
+            store_event,
             is_store=True,
             sync=True,
         )
+        if store_event >= 0:
+            self._submitted_store_event_indices.add(store_event)
 
     def start_load_kv(self) -> None:
         """Submit pre-forward recompute H2D transfers."""

@@ -436,6 +436,79 @@ def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
     assert state.load_transfer_meta == TransferMeta([10, 11, 12], [1, 2, 3])
 
 
+def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
+    scheduler.num_spec_tokens = 3
+    scheduler._group_is_mamba = [True]
+    scheduler._preempted_req_states = {
+        "req-1": PreemptedRequestState(
+            req_id="req-1",
+            cpu_block_ids=([101, 102, 103, 104],),
+            num_computed_tokens=20,
+            store_transfer_meta=TransferMeta(
+                [201, 202, 203, 204],
+                [101, 102, 103, 104],
+            ),
+            load_start_tokens=0,
+            ready=True,
+        )
+    }
+    scheduler._gpu_block_pool = SimpleNamespace(
+        blocks={50: "gpu50"},
+        touch=MagicMock(),
+    )
+    return scheduler
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_align_target():
+    scheduler = _make_ready_mamba_scheduler()
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([0, 0, 0, 50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+    scheduler._gpu_block_pool.touch.assert_called_once_with(["gpu50"])
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_none_target():
+    scheduler = _make_ready_mamba_scheduler()
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+
+
+def test_preempt_offload_connector_scheduler_h2d_rejects_invalid_mamba_mapping():
+    invalid_cases = [
+        (10, [0, 0, 0, 50, 51, 52, 53]),
+        (20, [50, 51, 52]),
+        (20, [0, 0, 0, 0, 51, 52, 53]),
+    ]
+    for num_tokens, gpu_block_ids in invalid_cases:
+        scheduler = _make_ready_mamba_scheduler()
+        try:
+            scheduler._prepare_preempt_load_after_alloc(
+                SimpleNamespace(request_id="req-1", num_tokens=num_tokens),
+                (gpu_block_ids,),
+                num_external_tokens=20,
+            )
+        except RuntimeError as exc:
+            assert "Invalid recompute H2D Mamba block mapping" in str(exc)
+        else:
+            raise AssertionError("Expected invalid Mamba block mapping")
+
+
 def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._store_event_counter = 4
@@ -651,6 +724,7 @@ def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
     worker._connector_metadata = None
     worker._pending_load_event_indices = set()
     worker._submitted_load_event_indices = set()
+    worker._submitted_store_event_indices = {1}
     worker._completed_store_events = {}
     worker._load_events = []
     worker._load_hwm = -1
@@ -676,6 +750,7 @@ def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
 
     worker.clear_connector_metadata()
     assert worker._connector_metadata is None
+    assert worker._submitted_store_event_indices == set()
 
 
 def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
@@ -683,6 +758,7 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     worker._submit_transfer = MagicMock()
     worker._flush_and_sync_all = MagicMock()
     worker._connector_metadata = None
+    worker._submitted_store_event_indices = set()
     metadata = PreemptOffloadMetadata(
         need_flush=True,
         preempt_store_event=3,
@@ -694,8 +770,9 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     )
 
     worker.handle_preemptions(metadata)
+    worker.handle_preemptions(metadata)
 
-    worker._flush_and_sync_all.assert_called_once_with()
+    assert worker._flush_and_sync_all.call_count == 2
     worker._submit_transfer.assert_called_once_with(
         [1],
         [2],
@@ -703,6 +780,7 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
         is_store=True,
         sync=True,
     )
+    assert worker._submitted_store_event_indices == {3}
 
     worker._submit_transfer.reset_mock()
     worker.start_load_kv()

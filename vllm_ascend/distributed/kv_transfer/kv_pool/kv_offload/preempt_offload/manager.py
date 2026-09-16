@@ -440,8 +440,19 @@ class PreemptOffloadScheduler:
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
             if self._group_is_mamba[g]:
                 accept_token_idx = self.num_spec_tokens - (state.num_computed_tokens - request.num_tokens + 1)
-                cpu_block_ids.append(group_cpu_ids[accept_token_idx])
-                gpu_block_ids.append(block_ids_by_group[g][0])
+                group_gpu_ids = block_ids_by_group[g]
+                state_block_idx = len(group_gpu_ids) - self.num_spec_tokens - 1
+                cpu_block_id = group_cpu_ids[accept_token_idx] if 0 <= accept_token_idx < len(group_cpu_ids) else 0
+                gpu_block_id = group_gpu_ids[state_block_idx] if 0 <= state_block_idx < len(group_gpu_ids) else 0
+                if cpu_block_id <= 0 or gpu_block_id <= 0:
+                    raise RuntimeError(
+                        "Invalid recompute H2D Mamba block mapping: "
+                        f"req_id={request.request_id}, group={g}, "
+                        f"cpu={cpu_block_id}@{accept_token_idx}, "
+                        f"gpu={gpu_block_id}@{state_block_idx}"
+                    )
+                cpu_block_ids.append(cpu_block_id)
+                gpu_block_ids.append(gpu_block_id)
             else:
                 group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
                 start_block = load_start_tokens // group_block_size
