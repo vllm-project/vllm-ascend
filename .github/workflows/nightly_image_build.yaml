@@ -76,6 +76,7 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   build-a3:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
@@ -91,6 +92,7 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   build-310p:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
@@ -106,6 +108,7 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
   build-a5:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
@@ -120,16 +123,4 @@ jobs:
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-
-  trigger-image-sync:
-    name: Trigger quay.io sync
-    if: ${{ !cancelled() && github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' && (needs.build-a2.result == 'success' || needs.build-a3.result == 'success' || needs.build-310p.result == 'success' || needs.build-a5.result == 'success') }}
-    needs: [build-a2, build-a3, build-310p, build-a5]
-    runs-on: linux-amd64-cpu-4
-    steps:
-      - name: Dispatch sync-vllm-ascend
-        env:
-          GH_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
-        run: |
-          gh workflow run sync-vllm-ascend.yml \
-            --repo ascend-gha-runners/sync-tools
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
