@@ -197,10 +197,12 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     with (
         patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+        patch("vllm_ascend._310p.worker.v2.model_state.vllm_version_is", return_value=True),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
     replace_rope.assert_called_once_with(encoder_cache)
+    assert state.recoverssm is None
     assert isinstance(state._capture_seq_lens_by_ptr, dict)
 
 

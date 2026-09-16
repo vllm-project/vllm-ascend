@@ -24,6 +24,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -254,6 +255,9 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         AscendMambaHybridModelState.__init__(  # type: ignore[call-arg]
             self, vllm_config, model, encoder_cache, device
         )
+        # vLLM main initializes RecoverSSM state, while v0.28.0 does not.
+        if vllm_version_is("0.28.0"):
+            self.recoverssm = None
         self._capture_seq_lens_by_ptr = {}
         self._replace_310p_rope_state(encoder_cache)
         self._num_accepted_tokens_cpu = np.ones(self.max_num_reqs, dtype=np.int32)
