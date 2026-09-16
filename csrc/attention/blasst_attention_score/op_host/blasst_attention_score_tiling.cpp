@@ -367,7 +367,11 @@ void FAInferTiling::fillCoreInfoForFlashDecode(FAInferTilingData &faTilingData, 
 
 void FAInferTiling::fillSplitInfoForFlashDecode(FAInferTilingData &faTilingData, uint32_t groupSize)
 {
-    for (uint32_t splitIdx = 0; splitIdx < blockNum_ + 1; splitIdx++) {
+    // splitInfo arrays are sized MAX_CORE_NUM_FD (26): entries
+    // [0, blockNum_) only. totalSplitNodeNum is clamped to blockNum_ and the
+    // kernel never reads entry [blockNum_], so blockNum_ + 1 here would be an
+    // out-of-bounds write when blockNum_ == MAX_CORE_NUM_FD.
+    for (uint32_t splitIdx = 0; splitIdx < blockNum_; splitIdx++) {
         faTilingData.splitInfo.get_batchIdx()[splitIdx] = 0;
         faTilingData.splitInfo.get_headStartIdx()[splitIdx] = 0;
         faTilingData.splitInfo.get_headEndIdx()[splitIdx] = 0;
@@ -437,7 +441,7 @@ void FAInferTiling::fillSplitInfoForFlashDecode(FAInferTilingData &faTilingData,
                     if (isSplitKV) {
                         if (BIdx != prevBIdx || N1Idx != prevN1Idx || S1Idx != prevS1Idx) {
                             splitIdx++;
-                            if (splitIdx >= 0 && splitIdx < (int32_t)(blockNum_ + 1)) {
+                            if (splitIdx >= 0 && splitIdx < (int32_t)blockNum_) {
                                 faTilingData.splitInfo.get_batchIdx()[splitIdx] = BIdx;
                                 faTilingData.splitInfo.get_splitNum()[splitIdx] = 0;
                                 faTilingData.splitInfo.get_headStartIdx()[splitIdx] = currentHeadStart;
@@ -451,7 +455,7 @@ void FAInferTiling::fillSplitInfoForFlashDecode(FAInferTilingData &faTilingData,
                             prevN1Idx = N1Idx;
                             prevS1Idx = S1Idx;
                         }
-                        if (splitIdx >= 0 && splitIdx < (int32_t)(blockNum_ + 1)) {
+                        if (splitIdx >= 0 && splitIdx < (int32_t)blockNum_) {
                             faTilingData.splitInfo.get_splitNum()[splitIdx]++;
                             currentLseTaskOffset += (int64_t)headLen * qLen;
                             currentOTaskOffset += (int64_t)headLen * qLen * faInfo_.embeddingSizeV;

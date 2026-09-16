@@ -619,8 +619,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             blasst_cfg = get_ascend_config().blasst_config
         except RuntimeError:
             blasst_cfg = None
+        # Hybrid linear-attention models (Qwen3.5 family: layer_types mixes
+        # "linear_attention" with "full_attention") always fall back to the
+        # baseline FIA path. Sparse-skip perturbations accumulate in the
+        # recurrent state of the linear layers and collapse E2E output
+        # (verified on Qwen3.5-27B with sparse_lambda=-3).
+        _hf_cfg = self.vllm_config.model_config.hf_config
+        _layer_types = (getattr(_hf_cfg, "layer_types", None)
+                        or getattr(getattr(_hf_cfg, "text_config", None),
+                                   "layer_types", None))
+        self._is_hybrid_linear = bool(_layer_types) and "linear_attention" in _layer_types
         self._blasst_supported = (
             blasst_cfg is not None and blasst_cfg.enabled
+            and not self._is_hybrid_linear
             # Op-side hard limits (blasst_attention_score_tiling.cpp):
             # FP16/BF16 only and K/V dtypes must match the query dtype. Use
             # an explicit whitelist: get_kv_quant_mode("int8") == NONE in
