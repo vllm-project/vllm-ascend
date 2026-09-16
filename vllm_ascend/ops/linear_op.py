@@ -447,7 +447,7 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
     devices so this class is never selected there.
     """
 
-    _HCOMM_INFO_MAP = {}
+    _HCOMM_INFO_MAP: dict[dist.ProcessGroup, str] = {}
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -478,6 +478,9 @@ class MatmulCommRowParallelOp(CustomRowParallelOp):
             weight = getattr(self.layer, "weight_t", None)
             if weight is None:
                 weight = self.layer.weight.t().contiguous()
+            # __init__ resolves the HCCL handle whenever tp_size > 1, which the
+            # fused branch requires.
+            assert self.hcomm_info is not None
             if self.mm_comm_fuse_mode == 1:
                 # The fused op takes a 2D mat1; flatten multi-dim inputs and
                 # restore the leading dims afterwards.
