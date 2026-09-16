@@ -36,6 +36,9 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in A5 AddRmsNormBias row fusion: 0 (default) disables, 1 enables.
+    # Non-sensitive; the default retains the existing path.
+    "VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", "0"))),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

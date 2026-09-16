@@ -12,11 +12,15 @@
  * \file add_rms_norm_bias.cpp
  * \brief
  */
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+#include "add_rms_norm_bias_a5.h"
+#else
 #include "add_rms_norm_bias.h"
 #include "add_rms_norm_bias_split_d.h"
 #include "add_rms_norm_bias_merge_n.h"
 #include "add_rms_norm_bias_multi_n.h"
 #include "add_rms_norm_bias_single_n.h"
+#endif
 
 using namespace AscendC;
 
@@ -32,6 +36,11 @@ extern "C" __global__ __aicore__ void add_rms_norm_bias(
 {
     TPipe pipe;
     GET_TILING_DATA(tilingData, tiling);
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+    if (TILING_KEY_IS(15)) { GENERAL_OP_IMPL(KernelAddRmsNormBiasA5, half); }
+    else if (TILING_KEY_IS(25)) { GENERAL_OP_IMPL(KernelAddRmsNormBiasA5, float); }
+    else if (TILING_KEY_IS(35)) { GENERAL_OP_IMPL(KernelAddRmsNormBiasA5, bfloat16_t); }
+#else
     if (TILING_KEY_IS(10)) {
         GENERAL_OP_IMPL(KernelAddRmsNormBias, half);
     } else if (TILING_KEY_IS(20)) {
@@ -69,4 +78,5 @@ extern "C" __global__ __aicore__ void add_rms_norm_bias(
     } else if (TILING_KEY_IS(34)) {
         GENERAL_OP_IMPL(KernelAddRmsNormBiasMultiN, bfloat16_t);
     }
+#endif
 }

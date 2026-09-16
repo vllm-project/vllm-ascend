@@ -21,10 +21,40 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend import envs
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    bootstrap_custom_op_env,
+    enable_custom_op,
+    get_ascend_device_type,
+)
+
+
+def _enable_a5_add_rms_norm_bias(x: torch.Tensor) -> bool:
+    if not envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS:
+        return False
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return False
+    import vllm.envs as vllm_envs
+
+    if vllm_envs.VLLM_BATCH_INVARIANT:
+        return False
+    if x.shape[-1] == 0 or x.shape[-1] > 6144 or x.shape[-1] % 16:
+        return False
+    bootstrap_custom_op_env(include_vendor_lib=True)
+    # Explicit opt-in must report a missing build instead of silently benchmarking
+    # the baseline. Keep the global custom-op enablement unchanged on A5.
+    import vllm_ascend.vllm_ascend_C  # noqa: F401
+
+    return True
+
+
+def _add_bias_with_axpy(x: torch.Tensor, negative_bias: torch.Tensor) -> torch.Tensor:
+    """Add bias through aclnnAdd's Axpy lowering without changing numerics."""
+    return x.add_(negative_bias, alpha=-1.0)
 
 
 class AscendRMSNorm(RMSNorm):
@@ -40,6 +70,7 @@ class AscendRMSNorm(RMSNorm):
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
+        self.register_buffer("_negative_bias", None, persistent=False)
 
         # quantization with anti_method m4 will generate none-zero norm bias
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
@@ -59,6 +90,10 @@ class AscendRMSNorm(RMSNorm):
             )
 
             param.data.copy_(loaded_weight)
+        # CANN lowers aclnnAdd with alpha=-1 to Axpy. Cache the negation at
+        # weight-load time so the forward path remains exactly x + bias and
+        # does not introduce a runtime Neg kernel.
+        self._negative_bias = -param.data
         self.bias_loaded = True
 
     def forward_oot(
@@ -69,19 +104,21 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if _enable_a5_add_rms_norm_bias(x) or enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
                 if self.bias is not None:
-                    x.add_(self.bias)
+                    assert self._negative_bias is not None
+                    _add_bias_with_axpy(x, self._negative_bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
-            x.add_(self.bias)
+            assert self._negative_bias is not None
+            _add_bias_with_axpy(x, self._negative_bias)
 
         return x
 
@@ -95,7 +132,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if _enable_a5_add_rms_norm_bias(x) or enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
