@@ -43,55 +43,93 @@ You can use the official all-in-one Docker image. For the available image tags a
 
 - Step 2: Start Docker container
 
-  ```bash
-  # Set the vLLM Ascend image name.
-  export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-  export NAME=minimax-m3-dev
+  Select the `docker run` command for your hardware platform:
 
-  # Start the container with the variables defined above.
-  # Update --device for your hardware (Atlas A3: /dev/davinci[0-15]; Atlas A2: /dev/davinci[0-7]; 950DT products: /dev/davinci[0-7]).
-  # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
-  docker run --rm \
-  --name $NAME \
-  --net=host \
-  --shm-size=100g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci8 \
-  --device /dev/davinci9 \
-  --device /dev/davinci10 \
-  --device /dev/davinci11 \
-  --device /dev/davinci12 \
-  --device /dev/davinci13 \
-  --device /dev/davinci14 \
-  --device /dev/davinci15 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
-  ```
+  === "A3 series"
 
-  For 950DT products, add the following two mounts to the `docker run` command (do not include them on Atlas A3 / A2, where the host paths do not exist and Docker would otherwise create empty directories):
+      ```bash
+      # Set the vLLM Ascend image name.
+      export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+      export NAME=minimax-m3-dev
 
-  ```bash
-  -v /etc/hixlep:/etc/hixlep \
-  -v /etc/hccn.conf:/etc/hccn.conf \
-  ```
+      # Start the container with the variables defined above.
+      # Atlas A3 has 16 NPUs (/dev/davinci[0-15]).
+      # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
+      docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=100g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+      ```
 
-  `/etc/hixlep` is required for UBOE / Ascend direct KV transfer (used in PD disaggregation), and `/etc/hccn.conf` is required for HCCL multi-card communication.
+  === "950DT products"
+
+      ```bash
+      # Set the vLLM Ascend image name.
+      export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+      export NAME=minimax-m3-dev
+
+      # 950DT products have 8 NPUs and use Device UB.
+      # /dev/ummu and /dev/uburma are required for Device UB.
+      # /etc/hixlep is required for UBOE / Ascend direct KV transfer.
+      # /etc/hccn.conf is required for HCCL multi-card communication.
+      # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
+      docker run --rm \
+      --name $NAME \
+      --net=host \
+      --privileged=true \
+      --shm-size=60g \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hixlep:/etc/hixlep \
+      -v /etc/hccn.conf:/etc/hccn.conf \
+      -v /var/log/npu/:/usr/slog \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+      ```
+
+  Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
 
   Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
@@ -1004,7 +1042,7 @@ fi
 | -------- | ------------- | ------------------------ | ----- |
 | 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ACL_OP_INIT_MODE=1` and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
 | 800I/T A3 (RoCE) or 800I/T A2 | A2: HDK >= 25.5 recommended | `export HCCL_INTRA_ROCE_ENABLE=1`, plus `HCCL_IF_IP` / socket IFNAME, and `nr_hugepages=200000` | Use the RoCE path from the KV Cache Pool guide. |
-| 950PR/DT (A5, Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
+| 950PR/DT (Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
 
 #### 5.4.3 Prefill / Decode Scripts
 
