@@ -33,10 +33,60 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm_ascend.ops.triton.fused_gdn_prepare import fused_gdn_prepare_impl
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    # Fused qkv-split + l2norm + gating triton kernel (fused_gdn_prepare);
+    # flip to False to fall back to rearrange_mixed_qkv + l2norm_fwd +
+    # DeviceOperator.fused_gdn_gating.
+    _use_fused_gdn_prepare = True
+
+    def _fused_prepare(
+        self, mixed_qkv: torch.Tensor | None, a: torch.Tensor, b: torch.Tensor, index: torch.Tensor | None = None
+    ):
+        """Run the fused split+l2norm+gating kernel on one token subset.
+
+        One triton launch replaces the whole legacy prepare chain:
+
+            query, key, value = rearrange_mixed_qkv(mixed_qkv)
+                -> torch.split(mixed_qkv, [key_dim/tp, key_dim/tp, value_dim/tp], dim=-1)
+                   + per-section reshape to (1, T, heads, dim) + contiguous()
+            query = l2norm_fwd(query); key = l2norm_fwd(key)
+                -> x * rsqrt(sum(x**2, over head dim) + 1e-6), fp32 accumulation
+            g, beta = DeviceOperator.fused_gdn_gating(A_log, a, b, dt_bias)
+                -> g    = -exp(A_log) * softplus(a + dt_bias)  (beta=1, threshold=20, fp32)
+                   beta = sigmoid(b)                           (dtype of b)
+
+        The kernel reads mixed_qkv in place through the section offsets (q | k | v
+        are contiguous inside each packed row), so no host-side split/copy is
+        issued. When ``index`` is given (spec path: mixed_qkv is a gathered
+        subset while a/b are the whole batch), the kernel also gathers the a/b
+        rows inline via the token ids, replacing the legacy output-side
+        g/beta index_selects. Outputs follow the batched convention
+        [1, T, H, D] / [1, T, Nv] of rearrange_mixed_qkv/fused_gdn_gating,
+        keeping the downstream shape-agnostic and the eager prefill path free
+        of shape ops. mixed_qkv=None propagates Nones like rearrange_mixed_qkv.
+        """
+        if mixed_qkv is None:
+            return None, None, None, None, None
+        return fused_gdn_prepare_impl(
+            mixed_qkv,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.key_dim,
+            self.value_dim,
+            self.tp_size,
+            index,
+        )
+
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
             return self.split_ba(ba)
@@ -308,27 +358,64 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-
         # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
-        if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                g_spec = g
-                beta_spec = beta
-                g_non_spec = None
-                beta_non_spec = None
+        # Prepare stage: split mixed_qkv into q/k/v, l2-normalize q/k and
+        # compute the gating (g, beta). The fused path does all of it in one
+        # triton launch per token subset; the legacy rearrange + l2norm_fwd +
+        # fused_gdn_gating chain is kept as fallback via _use_fused_gdn_prepare.
+        # _forward_core reaches the runtime class through method patching
+        # (see patch/worker/patch_qwen3_5.py), so resolve the flag defensively:
+        # a class that picked up _forward_core without the fused attrs falls
+        # back to the legacy chain instead of raising.
+        use_fused = getattr(self, "_use_fused_gdn_prepare", False) and hasattr(self, "_fused_prepare")
+        if use_fused:
+            if spec_sequence_masks is not None:
+                # The two token subsets are convolved separately, so the fused
+                # kernel runs once per subset on the conv outputs. a/b stay
+                # whole: the kernel gathers each subset's rows via the token
+                # index map (indirect addressing), and since gating is
+                # token-wise this equals full-batch gating + index_select.
+                query_spec, key_spec, value_spec, g_spec, beta_spec = self._fused_prepare(
+                    mixed_qkv_spec, a, b, index=spec_token_indx
+                )
+                if mixed_qkv_non_spec is not None:
+                    query_non_spec, key_non_spec, value_non_spec, g_non_spec, beta_non_spec = self._fused_prepare(
+                        mixed_qkv_non_spec, a, b, index=non_spec_token_indx
+                    )
+                else:
+                    query_non_spec = key_non_spec = value_non_spec = None
+                    g_non_spec = beta_non_spec = None
             else:
-                g_spec = g.index_select(1, spec_token_indx)
-                beta_spec = beta.index_select(1, spec_token_indx)
-                g_non_spec = g.index_select(1, non_spec_token_indx)
-                beta_non_spec = beta.index_select(1, non_spec_token_indx)
+                query_spec = key_spec = value_spec = None
+                g_spec = beta_spec = None
+                if mixed_qkv_non_spec is not None:
+                    query_non_spec, key_non_spec, value_non_spec, g_non_spec, beta_non_spec = self._fused_prepare(
+                        mixed_qkv_non_spec, a, b
+                    )
+                else:
+                    query_non_spec = key_non_spec = value_non_spec = None
+                    g_non_spec = beta_non_spec = None
         else:
-            g_spec = None
-            beta_spec = None
-            g_non_spec = g
-            beta_non_spec = beta
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+
+            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            if spec_sequence_masks is not None:
+                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                    g_spec = g
+                    beta_spec = beta
+                    g_non_spec = None
+                    beta_non_spec = None
+                else:
+                    g_spec = g.index_select(1, spec_token_indx)
+                    beta_spec = beta.index_select(1, spec_token_indx)
+                    g_non_spec = g.index_select(1, non_spec_token_indx)
+                    beta_non_spec = beta.index_select(1, non_spec_token_indx)
+            else:
+                g_spec = None
+                beta_spec = None
+                g_non_spec = g
+                beta_non_spec = beta
 
         split_non_spec = (
             spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
@@ -338,8 +425,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
+            if not use_fused:
+                # The fused kernel already l2-normalizes q/k.
+                query_spec = l2norm_fwd(query_spec)
+                key_spec = l2norm_fwd(key_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             # The custom op extends dtype support (e.g. float32 state) and is
@@ -364,10 +453,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert mixed_qkv_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
+            if use_fused:
+                # The fused kernel output is already split and normalized;
+                # slice the decode tokens off the non-spec subset.
+                query_decode = query_non_spec[:, :num_decode_tokens]
+                key_decode = key_non_spec[:, :num_decode_tokens]
+                value_decode = value_non_spec[:, :num_decode_tokens]
+            else:
+                query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                    mixed_qkv_non_spec[:num_decode_tokens]
+                )
+                query_decode = l2norm_fwd(query_decode)
+                key_decode = l2norm_fwd(key_decode)
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode)
-            key_decode = l2norm_fwd(key_decode)
             core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_decode.squeeze(0),
                 key=key_decode.squeeze(0),
@@ -412,7 +510,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=prefill_query_start_loc,
                 prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                 head_first=False,
-                use_qk_l2norm_in_kernel=True,
+                # q/k are already l2-normalized on the fused path.
+                use_qk_l2norm_in_kernel=not use_fused,
             )
             ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
             if split_non_spec:
@@ -422,8 +521,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            if not use_fused:
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
