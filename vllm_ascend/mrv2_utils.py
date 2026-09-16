@@ -103,9 +103,10 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
     """Feature whitelist: only whitelisted features may be enabled with a whitelisted model.
 
     Batch-size-based dynamic speculative decoding
-    (``num_speculative_tokens_per_batch_size``) is excluded from the
-    default-V2 feature whitelist. LoRA and static ``eagle3`` / ``mtp`` /
-    ``dflash`` / ``dspark`` remain supported. ``VLLM_USE_V2_MODEL_RUNNER``
+    (``num_speculative_tokens_per_batch_size``) and DSpark KV sliding window
+    (``draft_window_size``) are excluded from the default-V2 feature
+    whitelist. LoRA and static ``eagle3`` / ``mtp`` / ``dflash`` / ``dspark``
+    (without a draft window) remain supported. ``VLLM_USE_V2_MODEL_RUNNER``
     still overrides this default decision.
     """
     speculative_config = vllm_config.speculative_config
@@ -117,6 +118,18 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
             "Model Runner V2 default is disabled because dynamic speculative "
             "decoding (num_speculative_tokens_per_batch_size) is enabled; "
             "using the V1 model runner instead."
+        )
+        return False
+
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if (
+        speculative_config.method == "dspark"
+        and isinstance(additional_config, dict)
+        and additional_config.get("draft_window_size") is not None
+    ):
+        logger.warning_once(
+            "Model Runner V2 default is disabled because DSpark KV sliding "
+            "window (draft_window_size) is enabled; using the V1 model runner instead."
         )
         return False
 

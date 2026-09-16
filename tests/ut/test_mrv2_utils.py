@@ -45,11 +45,13 @@ def _make_vllm_config(
     model_config=None,
     speculative_config=None,
     lora_config=None,
+    additional_config=None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=model_config,
         speculative_config=speculative_config,
         lora_config=lora_config,
+        additional_config=additional_config,
     )
 
 
@@ -162,6 +164,32 @@ class TestIsSupportedV2ModelRunnerFeature:
         assert is_supported_v2_model_runner_feature(config) is False
         assert len(warning_calls) == 1
 
+    def test_dspark_sliding_window_is_excluded(self, monkeypatch):
+        warning_calls = []
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config("dspark"),
+            additional_config={"draft_window_size": 512},
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is False
+        assert len(warning_calls) == 1
+
+    def test_dspark_without_sliding_window_is_supported(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(speculative_config=_make_speculative_config("dspark"))
+
+        assert is_supported_v2_model_runner_feature(config) is True
+
+    def test_eagle3_sliding_window_is_not_dspark_blacklist(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config("eagle3"),
+            additional_config={"draft_window_size": 512},
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is True
+
 
 class TestV2ModelRunnerEnvironmentReady:
     def test_unsupported_feature(self):
@@ -183,6 +211,15 @@ class TestV2ModelRunnerEnvironmentReady:
                 "dflash",
                 num_speculative_tokens_per_batch_size=[[1, 256, 4]],
             )
+        )
+
+        assert _v2_model_runner_environment_ready(config) is False
+
+    def test_dspark_sliding_window_is_not_ready(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(
+            speculative_config=_make_speculative_config("dspark"),
+            additional_config={"draft_window_size": 512},
         )
 
         assert _v2_model_runner_environment_ready(config) is False
@@ -278,6 +315,20 @@ class TestUseV2ModelRunner:
                 "dflash",
                 num_speculative_tokens_per_batch_size=[[1, 256, 4]],
             ),
+        )
+
+        assert use_v2_model_runner(config) is False
+
+    def test_default_disabled_for_dspark_sliding_window(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]),
+            speculative_config=_make_speculative_config("dspark"),
+            additional_config={"draft_window_size": 512},
         )
 
         assert use_v2_model_runner(config) is False
