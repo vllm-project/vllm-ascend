@@ -38,10 +38,17 @@ def disable_target_pcp_for_replicated_draft(
         raise RuntimeError("Replicated draft execution requires model_state to use the target PCP manager.")
 
     model_state.pcp_manager = None
+    # Detach the speculator's own reference as well: upstream's draft-prefill
+    # helpers (prepare_draft_prefill / get_draft_input_buffers /
+    # restore_draft_prefill) read ``speculator.pcp_manager`` and would partition
+    # a replicated (global-token) draft into PCP-local rows, mismatching the
+    # global hidden states the draft consumes.
+    speculator.pcp_manager = None
     try:
         yield
     finally:
         model_state.pcp_manager = target_pcp_manager
+        speculator.pcp_manager = target_pcp_manager
 
 
 def prepare_replicated_pcp_config(

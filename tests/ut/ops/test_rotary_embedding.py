@@ -43,7 +43,7 @@ def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     return positions, query, key
 
 
-def check_parent_init_signature_has_not_changed(parent_func, child_func):
+def check_parent_init_signature_has_not_changed(parent_func, child_func, *, allow_extra_params=False):
     parent_sig = inspect.signature(parent_func)
     parent_params = set(parent_sig.parameters) - {"self"}
 
@@ -57,10 +57,14 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
         f"{parent_func.__name__} added new parameter(s): {added}. "
         f"Check whether {child_func.__name__} needs to forward them."
     )
-    assert not removed, (
-        f"{parent_func.__name__} removed parameter(s): {removed}. "
-        f"Check whether {child_func.__name__} needs to forward them."
-    )
+    # The Ascend override may keep extra parameters that only exist on the
+    # release lane (e.g. YaRN's version-split kwargs), so callers whose child
+    # is intentionally a superset opt out of the reverse check.
+    if not allow_extra_params:
+        assert not removed, (
+            f"{parent_func.__name__} removed parameter(s): {removed}. "
+            f"Check whether {child_func.__name__} needs to forward them."
+        )
 
 
 class TestRopeForwardOOT:
@@ -361,7 +365,13 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         Fail loudly if YaRNScalingRotaryEmbedding.__init__ adds, removes, or
         renames parameters, so a developer knows to update AscendYaRNRotaryEmbedding
         accordingly.
+
+        AscendYaRNRotaryEmbedding intentionally accepts both the pre-#56446
+        keyword set and the current one so it works on the 0.28.0 lane and on
+        upstream main, so it is a strict superset of the parent signature.
         """
         check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+            YaRNScalingRotaryEmbedding.__init__,
+            AscendYaRNRotaryEmbedding.__init__,
+            allow_extra_params=True,
         )

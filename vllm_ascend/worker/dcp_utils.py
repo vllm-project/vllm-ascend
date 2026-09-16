@@ -528,7 +528,7 @@ class DCPManager:
         """
         from vllm_ascend.attention.utils import AscendDCPMetadata
 
-        seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        seq_lens_cpu = getattr(common_attn_metadata, "seq_lens_cpu", None)
         if seq_lens_cpu is None:
             seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu)

@@ -223,9 +223,29 @@ class NPUModelRunner(GPUModelRunner):
                 pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
         aux_hidden_states = state.aux_hidden_states
-        if aux_hidden_states:
-            restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))
-            self.execute_model_state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+        restored_aux_hidden_states = (
+            [pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))] if aux_hidden_states else None
+        )
+
+        # vLLM #56107 slices the MTP draft hidden states at
+        # ``draft_hidden_states.size(0)`` (the pre-restore local extent).
+        # Replicated drafts run on the global layout, so restore the target
+        # hidden states here too: the base ``maybe_restore_pcp_for_sampling``
+        # call stays idempotent and ``propose`` then slices at the global
+        # extent, matching ``input_batch.num_tokens_after_padding``.
+        restored_hidden_states = (
+            pcp_manager.restore_hidden_states(state.hidden_states) if state.hidden_states is not None else None
+        )
+
+        if restored_aux_hidden_states is not None and restored_hidden_states is not None:
+            self.execute_model_state = state._replace(
+                aux_hidden_states=restored_aux_hidden_states,
+                hidden_states=restored_hidden_states,
+            )
+        elif restored_aux_hidden_states is not None:
+            self.execute_model_state = state._replace(aux_hidden_states=restored_aux_hidden_states)
+        elif restored_hidden_states is not None:
+            self.execute_model_state = state._replace(hidden_states=restored_hidden_states)
 
     def sample_tokens(self, grammar_output):
         pcp_manager = self.pcp_manager
