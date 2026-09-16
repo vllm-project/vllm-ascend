@@ -966,6 +966,8 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer.impl = SimpleNamespace(
         fa_quant_layer=fa_quant,
         enable_sparse_sfa_c8=sparse_c8,
+        kv_lora_rank=layer.kv_lora_rank,
+        qk_rope_head_dim=layer.qk_rope_head_dim,
         dtype=torch.bfloat16,
     )
     layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
@@ -976,6 +978,34 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         cache_dtype_str="auto",
     )
     return layer
+
+
+def test_sparse_c8_specs_use_each_layers_rope_dimension(monkeypatch):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64),
+        ),
+    )
+    layers = {}
+    for rope_dim in (0, 64):
+        layer = _make_mla_layer(sparse_c8=True)
+        layer.kv_lora_rank = layer.impl.kv_lora_rank = 512
+        layer.qk_rope_head_dim = layer.impl.qk_rope_head_dim = rope_dim
+        layers[f"rope{rope_dim}"] = layer
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _cfg: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: True)
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A2))
+
+    specs = attn_utils.get_kv_cache_spec(config)
+
+    assert specs["rope0"].head_size == 528
+    assert specs["rope64"].head_size == 656
+    assert all(spec.dtype == torch.int8 and spec.cache_sparse_sfa_c8 for spec in specs.values())
+    assert config.model_config.hf_text_config.qk_rope_head_dim == 64
 
 
 def test_sfa_indexer_allocates_and_reshapes_scale_views(monkeypatch):

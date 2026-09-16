@@ -1499,6 +1499,36 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     self.assertEqual(indexer_cache[1].shape, (2, 16, 1, 1))
                     self.assertEqual(indexer_cache[1].dtype, torch.float16)
 
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_c8_specs_use_each_layers_rope_dimension(self, mock_get_layers, _mock_has_ec_transfer):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 128
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.c8_k_cache_dtype = torch.int8
+        runner.shared_kv_cache_layers = {}
+        runner.model_config.hf_text_config = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+        layers = {}
+        for rope_dim in (0, 64):
+            layer = MLAAttention.__new__(MLAAttention)
+            torch.nn.Module.__init__(layer)
+            layer.kv_lora_rank = 512
+            layer.qk_rope_head_dim = rope_dim
+            layer.impl = SimpleNamespace(enable_sparse_sfa_c8=True, kv_lora_rank=512, qk_rope_head_dim=rope_dim)
+            layers[f"rope{rope_dim}"] = layer
+        mock_get_layers.return_value = layers
+
+        specs = runner.get_kv_cache_spec()
+
+        self.assertEqual(specs["rope0"].head_size, 528)
+        self.assertEqual(specs["rope64"].head_size, 656)
+        for spec in specs.values():
+            self.assertEqual(spec.dtype, torch.int8)
+            self.assertTrue(spec.cache_sparse_sfa_c8)
+        self.assertEqual(runner.model_config.hf_text_config.qk_rope_head_dim, 64)
+
     @patch(
         "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
@@ -1556,6 +1586,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     has_indexer=True,
                     enable_sparse_sfa_c8=enable_sfa_c8,
                     enable_sparse_li_c8=enable_li_c8,
+                    kv_lora_rank=attn_module.kv_lora_rank,
+                    qk_rope_head_dim=attn_module.qk_rope_head_dim,
                 )
                 runner.ascend_config.is_sparse_li_c8_layer.return_value = enable_li_c8
                 runner.ascend_config.is_sparse_li_c8_layer.reset_mock()

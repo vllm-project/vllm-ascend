@@ -288,6 +288,8 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl.qk_rope_head_dim = 64
+    impl.enable_sparse_sfa_c8 = False
     attn_metadata = SimpleNamespace(num_decode_tokens=1)
     kv_no_split = torch.arange(6, dtype=torch.float32).view(2, 3)
     cos = torch.arange(2, dtype=torch.float32).view(2, 1)
@@ -410,7 +412,8 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     assert combined_impl._parallel_query_gather_dim() == 0
 
 
-def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
+@pytest.mark.parametrize("rope_dim", [0, 64])
+def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths(rope_dim) -> None:
     builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
     builder.actual_seq_lengths_query = torch.tensor([3, 5, 0], dtype=torch.int32)
     builder.actual_seq_lengths_key = torch.tensor([3, 5, 0], dtype=torch.int32)
@@ -425,18 +428,25 @@ def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
         query_start_loc=torch.tensor([0, 3, 5], dtype=torch.int32),
     )
     tp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    full_cos = torch.arange(5 * rope_dim, dtype=torch.float32).view(5, 1, 1, rope_dim) if rope_dim else None
+    full_sin = full_cos + 100 if rope_dim else None
     with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
         cos, sin, slot_mapping, extra = builder._prepare_parallel_metadata(
             common,
-            torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
-            torch.arange(10, dtype=torch.float32).view(5, 1, 1, 2),
+            full_cos,
+            full_sin,
             torch.arange(5, dtype=torch.int32),
             torch.tensor([3, 5], dtype=torch.int32),
             torch.tensor([3, 5], dtype=torch.int32),
             draft_index=None,
         )
 
-    assert cos.shape[0] == sin.shape[0] == 3
+    if rope_dim:
+        padding = torch.zeros(1, 1, 1, rope_dim)
+        torch.testing.assert_close(cos, torch.cat((full_cos[3:], padding)))
+        torch.testing.assert_close(sin, torch.cat((full_sin[3:], padding)))
+    else:
+        assert cos is sin is None
     torch.testing.assert_close(slot_mapping, torch.tensor([0, 1, 2, 3, 4, -1], dtype=torch.int32))
     context = extra["dsa_cp_context"]
     torch.testing.assert_close(context.slot_mapping_cp, torch.tensor([3, 4, -1], dtype=torch.int32))
@@ -446,7 +456,8 @@ def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
     torch.testing.assert_close(builder.actual_seq_lengths_key, torch.tensor([3, 5, 0], dtype=torch.int32))
 
 
-def test_sfa_dsa_cp_metadata_builder_masks_graph_padding() -> None:
+@pytest.mark.parametrize("rope_dim", [0, 64])
+def test_sfa_dsa_cp_metadata_builder_masks_graph_padding(rope_dim) -> None:
     # TP8, graph size 80 and MTP3 produce 20 four-token request slots. With
     # nine real requests, rank 6 splits a padded slot at its local boundary.
     builder = AscendSFADSACPMetadataBuilder.__new__(AscendSFADSACPMetadataBuilder)
@@ -469,19 +480,28 @@ def test_sfa_dsa_cp_metadata_builder_masks_graph_padding() -> None:
         "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
         return_value=tp_group,
     ):
-        _, _, _, extra = builder._prepare_parallel_metadata(
+        cos, sin, slot_mapping, extra = builder._prepare_parallel_metadata(
             common,
-            torch.zeros(80, 1, 1, 64),
-            torch.zeros(80, 1, 1, 64),
+            torch.zeros(80, 1, 1, rope_dim) if rope_dim else None,
+            torch.zeros(80, 1, 1, rope_dim) if rope_dim else None,
             torch.arange(80, dtype=torch.int64),
             query_start_loc[1:],
             seq_lens,
             draft_index=None,
         )
 
-    local_seq_lens = extra["dsa_cp_context"].actual_seq_lengths_key
-    assert local_seq_lens[17].item() == 0
-    assert torch.all(local_seq_lens >= 0)
+    if rope_dim:
+        assert cos.shape == sin.shape == (10, 1, 1, rope_dim)
+    else:
+        assert cos is sin is None
+    context = extra["dsa_cp_context"]
+    torch.testing.assert_close(slot_mapping, torch.arange(80, dtype=torch.int64))
+    torch.testing.assert_close(context.slot_mapping_cp, torch.arange(60, 70, dtype=torch.int64))
+    torch.testing.assert_close(
+        context.actual_seq_lengths_query,
+        torch.tensor([0] * 15 + [4, 8, 10, 10, 10], dtype=torch.int32),
+    )
+    torch.testing.assert_close(context.actual_seq_lengths_key, torch.zeros(20, dtype=torch.int32))
 
 
 def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None:

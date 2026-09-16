@@ -134,9 +134,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype, cache_dtype_str = attn_module.impl.dtype, None
             elif enable_sfa(vllm_config) and bool(getattr(attn_module.impl, "enable_sparse_sfa_c8", False)):
                 cache_sparse_sfa_c8 = True
+                # NoPE layer dimensions may override the model-wide defaults.
                 head_size = get_sfa_qsfa_packed_head_dim(
-                    vllm_config.model_config.hf_text_config.kv_lora_rank,
-                    vllm_config.model_config.hf_text_config.qk_rope_head_dim,
+                    attn_module.impl.kv_lora_rank,
+                    attn_module.impl.qk_rope_head_dim,
                 )
                 dtype = c8_k_cache_dtype
                 cache_dtype_str = vllm_config.cache_config.cache_dtype
