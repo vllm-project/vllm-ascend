@@ -1045,6 +1045,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ):
         if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
+            if kwargs.get("common_ratio_to_sas_metadata") is None:
+                kwargs["common_ratio_to_sas_metadata"] = {}
+            kwargs.setdefault("num_actual_reqs", common_attn_metadata.num_reqs)
             attn_metadata = self.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
