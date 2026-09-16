@@ -169,6 +169,8 @@ class AscendDeepseekV4ForConditionalGeneration(
         """
         table = self._sentinel_table
         if table is None or table.dtype != dtype:
+            # Detach: this is an inference-only cache, and a grad-enabled
+            # table would break torch.where(..., out=) below.
             table = torch.stack(
                 [
                     self.image_start,
@@ -177,7 +179,7 @@ class AscendDeepseekV4ForConditionalGeneration(
                     self.image_newline,
                     self.image_end,
                 ]
-            ).to(dtype)
+            ).to(dtype).detach()
             self._sentinel_table = table
         return table
 
