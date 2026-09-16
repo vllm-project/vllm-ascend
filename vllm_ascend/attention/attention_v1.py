@@ -2844,12 +2844,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
         key_cache, value_cache = kv_cache[0], kv_cache[1]
         block_size = key_cache.shape[1]
-        # Write the K/V payloads in the PA_NZ layout QFA reads
-        # (layout_kv=PA_NZ). npu_scatter_pa_kv_cache's shape contract
-        # (key_cache.dim2 == num_kv_heads) does not fit the PA_NZ axis
-        # order, so the scatter is done in-house; the allocation, hybrid
-        # partitioning, PD and CoW machinery keeps seeing the natural
-        # (num_blocks, block_size, num_kv_heads, head_dim) storage.
+        # Write the K/V payloads in the PA_NZ layout QFA reads: the scatter
+        # declares cache_mode="PA_NZ" and hands the operator the 5-D view,
+        # while allocation, hybrid partitioning, PD and CoW keep seeing the
+        # natural (num_blocks, block_size, num_kv_heads, head_dim) storage.
         scatter_mxfp_pa_nz_kv_cache(
             quant_key,
             quant_value,
