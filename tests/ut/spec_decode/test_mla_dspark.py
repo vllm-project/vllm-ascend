@@ -225,7 +225,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     spec._group_causal = {0: False}
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
-    spec._build_draft_attn_metadata = MagicMock(return_value=metadata)
+    builder = MagicMock(return_value=metadata)
+    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    update = MagicMock(wraps=spec._update_draft_attn_metadata)
+    monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
     captured = {}
 
     @contextmanager
@@ -245,7 +248,10 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         assert captured["is_prefilling"].tolist() == [True, True]
         assert np.shares_memory(captured["is_prefilling"].numpy(), spec.input_batch.is_prefilling_np)
         assert not hasattr(result[0]["draft"], "attn_state")
-    kwargs = spec._build_draft_attn_metadata.call_args.kwargs
+    builder.assert_called_once()
+    update.assert_called_once_with(metadata, 2)
+    kwargs = builder.call_args.kwargs
+    assert "update_query_lengths" not in kwargs
     assert kwargs["num_reqs"] == 1
     assert kwargs["num_reqs_padded"] == 2
     assert kwargs["causal"] == {0: False}
