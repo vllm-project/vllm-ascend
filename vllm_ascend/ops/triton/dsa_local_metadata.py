@@ -44,18 +44,18 @@ DSA_LOCAL_METADATA_BLOCK = 512
 
 @triton.jit(do_not_specialize=["local_start", "local_end", "num_reqs"])
 def build_local_metadata_kernel(
-    query_start_loc_ptr,   # [num_reqs + 1] int32, 1D contiguous
-    seq_lens_ptr,          # [num_reqs]     int32, 1D contiguous
+    query_start_loc_ptr,  # [num_reqs + 1] int32, 1D contiguous
+    seq_lens_ptr,  # [num_reqs] int32, 1D contiguous
     local_query_start_loc_ptr,  # [BLOCK + 1] int32 (output, fully overwritten)
-    local_seq_lens_ptr,         # [BLOCK]     int32 (output, fully overwritten)
-    start_pos_out_ptr,          # [BLOCK]     int32 (output, fully overwritten)
-    local_start,           # runtime scalar: this rank's local token slice start
-    local_end,             # runtime scalar: this rank's local token slice end
-    num_reqs,              # runtime scalar: current batch size, 0..BLOCK
+    local_seq_lens_ptr,  # [BLOCK] int32 (output, fully overwritten)
+    start_pos_out_ptr,  # [BLOCK] int32 (output, fully overwritten)
+    local_start,  # runtime scalar: this rank's local token slice start
+    local_end,  # runtime scalar: this rank's local token slice end
+    num_reqs,  # runtime scalar: current batch size, 0..BLOCK
     COMPUTE_START_POS: tl.constexpr,
-    BLOCK: tl.constexpr,   # fixed capacity; never derived from num_reqs
-    SUB_N: tl.constexpr,   # cumsum fold rows (BLOCK = SUB_N * COLS)
-    COLS: tl.constexpr,    # cumsum fold cols
+    BLOCK: tl.constexpr,  # fixed capacity; never derived from num_reqs
+    SUB_N: tl.constexpr,  # cumsum fold rows (BLOCK = SUB_N * COLS)
+    COLS: tl.constexpr,  # cumsum fold cols
 ):
     """Fused local-token-metadata kernel; one BLOCK-lane vector pass.
 
@@ -98,11 +98,11 @@ def build_local_metadata_kernel(
     # compensate each column with the prefix of the preceding columns'
     # totals. Reshape/trans stays in registers.
     x_col = tl.trans(tl.reshape(lql, (COLS, SUB_N)))  # (SUB_N, COLS) column-major
-    cum_col = tl.cumsum(x_col, axis=0)                # vector path (not last dim)
-    col_sums = tl.sum(x_col, axis=0)                  # (COLS,) totals per column
+    cum_col = tl.cumsum(x_col, axis=0)  # vector path (not last dim)
+    col_sums = tl.sum(x_col, axis=0)  # (COLS,) totals per column
     col_prefix = tl.cumsum(col_sums, axis=0) - col_sums  # [0, s0, s0+s1, ...]
-    y = cum_col + col_prefix[None, :]                 # global inclusive scan
-    cum = tl.reshape(tl.trans(y), (BLOCK,))           # back to row-major order
+    y = cum_col + col_prefix[None, :]  # global inclusive scan
+    cum = tl.reshape(tl.trans(y), (BLOCK,))  # back to row-major order
     # Position [0] is the scalar 0 prefix; store it through a 1-lane
     # arange (triton 3.2.0 requires a block pointer for a block value).
     tl.store(local_query_start_loc_ptr + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32))
@@ -184,6 +184,6 @@ def build_local_metadata(
         num_reqs,
         COMPUTE_START_POS=start_pos_out is not None,
         BLOCK=block,
-        SUB_N=8,   # block = 8 * (block / 8); column-major fold for vector cumsum
+        SUB_N=8,  # block = 8 * (block / 8); column-major fold for vector cumsum
         COLS=block // 8,
     )
