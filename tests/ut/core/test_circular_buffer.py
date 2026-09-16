@@ -95,11 +95,11 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
     mamba = MambaSpec(block_size=128, shapes=((1,),), dtypes=(torch.float32,))
     host.kv_cache_config.kv_cache_groups = [groups[0], KVCacheGroupSpec(["mamba"], mamba), groups[1]]
     host.coordinator.single_type_managers = [
-        SimpleNamespace(block_size=128), SimpleNamespace(block_size=128), SimpleNamespace(block_size=32)
+        SimpleNamespace(block_size=128),
+        SimpleNamespace(block_size=128),
+        SimpleNamespace(block_size=32),
     ]
-    assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [], [])), 128) == (
-        [1], [], []
-    )
+    assert KVCacheManager.truncate_computed_blocks(host, SimpleNamespace(blocks=([1, 2], [], [])), 128) == ([1], [], [])
 
 
 @pytest.mark.parametrize("draft", [False, True])
