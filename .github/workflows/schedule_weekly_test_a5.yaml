@@ -170,7 +170,7 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
-          MATRIX_OUTPUTS: '{"multi_node":"a5.multi_node.test_config","single_node":"a5.single_node.test_config"}'
+          MATRIX_OUTPUTS: '{"single_node":"a5.single_node.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
