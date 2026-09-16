@@ -141,7 +141,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "msa_index_score"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
-        "fused_scatter_copy_sparse_flash_attention_first_fill"
         "fused_scatter_copy_sparse_flash_attention"
     )
 
@@ -202,7 +201,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "msa_index_score"
         "fused_sparse_attention_overlap"
         "fused_lightning_indexer_manage"
-        "fused_scatter_copy_sparse_flash_attention_first_fill"
         "fused_scatter_copy_sparse_flash_attention"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

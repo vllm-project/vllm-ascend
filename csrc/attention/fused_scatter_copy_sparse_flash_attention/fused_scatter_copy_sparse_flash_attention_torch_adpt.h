@@ -153,22 +153,6 @@ inline void npu_fused_scatter_copy_sparse_flash_attention(
   char* kv_layout_ptr = const_cast<char*>(kv_layout.c_str());
   constexpr int64_t kSparseBlockSize = 1;
   constexpr int64_t kSparseMode = 3;
-  // This launch is a device-side conditional no-op for steady-state batches.
-  // When any request is first-fill, it copies the request-level miss list to
-  // HBM. The following Attention launch is ordered on the same NPU stream.
-  EXEC_NPU_CMD(
-      aclnnFusedScatterCopySparseFlashAttentionFirstFill,
-      hbm_k_rope,
-      hbm_kv_cache,
-      dram_k_rope,
-      dram_kv_cache,
-      hbm_block_table,
-      dram_block_table,
-      miss_src_ids,
-      miss_dst_slots,
-      miss_counts,
-      num_cache_tokens);
-
   EXEC_NPU_CMD(
       aclnnFusedScatterCopySparseFlashAttention,
       query,

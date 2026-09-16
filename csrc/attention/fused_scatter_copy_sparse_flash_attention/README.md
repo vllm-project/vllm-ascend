@@ -31,8 +31,8 @@ $$
 算子根据设备侧 Metadata 自动选择执行路径：
 
 - 稳态路径：融合读取 `topk_src_ids`，搬运每一路 Query 的 Miss KV，并执行 Attention；
-- 首次填充路径：内部 helper 先按请求级 `miss_*` 清单填充 HBM Cache，再执行只访问 HBM
-  的 Attention；
+- 首次填充路径：同一 Kernel 内先按请求级 `miss_*` 清单填充 HBM Cache，通过核内同步
+  保证数据可见后，再执行只访问 HBM 的 Attention；
 - 路径选择不读取 CPU 数据，可用于 ACLGraph Capture 和 Replay。
 
 ## 参数说明
@@ -84,8 +84,9 @@ visible_kv_len = actual_seq_lengths_kv[i] - (query_end - 1 - query_row)
 ## 首次填充与稳态路径
 
 当任一请求满足 `miss_counts[i] >= num_cache_tokens[i]` 时，本 Batch 进入首次填充路径。
-内部 `fused_scatter_copy_sparse_flash_attention_first_fill` helper 按每个请求自己的 `miss_counts` 有效前缀完成搬运，
-然后主 Kernel 使用 `topk_dst_slots` 从 HBM 计算 Attention。
+主 Kernel 的 first-fill 阶段按每个请求自己的 `miss_counts` 有效前缀完成搬运，通过 MIX
+Kernel 内部同步建立搬运写入与 Attention 读取之间的数据依赖，然后使用 `topk_dst_slots`
+从 HBM 计算 Attention。
 
 其他 Batch 进入稳态路径。每一路 Query 的前 `topk_miss_counts[row]` 个 TopK 项视为 Miss，
 主 Kernel 使用对应的 `topk_src_ids` 从 DRAM 读取并写入 `topk_dst_slots`，同时与 Attention
@@ -141,8 +142,8 @@ torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention(
 )
 ```
 
-Python 接口内部依次调用私有首次填充 helper 和主算子的 ACLNN 两段式接口，调用方无须
-自行申请 Workspace 或管理 `aclOpExecutor`。
+Python 接口只调用一个 ACLNN 算子。首次填充、核内同步和 Attention 均由主 Kernel
+自闭环完成，调用方无须申请额外 Workspace 或管理内部执行阶段。
 
 ## 测试说明
 

@@ -2,12 +2,12 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
  */
 
-#ifndef KVCACHE_SCATTER_COPY_KERNEL_H
-#define KVCACHE_SCATTER_COPY_KERNEL_H
+#ifndef FIRST_FILL_SCATTER_COPY_KERNEL_H
+#define FIRST_FILL_SCATTER_COPY_KERNEL_H
 
 #include "kernel_operator.h"
 
-namespace KvcacheScatterCopyNs {
+namespace FirstFillScatterCopyNs {
 using namespace AscendC;
 
 constexpr int64_t BLOCK_SIZE = 128;
@@ -18,20 +18,26 @@ constexpr int64_t KV_CACHE_DIM = 512;
 constexpr int64_t K_ROPE_UB_BYTES = K_ROPE_DIM * sizeof(uint16_t);
 constexpr int64_t KV_CACHE_UB_BYTES = KV_CACHE_DIM * sizeof(uint16_t);
 
-template <typename T, bool CONDITIONAL_FIRST_FILL = false>
-class KvcacheScatterCopyKernel {
+template <typename T>
+class FirstFillScatterCopyKernel {
 public:
-    __aicore__ inline KvcacheScatterCopyKernel(TPipe* pipe, const KvcacheScatterCopyTilingData* tiling)
+    __aicore__ inline FirstFillScatterCopyKernel(
+        TPipe* pipe,
+        const FusedScatterCopySparseFlashAttentionTilingData* tiling)
         : pipe_(pipe), tiling_(tiling)
     {}
 
     __aicore__ inline void Init(
         GM_ADDR hbmKRoPE, GM_ADDR hbmKvCache, GM_ADDR dramKRoPE, GM_ADDR dramKvCache,
-        GM_ADDR hbmBlockTable, GM_ADDR dramBlockTable, GM_ADDR srcTokenIds, GM_ADDR dstSlots,
-        GM_ADDR copyCounts, GM_ADDR cacheTokens)
+        GM_ADDR hbmBlockTable, GM_ADDR dramBlockTable,
+        GM_ADDR srcTokenIds, GM_ADDR dstSlots, GM_ADDR copyCounts)
     {
         blockIdx_ = GetBlockIdx();
-        if (blockIdx_ >= tiling_->usedCoreNum) {
+        batchSize_ = tiling_->baseParams.batchSize;
+        copyCap_ = tiling_->missCap;
+        totalPairSlots_ = static_cast<int64_t>(batchSize_) * copyCap_;
+        usedCoreNum_ = tiling_->singleCoreParams.usedCoreNum * 2U;
+        if (blockIdx_ >= usedCoreNum_) {
             return;
         }
 
@@ -51,21 +57,12 @@ public:
         srcTokenIdsGm_.SetGlobalBuffer((__gm__ int32_t*)srcTokenIds);
         dstSlotsGm_.SetGlobalBuffer((__gm__ int32_t*)dstSlots);
         copyCountsGm_.SetGlobalBuffer((__gm__ int32_t*)copyCounts);
-        if constexpr (CONDITIONAL_FIRST_FILL) {
-            cacheTokensGm_.SetGlobalBuffer(
-                (__gm__ int32_t*)cacheTokens, tiling_->batchSize);
-        }
     }
 
     __aicore__ inline void Process()
     {
-        if (blockIdx_ >= tiling_->usedCoreNum) {
+        if (blockIdx_ >= usedCoreNum_) {
             return;
-        }
-        if constexpr (CONDITIONAL_FIRST_FILL) {
-            if (!IsBatchFirstFill()) {
-                return;
-            }
         }
 
         cachedBatchIdx_ = -1;
@@ -73,24 +70,24 @@ public:
 
         int64_t currentFlatPair = FindNextValidPair(blockIdx_);
         CopyAddress currentAddress;
-        while (currentFlatPair < tiling_->totalPairSlots &&
+        while (currentFlatPair < totalPairSlots_ &&
                !ResolveAddress(currentFlatPair, currentAddress)) {
-            currentFlatPair = FindNextValidPair(currentFlatPair + tiling_->usedCoreNum);
+            currentFlatPair = FindNextValidPair(currentFlatPair + usedCoreNum_);
         }
-        if (currentFlatPair >= tiling_->totalPairSlots) {
+        if (currentFlatPair >= totalPairSlots_) {
             return;
         }
 
         CopyIn(currentAddress);
         while (true) {
-            int64_t nextFlatPair = FindNextValidPair(currentFlatPair + tiling_->usedCoreNum);
+            int64_t nextFlatPair = FindNextValidPair(currentFlatPair + usedCoreNum_);
             CopyAddress nextAddress;
-            while (nextFlatPair < tiling_->totalPairSlots &&
+            while (nextFlatPair < totalPairSlots_ &&
                    !ResolveAddress(nextFlatPair, nextAddress)) {
-                nextFlatPair = FindNextValidPair(nextFlatPair + tiling_->usedCoreNum);
+                nextFlatPair = FindNextValidPair(nextFlatPair + usedCoreNum_);
             }
 
-            const bool hasNext = nextFlatPair < tiling_->totalPairSlots;
+            const bool hasNext = nextFlatPair < totalPairSlots_;
             if (hasNext) {
                 // Issue the next DRAM->UB transfer before draining the current
                 // UB->HBM payload.  The two queue slots keep both operations
@@ -107,23 +104,6 @@ public:
     }
 
 private:
-    __aicore__ inline bool IsBatchFirstFill()
-    {
-        bool firstFill = false;
-        for (int64_t batchIdx = 0; batchIdx < tiling_->batchSize; ++batchIdx) {
-            const int32_t copyCount = copyCountsGm_.GetValue(batchIdx);
-            const int32_t cacheTokenCount = cacheTokensGm_.GetValue(batchIdx);
-            ASSERT_MSG(copyCount >= 0 && copyCount <= tiling_->copyCap,
-                "first-fill copy_count exceeds the request-level input capacity.");
-            ASSERT_MSG(cacheTokenCount >= 0,
-                "num_cache_tokens must be non-negative.");
-            if (copyCount >= cacheTokenCount) {
-                firstFill = true;
-            }
-        }
-        return firstFill;
-    }
-
     struct CopyAddress {
         int64_t srcKv = 0;
         int64_t dstKv = 0;
@@ -136,34 +116,34 @@ private:
         if (start <= blockIdx_) {
             return blockIdx_;
         }
-        int64_t steps = CeilDiv(start - blockIdx_, static_cast<int64_t>(tiling_->usedCoreNum));
-        return blockIdx_ + steps * tiling_->usedCoreNum;
+        int64_t steps = CeilDiv(start - blockIdx_, static_cast<int64_t>(usedCoreNum_));
+        return blockIdx_ + steps * usedCoreNum_;
     }
 
     __aicore__ inline int64_t FindNextValidPair(int64_t flatPairIdx)
     {
-        while (flatPairIdx < tiling_->totalPairSlots) {
-            int64_t batchIdx = flatPairIdx / tiling_->copyCap;
-            int32_t copyIdx = static_cast<int32_t>(flatPairIdx - batchIdx * tiling_->copyCap);
+        while (flatPairIdx < totalPairSlots_) {
+            int64_t batchIdx = flatPairIdx / copyCap_;
+            int32_t copyIdx = static_cast<int32_t>(flatPairIdx - batchIdx * copyCap_);
             if (batchIdx != cachedBatchIdx_) {
                 cachedCopyCount_ = copyCountsGm_.GetValue(batchIdx);
-                ASSERT_MSG(cachedCopyCount_ >= 0 && cachedCopyCount_ <= tiling_->copyCap,
+                ASSERT_MSG(cachedCopyCount_ >= 0 && cachedCopyCount_ <= copyCap_,
                     "copy_count exceeds the SCATTER input capacity.");
                 cachedBatchIdx_ = batchIdx;
             }
             if (copyIdx < cachedCopyCount_) {
                 return flatPairIdx;
             }
-            flatPairIdx = FirstFlatPairAtOrAfter((batchIdx + 1) * tiling_->copyCap);
+            flatPairIdx = FirstFlatPairAtOrAfter((batchIdx + 1) * copyCap_);
         }
-        return tiling_->totalPairSlots;
+        return totalPairSlots_;
     }
 
     __aicore__ inline bool ResolveAddress(int64_t flatPairIdx, CopyAddress& address)
     {
-        int64_t batchIdx = flatPairIdx / tiling_->copyCap;
-        int32_t copyIdx = static_cast<int32_t>(flatPairIdx - batchIdx * tiling_->copyCap);
-        int64_t pairOffset = batchIdx * tiling_->copyCap + copyIdx;
+        int64_t batchIdx = flatPairIdx / copyCap_;
+        int32_t copyIdx = static_cast<int32_t>(flatPairIdx - batchIdx * copyCap_);
+        int64_t pairOffset = batchIdx * copyCap_ + copyIdx;
         int32_t srcTokenId = srcTokenIdsGm_.GetValue(pairOffset);
         int32_t dstSlot = dstSlotsGm_.GetValue(pairOffset);
         ASSERT_MSG(srcTokenId >= 0 && dstSlot >= 0, "active src_token_ids and dst_slots must be non-negative.");
@@ -231,8 +211,12 @@ private:
 
 private:
     TPipe* pipe_;
-    const KvcacheScatterCopyTilingData* tiling_;
+    const FusedScatterCopySparseFlashAttentionTilingData* tiling_;
     int32_t blockIdx_ = -1;
+    uint32_t usedCoreNum_ = 0;
+    uint32_t batchSize_ = 0;
+    uint32_t copyCap_ = 0;
+    int64_t totalPairSlots_ = 0;
     int32_t kRopeUbOffset_ = 0;
     int64_t cachedBatchIdx_ = -1;
     int32_t cachedCopyCount_ = 0;
@@ -246,9 +230,8 @@ private:
     GlobalTensor<int32_t> srcTokenIdsGm_;
     GlobalTensor<int32_t> dstSlotsGm_;
     GlobalTensor<int32_t> copyCountsGm_;
-    GlobalTensor<int32_t> cacheTokensGm_;
     TQueBind<QuePosition::VECIN, QuePosition::VECOUT, 2> copyQueue_;
 };
 
-} // namespace KvcacheScatterCopyNs
-#endif // KVCACHE_SCATTER_COPY_KERNEL_H
+} // namespace FirstFillScatterCopyNs
+#endif // FIRST_FILL_SCATTER_COPY_KERNEL_H

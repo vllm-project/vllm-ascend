@@ -11,9 +11,35 @@ using FusedScatterCopySparseFlashAttentionTilingDataMla =
     FusedScatterCopySparseFlashAttentionTilingData;
 
 #include "sparse_flash_attention_impl/fused_scatter_copy_sparse_flash_attention_kernel_mla.h"
+#include "first_fill_scatter_copy_kernel.h"
 
 using namespace AscendC;
 namespace {
+template <typename T>
+__aicore__ inline void RunFirstFillScatterCopy(
+    __gm__ uint8_t *hbmKeyRope,
+    __gm__ uint8_t *hbmKvCache,
+    __gm__ uint8_t *dramKeyRope,
+    __gm__ uint8_t *dramKvCache,
+    __gm__ uint8_t *hbmBlockTable,
+    __gm__ uint8_t *dramBlockTable,
+    __gm__ uint8_t *missSourceIds,
+    __gm__ uint8_t *missDstSlots,
+    __gm__ uint8_t *missCounts,
+    const FusedScatterCopySparseFlashAttentionTilingData *fusedTiling,
+    TPipe *pipe)
+{
+    if ASCEND_IS_AIV {
+        FirstFillScatterCopyNs::FirstFillScatterCopyKernel<T> copy(
+            pipe, fusedTiling);
+        copy.Init(
+            hbmKeyRope, hbmKvCache, dramKeyRope, dramKvCache,
+            hbmBlockTable, dramBlockTable, missSourceIds,
+            missDstSlots, missCounts);
+        copy.Process();
+    }
+}
+
 __aicore__ inline bool IsBatchFirstFill(
     __gm__ uint8_t *cacheTokens,
     __gm__ uint8_t *missCounts,
@@ -68,8 +94,8 @@ __aicore__ inline void RunFusedMtp(
     __gm__ uint8_t *tiling,
     TPipe *pipe)
 {
-    // Request-level payloads are consumed by the ordered conditional copy
-    // launch. This kernel only reads missCounts for the batch path decision.
+    // Request-level payloads are consumed by the first-fill stage in this
+    // kernel. Attention only reads missCounts for the batch path decision.
     (void)missSourceIds;
     (void)missDstSlots;
     using MtpType = SFAType<
@@ -130,6 +156,26 @@ extern "C" __global__ __aicore__ void fused_scatter_copy_sparse_flash_attention(
         const bool firstFill = IsBatchFirstFill(
             cacheTokens, missCounts, fusedTiling->baseParams.batchSize,
             fusedTiling->missCap);
+        if (firstFill) {
+            if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16) {
+                RunFirstFillScatterCopy<half>(
+                    hbmKeyRope, key, dramKeyRope, dramKvCache,
+                    hbmBlockTable, dramBlockTable, missSourceIds,
+                    missDstSlots, missCounts, fusedTiling, &pipe);
+            } else {
+                RunFirstFillScatterCopy<bfloat16_t>(
+                    hbmKeyRope, key, dramKeyRope, dramKvCache,
+                    hbmBlockTable, dramBlockTable, missSourceIds,
+                    missDstSlots, missCounts, fusedTiling, &pipe);
+            }
+            // All MIX kernel tasks must reach the barrier. It establishes the
+            // first-fill MTE3-to-Attention MTE2 dependency before either the
+            // Cube or Vector pipeline reads the updated HBM cache.
+            SyncAll<false>();
+            if ASCEND_IS_AIV {
+                pipe.Reset();
+            }
+        }
         if constexpr (ORIG_DTYPE_QUERY == DT_FLOAT16) {
             if (firstFill) {
                 RunFusedMtp<half, false>(

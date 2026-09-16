@@ -8,7 +8,8 @@ namespace optiling {
 
 // Keep the production sparse Attention payload as an exact prefix.  The
 // kernel reinterprets that prefix as FusedScatterCopySparseFlashAttentionTilingDataMla
-// and consumes the suffix for source-aware DRAM gather metadata.
+// and consumes the suffix for source-aware DRAM gather and the internal
+// first-fill scatter-copy stage.
 BEGIN_TILING_DATA_DEF(FusedScatterCopySparseFlashAttentionTilingData)
 TILING_DATA_FIELD_DEF_STRUCT(FusedScatterCopySparseFlashAttentionBaseParamsMla, baseParams);
 TILING_DATA_FIELD_DEF_STRUCT(FusedScatterCopySparseFlashAttentionSplitKVParamsMla, splitKVParams);
