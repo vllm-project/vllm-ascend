@@ -72,7 +72,7 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description, {})
 
     def test_deepseek_v41_packed_mapping_uses_checkpoint_shard_names(self):
-        self.ascend_config._update_packed_modules_mapping("deepseek_v4.1")
+        self.ascend_config._update_packed_modules_mapping("deepseek_v41")
         self.assertEqual(
             self.ascend_config.packed_modules_mapping["gate_up_proj"],
             ["w1", "w3"],
@@ -84,7 +84,7 @@ class TestAscendModelSlimConfig(TestBase):
 
     def test_deepseek_v41_quant_prefix_maps_terminal_projection(self):
         self.assertEqual(
-            self.ascend_config.quant_prefix_mapper("deepseek_v4.1", "model.layers.0.mlp.shared_experts.down_proj"),
+            self.ascend_config.quant_prefix_mapper("deepseek_v41", "model.layers.0.mlp.shared_experts.down_proj"),
             "layers.0.ffn.shared_experts.w2",
         )
 
@@ -630,7 +630,7 @@ class TestQuantPrefixMapper(TestBase):
         for prefix, expected in cases.items():
             with self.subTest(prefix=prefix):
                 self.assertEqual(
-                    config.quant_prefix_mapper("deepseek_v4.1", prefix),
+                    config.quant_prefix_mapper("deepseek_v41", prefix),
                     expected,
                 )
 

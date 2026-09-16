@@ -182,7 +182,7 @@ class PagedNgramHistory:
         if vocab_size != config.engram_compressed_vocab_size:
             raise ValueError(f"Engram compressed vocabulary mismatch: {vocab_size}")
         self.token_map = torch.tensor(token_map, dtype=torch.int64)
-        self.pad_id = token_map[config.engram_pad_id]
+        self.pad_id = token_map[config.engram_pad_token_id]
         self.image_token_id = config.image_token_id
         self.image_pad_token_id = getattr(
             config,

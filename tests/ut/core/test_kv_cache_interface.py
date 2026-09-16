@@ -62,5 +62,23 @@ def test_cache_layout_resolution_rejects_incompatible_layouts():
     first, second = object(), object()
     assert get_kv_cache_layout([SimpleNamespace()]) is None
     assert get_kv_cache_layout([SimpleNamespace(cache_layout=first)]) is first
+    assert get_kv_cache_layout([SimpleNamespace(kv_cache_spec=SimpleNamespace(cache_layout=first))]) is first
     with pytest.raises(ValueError, match="incompatible physical layouts"):
         get_kv_cache_layout([SimpleNamespace(cache_layout=first), SimpleNamespace(cache_layout=second)])
+
+
+def test_max_concurrency_delegates_without_custom_layout(monkeypatch):
+    from vllm_ascend.patch.platform import patch_kv_cache_utils
+
+    vllm_config = SimpleNamespace()
+    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace())])
+    calls = []
+
+    def upstream(config, cache):
+        calls.append((config, cache))
+        return 2.5
+
+    monkeypatch.setattr(patch_kv_cache_utils, "_orig_max_concurrency", upstream)
+
+    assert patch_kv_cache_utils._ascend_max_concurrency(vllm_config, cache_config) == 2.5
+    assert calls == [(vllm_config, cache_config)]
