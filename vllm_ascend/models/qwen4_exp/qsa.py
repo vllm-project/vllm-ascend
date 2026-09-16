@@ -337,6 +337,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                         out,
                         use_e3=True,
                     )
+                print(1)
                 return qsa_select_paged_tokens_lightning(
                     query,
                     self.compressed_key_cache.kv_cache,

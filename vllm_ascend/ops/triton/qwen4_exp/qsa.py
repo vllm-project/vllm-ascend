@@ -13,6 +13,7 @@ import math
 
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 
@@ -903,16 +904,24 @@ def qsa_sparse_paged_attention(
 
     # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
     # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
-        block_n, target_splits, partial_warps = 16, 64, 4
-    elif base_programs < 32:
-        block_n, target_splits, partial_warps = 16, 32, 4
-    elif base_programs <= 256:
-        block_n, target_splits, partial_warps = 64, 8, 2
-    elif base_programs <= 512:
-        block_n, target_splits, partial_warps = 64, 4, 2
+    if get_ascend_device_type() == AscendDeviceType.A2:
+        block_n = 64
+        partial_warps = 2
+
+        target_programs = 16
+        split_for_cores = max(1, target_programs // max(base_programs,1))
+        target_splits = 1 << (split_for_cores.bit_length() - 1)
     else:
-        block_n, target_splits, partial_warps = 64, 1, 2
+        if base_programs <= small_profile_limit:
+            block_n, target_splits, partial_warps = 16, 64, 4
+        elif base_programs < 32:
+            block_n, target_splits, partial_warps = 16, 32, 4
+        elif base_programs <= 256:
+            block_n, target_splits, partial_warps = 64, 8, 2
+        elif base_programs <= 512:
+            block_n, target_splits, partial_warps = 64, 4, 2
+        else:
+            block_n, target_splits, partial_warps = 64, 1, 2
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
