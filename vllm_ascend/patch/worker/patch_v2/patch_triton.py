@@ -22,7 +22,6 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
-from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
