@@ -21,6 +21,7 @@ from torch.nn.functional import pad
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
@@ -42,6 +43,18 @@ from vllm_ascend.utils import (
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
 SITU_MX_DST_TYPE_E4M3FN = 36
+
+
+def maybe_record_event() -> torch.npu.Event | None:
+    """Record an NPU event on the current stream for the shared-expert overlap.
+
+    Host-side record_event is expensive, and the events are consumed only by
+    the shared-expert side stream, which exists solely when multistream overlap
+    is enabled; skip the record entirely when it is off.
+    """
+    if get_ascend_config().multistream_overlap_shared_expert:
+        return torch.npu.current_stream().record_event()
+    return None
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
@@ -247,7 +260,7 @@ def _w4a8_situ_apply_mlp(
             activate_left=True,
             quant_mode="dynamic",
         )
-    before_gmm2_evt = torch.npu.current_stream().record_event()
+    before_gmm2_evt = maybe_record_event()
     hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
         hidden_states=hidden_states,
         weight=w2,
@@ -463,7 +476,7 @@ def quant_apply_mlp(
                     }
                 )
             hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(**dequant_swiglu_kwargs)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = maybe_record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -514,7 +527,7 @@ def quant_apply_mlp(
             )
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = maybe_record_event()
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -645,7 +658,7 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = maybe_record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
