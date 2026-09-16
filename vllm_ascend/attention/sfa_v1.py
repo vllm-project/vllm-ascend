@@ -694,6 +694,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.layerwise_kv_cache_hook: Any = None
 
         ascend_config = get_ascend_config()
+        # RL rollout workers receive in-place weight updates through vLLM's
+        # layerwise reload, which reloads each checkpoint parameter into its
+        # *existing* storage (the kernel tensor captured at transaction start)
+        # and copies the processed value back into it. A parameter whose storage
+        # was replaced by an empty tensor therefore has no valid load
+        # destination: the new weight is dropped and the model keeps serving the
+        # derived state built from the empty tensor. Keep the absorbed
+        # projections alive whenever live weight updates are possible.
+        self.live_weight_reload_enabled = ascend_config.rl_config.enabled
         self.vllm_config = get_current_vllm_config()
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
@@ -833,8 +842,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
-        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
-        dispose_layer(self.kv_b_proj)
+        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
+        # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
+        # update re-derives them from this parameter and the parameter must stay
+        # loadable (#15463).
+        if not self.live_weight_reload_enabled:
+            dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
         if self.preprocess_type == PreprocessType.NATIVE:
@@ -964,7 +977,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)
             self.weight_uq_qr_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
 
-        if self.is_kv_consumer:
+        # Same reasoning as kv_b_proj: once the fused projections are consumed by
+        # PROLOG_V3 they are pure load sources, but discarding their storage
+        # breaks the next layerwise reload, so RL keeps them.
+        if self.is_kv_consumer and not self.live_weight_reload_enabled:
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()
