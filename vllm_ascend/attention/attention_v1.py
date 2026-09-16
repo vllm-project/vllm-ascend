@@ -64,6 +64,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.mxfp_kv_cache import (
+    mxfp_k_scale_slot_index,
     scatter_mxfp_k_scale_cache,
     scatter_mxfp_pa_nz_kv_cache,
 )
@@ -2508,6 +2509,60 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata.qfa_metadata_cache = cache
         return cache
 
+    def _qfa_step_lengths(self, attn_metadata: AscendMetadata, num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return this step's (cu_seqlens_q, seqused_kv), derived once.
+
+        Both come from the runner's persistent length buffers and depend only
+        on per-step data, yet every full-attention layer used to re-derive
+        them -- three device ops each, 23 times a step for nothing.
+
+        Caching here stays correct under graph capture, and the reason is
+        worth spelling out because the metadata-op cache above does the
+        opposite. What capture cannot tolerate is a value produced OUTSIDE
+        the captured region, because replay never re-runs Python. These ops
+        run inside it: the first layer's derivation is recorded, the other
+        layers simply consume the tensor it produced, and every replay
+        re-executes that one recorded derivation against the refreshed
+        buffers. The metadata op is bypassed instead because its plan is
+        consumed by the very call that produced it, not because caching
+        across layers would freeze anything.
+        """
+        cache = self._qfa_step_cache(attn_metadata)
+        lengths = cache.get("lengths")
+        if lengths is None:
+            # Sanitize the tail beyond the current requests: unused
+            # query_start_loc slots carry -1 (the FIA padding convention) and
+            # may also hold stale entries from larger earlier steps (the FULL
+            # dummy-request padding re-copies the whole CPU buffer to GPU).
+            # clamp to [0, num_tokens] bounds both; cummax restores
+            # monotonicity, turning the tail into zero-length requests whose
+            # cu_seqlens_q[-1] still equals the token total. Unused seq_lens
+            # slots are zero-filled by the runner every step; clamp(min=1)
+            # matches the dummy-request convention (block 0, one token). On
+            # clean eager data both ops are identity transforms.
+            lengths = (
+                attn_metadata.query_start_loc_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values,
+                attn_metadata.seq_lens_gpu.clamp(min=1),
+            )
+            cache["lengths"] = lengths
+        return lengths
+
+    def _qfa_k_scale_slot_index(
+        self, attn_metadata: AscendMetadata, slot_mapping: torch.Tensor, block_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return this step's K-scale slot decomposition, derived once.
+
+        Same story as _qfa_step_lengths: six device ops over slot_mapping
+        that every layer used to repeat, cached inside the captured region so
+        replay re-derives them exactly once.
+        """
+        cache = self._qfa_step_cache(attn_metadata)
+        slot_index = cache.get("k_scale_slots")
+        if slot_index is None:
+            slot_index = mxfp_k_scale_slot_index(slot_mapping, block_size)
+            cache["k_scale_slots"] = slot_index
+        return slot_index
+
     def _get_qfa_metadata(
         self,
         attn_metadata: AscendMetadata,
@@ -2762,18 +2817,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 "C8_MXFP attention requires the GPU-side length sources "
                 "(query_start_loc_gpu / seq_lens_gpu) on AscendMetadata."
             )
-        # Sanitize the tail beyond the current requests: unused
-        # query_start_loc slots carry -1 (the FIA padding convention) and
-        # may also hold stale entries from larger earlier steps (the FULL
-        # dummy-request padding re-copies the whole CPU buffer to GPU).
-        # clamp to [0, num_tokens] bounds both; cummax restores
-        # monotonicity, turning the tail into zero-length requests whose
-        # cu_seqlens_q[-1] still equals the token total. Unused seq_lens
-        # slots are zero-filled by the runner every step; clamp(min=1)
-        # matches the dummy-request convention (block 0, one token). On
-        # clean eager data both ops are identity transforms.
-        cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values
-        seqused_kv = seq_lens_gpu.clamp(min=1)
+        cu_seqlens_q, seqused_kv = self._qfa_step_lengths(attn_metadata, num_tokens)
         # The longest single query in the batch -- NOT the batch token total.
         # The metadata op seeds its querySeqSize with this attr and then raises
         # it per request with max(attr, cu_seqlens_q[i+1] - cu_seqlens_q[i]),
@@ -2867,8 +2911,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # AICPU (the cache side is already uint8 raw storage).
             key_scale.view(torch.uint8) if key_scale.dtype != torch.uint8 else key_scale,
             key_scale_cache,
-            slot_mapping,
-            block_size,
+            self._qfa_k_scale_slot_index(attn_metadata, slot_mapping, block_size),
         )
         filled_caches = self._v_scale_filled_caches
         if filled_caches is None:

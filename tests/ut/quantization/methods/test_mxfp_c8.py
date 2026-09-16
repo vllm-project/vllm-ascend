@@ -11,6 +11,7 @@ from vllm_ascend.device.mxfp_kv_cache import (
     MXFP_KV_SCALE_GROUP_SIZE,
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_page_bytes,
+    mxfp_k_scale_slot_index,
     mxfp_v_scale_cache_shape,
     mxfp_v_scale_page_bytes,
     scatter_mxfp_k_scale_cache,
@@ -187,7 +188,11 @@ class TestScatterMXFPKScaleCache(TestBase):
         # uses valid dummy slots), see the coexist test note.
         slot_mapping = torch.tensor([2, 513, -1], dtype=torch.int64)
 
-        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+        scatter_mxfp_k_scale_cache(
+            key_scale,
+            self.key_scale_cache,
+            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
+        )
 
         block, seg, frag = self._at(2)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 130))
@@ -210,7 +215,11 @@ class TestScatterMXFPKScaleCache(TestBase):
         key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
         slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
 
-        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+        scatter_mxfp_k_scale_cache(
+            key_scale,
+            self.key_scale_cache,
+            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
+        )
 
         block, seg, frag = self._at(0)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 99))
@@ -232,7 +241,11 @@ class TestScatterMXFPKScaleCache(TestBase):
         key_scale[1] = 77  # padding row (clamps to slot 0, rewrites 55)
         slot_mapping = torch.tensor([3, -1], dtype=torch.int64)
 
-        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+        scatter_mxfp_k_scale_cache(
+            key_scale,
+            self.key_scale_cache,
+            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
+        )
 
         block, seg, frag = self._at(3)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 200))

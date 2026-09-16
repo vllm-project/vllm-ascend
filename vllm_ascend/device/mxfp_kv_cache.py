@@ -265,109 +265,62 @@ def scatter_mxfp_pa_nz_kv_cache(
     )
 
 
+def mxfp_k_scale_slot_index(
+    slot_mapping: torch.Tensor,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Decompose slots into the index tensors the K-scale scatter indexes with.
+
+    Returns ``(valid, block_ids, seg_ids, frag_ids)`` for the PA_NZ K-scale
+    cache, where a token at in-block offset ``o`` lands at
+    ``[block, n, o // 16, :, o % 16, :]``.
+
+    Depends only on per-step data (slot_mapping, block_size), so one call
+    serves every full-attention layer of a step -- see
+    ``AscendC8MXFPAttentionBackendImpl._qfa_k_scale_slot_index`` for the
+    caching, including why caching this one through graph capture is safe
+    while the metadata-op plan is not.
+
+    Padded rows (slot -1) are clamped to slot 0 and handled by the ``valid``
+    mask at write time, which keeps the shapes static: no ``.item()``, no
+    boolean indexing, nothing a capture would reject.
+    """
+    slots = slot_mapping.to(torch.long)
+    valid = slots >= 0
+    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
+    block_ids = safe_slots // block_size
+    offsets = safe_slots % block_size
+    return valid, block_ids, offsets // MXFP_K_SCALE_NZ_TOKEN_FRAG, offsets % MXFP_K_SCALE_NZ_TOKEN_FRAG
+
+
 def scatter_mxfp_k_scale_cache(
     key_scale: torch.Tensor,
     key_scale_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_size: int,
+    slot_index: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ) -> None:
     """Scatter per-token K scales into the paged K-scale cache.
 
     ``key_scale`` shape: ``[num_tokens, num_kv_heads, head_dim // 64, 2]``
     (any 1-byte dtype; callers pass a uint8 view of the E8M0 scale).
     ``key_scale_cache`` shape (PA_NZ): ``[num_blocks, num_kv_heads,
-    block_size // 16, head_dim // 64, 16, 2]`` -- a token at in-block offset
-    ``o`` lands at ``[block, n, o // 16, :, o % 16, :]``.
+    block_size // 16, head_dim // 64, 16, 2]``.
+
+    ``slot_index`` comes from :func:`mxfp_k_scale_slot_index` and is shared
+    across the step's layers; only the read-modify-write below is per-layer.
 
     ACL-graph-capture safe: no host-device synchronization (``.all()``/
     ``bool()``/``.item()`` are illegal mid-capture -- "Stream during the
     capture stage is not supported") and no data-dependent shapes. Padded
-    rows (slot -1) are clamped to slot 0 via ``torch.where`` and write back
-    the cache's pre-read content, making them no-ops. Known edge (unreachable
-    in supported paths): a real token targeting slot 0 IN THE SAME BATCH as a
-    padded row would be a duplicate-index write where the padding row's
-    read-back clobbers the real value -- eager batches never carry -1 rows,
-    and graph-mode padding uses valid dummy slots, so this combination cannot
-    occur in v1.
+    rows write back the cache's pre-read content, making them no-ops. Known
+    edge (unreachable in supported paths): a real token targeting slot 0 IN
+    THE SAME BATCH as a padded row would be a duplicate-index write where the
+    padding row's read-back clobbers the real value -- eager batches never
+    carry -1 rows, and graph-mode padding uses valid dummy slots, so this
+    combination cannot occur in v1.
     """
-    validate_mxfp_v_scale_block_size(block_size)
-    slots = slot_mapping.to(torch.long)
-    if slots.numel() == 0:
+    valid, block_ids, seg_ids, frag_ids = slot_index
+    if block_ids.numel() == 0:
         return
-
-    valid = slots >= 0
-    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
-    block_ids = safe_slots // block_size
-    offsets = safe_slots % block_size
-    seg_ids = offsets // MXFP_K_SCALE_NZ_TOKEN_FRAG
-    frag_ids = offsets % MXFP_K_SCALE_NZ_TOKEN_FRAG
-    # Row mask (device-only): valid rows take the new scale, padded rows
-    # rewrite the current content of their clamp target -- a no-op.
     cached = key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :]
     updates = torch.where(valid.view(-1, 1, 1, 1), key_scale, cached)
     key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :] = updates
-
-
-def scatter_mxfp_v_cache(
-    quant_value: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_size: int,
-) -> None:
-    """Scatter per-token quantized V into the paged V cache.
-
-    ``quant_value`` shape: ``[num_tokens, num_kv_heads, v_dim]``.
-    ``value_cache`` shape: ``[num_blocks, block_size, num_kv_heads, v_dim]``.
-    """
-    validate_mxfp_v_scale_block_size(block_size)
-    slots = slot_mapping.to(torch.long)
-    if slots.numel() == 0:
-        return
-
-    num_kv_heads = quant_value.shape[1]
-    v_dim = quant_value.shape[2]
-    flat_cache = value_cache.view(-1, num_kv_heads * v_dim)
-    torch_npu.npu_scatter_nd_update_(
-        flat_cache,
-        slots.view(-1, 1),
-        quant_value.reshape(quant_value.shape[0], num_kv_heads * v_dim),
-    )
-
-
-def scatter_mxfp_v_scale_cache(
-    value_scale: torch.Tensor,
-    value_scale_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_size: int,
-) -> None:
-    """Scatter per-64-token-group V scales into the paged V-scale cache.
-
-    ``value_scale`` comes from ``npu_dynamic_mx_quant(..., axis=0)`` and has shape
-    ``[ceil(num_tokens / 64), num_kv_heads, head_dim, 2]``. The cache layout is
-    PA_NZ ``[num_blocks, num_kv_heads, head_dim // 16, block_size // 64, 16, 2]``:
-    a 64-token group at in-block group-offset ``g`` lands at
-    ``[block, n, d // 16, g, d % 16, :]`` for every channel ``d``.
-
-    Unused while V's scale is the checkpoint's static per-channel one (a
-    static V scale is broadcast into the cache once and never scattered);
-    kept for a dynamic-V design. Indexing follows the PA_NZ order the rest
-    of this module uses, so it stays correct if a dynamic-V path ever calls it.
-    """
-    validate_mxfp_v_scale_block_size(block_size)
-    num_scales = value_scale.shape[0]
-    v_scale_slot_mapping = (slot_mapping // MXFP_KV_SCALE_GROUP_SIZE).unique()
-    if v_scale_slot_mapping.numel() != num_scales:
-        raise ValueError(
-            f"C8_MXFP V scale slot mapping mismatch: expected {v_scale_slot_mapping.numel()}, got {num_scales}."
-        )
-
-    v_scale_cache_block_size = mxfp_kv_block_scale_groups(block_size)
-    block_ids = v_scale_slot_mapping // v_scale_cache_block_size
-    v_scale_cache_offsets = v_scale_slot_mapping % v_scale_cache_block_size
-    # value_scale: [G, N, D, 2] -> [G, N, D // 16, 16, 2]; the advanced
-    # indexing below broadcasts the G-length index vectors to the front,
-    # so the source lines up group-by-group with the target slots.
-    packed = value_scale.reshape(
-        num_scales, *value_scale.shape[1:2], -1, MXFP_V_SCALE_NZ_DIM_FRAG, MXFP_KV_SCALE_VALUES_PER_GROUP
-    )
-    value_scale_cache[block_ids, :, :, v_scale_cache_offsets, :, :] = packed

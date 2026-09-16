@@ -1165,3 +1165,64 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
         self.assertEqual(seen["layout"], "TND")
         self.assertIs(seen["scale"], seen["source_scale"])
+
+
+class TestC8MXFPPerStepDerivations(TestBase):
+    """Per-step quantities are derived once, not once per layer.
+
+    cu_seqlens_q / seqused_kv and the K-scale slot decomposition depend only
+    on the runner's per-step buffers, but a step walks 23 full-attention
+    layers. Caching them on the shared AscendMetadata is what keeps that from
+    being ~200 redundant device ops a decode step, so the reuse is the thing
+    worth pinning.
+    """
+
+    def setUp(self):
+        self.impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        self.attn_metadata = SimpleNamespace(
+            query_start_loc_gpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+            seq_lens_gpu=torch.tensor([10, 20], dtype=torch.int32),
+        )
+
+    def test_lengths_are_derived_once_per_step(self):
+        first = self.impl._qfa_step_lengths(self.attn_metadata, 8)
+        second = self.impl._qfa_step_lengths(self.attn_metadata, 8)
+        # Same tensor objects, so later layers add no ops to the graph.
+        self.assertIs(first[0], second[0])
+        self.assertIs(first[1], second[1])
+
+    def test_lengths_are_sanitized(self):
+        # -1 padding clamps to 0, and cummax keeps the boundaries monotonic
+        # so cu_seqlens_q[-1] still equals the token total.
+        self.attn_metadata.query_start_loc_gpu = torch.tensor([0, 4, 8, -1, -1], dtype=torch.int32)
+        self.attn_metadata.seq_lens_gpu = torch.tensor([10, 20, 0, 0], dtype=torch.int32)
+        cu_seqlens_q, seqused_kv = self.impl._qfa_step_lengths(self.attn_metadata, 8)
+        self.assertEqual(cu_seqlens_q.tolist(), [0, 4, 8, 8, 8])
+        self.assertEqual(seqused_kv.tolist(), [10, 20, 1, 1])
+
+    def test_k_scale_slot_index_is_derived_once_per_step(self):
+        slots = torch.tensor([2, 5, -1], dtype=torch.int64)
+        first = self.impl._qfa_k_scale_slot_index(self.attn_metadata, slots, 4)
+        second = self.impl._qfa_k_scale_slot_index(self.attn_metadata, slots, 4)
+        for a, b in zip(first, second):
+            self.assertIs(a, b)
+
+    def test_k_scale_slot_index_decomposes_slots(self):
+        # block_size 4, K-scale token fragment 16: slot 5 -> block 1,
+        # offset 1 -> segment 0, fragment 1. The padded row clamps to slot 0
+        # and is carried by the valid mask instead of changing any shape.
+        slots = torch.tensor([2, 5, -1], dtype=torch.int64)
+        valid, block_ids, seg_ids, frag_ids = self.impl._qfa_k_scale_slot_index(self.attn_metadata, slots, 4)
+        self.assertEqual(valid.tolist(), [True, True, False])
+        self.assertEqual(block_ids.tolist(), [0, 1, 0])
+        self.assertEqual(seg_ids.tolist(), [0, 0, 0])
+        self.assertEqual(frag_ids.tolist(), [2, 1, 0])
+
+    def test_the_two_derivations_do_not_collide_in_the_step_cache(self):
+        lengths = self.impl._qfa_step_lengths(self.attn_metadata, 8)
+        slots = self.impl._qfa_k_scale_slot_index(self.attn_metadata, torch.tensor([2, 5, -1], dtype=torch.int64), 4)
+        self.assertIs(self.impl._qfa_step_lengths(self.attn_metadata, 8)[0], lengths[0])
+        self.assertIs(
+            self.impl._qfa_k_scale_slot_index(self.attn_metadata, torch.tensor([2, 5, -1], dtype=torch.int64), 4)[0],
+            slots[0],
+        )
