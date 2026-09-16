@@ -9,6 +9,7 @@ from vllm_ascend.device.mxfp_kv_cache import (
     MXFP8_GROUP_SIZE,
     MXFP_K_SCALE_NZ_TOKEN_FRAG,
     MXFP_KV_SCALE_GROUP_SIZE,
+    fill_mxfp_v_scale_cache,
     mxfp_k_scale_cache_shape,
     mxfp_k_scale_page_bytes,
     mxfp_k_scale_slot_index,
@@ -151,6 +152,61 @@ class TestScatterMXFPPaNzKvCache(TestBase):
         expected = (((1 * self.NUM_KV_HEADS + 0) * (self.HEAD_DIM // 32) + 1) * self.BLOCK_SIZE + 2) * 32 + 5
         self.assertEqual(flat[expected].item(), 42)
         self.assertEqual(int((flat != 0).sum()), 1)
+
+
+class TestFillMXFPVScaleCache(TestBase):
+    """V's static per-channel scale, spread over its whole paged cache.
+
+    Unlike K's, this scale never changes at inference, so it is written once
+    at KV cache setup instead of being scattered per step. Every block, every
+    token group and both halves of the even/odd pair get the same
+    (kv head, channel) byte.
+    """
+
+    NUM_BLOCKS = 2
+    NUM_KV_HEADS = 2
+    BLOCK_SIZE = 128
+
+    def _fill(self, head_dim):
+        cache = torch.zeros(
+            mxfp_v_scale_cache_shape(self.NUM_BLOCKS, self.BLOCK_SIZE, self.NUM_KV_HEADS, head_dim),
+            dtype=torch.uint8,
+        )
+        # Distinct byte per (kv head, channel) so a transposed or collapsed
+        # axis cannot pass by accident, and none of them zero so an untouched
+        # slot stays distinguishable from a written one.
+        value_scale = (
+            torch.arange(self.NUM_KV_HEADS * head_dim, dtype=torch.int32).remainder(251).add(1).to(torch.uint8)
+        )
+        fill_mxfp_v_scale_cache(value_scale, cache)
+        return value_scale, cache
+
+    def test_every_slot_carries_its_channel_scale(self):
+        head_dim = 64
+        value_scale, cache = self._fill(head_dim)
+        num_token_groups = cache.shape[3]
+        for block in range(self.NUM_BLOCKS):
+            for token_group in range(num_token_groups):
+                for half in range(2):
+                    self.assertEqual(
+                        cache[block, :, :, token_group, :, half].reshape(-1).tolist(),
+                        value_scale.tolist(),
+                    )
+
+    def test_the_cache_supplies_the_head_dim(self):
+        # A model whose V head dim differs from Q/K's must still land
+        # correctly, which is why the shapes are read off the cache.
+        value_scale, cache = self._fill(32)
+        self.assertEqual(cache.shape[2], 32 // 16)
+        self.assertEqual(cache[0, :, :, 0, :, 0].reshape(-1).tolist(), value_scale.tolist())
+
+    def test_no_slot_is_left_untouched(self):
+        # Zero is the failure signature of the bug this replaced: a scale
+        # cache that stayed at its allocation value dequantizes V to ~0 and
+        # attention returns exactly zero. The fixture has no zero scales, so
+        # any zero left in the cache is a slot the fill missed.
+        _, cache = self._fill(64)
+        self.assertTrue(bool((cache != 0).all()))
 
 
 class TestScatterMXFPKScaleCache(TestBase):
@@ -387,7 +443,6 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         self.assertIs(layer.attn_backend, AscendC8MXFPAttentionBackend)
         self.assertIsInstance(layer.impl, AscendC8MXFPAttentionBackendImpl)
         self.assertFalse(layer.impl.enable_hamming_sparse)
-        self.assertEqual(layer.impl._v_scale_filled_caches, set())
         self.assertEqual(AscendAttentionBackend.get_supported_kernel_block_sizes(), [128])
         self.assertEqual(AscendC8MXFPAttentionBackend.get_supported_kernel_block_sizes(), [512])
 

@@ -134,7 +134,11 @@ except ImportError:  # pragma: no cover - exercised on v0.28.0
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionState,
+    AscendC8MXFPAttentionBackendImpl,
+)
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -157,6 +161,7 @@ from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.mxfp_kv_cache import (
     MXFP8_GROUP_SIZE,
+    fill_mxfp_v_scale_cache,
     mxfp_k_scale_cache_shape,
     mxfp_v_scale_cache_shape,
 )
@@ -4393,6 +4398,42 @@ class NPUModelRunner(GPUModelRunner):
     def _is_c8_mxfp_kv_cache(self, kv_cache_spec: AttentionSpec) -> bool:
         return isinstance(kv_cache_spec, FullAttentionSpec) and is_c8_mxfp_kv_quant(self.vllm_config)
 
+    def _fill_c8_mxfp_v_scale_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Broadcast every C8 MXFP layer's static V scale into its scale cache.
+
+        V is quantized with the checkpoint's per-channel E8M0 scale, so its
+        scale cache holds one value per (kv head, channel) repeated over every
+        block and token slot, and it never changes at inference. Filling it
+        here, once the caches exist, is what keeps it off the attention path.
+
+        Doing it lazily in forward could not be made both correct and free.
+        ACL-graph capture records a write without executing it while the
+        Python bookkeeping beside it runs for real, so a cache first reached
+        during capture either stayed zero forever -- V dequantizing to zero,
+        attention returning exactly zero, MTP acceptance collapsing the moment
+        the draft graph was enabled -- or, once that was guarded, re-broadcast
+        the entire cache on every replay for the rest of the run. Neither
+        applies to a fill that happens before any request, capture or replay.
+
+        The impl class is installed during create_weights and the scale itself
+        is finalized in process_weights_after_loading, both at model load, so
+        every layer here is ready -- draft models included.
+        """
+        static_forward_context = self.compilation_config.static_forward_context
+        for layer_name, kv_cache in kv_caches.items():
+            layer = static_forward_context.get(layer_name)
+            if not isinstance(getattr(layer, "impl", None), AscendC8MXFPAttentionBackendImpl):
+                continue
+            # Fail loudly here rather than serve zeros: a C8 MXFP layer whose
+            # V scale never lands looks like a model quality problem, not a
+            # setup one, and that misdiagnosis has cost a debugging round once.
+            if not isinstance(kv_cache, tuple) or len(kv_cache) != 4:
+                raise RuntimeError(
+                    f"C8_MXFP layer {layer_name} needs a (k, v, k_scale, v_scale) KV cache tuple, "
+                    f"got {type(kv_cache).__name__}."
+                )
+            fill_mxfp_v_scale_cache(layer.v_cache_scale, kv_cache[3])
+
     @staticmethod
     def _split_hybrid_c8_mxfp_cache_buffer(
         raw_tensor: torch.Tensor,
@@ -4472,6 +4513,9 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
+
+        # Static V scales are written once, here, and never again.
+        self._fill_c8_mxfp_v_scale_caches(kv_caches)
 
         if self.model_config.hf_text_config.model_type == "deepseek_v4":
             from vllm_ascend.utils import extract_dsv4_layer_index

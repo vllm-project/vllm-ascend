@@ -76,12 +76,8 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
             layer.attn_backend = AscendC8MXFPAttentionBackend
             layer.impl.__class__ = AscendC8MXFPAttentionBackendImpl
             # Changing __class__ does not invoke the new class's __init__, so
-            # initialize the state the impl relies on here. The V-scale fill
-            # tracker is keyed by cache tensor identity, which stays correct
-            # across memory-profiling runs (fresh dummy caches) and the real
-            # KV cache without any explicit reset hook.
+            # initialize the state the impl relies on here.
             layer.impl.enable_hamming_sparse = False
-            layer.impl._v_scale_filled_caches = set()
 
         # Load v_cache static quantization scale
         hidden_size = layer.num_kv_heads * layer.head_size_v

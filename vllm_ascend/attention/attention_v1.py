@@ -2483,7 +2483,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     # this subclass's constructor. Class-level defaults are therefore
     # required for objects that predate the class swap.
     enable_hamming_sparse: bool = False
-    _v_scale_filled_caches: set[torch.Tensor] | None = None
 
     # NZ fragment size of the PA_NZ K/V cache view (matches the FIA C8 path's
     # _nz_5d_view and QFA's PA_NZ fp8 layout [Bn, N, D//32, Bs, 32]).
@@ -2914,7 +2913,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         quant_key: torch.Tensor,
         quant_value: torch.Tensor,
         key_scale: torch.Tensor,
-        value_scale: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
     ) -> None:
@@ -2935,45 +2933,17 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             block_size,
         )
 
-        # Scatter the dynamic per-token K scales; V's static per-channel scale
-        # is broadcast into its group-layout cache once per cache instance
-        # (tracked by identity so memory-profiling dummy caches and the real
-        # cache are both initialized without a reset hook).
-        key_scale_cache, value_scale_cache = kv_cache[2], kv_cache[3]
+        # Only K's scale is per-token. V's is the checkpoint's static
+        # per-channel scale, broadcast over its whole cache once by
+        # NPUModelRunner._fill_c8_mxfp_v_scale_caches at KV cache setup, so
+        # nothing about it belongs on this path.
         scatter_mxfp_k_scale_cache(
             # Byte view: index_put_ on float8 either errors or falls back to
             # AICPU (the cache side is already uint8 raw storage).
             key_scale.view(torch.uint8) if key_scale.dtype != torch.uint8 else key_scale,
-            key_scale_cache,
+            kv_cache[2],
             self._qfa_k_scale_slot_index(attn_metadata, slot_mapping, block_size),
         )
-        filled_caches = self._v_scale_filled_caches
-        if filled_caches is None:
-            filled_caches = set()
-            self._v_scale_filled_caches = filled_caches
-        if value_scale_cache not in filled_caches:
-            # (hidden_size) -> (num_kv_heads, head_size) -> (num_kv_heads,
-            # head_size // 16, 1, 16, 1) -> broadcast ->
-            # (num_blocks, num_kv_heads, head_size // 16, block_size // 64,
-            # 16, 2) (PA_NZ). Derive num_kv_heads / v head_dim from the cache
-            # layout instead of self.num_kv_heads / self.head_size so models
-            # whose V head dim differs from the Q/K head dim stay correct.
-            num_kv_heads = value_scale_cache.shape[1]
-            v_dim_frags = value_scale_cache.shape[2]
-            v_dim_frag_size = value_scale_cache.shape[4]
-            value_scale_cache.copy_(value_scale.view(num_kv_heads, v_dim_frags, 1, v_dim_frag_size, 1))
-            # Only claim the cache is filled when the copy actually ran. Graph
-            # capture records the copy without executing it, while this Python
-            # line runs for real -- so marking it there leaves the cache full of
-            # zeros forever and every later call skips the fill. V then
-            # dequantizes to zero and attention returns exactly zero. That is
-            # invisible for the target model, whose first execution of this
-            # path is an eager forward, but the draft's first execution is the
-            # capture itself, which is why MTP acceptance collapses as soon as
-            # the draft graph is enabled. The copy stays inside the captured
-            # graph and is idempotent, so replays keep writing the same value.
-            if not _EXTRA_CTX.capturing:
-                filled_caches.add(value_scale_cache)
         notify_kv_cache_written()
 
     def forward(
@@ -3043,7 +3013,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             )
             value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
 
-            self.reshape_and_cache(key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata)
+            self.reshape_and_cache(key_mxfp8, value_mxfp8, key_scale, kv_cache, attn_metadata)
 
         # PA_NZ: QFA reads the paged cache through the NZ view taken in
         # _run_qfa, so the cache tuple is passed through as-is -- no

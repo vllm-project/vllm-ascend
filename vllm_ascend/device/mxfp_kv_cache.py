@@ -265,6 +265,29 @@ def scatter_mxfp_pa_nz_kv_cache(
     )
 
 
+def fill_mxfp_v_scale_cache(value_scale: torch.Tensor, value_scale_cache: torch.Tensor) -> None:
+    """Broadcast V's static per-channel E8M0 scale over its whole paged cache.
+
+    ``value_scale`` is the checkpoint's flat ``(num_kv_heads * head_dim,)``
+    E8M0 byte vector, ``value_scale_cache`` the PA_NZ 6-D cache
+    ``[num_blocks, num_kv_heads, head_dim // 16, block_size // 64, 16, 2]``.
+    Reshaping the source to ``(num_kv_heads, head_dim // 16, 1, 16, 1)`` lines
+    its channel axis up with the cache's fragment split and lets the block,
+    token-group and even/odd axes broadcast.
+
+    V's scale is static, so unlike K's this is a one-time fill rather than a
+    per-step scatter -- the caller runs it once the caches exist, before any
+    request, capture or replay.
+
+    Head count and V head dim are read from the cache rather than the layer so
+    a model whose V head dim differs from Q/K's stays correct.
+    """
+    num_kv_heads = value_scale_cache.shape[1]
+    v_dim_frags = value_scale_cache.shape[2]
+    v_dim_frag_size = value_scale_cache.shape[4]
+    value_scale_cache.copy_(value_scale.view(num_kv_heads, v_dim_frags, 1, v_dim_frag_size, 1))
+
+
 def mxfp_k_scale_slot_index(
     slot_mapping: torch.Tensor,
     block_size: int,
