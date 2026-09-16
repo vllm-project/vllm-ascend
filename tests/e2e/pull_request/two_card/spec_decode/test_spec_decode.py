@@ -195,11 +195,16 @@ def test_p_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
     draft_tensor_parallel_size: None | int,
+    monkeypatch,
 ):
     """
     Test acceptance rate for parallel drafting speculative decoding
     using a smaller draft model with parallel_drafting enabled.
     """
+    # MRv2 FULL decode ACL graph capture D2Hs seq_lens via .tolist() for
+    # parallel_drafting. Keep this acceptance case on V1 until that path is
+    # capture-safe.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 
