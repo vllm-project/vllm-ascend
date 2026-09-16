@@ -49,7 +49,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   export NAME=minimax-m3-dev
 
   # Start the container with the variables defined above.
-  # Update --device for your hardware (Atlas A3: /dev/davinci[0-15]; Atlas A2: /dev/davinci[0-7]).
+  # Update --device for your hardware (Atlas A3: /dev/davinci[0-15]; Atlas A2: /dev/davinci[0-7]; 950DT products: /dev/davinci[0-7]).
   # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
   docker run --rm \
   --name $NAME \
@@ -83,6 +83,15 @@ You can use the official all-in-one Docker image. For the available image tags a
   -v /root/.cache:/root/.cache \
   -it $IMAGE bash
   ```
+
+  For 950DT products, add the following two mounts to the `docker run` command (do not include them on Atlas A3 / A2, where the host paths do not exist and Docker would otherwise create empty directories):
+
+  ```bash
+  -v /etc/hixlep:/etc/hixlep \
+  -v /etc/hccn.conf:/etc/hccn.conf \
+  ```
+
+  `/etc/hixlep` is required for UBOE / Ascend direct KV transfer (used in PD disaggregation), and `/etc/hccn.conf` is required for HCCL multi-card communication.
 
   Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
@@ -511,12 +520,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
 
-    **Deployment topology:**
-
-    | Node group | Nodes | Parallelism | Engine ports |
-    | ---------- | ----- | ----------- | ------------ |
-    | Prefill | 1 | `DP2 TP4 PP2` (2 ranks, 8 NPUs each) | 31050/31051 |
-    | Decode | 1 | `DP4 TP4 PP1` (4 ranks, 4 NPUs each) | 31060-31063 |
+    Explicitly declaring this limit (--limit-mm-per-prompt '{"image":1,"video":0}') improves scheduler-side memory planning and end-to-end throughput. Adjust it to your actual request shape (e.g., `{"image":2,"video":0}` for two-image requests, `{"image":0,"video":1}` for one-video requests); for text-only deployment, this parameter can be omitted.
 
     1. Prefill node
 
@@ -563,6 +567,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --long-prefill-token-threshold 2048 \
         --trust-remote-code \
         --gpu-memory-utilization 0.92 \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
@@ -624,6 +629,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --no-enable-prefix-caching \
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
+        --limit-mm-per-prompt '{"image":1,"video":0}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
@@ -694,14 +700,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
 
-    **Deployment topology:**
-
-    | Node group | Nodes | Parallelism | Engine ports |
-    | ---------- | ----- | ----------- | ------------ |
-    | Prefill | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31050/31051 |
-    | Decode | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31060/31061 |
-
-    Each node launches one API process per DP rank: 2 Prefill ranks on ports 31050/31051 and 2 Decode ranks on ports 31060/31061. Both roles use `PP=1` (no pipeline parallel), so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in `kv_connector_extra_config`:
+    Both Prefill and Decode use `DP2 TP4 PP1`. Each node launches one API process per DP rank: 2 Prefill ranks on ports 31050/31051 and 2 Decode ranks on ports 31060/31061. Both roles use `PP=1` (no pipeline parallel), so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in `kv_connector_extra_config`:
 
     ```json
     {
@@ -946,7 +945,7 @@ A3 Prefill `mooncake.json`:
   "protocol": "ascend",
   "device_name": "",
   "master_server_address": "xxxx:50088",
-  "global_segment_size": "16GB",
+  "global_segment_size": "64GB",
   "preferred_segment": true,
   "prefer_alloc_in_same_node": true,
   "enable_ssd_offload": false,
