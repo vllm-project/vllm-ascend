@@ -129,6 +129,9 @@ jobs:
         id: build
         env:
           GIT_PROXY: https://gh-proxy.test.osinfra.cn/
+          PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          PIP_EXTRA_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
+          PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         shell: bash
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
@@ -190,6 +193,9 @@ jobs:
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"
             --build-arg GIT_PROXY="${GIT_PROXY}"
+            --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}"
+            --build-arg PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}"
+            --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}"
           )
 
           if [ -n "$TAG_SUFFIX" ]; then
