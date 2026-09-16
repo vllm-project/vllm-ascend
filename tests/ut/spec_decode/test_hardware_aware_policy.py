@@ -91,7 +91,39 @@ def test_small_batch_keeps_full_width():
     controller = AdaptiveDraftKController(max_k=5, min_k=4, hybrid_min_batch_size=8)
     controller.observe([5] * 4, [[0]] * 4)
     assert controller.current_k == 5
-    assert controller.last_reason == "small_batch_full_k"
+    assert controller.last_reason == "small_batch_fixed_k"
+
+
+def test_small_batch_cap_is_a_fast_path():
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=4,
+        hybrid_min_batch_size=8,
+        auto_tune_enabled=True,
+    )
+    assert controller.cap(5, batch_size=4) == 5
+    assert controller.last_reason == "small_batch_fixed_k"
+    assert controller.observation_count == 0
+
+
+def test_small_batch_does_not_pollute_online_cost_model():
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=4,
+        hybrid_min_batch_size=8,
+        auto_tune_enabled=True,
+        auto_tune_window_steps=1,
+    )
+    controller.cap(5, batch_size=4)
+    controller.observe(
+        [5] * 4,
+        [[0, 1]] * 4,
+        elapsed_ms=10.0,
+        physical_k=5,
+    )
+    assert controller.observation_count == 0
+    assert controller._cost_model == {}
+    assert controller.last_reason == "small_batch_fixed_k"
 
 
 def test_hybrid_uses_hysteresis_and_periodic_probe():
@@ -275,7 +307,7 @@ def test_online_cost_model_keeps_full_k_for_small_batch():
         physical_k=5,
     )
     assert controller.current_k == 5
-    assert controller.last_reason == "auto_small_batch_full_k"
+    assert controller.last_reason == "small_batch_fixed_k"
 
 
 def test_online_cost_model_applies_k_per_batch_bucket():
