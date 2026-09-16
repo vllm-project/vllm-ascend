@@ -312,11 +312,6 @@ class AscendDSAV41Impl:
         )
         return kv.squeeze(1)
 
-    @classmethod
-    def _project_q_kv(cls, attn, hidden_states, cos, sin):
-        q, qr = cls._project_q(attn, hidden_states, cos, sin)
-        return q, qr, cls._project_kv(attn, hidden_states, cos, sin)
-
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:
             return
@@ -328,7 +323,7 @@ class AscendDSAV41Impl:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
 
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
-        """Prepare caches before query work; ordinary preprocessing writes them."""
+        """CP overrides this to update replicated caches before local queries."""
         pass
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
@@ -350,7 +345,8 @@ class AscendDSAV41Impl:
 
     def preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Project Q/KV and populate this layer's SWA cache on the current stream."""
-        q, qr, kv = self._project_q_kv(attn, hidden_states, cos, sin)
+        q, qr = self._project_q(attn, hidden_states, cos, sin)
+        kv = self._project_kv(attn, hidden_states, cos, sin)
         scatter_cache_sk(
             attn.dsa_attn.swa_cache_layer.kv_cache[0],
             swa_metadata.slot_mapping,
