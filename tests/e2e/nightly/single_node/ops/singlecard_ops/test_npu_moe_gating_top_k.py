@@ -5,9 +5,7 @@ import numpy
 import pytest
 import torch
 
-from vllm_ascend.utils import enable_custom_op
-
-enable_custom_op()
+from vllm_ascend.device.device_op import DeviceOperator
 
 # Fix random seed to ensure test reproducibility
 RTOL_TOLERANCE = 1e-5
@@ -133,7 +131,7 @@ def test_npu_moe_gating_topk_compare(
     """Ascend NPU MOE Gating TopK operator test.
 
     Compare NPU kernel results with NumPy reference implementation
-    to verify the correctness of Ascend custom op.
+    to verify the correctness of the CANN operator.
 
     Args:
         group_select_mode: Group selection mode (0: max, 1: top2 sum)
@@ -182,7 +180,7 @@ def test_npu_moe_gating_topk_compare(
     )
 
     # Calculate NPU operator results
-    y_npu, expert_idx_npu, out_npu = torch.ops._C_ascend.moe_gating_top_k(
+    y_npu, expert_idx_npu, out_npu = DeviceOperator.moe_gating_top_k(
         x_tensor.npu(),
         k=k,
         k_group=k_group,
