@@ -80,7 +80,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-
+    
 === "A2 series"
 
     Start the docker image on each node.
@@ -88,10 +88,10 @@ Select an image based on your machine type and start the docker image on your no
     ```bash
     # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-
+    
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
-
+    
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -200,7 +200,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
-        --served-model-name dsv4 \
+        --served-model-name dsv4-dspark \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 32 \
         --data-parallel-size 1 \
@@ -294,9 +294,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
         --port 8900 \
-        --block-size 32 \
+        --block-size 128 \
         --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --async-scheduling \
         --additional-config '{
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
@@ -319,7 +320,7 @@ Key Parameter Descriptions:
 - `--tokenizer-mode deepseek_v4`, `--tool-call-parser deepseek_v4`, `--enable-auto-tool-choice`, and `--reasoning-parser deepseek_v4` enable the DeepSeek-V4 tokenizer behavior, automatic tool calling, and reasoning-output parsing.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
-- `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
+- `--block-size` sets the KV cache block size. To enable the experimental 4K prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the quantized model.
 - `--model-loader-extra-config` enables multi-threaded weight loading and sets the number of loading threads.
 - `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
@@ -672,7 +673,7 @@ Before you start, please:
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name dsv4 \
+            --served-model-name dsv4-spark \
             --max-model-len 1048576 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 16 \
@@ -1084,7 +1085,7 @@ Before you start, please:
        --tensor-parallel-size $7 \
        --enable-expert-parallel \
        --seed 1024 \
-       --served-model-name dsv4 \
+       --served-model-name deepseek_v4 \
        --max-model-len 200000 \
        --max-num-batched-tokens 4096 \
        --max-num-seqs 32 \
@@ -1156,7 +1157,7 @@ Before you start, please:
        --tensor-parallel-size $7 \
        --enable-expert-parallel \
        --seed 1024 \
-       --served-model-name dsv4 \
+       --served-model-name deepseek_v4 \
        --max-model-len 200000 \
        --max-num-batched-tokens 256 \
        --max-num-seqs 32 \

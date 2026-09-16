@@ -505,8 +505,14 @@ ge::graphStatus ScatterNdUpdateSkArch22Tiling::Init()
     }
     auto compileInfo = tilingContext_->GetCompileInfo<ScatterNdUpdateSkArch22CompileInfo>();
     OP_CHECK_NULL_WITH_CONTEXT(tilingContext_, compileInfo);
-    // Use all available vector cores for full-core scheduling.
-    coreNum_ = static_cast<uint64_t>(compileInfo->vectorCoreNum);
+    coreNum_ = std::min(static_cast<uint64_t>(compileInfo->vectorCoreNum), std::min(info.totalLength, info.indexRow));
+    coreNum_ = coreNum_ == 0 ? 1 : coreNum_;
+
+    // Align coreNum_ to even: SyncAll-based kernels require an even number of
+    // cores per block (see https://gitcode.com/cann/ops-nn/pull/9645).
+    if (coreNum_ % 2 != 0) {
+        coreNum_ += 1;
+    }
     ubSize_ = compileInfo->ubSize;
     GetDtypeSize();
     SetTilingKeyMode();

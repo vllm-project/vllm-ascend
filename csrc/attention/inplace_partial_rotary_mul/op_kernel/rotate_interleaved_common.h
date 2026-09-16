@@ -115,8 +115,7 @@ __aicore__ inline void SetGatherSrcOffset(LocalTensor<int32_t> &gatherOffset, in
 }
 
 // count < 256 * 64 and count % 8 == 0
-__aicore__ inline void InterleavedInversion(LocalTensor<float> &srcInversion, int32_t count, bool negateSin = false,
-                                            bool isOffset = false)
+__aicore__ inline void InterleavedInversion(LocalTensor<float> &srcInversion, int32_t count, bool isOffset = false)
 {
     SetMaskNorm();
 
@@ -124,12 +123,9 @@ __aicore__ inline void InterleavedInversion(LocalTensor<float> &srcInversion, in
     const int32_t repeatTimes = count / mask;
     const int32_t remainder = count % mask;
 
-    // negateSin: negate the complementary (even) positions, which is equivalent
-    // to negating sin before the default interleaved inversion (legacy -sin path);
-    // otherwise define masks based on the 'isOffset' flag
-    const uint64_t fullMask =
-        negateSin ? 0xAAAAAAAAAAAAAAAA : (isOffset ? 0xAAAAAAAAAAAAAAAA : 0x5555555555555555);
-    const uint64_t partialMask = negateSin ? 0xAA : (isOffset ? 0xAA : 0x55);
+    // Define masks based on the 'isOffset' flag
+    const uint64_t fullMask = isOffset ? 0xAAAAAAAAAAAAAAAA : 0x5555555555555555;
+    const uint64_t partialMask = isOffset ? 0xAA : 0x55;
 
     // Apply the mask and multiplication for the full
     SetVectorMask<float, MaskMode::NORMAL>(0, fullMask);

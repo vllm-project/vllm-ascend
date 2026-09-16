@@ -91,7 +91,6 @@ TILING_DATA_FIELD_DEF(int64_t, ubCalcBTail);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNNum);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNLoop);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNTail);
-TILING_DATA_FIELD_DEF(int64_t, negateSin);
 
 END_TILING_DATA_DEF;
 
