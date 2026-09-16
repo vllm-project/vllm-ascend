@@ -67,6 +67,8 @@ class TestTorchNPUProfilerWrapper(TestBase):
             torch_profiler_dir="/path/to/traces",
             torch_profiler_with_stack=True,
             torch_profiler_with_memory=True,
+            torch_profiler_record_shapes=True,
+            torch_profiler_with_flops=True,
         )
 
         mock_export_type.Text = "Text"
@@ -109,8 +111,11 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_profile.assert_called_once()
         profile_kwargs = mock_profile.call_args.kwargs
         self.assertEqual(profile_kwargs["activities"], ["CPU", "NPU"])
+        self.assertIsNone(profile_kwargs["schedule"])
+        self.assertTrue(profile_kwargs["record_shapes"])
         self.assertTrue(profile_kwargs["profile_memory"])
         self.assertEqual(profile_kwargs["with_modules"], True)
+        self.assertTrue(profile_kwargs["with_flops"])
         self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
         self.assertEqual(result, mock_profiler_instance)
 
@@ -214,7 +219,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
             str(cm.exception),
         )
 
-    def test_profiler_step_returns_true(self):
+    def test_profiler_step_without_schedule_returns_true(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         profiler_config = ProfilerConfig(
@@ -222,10 +227,114 @@ class TestTorchNPUProfilerWrapper(TestBase):
             torch_profiler_dir="/path/to/traces",
         )
 
-        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=MagicMock()):
+        mock_profiler = MagicMock()
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
             wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
 
         self.assertTrue(wrapper._profiler_step())
+        mock_profiler.step.assert_not_called()
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler._ExperimentalConfig", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.profile", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.schedule", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.tensorboard_trace_handler", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ExportType", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerLevel", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.AiCMetrics", create=True)
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch_npu.profiler.ProfilerActivity", create=True)
+    def test_create_profiler_with_schedule(
+        self,
+        mock_profiler_activity,
+        mock_aic_metrics,
+        mock_profiler_level,
+        mock_export_type,
+        mock_trace_handler,
+        mock_schedule,
+        mock_profile,
+        mock_experimental_config,
+        mock_get_ascend_config,
+    ):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        mock_get_ascend_config.side_effect = RuntimeError("Ascend config is not initialized")
+        mock_schedule.return_value = "npu_schedule"
+        mock_profile.return_value = MagicMock()
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            wait_iterations=2,
+            warmup_iterations=1,
+            active_iterations=3,
+        )
+
+        TorchNPUProfilerWrapper._create_profiler(profiler_config, "trace_name")
+
+        mock_schedule.assert_called_once_with(skip_first=0, wait=2, warmup=1, active=3, repeat=1)
+        self.assertEqual(mock_profile.call_args.kwargs["schedule"], "npu_schedule")
+
+    def test_profiler_step_tracks_non_active_schedule_steps(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            wait_iterations=2,
+            warmup_iterations=1,
+            active_iterations=3,
+        )
+        mock_profiler = MagicMock()
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
+            wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
+
+        self.assertFalse(wrapper._profiler_step())
+        self.assertFalse(wrapper._profiler_step())
+        self.assertTrue(wrapper._profiler_step())
+        self.assertEqual(mock_profiler.step.call_count, 3)
+
+    def test_max_iterations_counts_only_active_schedule_steps(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            wait_iterations=1,
+            warmup_iterations=1,
+            active_iterations=3,
+            max_iterations=1,
+        )
+        mock_profiler = MagicMock()
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
+            wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
+
+        wrapper.start()
+        wrapper.step()  # Remaining warmup step.
+        self.assertEqual(wrapper._profiling_for_iters, 0)
+        mock_profiler.stop.assert_not_called()
+
+        wrapper.step()  # First active step.
+        self.assertEqual(wrapper._profiling_for_iters, 1)
+        mock_profiler.stop.assert_not_called()
+
+        wrapper.step()  # Second active step exceeds max_iterations.
+        self.assertEqual(wrapper._profiling_for_iters, 2)
+        mock_profiler.stop.assert_called_once()
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.torch.profiler.record_function")
+    def test_annotate_context_manager_uses_torch_record_function(self, mock_record_function):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+        )
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=MagicMock()):
+            wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
+
+        context = wrapper.annotate_context_manager("execute_context_1(4)_generation_0(0)")
+
+        mock_record_function.assert_called_once_with("execute_context_1(4)_generation_0(0)")
+        self.assertIs(context, mock_record_function.return_value)
 
     def test_step_calls_underlying_start_after_delay_iterations(self):
         """Work matches vLLM WorkerProfiler: first N worker steps defer _start."""
