@@ -20,7 +20,7 @@
 
 Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py`.
 """
-
+import time
 import os
 from unittest.mock import patch
 
@@ -77,19 +77,25 @@ def test_deepseek_v4_dspark_acceptance_tp4(
     expected_acceptance_length,
     num_speculative_tokens,
     additional_config,
+    request,
 ):
-    _run_speculative_decoding(
-        model_name=model_name,
-        speculative_config={
-            "method": "dspark",
-            "num_speculative_tokens": num_speculative_tokens,
-            "enforce_eager": True,
-        },
-        expected_acceptance_length=expected_acceptance_length,
-        runner_kwargs={
-            "tensor_parallel_size": 4,
-            "max_model_len": 4096,
-            "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
-            "additional_config": additional_config,
-        },
-    )
+    start_time = time.perf_counter()
+    try:
+        _run_speculative_decoding(
+            model_name=model_name,
+            speculative_config={
+                "method": "dspark",
+                "num_speculative_tokens": num_speculative_tokens,
+                "enforce_eager": True,
+            },
+            expected_acceptance_length=expected_acceptance_length,
+            runner_kwargs={
+                "tensor_parallel_size": 4,
+                "max_model_len": 4096,
+                "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
+                "additional_config": additional_config,
+            },
+        )
+    finally:
+        elapsed = time.perf_counter() - start_time
+        print(f"[DSpark CI timing] case={request.node.name} elapsed={elapsed:.2f}s")
