@@ -1550,7 +1550,7 @@ def init_ascend_config(vllm_config):
     for _prefill_key in ("gdn_prefill_backend", "kda_prefill_backend"):
         _prefill_value = additional_config.get(_prefill_key)
         if _prefill_value is not None and str(_prefill_value).strip().lower() not in _TRITON_COMPATIBLE_VALUES:
-            logger.warning(
+            logger.warning_once(
                 "Ascend does not support %s=%r; only the 'triton' value is "
                 "available on Ascend for GDN/KDA prefill (FLA kernels run via "
                 "triton-ascend). The option is ignored.",

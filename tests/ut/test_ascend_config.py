@@ -239,7 +239,7 @@ class TestAscendConfig(TestBase):
         self.assertIsNotNone(ascend_config)
 
         prefill_warnings = [
-            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
+            call for call in mock_logger.warning_once.call_args_list if "does not support" in str(call.args[0])
         ]
         warned_text = " ".join(str(call.args) for call in prefill_warnings)
         self.assertIn("gdn_prefill_backend", warned_text)
@@ -262,7 +262,7 @@ class TestAscendConfig(TestBase):
         self.assertIsNotNone(ascend_config)
 
         prefill_warnings = [
-            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
+            call for call in mock_logger.warning_once.call_args_list if "does not support" in str(call.args[0])
         ]
         self.assertEqual(prefill_warnings, [])
 
@@ -278,7 +278,7 @@ class TestAscendConfig(TestBase):
         self.assertIsNotNone(ascend_config)
 
         prefill_warnings = [
-            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
+            call for call in mock_logger.warning_once.call_args_list if "does not support" in str(call.args[0])
         ]
         self.assertEqual(prefill_warnings, [])
 
