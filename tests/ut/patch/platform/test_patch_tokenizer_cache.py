@@ -32,6 +32,7 @@ from vllm_ascend.patch.platform.patch_tokenizer_cache import (
     IncrementalTokenizerCache,
     _cache_for,
     _chat_ids,
+    _patch_hf_chat,
     _patch_renderer_chat,
     _probe_corpus,
 )
@@ -340,4 +341,43 @@ def test_renderer_chat_patch_forwards_the_callers_keyword_arguments():
         assert len(tokenizer.calls) == tokenized, "the repeat call must not re-tokenize"
     finally:
         _KeywordOnlyRenderer._apply_chat_template = original
+        _CACHES.pop(tokenizer, None)
+
+
+def test_hf_chat_patch_forwards_the_callers_template_kwargs():
+    """The HF renderer takes the conversation positionally, so this one is silent.
+
+    OpenAI ``tools`` reach the renderer inside ``chat_template_kwargs``
+    (``ChatParams.get_apply_chat_template_kwargs``), which is forwarded as
+    keyword arguments. Dropping them from the probe - and from the render whose
+    text is then cached - raises nothing: it quietly returns the token ids of a
+    different prompt, with the tool definitions missing.
+    """
+    import vllm.renderers.hf as hf_mod
+
+    tokenizer, cache = _build()
+    seen: list = []
+
+    def fake_safe_apply_chat_template(
+        model_config, tok, conversation, *, tokenize=True, tools=None, **_ignored
+    ):
+        seen.append(tools)
+        text = f"{'tools' if tools else 'no tools'}{_END}user: hi{_END}"
+        return text if not tokenize else tok(text, add_special_tokens=False)["input_ids"]
+
+    original = hf_mod.safe_apply_chat_template
+    _CACHES[tokenizer] = cache
+    try:
+        hf_mod.safe_apply_chat_template = fake_safe_apply_chat_template
+        _patch_hf_chat()
+
+        tools = [{"type": "function", "function": {"name": "get_weather"}}]
+        got = hf_mod.safe_apply_chat_template(None, tokenizer, [], tools=tools)
+
+        assert got == tokenizer.reference(f"tools{_END}user: hi{_END}")
+        assert seen and all(render_tools is tools for render_tools in seen), (
+            "every render on the cache path must keep the caller's kwargs"
+        )
+    finally:
+        hf_mod.safe_apply_chat_template = original
         _CACHES.pop(tokenizer, None)
