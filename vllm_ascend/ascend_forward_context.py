@@ -482,24 +482,32 @@ class _ExtraForwardContextProxy:
     def _ctx():
         return get_forward_context()
 
-    @torch._dynamo.disable
     def __getattr__(self, name: str) -> Any:
-        self.check_extra_attr(name)
-        ctx = self._ctx()
-        if _use_v2_extra_kwargs():
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
-        return getattr(ctx, name, None)
+        return _extra_ctx_getattr(self, name)
 
-    @torch._dynamo.disable
     def __setattr__(self, name: str, value: Any) -> None:
-        self.check_extra_attr(name)
-        ctx = self._ctx()
-        if _use_v2_extra_kwargs():
-            ctx.additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        _extra_ctx_setattr(self, name, value)
+
+
+@torch._dynamo.disable
+def _extra_ctx_getattr(proxy: _ExtraForwardContextProxy, name: str) -> Any:
+    proxy.check_extra_attr(name)
+    ctx = proxy._ctx()
+    if _use_v2_extra_kwargs():
+        # Unset known extras default to None so optional flags (e.g. `sinks`)
+        # can be read with truthiness checks before the V2 path populates them.
+        return ctx.additional_kwargs.get(name)
+    return getattr(ctx, name, None)
+
+
+@torch._dynamo.disable
+def _extra_ctx_setattr(proxy: _ExtraForwardContextProxy, name: str, value: Any) -> None:
+    proxy.check_extra_attr(name)
+    ctx = proxy._ctx()
+    if _use_v2_extra_kwargs():
+        ctx.additional_kwargs[name] = value
+    else:
+        setattr(ctx, name, value)
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX
