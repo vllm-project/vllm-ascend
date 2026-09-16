@@ -18,8 +18,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
-- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
+- `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-235B-A22B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct).
+- `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://ai.atomgit.com/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
 - `Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT (96G x 8) node. [Model Weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8)
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
