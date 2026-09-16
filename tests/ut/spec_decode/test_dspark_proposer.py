@@ -861,7 +861,7 @@ class TestDSparkInitValidation:
                 ).view(num_rows, 4)
                 return self.last_hidden_states, torch.zeros_like(self.last_hidden_states)
 
-            def compute_logits(self, hidden_states):
+            def compute_draft_logits(self, hidden_states):
                 return torch.zeros(
                     hidden_states.shape[0],
                     self.vocab_size,
