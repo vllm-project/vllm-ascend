@@ -256,6 +256,7 @@ def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
     attn_metadata.dcp_context = SimpleNamespace(
         slot_mapping=main_slots,
     )
+    assert impl._get_sfa_kv_slot_mapping(attn_metadata) is main_slots
     kv_no_split = torch.zeros(2, 3)
     cos = torch.zeros(2, 1)
     sin = torch.zeros(2, 1)
