@@ -308,7 +308,7 @@ class XliteWrapper:
 
             num_tokens = forward_context.batch_descriptor.num_tokens
             num_actual_tokens = attn_metadata.num_actual_tokens
-            xlite_attn_metadata = AttnMeta()
+            xlite_attn_metadata: Any = AttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
             xlite_attn_metadata.cached_lens = cached_lens.tolist()
             xlite_attn_metadata.is_prefills = [False] * num_decodes + [True] * num_prefills
