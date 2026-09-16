@@ -140,6 +140,17 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         if impl is not None and hasattr(impl, "topk_indices_buffer"):
             impl.topk_indices_buffer = value
 
+    @property
+    def uses_nano_topk_metadata(self) -> bool:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        return bool(getattr(impl, "use_nano", False))
+
+    def compact_nano_topk_metadata(self, slot_ids: torch.Tensor) -> None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        compact = getattr(impl, "compact_nano_topk_metadata", None)
+        if compact is not None:
+            compact(slot_ids)
+
     def __init__(
         self,
         hidden_size: int,
