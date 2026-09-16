@@ -47,6 +47,7 @@ class HardwareCapability(Enum):
     MC2_HIERARCHY_COMM = auto()
     MOE_DISPATCH_EXTRA_ARGS = auto()
     MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
+    MOE_PRE_ALLGATHER_W8A8_QUANTIZATION = auto()
     NPUGRAPH_EX = auto()
     NPU_TOP_K_TOP_P = auto()
     PAGED_ATTENTION = auto()
@@ -173,7 +174,11 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            capabilities=_STANDARD_CAPABILITIES
+            | {
+                HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
+                HardwareCapability.NPU_TOP_K_TOP_P,
+            },
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
@@ -210,6 +215,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
                     HardwareCapability.GDN_COMPATIBILITY,
                     HardwareCapability.IRQ_CPU_RESERVATION,
+                    HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
                     HardwareCapability.RC_DEVICE_DISCOVERY,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
                 }
@@ -247,6 +253,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+                    HardwareCapability.MOE_PRE_ALLGATHER_W8A8_QUANTIZATION,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
