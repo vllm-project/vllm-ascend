@@ -113,26 +113,18 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Vector-core launch strategy for the fused vision producer:
     # "dynamic" = one core per token tile (default), "fixed" = always all
     # vector cores, "bucket" = round up to a divisor of 40.
-    "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE": lambda: os.getenv(
-        "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", "dynamic"
-    ),
+    "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", "dynamic"),
     # Token tile size (BLOCK_T) for the fused vision producer kernel.
     "VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T", "4"),
     # Q/K store layout of the fused vision producer: "block" (default),
     # "masked" (non-overlapping stores), "single" (one full-width store).
-    "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE": lambda: os.getenv(
-        "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", "block"
-    ),
+    "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", "block"),
     # Q/K/V output allocation: "fused" (one buffer + views, default) or
     # "split" (three allocations) for allocator A/B comparisons.
-    "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE": lambda: os.getenv(
-        "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE", "fused"
-    ),
+    "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE", "fused"),
     # Periodically log decode batch sizes and ACL graph dispatch results so
     # capture-size coverage can be checked against the real decode batches.
-    "VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS", "1"))
-    ),
+    "VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS": lambda: bool(int(os.getenv("VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS", "1"))),
 }
 
 # end-env-vars-definition

@@ -38,6 +38,8 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from vllm_ascend import envs
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_forward_context,
@@ -45,8 +47,6 @@ from vllm_ascend.worker.encoder_acl_graph import (
     maybe_compute_actual_seq_lengths,
     update_encoder_graph_workspace,
 )
-
-from vllm_ascend import envs
 
 MIN_PAD_SIZE: int = 64
 MAX_PAD_SIZE: int = 128

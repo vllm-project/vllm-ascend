@@ -4,16 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-from tests.ut.base import TestBase
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.vllm import get_cached_compilation_config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm_ascend.worker import encoder_acl_graph
-from vllm_ascend.worker.encoder_acl_graph import (
-    get_encoder_graph_params,
-    set_encoder_forward_context,
-    set_encoder_graph_params,
-)
+from tests.ut.base import TestBase
 
 from vllm_ascend.ops import mm_encoder_attention as mm_encoder_attention_module
 from vllm_ascend.ops.mm_encoder_attention import (
@@ -23,6 +17,12 @@ from vllm_ascend.ops.mm_encoder_attention import (
     peek_cu_seqlens_host_lengths,
     prime_cu_seqlens_host_lengths,
     reset_vit_fusion_stats,
+)
+from vllm_ascend.worker import encoder_acl_graph
+from vllm_ascend.worker.encoder_acl_graph import (
+    get_encoder_graph_params,
+    set_encoder_forward_context,
+    set_encoder_graph_params,
 )
 
 
