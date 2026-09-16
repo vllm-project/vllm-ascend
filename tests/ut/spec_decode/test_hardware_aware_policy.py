@@ -37,11 +37,12 @@ def test_compact_config_defaults_and_overrides():
         "hybrid_high_steps": 2,
         "hybrid_probe_interval": 0,
         "auto_tune_enabled": False,
-        "auto_tune_warmup_steps": 64,
+        "auto_tune_warmup_steps": 128,
         "auto_tune_explore_ratio": 0.05,
         "auto_tune_update_interval": 32,
         "auto_tune_min_gain": 0.02,
         "auto_tune_ema_decay": 0.9,
+        "auto_tune_window_steps": 16,
     }
     assert v2_physical_k_enabled(compact())
     assert not v2_physical_k_enabled(compact(enabled=False))
@@ -131,6 +132,9 @@ def test_online_cost_model_explores_and_selects_best_k():
         auto_tune_explore_ratio=0.0,
         auto_tune_update_interval=1,
         auto_tune_min_gain=0.0,
+        # One step per sample keeps this test focused on the explore/select
+        # logic; window accumulation has its own test below.
+        auto_tune_window_steps=1,
     )
     assert controller.cap(5) == 5
     # First observation measures K=5, then warmup exploration switches to K=4.
@@ -142,6 +146,97 @@ def test_online_cost_model_explores_and_selects_best_k():
     assert controller.last_reason == "auto_cost_model_best_k"
 
 
+def test_online_cost_model_accumulates_a_window_before_scoring():
+    """A single step timing is noisy, so no sample is settled until the window fills."""
+
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=4,
+        capture_k=(4, 5),
+        auto_tune_enabled=True,
+        auto_tune_warmup_steps=0,
+        auto_tune_update_interval=1,
+        auto_tune_window_steps=4,
+    )
+    controller.cap(5)
+    key = controller._cost_key(8, 5)
+    for _ in range(3):
+        controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0, physical_k=5)
+    estimate = controller._cost_model[key]
+    assert estimate.samples == 0
+    assert estimate.window_count == 3
+    # Per step: 1 accepted token per request + 1 target token per request = 16.
+    assert estimate.window_tokens == 48.0
+    assert estimate.window_ms == 30.0
+
+    controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0, physical_k=5)
+    estimate = controller._cost_model[key]
+    assert estimate.samples == 1
+    assert estimate.window_count == 0
+    # 4 steps x 16 effective tokens over 4 x 10 ms.
+    assert estimate.ema_score == pytest.approx(64.0 / 40.0)
+
+
+def test_explore_probe_cycles_through_all_candidates():
+    """Round-robin probing re-measures a K that already scored badly."""
+
+    controller = AdaptiveDraftKController(
+        max_k=6,
+        min_k=4,
+        capture_k=(4, 5, 6),
+        auto_tune_enabled=True,
+    )
+    seen = [controller._next_explore_k() for _ in range(6)]
+    assert sorted(set(seen)) == [4, 5, 6]
+    assert seen[:3] == seen[3:]
+
+
+def test_explore_probe_holds_the_width_for_a_full_window():
+    """A probe shorter than the window never settles a sample, so it must dwell."""
+
+    controller = AdaptiveDraftKController(
+        max_k=6,
+        min_k=4,
+        capture_k=(4, 5, 6),
+        auto_tune_enabled=True,
+        auto_tune_warmup_steps=1000,
+        auto_tune_window_steps=4,
+    )
+    controller._choose_auto_k(8)
+    first = controller.current_k
+    assert controller.last_reason == "auto_warmup_explore"
+    assert controller._dwell_remaining == 3
+
+    for _ in range(3):
+        controller._choose_auto_k(8)
+        assert controller.current_k == first
+        assert controller.last_reason == "auto_explore_dwell"
+    assert controller._dwell_remaining == 0
+
+    # Once the dwell is exhausted a fresh decision happens, and the dwell is
+    # restarted for the next probe.
+    controller._choose_auto_k(8)
+    assert controller.last_reason == "auto_warmup_explore"
+    assert controller._dwell_remaining == 3
+
+
+def test_dwell_zero_window_steps_keeps_every_step_decidable():
+    """window_steps=1 restores strictly per-step decisions (no dwelling)."""
+
+    controller = AdaptiveDraftKController(
+        max_k=6,
+        min_k=4,
+        capture_k=(4, 5, 6),
+        auto_tune_enabled=True,
+        auto_tune_warmup_steps=1000,
+        auto_tune_window_steps=1,
+    )
+    controller._choose_auto_k(8)
+    assert controller._dwell_remaining == 0
+    controller._choose_auto_k(8)
+    assert controller.last_reason == "auto_warmup_explore"
+
+
 def test_online_cost_model_uses_physical_k_not_logical_width():
     controller = AdaptiveDraftKController(
         max_k=5,
@@ -149,6 +244,7 @@ def test_online_cost_model_uses_physical_k_not_logical_width():
         capture_k=(4, 5),
         auto_tune_enabled=True,
         auto_tune_warmup_steps=1,
+        auto_tune_window_steps=1,
     )
     controller.cap(5)
     controller.observe(
@@ -189,6 +285,7 @@ def test_online_cost_model_applies_k_per_batch_bucket():
         capture_k=(4, 5),
         auto_tune_enabled=True,
         auto_tune_warmup_steps=1,
+        auto_tune_window_steps=1,
     )
     controller.cap(5, batch_size=8)
     controller.observe(
