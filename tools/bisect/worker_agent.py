@@ -98,14 +98,18 @@ def run_worker(inp: BisectInput, opt: BisectOptions) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("[worker] node %d started; waiting for master commands", opt.node_index)
+    # Record the run start BEFORE any slow startup work. A master can time out
+    # and publish DONE while this worker is recovering a shallow clone; that is
+    # a real stop signal for this run, not stale state to ignore.
+    start_ts = time.time()
     # Recover the full history up front: the nightly clone is depth-1 and only
     # the tip exists locally, while every commanded commit is an ancestor.
     # Doing this before the first round keeps the slow, network-bound unshallow
     # out of the barrier window (prepare() re-resolves as a no-op backstop).
     git_ops.ensure_full_history(opt.repo_dir)
-    # Only DONE/release files created AFTER this moment count as stop signals, so
-    # a stale sentinel from a previous run on the persistent PVC is ignored.
-    start_ts = time.time()
+    # Only DONE/release files created after worker startup count as stop
+    # signals, so a stale sentinel from a previous run on the persistent PVC is
+    # ignored without discarding a real signal published during startup.
     rnd = 0
     while True:
         rnd += 1

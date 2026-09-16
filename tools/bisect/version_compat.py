@@ -209,6 +209,21 @@ def environment_drift(expected: PackageVersions) -> tuple[str, ...]:
     return tuple(drift)
 
 
+def policy_with_environment_drift(good: PackageVersions, bad: PackageVersions) -> tuple[VersionPolicy, tuple[str, ...]]:
+    """Build a version policy that covers endpoint changes and image drift.
+
+    An endpoint change already requires adapting that package for every trial.
+    A package whose endpoint pin is unchanged still needs adapting when the
+    nightly image differs from that common pin. These cases are independent:
+    for example, a vLLM endpoint change must not hide a mismatched, but
+    unchanged, torch-npu pin.
+    """
+    endpoint_policy = VersionPolicy.between(good, bad)
+    drift = tuple(package for package in environment_drift(good) if versions_equal(good.get(package), bad.get(package)))
+    checked = tuple(package for package in ALL_PACKAGES if endpoint_policy.checks(package) or package in drift)
+    return VersionPolicy(checked_packages=checked, good=good, bad=bad), drift
+
+
 class VersionAdapter:
     """Bring switchable packages to the versions declared by a candidate."""
 

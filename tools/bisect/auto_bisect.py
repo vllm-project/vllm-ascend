@@ -51,7 +51,7 @@ from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.runner import BisectFatalError
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
-from tools.bisect.version_compat import VersionPolicy, environment_drift, expected_versions
+from tools.bisect.version_compat import expected_versions, policy_with_environment_drift
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -227,29 +227,24 @@ class Bisector:
         logger.info("Search space: %d commits", len(candidates))
         good_versions = expected_versions(self.repo, good.commit)
         bad_versions = expected_versions(self.repo, bad.commit)
-        version_policy = VersionPolicy.between(good_versions, bad_versions)
-        if version_policy.enabled:
+        version_policy, drift = policy_with_environment_drift(good_versions, bad_versions)
+        endpoint_changed = tuple(
+            package
+            for package in version_policy.checked_packages
+            if good_versions.get(package) != bad_versions.get(package)
+        )
+        if endpoint_changed:
             logger.info(
                 "Version adaptation enabled for %s; endpoint versions differ",
-                ", ".join(version_policy.checked_packages),
+                ", ".join(endpoint_changed),
             )
-        else:
-            # The endpoints pin the same versions, but the installed
-            # environment is not guaranteed to match that pin -- the nightly
-            # image carries its own build (e.g. vllm 0.28.0+empty against a
-            # v0.27.1 pin). Any drift must keep the per-candidate adaptation
-            # active, or every trial runs against the wrong dependency.
-            drift = environment_drift(good_versions)
-            if drift:
-                version_policy = VersionPolicy(checked_packages=drift, good=good_versions, bad=bad_versions)
-                logger.info(
-                    "Version adaptation enabled for %s; installed version differs from the endpoints' common pin",
-                    ", ".join(drift),
-                )
-            else:
-                logger.info(
-                    "Version adaptation disabled; endpoint pins match and the installed environment matches them"
-                )
+        if drift:
+            logger.info(
+                "Version adaptation enabled for %s; installed version differs from the endpoints' common pin",
+                ", ".join(drift),
+            )
+        if not version_policy.enabled:
+            logger.info("Version adaptation disabled; endpoint pins match and the installed environment matches them")
         self.runner.configure_version_policy(version_policy)
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(

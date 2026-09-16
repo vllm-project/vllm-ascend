@@ -18,6 +18,7 @@ from tools.bisect.version_compat import (
     environment_drift,
     expected_versions,
     installed_package_version,
+    policy_with_environment_drift,
     versions_equal,
 )
 
@@ -261,3 +262,18 @@ def test_environment_drift_skips_undeclared_packages(monkeypatch: pytest.MonkeyP
     drift = environment_drift(PackageVersions(vllm=None, torch_npu="2.10.0"))
 
     assert drift == ()
+
+
+def test_policy_keeps_common_torch_npu_pin_when_vllm_endpoints_differ(monkeypatch: pytest.MonkeyPatch):
+    """An endpoint change for one package must not hide drift in another."""
+    monkeypatch.setattr(
+        "tools.bisect.version_compat.installed_versions",
+        lambda: PackageVersions(vllm="0.27.1", torch_npu="2.10.0.post3"),
+    )
+    good = PackageVersions(vllm="v0.27.1", torch_npu="2.10.0.post2")
+    bad = PackageVersions(vllm="v0.28.0", torch_npu="2.10.0.post2")
+
+    policy, drift = policy_with_environment_drift(good, bad)
+
+    assert drift == ("torch-npu",)
+    assert policy.checked_packages == ("vllm", "torch-npu")

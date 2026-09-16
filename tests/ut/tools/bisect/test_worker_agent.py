@@ -182,3 +182,27 @@ def test_worker_survives_wait_start_timeout(tmp_path: Path, repo_with_commits, m
     coord.publish_done()
 
     _join_worker(thread, errors)
+
+
+def test_worker_accepts_done_published_during_history_recovery(
+    tmp_path: Path,
+    repo_with_commits,
+    monkeypatch,
+):
+    """A DONE published while unshallowing belongs to this worker run.
+
+    If the master times out while the worker is recovering a depth-1 clone, the
+    worker must exit on its DONE sentinel instead of treating it as stale and
+    eventually timing out while waiting for a nonexistent next command.
+    """
+    worker_repo, _ = repo_with_commits(2)
+    coord_dir = tmp_path / "coord"
+    inp = BisectInput(scene="multi_node", config_yaml="case.yaml", bad_commit="bad", soc="a3")
+    opt = _worker_options(tmp_path, worker_repo, coord_dir)
+
+    def publish_done_during_recovery(_repo: Path) -> None:
+        Coordinator(str(coord_dir), num_nodes=2, node_index=0).publish_done()
+
+    monkeypatch.setattr(git_ops, "ensure_full_history", publish_done_during_recovery)
+
+    assert run_worker(inp, opt) == 0
