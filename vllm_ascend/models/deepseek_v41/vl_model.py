@@ -51,6 +51,7 @@ class AscendDeepseekV41ForCausalLM(
 
     # Engram history and vision MoE routing also consume the original token IDs.
     requires_raw_input_tokens = True
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
     @classmethod

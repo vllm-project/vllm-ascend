@@ -324,6 +324,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
 @support_torch_compile
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
     def __init__(self, *, vllm_config, prefix="") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None

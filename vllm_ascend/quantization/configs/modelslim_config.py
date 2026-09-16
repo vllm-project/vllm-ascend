@@ -92,14 +92,6 @@ MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 # Note: Currently, only models that do not have the `packed_modules_mapping` attribute
 # in the vLLM upstream need to be added here.
 UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
-    "deepseek_v41": {
-        "gate_up_proj": ["w1", "w3"],
-        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
-    },
-    "deepseek_v41": {
-        "gate_up_proj": ["w1", "w3"],
-        "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
-    },
     # GLM-5.3-Flash (glm5_next): KDA layers ship a fused q/k/v/b/f_a/g_a
     # projection; sparse-MLA layers keep the DeepSeek-style q_a/kv_a pair.
     # Native HF FP8 checkpoints leave the KDA projections in bf16 via
@@ -172,7 +164,7 @@ QUANT_MODEL_PREFIX_MAPPINGS = {
     },
     "deepseek_v41": {
         # V4.1 ModelSlim descriptions keep the original checkpoint names,
-        # while the runtime reuses the V4 module tree. Map runtime prefixes
+        # while the runtime uses Ascend module names. Map runtime prefixes
         # back to the checkpoint namespace for quant-scheme lookup.
         "language_model.model.layers.": "layers.",
         "language_model.model.embed_tokens.": "embed.",
@@ -236,6 +228,7 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     },
 }
 
+
 def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bool:
     """Return whether the missing shard is Gemma4's replicated v_proj.
 
@@ -253,6 +246,7 @@ def get_quant_type_for_layer(
     quant_description: dict[str, Any],
     prefix: str,
     packed_modules_mapping: dict[str, Any] | None = None,
+    prefix_mapper: Callable[[str], str] | None = None,
 ) -> str | None:
     """Determine the quantization type for a layer.
 
@@ -260,6 +254,7 @@ def get_quant_type_for_layer(
         quant_description: The quantization description dictionary.
         prefix: The layer prefix.
         packed_modules_mapping: Mapping for packed/fused modules.
+        prefix_mapper: Map expanded module names to quantization description keys.
 
     Returns:
         The quantization type string (e.g., "W8A8_DYNAMIC").
@@ -277,6 +272,8 @@ def get_quant_type_for_layer(
             prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
+            if prefix_mapper is not None:
+                shard_prefix = prefix_mapper(shard_prefix)
             shard_key = shard_prefix + ".weight"
             # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
             # shards fall through to the original dictionary lookup below.
@@ -295,6 +292,8 @@ def get_quant_type_for_layer(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
+        if prefix_mapper is not None:
+            prefix = prefix_mapper(prefix)
         quant_type = quant_description.get(prefix + ".weight")
     return quant_type if quant_type != "FLOAT" else None
 
@@ -348,6 +347,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # This will be updated by upstream vLLM with model-specific mappings.
         self.packed_modules_mapping: dict[str, list[str]] = {}
         self.quant_description = quant_config if quant_config is not None else {}
+        self._format_metadata: dict[str, Any] = {}
         self._apply_extra_quant_adaptations()
         self.model_type: str | None = None
         self.hf_to_vllm_mapper: WeightsMapper | None = None
@@ -381,15 +381,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AscendModelSlimConfig":
-        # Some ModelSlim checkpoints keep only format metadata in config.json
-        # and store the per-parameter description in
-        # quant_model_description.json. Treat that metadata-only form as a
-        # deferred file load; otherwise maybe_update_config() sees a non-empty
-        # dict and never reads the actual layer descriptions.
-        if config.get("quant_method") == ASCEND_QUANTIZATION_METHOD and not any(
-            isinstance(name, str) and name.endswith(".weight") for name in config
-        ):
-            return cls()
+        # Format-only HF metadata is not a per-parameter quantization description.
+        metadata_keys = {"quant_method", "model_quant_type"}
+        if config.get("quant_method") == ASCEND_QUANTIZATION_METHOD and set(config) <= metadata_keys:
+            result = cls()
+            result._format_metadata = dict(config)
+            return result
         return cls(config)
 
     @classmethod
@@ -628,6 +625,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
         self._update_packed_modules_mapping(model_type)
+        runtime_prefix = prefix
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         # Kimi K3's mixed-precision packed KDA projection is split by the model
@@ -635,7 +633,12 @@ class AscendModelSlimConfig(QuantizationConfig):
         if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
             quant_type = None
         else:
-            quant_type = get_quant_type_for_layer(self.quant_description, prefix, self.packed_modules_mapping)
+            quant_type = get_quant_type_for_layer(
+                self.quant_description,
+                runtime_prefix,
+                self.packed_modules_mapping,
+                prefix_mapper=lambda name: self.quant_prefix_mapper(model_type, name),
+            )
 
         if isinstance(layer, LinearBase):
             if quant_type is None:
@@ -785,7 +788,7 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if config_path is not None:
             with open(config_path) as f:
-                self.quant_description = json.load(f)
+                self.quant_description = {**self._format_metadata, **json.load(f)}
             self._apply_extra_quant_adaptations()
             self._add_kvcache_quant_metadata()
             return

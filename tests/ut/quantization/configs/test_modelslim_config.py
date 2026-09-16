@@ -71,16 +71,71 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig.from_config({"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"})
         self.assertEqual(config.quant_description, {})
 
-    def test_deepseek_v41_packed_mapping_uses_checkpoint_shard_names(self):
-        self.ascend_config._update_packed_modules_mapping("deepseek_v41")
-        self.assertEqual(
-            self.ascend_config.packed_modules_mapping["gate_up_proj"],
-            ["w1", "w3"],
-        )
-        self.assertEqual(
-            self.ascend_config.packed_modules_mapping["experts"],
-            ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
-        )
+    def test_deepseek_v41_model_mapping_and_expert_discovery(self):
+        from vllm.model_executor.model_loader.utils import configure_quant_config
+
+        from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
+        from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
+        from vllm_ascend.models.deepseek_v41.vl_model import AscendDeepseekV41ForCausalLM
+
+        for model in (AscendDeepseekV41LLMForCausalLM, AscendDeepseekV41ForCausalLM, DSparkDeepseekV41ForCausalLM):
+            for root in ("model.layers.0", "language_model.model.layers.0"):
+                description = {
+                    f"layers.0.ffn.{part}.{name}.weight": "W8A8_DYNAMIC"
+                    for part in ("shared_experts", "experts.0")
+                    for name in ("w1", "w2", "w3")
+                }
+                config = AscendModelSlimConfig(description)
+                original = {key: list(value) for key, value in model.packed_modules_mapping.items()}
+                try:
+                    configure_quant_config(config, model)
+                    config._update_packed_modules_mapping("deepseek_v41")
+                    self.assertEqual(config.packed_modules_mapping["gate_up_proj"], ["gate_proj", "up_proj"])
+                    for module in ("shared_experts.gate_up_proj", "experts"):
+                        self.assertEqual(
+                            get_quant_type_for_layer(
+                                description,
+                                f"{root}.mlp.{module}",
+                                config.packed_modules_mapping,
+                                prefix_mapper=lambda name, config=config: config.quant_prefix_mapper(
+                                    "deepseek_v41", name
+                                ),
+                            ),
+                            "W8A8_DYNAMIC",
+                        )
+                    description["layers.0.ffn.shared_experts.w3.weight"] = "FLOAT"
+                    with self.assertRaises(ValueError):
+                        get_quant_type_for_layer(
+                            description,
+                            f"{root}.mlp.shared_experts.gate_up_proj",
+                            config.packed_modules_mapping,
+                            prefix_mapper=lambda name, config=config: config.quant_prefix_mapper("deepseek_v41", name),
+                        )
+                finally:
+                    model.packed_modules_mapping.clear()
+                    model.packed_modules_mapping.update(original)
+
+    def test_metadata_only_load_preserves_metadata(self):
+        metadata = {"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"}
+        config = AscendModelSlimConfig.from_config(metadata)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / MODELSLIM_CONFIG_FILENAME
+            path.write_text(json.dumps({"layer.weight": "W8A8_DYNAMIC"}))
+            config.maybe_update_config(directory)
+        self.assertEqual(config.quant_description, {**metadata, "layer.weight": "W8A8_DYNAMIC"})
+
+    def test_inline_description_is_not_discarded(self):
+        description = {"quant_method": "ascend", "layer.weight": "W8A8_DYNAMIC"}
+        config = AscendModelSlimConfig.from_config(description)
+        config.maybe_update_config("/nonexistent/unused-model")
+        self.assertEqual(config.quant_description, description)
+        unknown = {"quant_method": "ascend", "fa_quant_type": "C8"}
+        self.assertEqual(AscendModelSlimConfig.from_config(unknown).quant_description, unknown)
+
+    def test_metadata_only_requires_external_description(self):
+        config = AscendModelSlimConfig.from_config({"quant_method": "ascend"})
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+            config.maybe_update_config(directory)
 
     def test_deepseek_v41_quant_prefix_maps_terminal_projection(self):
         self.assertEqual(
