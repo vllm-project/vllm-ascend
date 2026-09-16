@@ -309,3 +309,7 @@ Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parall
 ### 26. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 27. When should I enable the fused matmul+communication operators?
+
+Set `VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE` to fuse the matmul of each row-parallel linear with its Tensor-Parallel collective into a single HCCL op on A2 devices: `1` uses `npu_mm_all_reduce_base` (matmul + all-reduce in one op); `2` uses `npu_mm_reduce_scatter_base` followed by an all-gather, which pipelines the matmul into the communication stage. Consider enabling it when TP ≥ 2 and the row-parallel layers are communication-bound. Constraints: the fused path only applies to unquantized (BF16/FP16) layers with 1 < TP ≤ 8 — quantized models and other TP sizes automatically keep the default matmul + all-reduce path — and each fused layer keeps an extra transposed copy of its weight shard in device memory. On non-A2 devices (or with invalid values) the run falls back to the default path with a warning.

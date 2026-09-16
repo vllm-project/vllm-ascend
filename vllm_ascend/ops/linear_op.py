@@ -24,7 +24,8 @@ CustomLinearOp
 └── CustomRowParallelOp
 │   ├── MLPRowParallelOp
 │   ├── OProjRowParallelOp
-│   └── SequenceRowParallelOp
+│   ├── SequenceRowParallelOp
+│   └── MatmulCommRowParallelOp
 └── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
@@ -44,6 +45,7 @@ import regex as re
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
@@ -63,6 +65,7 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
+    enable_mm_comm_fuse,
     enable_sp,
     is_vl_model,
     mlp_tp_enable,
@@ -422,6 +425,146 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.unique_prefix = self.layer.unique_prefix
 
 
+# The fused matmul+comm path is capped at 8 TP ranks: npu_mm_reduce_scatter_base
+# does not support tp_size >= 16 yet (see the mmrs_fusion guard in
+# ascend_forward_context), so both fused modes keep to the same limit.
+_MM_COMM_FUSE_MAX_TP = 8
+
+
+class MatmulCommRowParallelOp(CustomRowParallelOp):
+    """Fuses matmul and all-reduce or reduce-scatter into a single HCCL op.
+
+    VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE=1: npu_mm_all_reduce_base, returns the
+    full [M, O] tensor (plain TP path).
+    VLLM_ASCEND_ENABLE_MATMUL_COMM_FUSE=2: npu_mm_reduce_scatter_base followed
+    by an all-gather, mathematically equivalent to all-reduce but with the
+    matmul pipelined into the communication stage.
+
+    The fused ops consume a raw [K, O] ND weight, so _get_row_parallel_op only
+    selects this class for unquantized layers with 1 < tp <=
+    _MM_COMM_FUSE_MAX_TP; quantized layers and other tp sizes keep the default
+    matmul + all-reduce path. enable_mm_comm_fuse() clears the mode on non-A2
+    devices so this class is never selected there.
+    """
+
+    _HCOMM_INFO_MAP = {}
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.mm_comm_fuse_mode = enable_mm_comm_fuse()
+        # The fused ops take a string HCCL comm handle (not a ProcessGroup),
+        # resolved per group. tp=1 never reaches the fused path, so skip the
+        # backend query instead of eagerly initializing a communicator.
+        self.hcomm_info = None
+        if self.tp_size > 1 and self.comm_group.device_group is not None:
+            self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
+
+    def update_attrs(self):
+        super().update_attrs()
+        # Flagged here rather than in __init__ because reduce_results is only
+        # synced from the layer at this point. Still runs before
+        # process_weights_after_loading, which stashes weight_t when set.
+        if self.reduce_results and self.tp_size > 1:
+            self.layer.apply_weight_t = True
+
+    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        input_parallel = self.get_input_parallel(input_)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if self.reduce_results and self.tp_size > 1:
+            # Both fused ops expect a contiguous [K, O] weight in ND format
+            # (npu_mm_all_reduce_base rejects FRACTAL_NZ); prefer the ND
+            # transposed copy stashed at load time and transpose on the fly
+            # when it is absent.
+            weight = getattr(self.layer, "weight_t", None)
+            if weight is None:
+                weight = self.layer.weight.t().contiguous()
+            if self.mm_comm_fuse_mode == 1:
+                # The fused op takes a 2D mat1; flatten multi-dim inputs and
+                # restore the leading dims afterwards.
+                if input_parallel.dim() > 2:
+                    orig_shape = input_parallel.shape
+                    input_mm = input_parallel.reshape(-1, orig_shape[-1])
+                    output = torch_npu.npu_mm_all_reduce_base(input_mm, weight, self.hcomm_info, bias=bias_)
+                    output = output.reshape(*orig_shape[:-1], output.shape[-1])
+                else:
+                    output = torch_npu.npu_mm_all_reduce_base(input_parallel, weight, self.hcomm_info, bias=bias_)
+            else:
+                world_size = self.tp_size
+                # --------------- 1. Record original shape and convert to 2D ---------------
+                orig_shape = input_parallel.shape
+                # Merge all but the last dimension into 'num_tokens', last dim is the feature dimension
+                non_feature_shape = orig_shape[:-1]
+                hidden_dim = orig_shape[-1]
+                input_2d = input_parallel.reshape(-1, hidden_dim)
+                num_tokens = input_2d.shape[0]
+
+                # --------------- 2. Pad to make it divisible by world_size ---------------
+                pad_size = (world_size - (num_tokens % world_size)) % world_size
+                if pad_size > 0:
+                    # Pad 'pad_size' rows at the end of the num_tokens dimension (dim=0)
+                    input_2d = F.pad(input_2d, (0, 0, 0, pad_size))
+
+                # --------------- 3. Call npu_mm_reduce_scatter_base ---------------
+                # Internally performs: matmul(input_2d, weight) -> reduce_scatter.
+                # Output shape: [(num_tokens + pad_size) // world_size, out_features].
+                # bias is not supported by this op yet, so add it after the gather.
+                rs_output = DeviceOperator.npu_mm_reduce_scatter_base(
+                    input_2d,
+                    weight,
+                    self.hcomm_info,
+                    world_size,
+                    reduce_op="sum",
+                    comm_turn=0,
+                )
+
+                # --------------- 4. AllGather to collect the complete result ---------------
+                # Allocate the receive buffer with the size of the full padded output
+                out_features = rs_output.shape[1]
+                full_output_2d = torch.empty(
+                    input_2d.shape[0], out_features, device=rs_output.device, dtype=rs_output.dtype
+                )
+                # Use all_gather_into_tensor for efficient collection across ranks
+                dist.all_gather_into_tensor(full_output_2d, rs_output, group=self.comm_group.device_group)
+
+                # --------------- 5. Slice off the padded part and restore original shape ---------------
+                if pad_size > 0:
+                    full_output_2d = full_output_2d[:-pad_size, :]
+
+                # Reshape 'num_tokens' back to the original leading dimensions
+                output = full_output_2d.reshape(*non_feature_shape, out_features)
+
+                # All ranks hold the identical full output after the gather,
+                # so every rank adds the (replicated) bias itself.
+                if not self.skip_bias_add and self.bias is not None:
+                    output = output + self.bias
+
+        else:
+            assert self.quant_method is not None
+            output = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+    @classmethod
+    def get_hcomm_info(cls, group: dist.ProcessGroup) -> str:
+        """Get the HCCL communication information for the given group.
+
+        Cached per group: layers on different comm groups (e.g. the MLP TP
+        group vs. the plain TP group) yield different handles, so a single
+        class-level value would be wrong.
+        """
+        if group in cls._HCOMM_INFO_MAP:
+            return cls._HCOMM_INFO_MAP[group]
+        rank = torch.distributed.get_rank(group)
+        if torch.__version__ > "2.0":
+            global_rank = torch.distributed.get_global_rank(group, rank)
+            hcomm_info = group._get_backend(torch.device("npu")).get_hccl_comm_name(global_rank)
+        else:
+            hcomm_info = group.get_hccl_comm_name(rank)
+        cls._HCOMM_INFO_MAP[group] = hcomm_info
+        return hcomm_info
+
+
 class ShardedCPColumnParallelOp(CustomColumnParallelOp):
     @property
     def comm_group(self):
@@ -495,8 +638,15 @@ def _get_column_parallel_op(
 
 
 def _get_row_parallel_op(
-    prefix, layer
-) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | SequenceRowParallelOp | None:
+    prefix, layer, quant_config=None
+) -> (
+    MLPRowParallelOp
+    | OProjRowParallelOp
+    | DSV4OProjRowParallelOp
+    | SequenceRowParallelOp
+    | MatmulCommRowParallelOp
+    | None
+):
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
     if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
@@ -518,10 +668,23 @@ def _get_row_parallel_op(
             if a_prefix in prefix:
                 return SequenceRowParallelOp(layer)
 
+    if enable_mm_comm_fuse():
+        # The fused ops consume a raw [K, O] weight, so they only fit the
+        # unquantized default path, and npu_mm_reduce_scatter_base does not
+        # support large world sizes; everything else keeps the default path.
+        tp_size = get_tp_group().world_size
+        if quant_config is None and 1 < tp_size <= _MM_COMM_FUSE_MAX_TP:
+            return MatmulCommRowParallelOp(layer)
+        logger.warning_once(
+            "The fused matmul+comm path only applies to unquantized layers with 1 < TP <= %d; "
+            "other layers keep the default matmul + all-reduce path.",
+            _MM_COMM_FUSE_MAX_TP,
+        )
+
     return None
 
 
-def get_parallel_op(disable_tp, prefix, layer, direct, output_size: int | None = None):
+def get_parallel_op(disable_tp, prefix, layer, direct, output_size: int | None = None, quant_config=None):
     if (
         disable_tp
         or ("shared_experts" in prefix and shared_expert_dp_enabled())
@@ -538,10 +701,11 @@ def get_parallel_op(disable_tp, prefix, layer, direct, output_size: int | None =
         | DSV4OProjRowParallelOp
         | SequenceRowParallelOp
         | ShardedCPColumnParallelOp
+        | MatmulCommRowParallelOp
         | None
     ) = None
     if direct == "row":
-        custom_op = _get_row_parallel_op(prefix, layer)
+        custom_op = _get_row_parallel_op(prefix, layer, quant_config)
 
     if direct == "column":
         custom_op = _get_column_parallel_op(prefix, layer, output_size)
