@@ -15,7 +15,6 @@ from vllm.v1.worker.utils import get_uniform_decode_token_count
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_target_pcp_for_replicated_draft
@@ -25,11 +24,22 @@ class AscendParallelEagleSpeculator(AscendEagleSpeculator):
     """P-EAGLE: expand masked queries and sample K positions in one V2 forward."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.extra_query_tokens = speculative_config.num_speculative_tokens - 1
+        scheduler_config = vllm_config.scheduler_config
+        expanded_max_tokens = (
+            scheduler_config.max_num_batched_tokens + scheduler_config.max_num_seqs * self.extra_query_tokens
+        )
+        # The draft compiler must accept expanded batches during profiling and
+        # execution, not only at graph capture. Copy compilation settings while
+        # sharing the layer registry so target and draft KV discovery still work.
+        vllm_config = replace(
+            vllm_config,
+            scheduler_config=replace(scheduler_config, max_num_batched_tokens=expanded_max_tokens),
+            compilation_config=copy(vllm_config.compilation_config),
+        )
         super().__init__(vllm_config, device)
-        self.extra_query_tokens = self.num_speculative_steps - 1
-        self.max_num_tokens += self.max_num_reqs * self.extra_query_tokens
-        self.input_buffers = AscendInputBuffers(self.max_num_reqs, self.max_num_tokens, device)
-        self.hidden_states = torch.zeros(self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device)
         self.parallel_token_id = get_parallel_drafting_token_id(self.draft_model_config.hf_config)
         self.parallel_sample_indices = torch.zeros(
             self.max_num_reqs * self.num_speculative_steps, dtype=torch.long, device=device
@@ -60,14 +70,10 @@ class AscendParallelEagleSpeculator(AscendEagleSpeculator):
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
             cudagraph_mode = CUDAGraphMode.NONE
-        graph_config = replace(
-            self.vllm_config,
-            scheduler_config=replace(self.scheduler_config, max_num_batched_tokens=self.max_num_tokens),
-        )
         # Target decode has K+1 tokens; adding K-1 masked queries gives 2K.
         # The single parallel forward uses the draft-prefill graph pool.
         self.prefill_cudagraph_manager = AutoRegressiveAclGraphManager(
-            graph_config, self.device, cudagraph_mode, decode_query_len=2 * self.num_speculative_steps
+            self.vllm_config, self.device, cudagraph_mode, decode_query_len=2 * self.num_speculative_steps
         )
         self.prefill_cudagraph_manager.speculator = self
         self.prefill_cudagraph_manager.update_stream = self.update_stream

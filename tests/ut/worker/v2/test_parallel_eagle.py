@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-Ascend project
 import sys
 from contextlib import nullcontext
+from copy import copy
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,57 @@ import torch
 from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.parallel import AscendParallelEagleSpeculator
+
+
+def test_expanded_compile_range_is_installed_before_base_initialization():
+    module = sys.modules[AscendParallelEagleSpeculator.__module__]
+    compilation = SimpleNamespace(
+        compile_ranges_endpoints=[8192],
+        static_forward_context={"target.layer": object()},
+        cudagraph_mode=module.CUDAGraphMode.FULL,
+        pass_config=SimpleNamespace(
+            fuse_allreduce_rms=False,
+            enable_sp=False,
+            fuse_rope_kvcache=False,
+            fuse_qk_norm_rope_kvcache=False,
+        ),
+    )
+    target_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192, max_num_seqs=256),
+        speculative_config=SimpleNamespace(num_speculative_tokens=8),
+        compilation_config=compilation,
+    )
+
+    def replace_config(config, **changes):
+        result = copy(config)
+        result.__dict__.update(changes)
+        if "scheduler_config" in changes:
+            # Exercise upstream's actual range normalization without loading
+            # a model or initializing distributed/NPU state in the CPU test.
+            module.VllmConfig._set_compile_ranges(result)
+        return result
+
+    def initialize_base(spec, config, device):
+        spec.vllm_config = config
+        spec.num_speculative_steps = config.speculative_config.num_speculative_tokens
+        spec.max_num_reqs = config.scheduler_config.max_num_seqs
+        spec.max_num_tokens = config.scheduler_config.max_num_batched_tokens
+        spec.draft_model_config = SimpleNamespace(hf_config=object())
+
+    with (
+        patch.object(module, "replace", side_effect=replace_config),
+        patch.object(module, "get_parallel_drafting_token_id", return_value=99),
+        patch.object(AscendParallelEagleSpeculator.__mro__[1], "__init__", initialize_base),
+    ):
+        spec = AscendParallelEagleSpeculator(target_config, torch.device("cpu"))
+
+    assert spec.max_num_tokens == 9984
+    assert spec.vllm_config.compilation_config.compile_ranges_endpoints == [8192, 9984]
+    assert target_config.scheduler_config.max_num_batched_tokens == 8192
+    assert compilation.compile_ranges_endpoints == [8192]
+    assert spec.vllm_config.compilation_config is not compilation
+    assert spec.vllm_config.compilation_config.static_forward_context is compilation.static_forward_context
+    assert spec.vllm_config.compilation_config.cudagraph_mode == module.CUDAGraphMode.FULL
 
 
 def make_speculator(steps=3):
