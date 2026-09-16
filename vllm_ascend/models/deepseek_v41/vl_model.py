@@ -49,6 +49,8 @@ class AscendDeepseekV41ForCausalLM(
 ):
     """V4.1 image-span semantics with the shared Ascend vision tower."""
 
+    # Engram history and vision MoE routing also consume the original token IDs.
+    requires_raw_input_tokens = True
     language_model_cls = AscendDeepseekV41LLMForCausalLM
 
     @classmethod

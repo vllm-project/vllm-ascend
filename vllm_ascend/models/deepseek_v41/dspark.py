@@ -32,6 +32,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, proce
 
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
+from vllm_ascend.config_utils import normalize_deepseek_v41_config
 from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41DraftSWASpec, validate_cache_runtime
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -142,7 +143,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.vllm_config = vllm_config
         validate_cache_runtime(vllm_config)
         draft_model_config = vllm_config.speculative_config.draft_model_config
-        config = draft_model_config.hf_text_config
+        config = normalize_deepseek_v41_config(draft_model_config.hf_text_config)
         self.config = config
         self.hc_mult = config.hc_mult
         self.hidden_size = config.hidden_size
