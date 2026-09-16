@@ -10,6 +10,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
@@ -740,6 +741,14 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # ``W_UV``/``W_UK_T`` are injected during ``process_weights_after_loading``
+    # through ``replace_parameter``, which is ``setattr``-based and therefore
+    # invisible to static analysis. These declarations are what let mypy resolve
+    # the attributes at every use site; without them ``pre-commit`` fails with
+    # `Cannot determine type of "W_UK_T"  [has-type]`.
+    W_UV: torch.Tensor
+    W_UK_T: torch.Tensor
+
     # A replicated MTP draft may inherit a PCP target's non-trivial interleave
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
@@ -922,17 +931,28 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         W_UK, W_UV = kv_b_proj_weight.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # NOTE: When we make a incontiguous weight contiguous, a new address will be allocated for the weight,
-        # in graph + RL scenario, we only capture the graph once, and the weight address is expected to be the same
-        # across iterations, so we need to copy the weight to the original address after making it contiguous.
-        if not hasattr(self, "W_UV"):
-            # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1).contiguous()
-            # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        else:
-            self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
-            self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
+        # NOTE: `W_UK`/`W_UV` must live at a stable address: in graph + RL
+        # scenario the graph is captured once, so every later weight update
+        # reload has to refresh the stored tensors in place instead of
+        # rebinding the attributes to freshly allocated tensors.
+        # `replace_parameter(..., prefer_copy=True)` does exactly that: it
+        # copies into the existing storage while the new value stays
+        # compatible, and rebinds only when shape/dtype/device actually
+        # changes. This mirrors how upstream vLLM refreshes
+        # `MLAAttention.W_UV`/`W_UK_T`, and unlike a plain `copy_` it cannot
+        # raise on a shape mismatch.
+        replace_parameter(
+            self,
+            "W_UV",
+            W_UV.transpose(0, 1).contiguous(),  # (L, N, V) -> (N, L, V)
+            prefer_copy=True,
+        )
+        replace_parameter(
+            self,
+            "W_UK_T",
+            W_UK.permute(1, 2, 0).contiguous(),  # (L, N, P) -> (N, P, L)
+            prefer_copy=True,
+        )
 
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
