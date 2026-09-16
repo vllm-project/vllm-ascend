@@ -213,6 +213,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model_config = getattr(spec_config, "draft_model_config", None)
         draft_hf_config = draft_model_config.hf_config if draft_model_config is not None else None
         self._share_mtp_indices = getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+        self._nano_topk_compactors: list[nn.Module] = []
 
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
@@ -673,6 +674,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
+        self._nano_topk_compactors = []
+        draft_model = getattr(self.model, "model", None)
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
@@ -682,11 +685,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 " Sharing target model topk_indices_buffer with the draft model."
             )
             target_buffer = target_language_model.model.topk_indices_buffer
-            draft_model = getattr(self.model, "model", None)
             if target_buffer is not None and draft_model is not None:
-                for _, module in draft_model.named_modules():
+                for module in draft_model.modules():
                     if hasattr(module, "topk_indices_buffer"):
                         module.topk_indices_buffer = target_buffer
+        if draft_model is not None:
+            self._nano_topk_compactors.extend(
+                module for module in draft_model.modules() if getattr(module, "uses_nano_topk_metadata", False)
+            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -1439,6 +1445,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     token_indices_to_sample,
                     num_input_tokens,
                     tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
+                    nano_topk_compactors=self._nano_topk_compactors,
                 )
 
         num_indices = token_indices_to_sample.shape[0]

@@ -432,7 +432,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 self.nano_miss_dst = torch.empty_like(self.nano_miss_src)
                 self.nano_misses = torch.zeros(requests, dtype=torch.int32, device=device)
                 self.nano_reuse_cache_tokens = torch.empty(requests, dtype=torch.int32, device=device)
-                self.nano_reuse_slots = torch.arange(2048, dtype=torch.int32, device=device)
+                self.nano_reuse_topk_misses = torch.zeros(output_tokens, dtype=torch.int32, device=device)
+                self.nano_reuse_misses = torch.zeros(requests, dtype=torch.int32, device=device)
+                self.nano_reuse_request_count = 0
                 self.nano_query_scale = None
                 self.nano_key_scale = None
             # Descriptor storage belongs to the attention implementation;
@@ -561,6 +563,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             # The fallback arena overlaps persistent nano rows. Force a cold
             # fill after prefill/mixed/fallback execution, including owners
             # whose source-to-slot maps otherwise still look valid.
+            self.nano_reuse_request_count = 0
             self.nano_last_generation.fill_(-1)
         try:
             return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
@@ -640,6 +643,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self.nano_miss_dst[:count],
             self.nano_misses[:count],
         )
+        # MTP draft step 0 owns the only LIM invocation. Preserve its cache
+        # budget so later draft steps can reuse the compacted LIM outputs
+        # without rebuilding source-to-slot metadata.
+        self.nano_reuse_request_count = count
+        self.nano_reuse_cache_tokens[:count].copy_(cache)
         return self.nano_topk_src[:tokens]
 
     def bind_nano_kv_cache(self, manager, layer_name) -> None:
@@ -676,62 +684,14 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self.nano_copy_src[:count], self.nano_copy_dst[:count], metadata.nano_copy_lengths, metadata.nano_copy_count
         )
 
-    def _prepare_nano_reused_topk(self, topk_indices, metadata):
-        """Resolve the proposer's compacted MTP indices without running LIM.
-
-        Later draft steps attend to the exact saved selection, as in regular
-        SFA. In particular, they must not append a newly advanced dense tail.
-        Usually every source is already resident from draft zero. A prefill
-        first step (or an invalidated arena) instead fills a compact TopK
-        cache once; subsequent drafts reuse it. Its source-to-slot map stays
-        coherent so the next LIM invocation can safely reuse or resize it.
-        """
-        count = metadata.nano_pool_entries.numel()
-        if metadata.num_decode_tokens != count:
-            raise RuntimeError("MTP index reuse requires one query per request")
-        topk = self.nano_reuse_slots.numel()
-        pools = metadata.nano_pool_entries.to(torch.int64)
-        sources = topk_indices[:count].reshape(count, topk).to(torch.int32)
-        source_capacity = self.nano_slot_map.shape[1]
-        valid = (
-            metadata.nano_active[:, None]
-            & (sources >= 0)
-            & (sources < metadata.nano_seq_lens[:, None])
-            & (sources < source_capacity)
-        )
-        source_ids = torch.where(valid, sources, 0).to(torch.int64)
-        mapping = self.nano_slot_map[pools]
-        cached_slots = mapping.gather(1, source_ids)
-        cached_count = self.nano_last_cache[pools]
-        ready = (self.nano_last_generation[pools] == metadata.nano_generations) & (cached_count >= topk)
-        hits = (cached_slots >= 0) & (cached_slots < cached_count[:, None])
-        cold = metadata.nano_active & ~(ready & (hits | ~valid).all(dim=1))
-        slots = torch.where(cold[:, None], self.nano_reuse_slots[None], cached_slots)
-        cache = torch.where(metadata.nano_active & ~cold, cached_count, topk)
-        self.nano_reuse_cache_tokens[:count].copy_(cache)
-        self.nano_topk_src[:count, 0].copy_(torch.where(valid, sources, -1))
-        self.nano_topk_dst[:count, 0].copy_(torch.where(valid, slots, -1))
-        misses = torch.where(cold, topk, 0)
-        self.nano_topk_misses[:count].copy_(misses)
-        self.nano_misses[:count].copy_(misses)
-        # FirstFillScatterCopy requires non-negative entries. Invalid TopK
-        # padding copies a harmless source to an unused slot, then attention
-        # ignores that slot through its -1 sparse index. Inactive rows copy 0.
-        self.nano_miss_src[:count, :topk].copy_(source_ids)
-        self.nano_miss_dst[:count, :topk].copy_(self.nano_reuse_slots[None])
-        invalid_slot = -(1 << 31)
-        mapping = torch.where(cold[:, None], invalid_slot, mapping)
-        # Padded indices use source zero. Restore its deterministic value
-        # after scatter so duplicate padding cannot overwrite a real entry.
-        # scatter_reduce falls back to CPU on some supported torch_npu builds.
-        zero_slot = torch.maximum(mapping[:, 0], torch.where(valid & (sources == 0), slots, invalid_slot).amax(dim=1))
-        mapping.scatter_(1, source_ids, torch.where(valid, slots, invalid_slot))
-        mapping[:, 0].copy_(zero_slot)
-        self.nano_slot_map.index_copy_(0, pools, mapping)
-        self.nano_last_generation.scatter_(0, pools, metadata.nano_generations)
-        self.nano_last_cache.scatter_(0, pools, cache)
-        self.nano_last_prefix.scatter_(0, pools, metadata.nano_prefix_lens)
-        return self.nano_reuse_cache_tokens[:count]
+    def compact_nano_topk_metadata(self, slot_ids: torch.Tensor) -> None:
+        """Compact draft-step-0 LIM rows for direct reuse by later steps."""
+        count = min(self.nano_reuse_request_count, slot_ids.numel())
+        if count == 0:
+            return
+        compact_ids = slot_ids[:count]
+        self.nano_topk_src[:count].copy_(self.nano_topk_src[compact_ids])
+        self.nano_topk_dst[:count].copy_(self.nano_topk_dst[compact_ids])
 
     def _nano_attention(self, query, query_rope, topk_indices, metadata, manager, layer_name):
         tokens = metadata.num_decode_tokens
@@ -746,15 +706,19 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         host_k = manager.k_caches_cpu[layer_id].view(-1, 128, self.kv_lora_rank)
         host_v = manager.v_caches_cpu[layer_id].view(-1, 128, self.qk_rope_head_dim)
         if reuse_indices:
-            # The existing proposer already compacted the model's TopK
-            # buffer to one sampled row per request. Reconstruct destinations
-            # from those logical IDs, never from stale draft-zero row order.
-            cache_tokens = self._prepare_nano_reused_topk(topk_indices, metadata)
+            # The proposer compacts the complete step-0 LIM result alongside
+            # the shared logical TopK rows. All selected sources are resident
+            # after step 0, so later steps issue no cache copies.
+            cache_tokens = self.nano_reuse_cache_tokens[:count]
             logical_lens = cache_tokens  # exact saved selection; no extra tail
+            topk_misses = self.nano_reuse_topk_misses[:tokens]
+            misses = self.nano_reuse_misses[:count]
         else:
             self._nano_restore_tail(metadata, manager, layer_name)
             cache_tokens = metadata.nano_cache_tokens
             logical_lens = metadata.nano_logical_lens
+            topk_misses = owner.nano_topk_misses[:tokens]
+            misses = owner.nano_misses[:count]
         heads = query.shape[1]
         q, qr = prepare_copy_sfa_queries(query[:tokens], query_rope[:tokens])
         out = torch.empty_like(q)
@@ -766,10 +730,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             cache_tokens,
             owner.nano_topk_dst[:tokens],
             owner.nano_topk_src[:tokens],
-            owner.nano_topk_misses[:tokens],
+            topk_misses,
             owner.nano_miss_src[:count],
             owner.nano_miss_dst[:count],
-            owner.nano_misses[:count],
+            misses,
             metadata.nano_hbm_block_table,
             metadata.nano_source_block_table,
             hbm_v,
