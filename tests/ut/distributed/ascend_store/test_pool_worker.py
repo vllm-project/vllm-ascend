@@ -1039,16 +1039,15 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_recv_thread = recv_thread
         worker.kv_send_thread = None
 
-        loading_req_ids = {"r1"}
-        meta = AscendConnectorMetadata(set(), loading_req_ids=loading_req_ids)
+        meta = AscendConnectorMetadata(set())
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
-        recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
+        recv_thread.get_and_clear_finished_requests.assert_called_once_with()
 
         recv_thread.reset_mock()
         recv_thread.get_and_clear_finished_requests.return_value = set()
-        meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
+        meta = AscendConnectorMetadata({"r_preempted"})
         worker.get_finished(set(), meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
