@@ -459,7 +459,15 @@ class AscendDSAV41Impl:
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[: hidden_states.shape[0]],
         )
-        shared.topk_indices[: selected.shape[0]].copy_(selected)
+        if selected.shape[-1] == 0:
+            # Empty compressed source (e.g. first decode before any completed
+            # compression group): the indexer signals "no sparse indices" with
+            # a zero-width selection. Fill the shared buffer rows with -1 —
+            # the same invalid marker pad_sparse_indices uses — so the
+            # compressed stage is skipped (cmp_seq_lens are 0 here anyway).
+            shared.topk_indices[: selected.shape[0]].fill_(-1)
+        else:
+            shared.topk_indices[: selected.shape[0]].copy_(selected)
         if self.role.is_candidate_source:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
         return shared.topk_indices[: selected.shape[0]]
