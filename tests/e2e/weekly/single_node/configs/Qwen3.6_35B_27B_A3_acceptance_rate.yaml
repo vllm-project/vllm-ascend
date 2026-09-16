@@ -87,5 +87,5 @@ test_cases:
     test_content:
       - spec_decode_acceptance
     acceptance_rate:
-      baseline: 0.3633
+      baseline: 0.8093
       tolerance: 0.05
