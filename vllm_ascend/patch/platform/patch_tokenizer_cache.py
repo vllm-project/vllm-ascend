@@ -412,7 +412,11 @@ def _patch_hf_chat() -> None:
         if cache is not None and not kwargs.get("return_assistant_tokens_mask"):
 
             def render(**kw):
-                return original(model_config, tokenizer, conversation, **kw)
+                # ``kwargs`` carries the chat template and the template kwargs
+                # (the OpenAI renderer delivers ``tools`` through
+                # ``ChatParams.chat_template_kwargs``), so they have to survive
+                # the probe; only ``tokenize`` may be overridden.
+                return original(model_config, tokenizer, conversation, **{**kwargs, **kw})
 
             token_ids = _chat_ids(cache, render, kwargs)
             if token_ids is not None:
