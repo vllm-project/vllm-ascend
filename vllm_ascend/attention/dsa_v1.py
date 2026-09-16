@@ -406,6 +406,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.num_decode_tokens = 0
         self.num_prefill_tokens = 0
         self.num_actual_tokens: int | None = None
+        self._dspark_graph_swa_indices: torch.Tensor | None = None
         self.block_table: torch.Tensor = None
         self.common_ratio_to_sas_metadata: dict | None = None
         self.seq_lens: torch.Tensor = None
@@ -429,6 +430,39 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
+
+    def _prepare_dspark_graph_swa_indices(self) -> None:
+        if self._dspark_graph_swa_indices is not None:
+            return
+        assert self.speculative_config is not None
+        num_spec_tokens = self.speculative_config.num_speculative_tokens
+        width = _aligned_dspark_index_width(self.model_config.hf_config.sliding_window, num_spec_tokens)
+        max_tokens = self.vllm_config.scheduler_config.max_num_seqs * (num_spec_tokens + 1)
+        self._dspark_graph_swa_indices = torch.empty((max_tokens, 1, width), dtype=torch.int32, device=self.device)
+
+    def _build_dspark_graph_swa_indices(
+        self,
+        block_table: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        assert self.speculative_config is not None
+        indices, _ = build_dspark_swa_indices(
+            block_table,
+            self.speculative_config.num_speculative_tokens,
+            self.model_config.hf_config.sliding_window,
+            self.storage_block_size,
+            query_start_loc,
+            seq_lens,
+            num_tokens,
+        )
+        if self._dspark_graph_swa_indices is None:
+            return indices
+        assert num_tokens <= self._dspark_graph_swa_indices.shape[0]
+        stable_indices = self._dspark_graph_swa_indices[:num_tokens]
+        stable_indices.copy_(indices)
+        return stable_indices
 
     def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
@@ -747,11 +781,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # current step's block table / sequence lengths, so they must be
             # rebuilt whenever a DSpark draft step runs.
             assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
+            dspark_swa_indices = self._build_dspark_graph_swa_indices(
                 self.block_table[: self.num_decodes],
-                self.speculative_config.num_speculative_tokens,
-                self.model_config.hf_config.sliding_window,
-                self.storage_block_size,
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
@@ -895,11 +926,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_right = 0
         if not common_attn_metadata.causal:
             assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
+            dspark_swa_indices = self._build_dspark_graph_swa_indices(
                 self.block_table[:num_reqs],
-                self.speculative_config.num_speculative_tokens,
-                self.model_config.hf_config.sliding_window,
-                self.storage_block_size,
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
@@ -986,6 +1014,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ):
         if attn_state in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}:
+            dspark_swa_graph = (
+                attn_state == AscendAttentionState.SpecDecoding
+                and not getattr(common_attn_metadata, "causal", True)
+                and getattr(self, "spec_sas_metadata", None) is not None
+            )
+            if dspark_swa_graph:
+                self._prepare_dspark_graph_swa_indices()
             if kwargs.get("common_ratio_to_sas_metadata") is None:
                 kwargs["common_ratio_to_sas_metadata"] = {}
             kwargs.setdefault("num_actual_reqs", common_attn_metadata.num_reqs)
@@ -1000,6 +1035,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
 
         assert attn_metadata is not None
+        if dspark_swa_graph:
+            req_metadata = attn_metadata.req_metadata
+            assert self.spec_sas_metadata is not None
+            req_metadata.sas_metadata = self.spec_sas_metadata[0]
+            req_metadata.sas_metadata.copy_(self.sas_metadata_buffer)
+            assert self.spec_slot_mapping is not None
+            stable_slots = self.spec_slot_mapping[0][: common_attn_metadata.num_input_tokens]
+            stable_slots.copy_(req_metadata.slot_mapping)
+            req_metadata.slot_mapping = stable_slots
+            req_metadata.cos, req_metadata.sin = get_cos_and_sin_dsa(
+                common_attn_metadata.positions[: common_attn_metadata.num_input_tokens].long(),
+                use_cache=True,
+                draft_index=1,
+            )
         attn_metadata.attn_state = attn_state
         return attn_metadata
 

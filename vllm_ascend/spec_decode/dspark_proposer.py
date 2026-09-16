@@ -666,6 +666,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         multi_steps_attn_metadata = []
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and self.draft_attn_groups:
             assert batch_descriptor is not None and batch_descriptor.num_reqs == num_reqs
+            self.seq_lens_group[0][:num_reqs].copy_(self.runner.seq_lens[:num_reqs])
+            self.seq_lens_group[0][num_reqs:].fill_(0)
             query_start_loc = self._draft_graph_query_start_loc[: num_reqs + 1]
             query_start_loc_cpu = self._draft_graph_query_start_loc_cpu[: num_reqs + 1]
             assert int(query_start_loc_cpu[-1]) == num_input_tokens
@@ -682,7 +684,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                     query_start_loc_cpu=query_start_loc_cpu,
                     seq_lens_cpu=self.runner.optimistic_seq_lens_cpu[:num_reqs],
                     seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu[:num_reqs],
-                    seq_lens=self.runner.seq_lens[:num_reqs],
+                    seq_lens=self.seq_lens_group[0][:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_query_total,
                     num_input_tokens=num_input_tokens,

@@ -425,6 +425,7 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
             draft_attn_causal=None,
         )
         proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        proposer.seq_lens_group = [torch.zeros(4, dtype=torch.int32)]
         proposer.runner = SimpleNamespace(
             _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("capture DP sync must be skipped")),
             optimistic_seq_lens_cpu=torch.arange(4, dtype=torch.int32),
@@ -460,6 +461,8 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
         common_metadata = builder.build_for_graph_capture.call_args.args[0]
         assert builder.build_for_graph_capture.call_args.args[1] == AscendAttentionState.SpecDecoding
         assert common_metadata.attn_state == AscendAttentionState.SpecDecoding
+        assert common_metadata.seq_lens.data_ptr() == proposer.seq_lens_group[0].data_ptr()
+        assert common_metadata.seq_lens.tolist() == [0, 1, 2, 3]
         assert common_metadata.query_start_loc_cpu.tolist() == [0, 8, 16, 24, 32]
         assert proposer._runnable.call_args.kwargs["num_input_tokens"] == 32
         assert proposer._runnable.call_args.kwargs["batch_size"] == 4

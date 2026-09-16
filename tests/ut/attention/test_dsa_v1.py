@@ -506,6 +506,62 @@ def test_build_req_metadata_clears_graph_padding_rows():
     assert torch.count_nonzero(metadata.block_table[1:]).item() == 0
 
 
+def test_dspark_graph_swa_indices_buffer_reuses_address_and_updates_contents():
+    builder = _make_builder(compressor_ratio=1)
+    builder.speculative_config = SimpleNamespace(num_speculative_tokens=7)
+    builder.model_config.hf_config.sliding_window = 16
+    builder._prepare_dspark_graph_swa_indices()
+    block_table = torch.arange(32, dtype=torch.int32).reshape(1, 32)
+    query_start_loc = torch.tensor([0, 7], dtype=torch.int32)
+    capture = builder._build_dspark_graph_swa_indices(block_table, query_start_loc, torch.tensor([24]), 7)
+    captured_values = capture.clone()
+    replay = builder._build_dspark_graph_swa_indices(block_table, query_start_loc, torch.tensor([32]), 7)
+
+    assert capture.data_ptr() == replay.data_ptr()
+    assert not torch.equal(captured_values, replay)
+    assert torch.equal(capture, replay)
+
+
+def test_dspark_graph_capture_uses_drafting_sas_and_slot_buffers():
+    builder = _make_builder(compressor_ratio=1)
+    builder.speculative_config = SimpleNamespace(num_speculative_tokens=7)
+    builder.spec_sas_metadata = [torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)]
+    builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
+    builder.sas_metadata_buffer.fill_(3)
+    captured_slots = torch.ones((7, 2), dtype=torch.int32)
+    req_metadata = SimpleNamespace(
+        sas_metadata=builder.sas_metadata_buffer,
+        slot_mapping=captured_slots,
+        cos=None,
+        sin=None,
+    )
+    builder.build = MagicMock(return_value=SimpleNamespace(req_metadata=req_metadata, attn_state=None))
+    graph_cos, graph_sin = object(), object()
+
+    with patch(
+        "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
+        return_value=(graph_cos, graph_sin),
+    ) as rope:
+        builder.build_for_graph_capture(
+            SimpleNamespace(
+                num_reqs=1,
+                num_input_tokens=7,
+                positions=torch.arange(7, dtype=torch.int32),
+                causal=False,
+            ),
+            AscendAttentionState.SpecDecoding,
+        )
+
+    assert req_metadata.sas_metadata is builder.spec_sas_metadata[0]
+    assert torch.all(req_metadata.sas_metadata == 3)
+    assert req_metadata.slot_mapping.data_ptr() == builder.spec_slot_mapping[0].data_ptr()
+    assert torch.equal(req_metadata.slot_mapping, captured_slots)
+    assert req_metadata.cos is graph_cos
+    assert req_metadata.sin is graph_sin
+    assert rope.call_args.kwargs == {"use_cache": True, "draft_index": 1}
+    assert builder._dspark_graph_swa_indices is not None
+
+
 def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     builder = _make_builder(compressor_ratio=1)
     builder.num_actual_tokens = 3
