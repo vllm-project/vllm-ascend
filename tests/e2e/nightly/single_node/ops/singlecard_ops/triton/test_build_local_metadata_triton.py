@@ -260,8 +260,7 @@ def test_build_local_metadata_no_recompile_across_num_reqs(device: str) -> None:
             block=MAX_NUM_SEQS,
         )
     assert entry_count() - cache_before <= 1, (
-        "num_reqs sweep must not grow the kernel cache "
-        f"(before={cache_before}, after={entry_count()})"
+        f"num_reqs sweep must not grow the kernel cache (before={cache_before}, after={entry_count()})"
     )
 
     gc.collect()
