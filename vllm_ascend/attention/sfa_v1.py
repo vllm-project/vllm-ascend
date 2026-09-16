@@ -32,7 +32,6 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
-    scatter_paged_cache,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -1092,7 +1091,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
-            scatter_paged_cache(cache, slots[: values.shape[0]].long(), values.to(cache.dtype), cache.shape[1])
+            block_size = cache.shape[1]
+            # Extreme invalid slots can overflow inside the native scatter
+            # and alias valid rows. Bounded out-of-range pages are ignored.
+            slots = slots[: values.shape[0]].clamp(min=-1, max=cache.shape[0] * block_size)
+            indices = torch.stack(
+                (torch.div(slots, block_size, rounding_mode="floor"), torch.remainder(slots, block_size)), dim=-1
+            )
+            # Preserve page strides: flattening a padded cache can copy it.
+            torch_npu.npu_scatter_nd_update_(
+                cache, indices, values.to(cache.dtype).reshape(values.shape[0], *cache.shape[2:])
+            )
             return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads

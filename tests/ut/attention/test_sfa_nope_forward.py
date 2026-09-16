@@ -9,7 +9,6 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
-import vllm_ascend.attention.utils as attention_utils
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
 
 
@@ -20,30 +19,50 @@ def mock_scatter_nd_update(monkeypatch):
         cache[indices[valid, 0], indices[valid, 1]] = updates[valid]
         return cache
 
-    monkeypatch.setattr(attention_utils.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
+    monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
 
 
 @pytest.mark.parametrize("block_size", [128, 640])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_paged_cache_scatter_preserves_padding_and_special_values(block_size, dtype):
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, slot_dtype):
     dim = 512
     backing = torch.randn(3, block_size + 7, 1, dim, dtype=dtype)
     cache = backing[:, :block_size]
     before = backing.clone()
-    slots = torch.tensor([0, block_size + 1, -1, 3 * block_size, -(2**63), 2**63 - 1, 2**32])
+    limits = torch.iinfo(slot_dtype)
+    slot_values = [0, block_size + 1, -1, 3 * block_size, limits.min, limits.max]
+    if slot_dtype == torch.int64:
+        slot_values.append(2**32)
+    slots = torch.tensor(slot_values, dtype=slot_dtype)
     values = torch.randn(slots.numel(), dim, dtype=dtype)
     values[0, :4] = torch.tensor([-0.0, float("nan"), float("inf"), -float("inf")], dtype=dtype)
     expected = before.clone()
     expected[0, 0, 0] = values[0]
     expected[1, 1, 0] = values[1]
-    native = attention_utils.torch_npu.npu_scatter_nd_update_
-    with patch.object(attention_utils.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
-        attention_utils.scatter_paged_cache(cache, slots, values, block_size)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x)
+    native = sparse_mla.torch_npu.npu_scatter_nd_update_
+    with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
+        result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    assert result == (None, None)
     scatter.assert_called_once()
     # The native kernel must never receive the original extreme coordinates.
     indices = scatter.call_args.args[1]
+    assert indices.dtype == slot_dtype
     assert bool(((indices[:, 0] >= -1) & (indices[:, 0] <= cache.shape[0])).all())
     assert torch.equal(backing.view(torch.uint8), expected.view(torch.uint8))
+
+
+def test_nope_exec_kv_trims_unused_slots_and_converts_values():
+    cache = torch.zeros(2, 4, 1, 8, dtype=torch.bfloat16)
+    values = torch.randn(2, 8, dtype=torch.float32)
+    slots = torch.tensor([1, 4, 7], dtype=torch.int32)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    expected = torch.zeros_like(cache)
+    expected[0, 1, 0] = values[0].to(cache.dtype)
+    expected[1, 0, 0] = values[1].to(cache.dtype)
+    assert torch.equal(cache, expected)
 
 
 class _Linear:
@@ -236,7 +255,11 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
-        patch.object(sparse_mla, "torch_npu", SimpleNamespace()),
+        patch.object(
+            sparse_mla,
+            "torch_npu",
+            SimpleNamespace(npu_scatter_nd_update_=sparse_mla.torch_npu.npu_scatter_nd_update_),
+        ),
     ):
         actual = AscendSFAImpl.forward(
             impl,
