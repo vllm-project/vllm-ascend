@@ -250,7 +250,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 === "A2 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 32).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 16).
 
     **node 0**
 
