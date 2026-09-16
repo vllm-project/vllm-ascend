@@ -203,6 +203,7 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.parallel_config.world_size = 1
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
+    config.cache_config.prefix_match_unit = None
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
     config.model_config.hf_text_config = MagicMock(spec=[])
@@ -653,6 +654,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = block_size
         config.cache_config.hash_block_size = block_size
+        config.cache_config.prefix_match_unit = None
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"
@@ -1038,14 +1040,14 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
-        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"], [b"mode"]]
 
         client = LookupKeyClient(config)
         self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 32)
         mock_socket.send_multipart.assert_called_once()
         self.assertEqual(
             mock_socket.send_multipart.call_args.args[0],
-            [(64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"hashes"],
+            [(64).to_bytes(4, "big"), b"groups", (16).to_bytes(4, "big"), b"mode", b"hashes"],
         )
         client.close()
 
@@ -1062,7 +1064,7 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         mock_socket.recv.side_effect = ZMQError("timeout")
-        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"], [b"mode"]]
 
         client = LookupKeyClient(config)
         self.assertEqual(client.lookup(64, [b"\\xaa\\xbb"], hbm_hit_tokens=16), 0)
@@ -1415,6 +1417,7 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
         config.parallel_config.world_size = 1
         config.cache_config.block_size = 16
         config.cache_config.hash_block_size = 16
+        config.cache_config.prefix_match_unit = None
         # Concrete model_config values so KVPoolScheduler.__init__ int math
         # (num_kv_head < tp_size, get_num_layers, model name split, ...) works.
         config.model_config.model = "org/llama-7b"

@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache, partial
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, cast, overload
 from weakref import proxy
 
 from vllm.logger import logger
@@ -47,29 +47,49 @@ class _HBMBlockHash(bytes):
     """A hash whose complete hash block is already computed locally."""
 
 
-class _HBMPrefixBlockHashes(Sequence[BlockHash]):
+class HBMPrefixBlockHashes(Sequence[BlockHash | str]):
     """Mark local hashes on access, without expanding per-group hit sets.
 
     Managers select each group's terminal hash without copying it. That hash
     is local exactly when the complete group block ends within the HBM prefix;
     an interior hash cannot make a larger, partially local block hit.
+
+    A suffix RPC omits ``num_omitted_hashes`` leading hashes. Those positions
+    use content-free HBM markers while retaining absolute request coordinates;
+    every group queried externally must still select a real suffix hash.
     """
 
-    def __init__(self, block_hashes: Sequence[BlockHash], num_hbm_hashes: int) -> None:
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        num_hbm_hashes: int,
+        *,
+        num_omitted_hashes: int = 0,
+    ) -> None:
+        assert 0 <= num_omitted_hashes <= num_hbm_hashes
         self._block_hashes = block_hashes
         self._num_hbm_hashes = num_hbm_hashes
+        self._num_omitted_hashes = num_omitted_hashes
 
     def __len__(self) -> int:
-        return len(self._block_hashes)
+        return self._num_omitted_hashes + len(self._block_hashes)
 
-    def __getitem__(self, index):
+    @overload
+    def __getitem__(self, index: int) -> BlockHash | str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockHash | str]: ...
+
+    def __getitem__(self, index: int | slice) -> BlockHash | str | list[BlockHash | str]:
         if isinstance(index, slice):
             return [self[i] for i in range(*index.indices(len(self)))]
         if index < 0:
             index += len(self)
         if not 0 <= index < len(self):
             raise IndexError(index)
-        block_hash = self._block_hashes[index]
+        if index < self._num_omitted_hashes:
+            return cast(BlockHash, _HBMBlockHash())
+        block_hash = self._block_hashes[index - self._num_omitted_hashes]
         if index < self._num_hbm_hashes:
             return cast(BlockHash, _HBMBlockHash(block_hash_to_bytes(block_hash)))
         return block_hash
@@ -190,7 +210,7 @@ class AscendStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: Sequence[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -281,7 +301,7 @@ class AscendStoreCoordinator:
 
     def find_reachable_hit_tokens(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         token_len: int,
         query_group_hits: GroupHitQuery,
         *,
@@ -318,10 +338,10 @@ class AscendStoreCoordinator:
         if not exists and hbm_hit_tokens <= 0:
             logger.debug("%s: token_len=%d no pooled blocks found", log_context, token_len)
             return 0
-        hit_hashes: Sequence[BlockHash] = block_hashes
+        hit_hashes: Sequence[BlockHash | str] = block_hashes
         if hbm_hit_tokens > 0:
             num_hbm_hashes = min(hbm_hit_tokens // self.hash_block_size, token_len // self.hash_block_size)
-            hit_hashes = _HBMPrefixBlockHashes(block_hashes, num_hbm_hashes)
+            hit_hashes = HBMPrefixBlockHashes(block_hashes, num_hbm_hashes)
         _, hit_length = self.find_longest_cache_hit(
             hit_hashes,
             token_len,
@@ -331,14 +351,14 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
-    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+    def block_hashes_for_spec(self, block_hashes: Sequence[BlockHash | str], spec: KVCacheSpec) -> BlockHashList:
         # Managers accept lazy sequences and preserve their terminal hashes
         # when resolving each group's block-size view.
         return cast(BlockHashList, block_hashes)
 
     def _find_hit_blocks(
         self,
-        block_hashes: Sequence[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,

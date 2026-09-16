@@ -15,6 +15,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 # isort: split
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -149,7 +150,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             name = "model.layers.2.indexer.tail_cache"
             tail = PrivateTailSpec(block_size=7, num_kv_heads=1, head_size=1, dtype="uint8")
             groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
-        config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
+        config = KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVPoolWorker._build_cache_coordinator",
             return_value=None,

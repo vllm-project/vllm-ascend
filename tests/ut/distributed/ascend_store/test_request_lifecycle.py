@@ -216,8 +216,9 @@ def test_private_only_layout_rejected(devices_and_store, role, prefix_unit):
 @pytest.mark.parametrize("prefix_unit", [None, 32, 128])
 @pytest.mark.parametrize("load_async", [False, True])
 @pytest.mark.parametrize("save_decode_cache", [False, True])
+@pytest.mark.parametrize("lookup_hash_mode", ["full", "suffix"])
 def test_raw_sequence_lifecycle(
-    cache_layout, devices_and_store, prefix_unit, load_async, speculative_method, save_decode_cache
+    cache_layout, devices_and_store, prefix_unit, load_async, speculative_method, save_decode_cache, lookup_hash_mode
 ):
     plan, allocate = cache_layout
     if len(plan.kv_cache_groups) == 1 and prefix_unit == 32:
@@ -234,6 +235,7 @@ def test_raw_sequence_lifecycle(
                 "backend": "cpu",
                 "load_async": load_async,
                 "save_decode_cache": save_decode_cache,
+                "lookup_hash_mode": lookup_hash_mode,
             },
         ),
     )

@@ -48,7 +48,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    HBMPrefixBlockHashes,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import (
     DSparkPrefixCache,
     DSparkPrefixKeys,
@@ -83,6 +86,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerTransferTask,
+    LookupHashMode,
     ReqMeta,
     SharedBlockData,
     block_hash_to_str,
@@ -3777,16 +3781,17 @@ class KVPoolWorker:
     def _build_lookup_keys(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         group_id: int,
         use_layerwise: bool,
+        mask_num: int = 0,
     ) -> tuple[list[str], list[int], list[int]]:
         keys: list[str] = []
         starts: list[int] = []
         ends: list[int] = []
         if use_layerwise:
             for start, end, pool_key in self.token_database.process_tokens(
-                token_len, block_hashes, kv_cache_group_id=group_id
+                token_len, block_hashes, mask_num=mask_num, kv_cache_group_id=group_id
             ):
                 keys.extend(
                     item.to_string()
@@ -3799,7 +3804,7 @@ class KVPoolWorker:
                 ends.append(end)
         else:
             for start, end, key_string, _ in self.token_database.process_token_key_strings(
-                token_len, block_hashes, kv_cache_group_id=group_id
+                token_len, block_hashes, mask_num=mask_num, kv_cache_group_id=group_id
             ):
                 keys.append(key_string)
                 starts.append(start)
@@ -3925,7 +3930,7 @@ class KVPoolWorker:
     def _lookup_with_coordinator(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         kv_cache_group_ids: list[int],
         use_layerwise: bool,
         include_all_ranks: bool,
@@ -3991,23 +3996,40 @@ class KVPoolWorker:
     def lookup_scheduler(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         kv_cache_group_ids: list[int] | None = None,
         use_layerwise: bool = False,
         hbm_hit_tokens: int = 0,
+        lookup_hash_mode: LookupHashMode = LookupHashMode.FULL,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
-        :param tokens: the input tokens, with shape [seq_len]
+        :param block_hashes: The complete request hash list in FULL mode, or
+            the hashes after the HBM-cached prefix in SUFFIX mode.
+        :param lookup_hash_mode: How ``block_hashes`` should be interpreted.
         :return: An int indicating how many prefix tokens are cached.
         """
         try:
+            assert 0 <= hbm_hit_tokens <= token_len
+            if hbm_hit_tokens == token_len:
+                return token_len
+            lookup_block_hashes: Sequence[BlockHash | str]
+            if lookup_hash_mode is LookupHashMode.SUFFIX:
+                assert hbm_hit_tokens % self.hash_block_size == 0, (
+                    "hbm_hit_tokens must align to the request hash block size"
+                )
+                omitted_hashes = hbm_hit_tokens // self.hash_block_size
+                lookup_block_hashes = HBMPrefixBlockHashes(
+                    block_hashes, omitted_hashes, num_omitted_hashes=omitted_hashes
+                )
+            else:
+                lookup_block_hashes = block_hashes
             hits: list[list[int]] = []
             max_hit_position = self.max_model_len
             kv_cache_group_ids = kv_cache_group_ids or [0]
             coordinator_hit = self._lookup_with_coordinator(
                 token_len,
-                block_hashes,
+                lookup_block_hashes,
                 kv_cache_group_ids,
                 use_layerwise,
                 include_all_ranks=True,
@@ -4016,9 +4038,17 @@ class KVPoolWorker:
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
+                group_block_size = self.token_database.get_block_size(group_id)
+                lookup_start = hbm_hit_tokens // group_block_size * group_block_size
+                keys, starts, ends = self._build_lookup_keys(
+                    token_len, lookup_block_hashes, group_id, use_layerwise, mask_num=lookup_start
+                )
 
                 if not keys:
+                    if hbm_hit_tokens:
+                        hits.append([hbm_hit_tokens])
+                        max_hit_position = min(max_hit_position, hbm_hit_tokens)
+                        continue
                     return 0
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
@@ -4055,6 +4085,8 @@ class KVPoolWorker:
                     group_hits = self.find_all_continuous_hit_positions(
                         multi_tp_values, ends, num_block, max_hit_position, self.cache_transfer_granularity
                     )
+                if hbm_hit_tokens:
+                    group_hits.insert(0, hbm_hit_tokens)
                 if not group_hits:
                     return 0
                 max_hit_position = min(max_hit_position, group_hits[-1])
