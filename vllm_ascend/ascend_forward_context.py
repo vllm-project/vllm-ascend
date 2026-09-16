@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -22,6 +22,20 @@ from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
 )
+
+# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
+# setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
+_USE_V2_EXTRA_KWARGS = False
+
+
+def sync_v2_extra_kwargs(vllm_config: VllmConfig) -> None:
+    """Cache whether Ascend extras belong in ``additional_kwargs``.
+
+    Call this from eager config / forward-context setup, not from compiled
+    attention. Require an actual bool: MagicMock configs can be truthy.
+    """
+    global _USE_V2_EXTRA_KWARGS
+    _USE_V2_EXTRA_KWARGS = use_v2_model_runner(vllm_config) is True
 
 
 class MoECommType(Enum):
@@ -127,6 +141,7 @@ def set_ascend_forward_context(
     exit, so wrapping only ``load_model`` is not enough; pin it here instead of
     in the Worker.
     """
+    sync_v2_extra_kwargs(vllm_config)
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,
         "vllm_config": vllm_config,
@@ -419,28 +434,6 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
-@torch._dynamo.disable
-def _use_v2_extra_kwargs() -> bool:
-    """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
-
-    GPU V2 stores its own ``capturing`` flag on the forward-context object.
-    Isolate extras when Ascend enables V2, including whitelist-default V2
-    with ``VLLM_USE_V2_MODEL_RUNNER`` unset.
-
-    ``get_current_vllm_config()`` raises when no config is set (cpu-ut
-    attention fixtures). Treat that as V1 so FIA can read ``capturing``.
-    Require an actual bool: MagicMock configs can be truthy.
-
-    Disabled under Dynamo: ``use_v2_model_runner`` logs with
-    ``warning_once`` / ``info_once``, which Dynamo cannot trace.
-    """
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
-        return False
-    return use_v2_model_runner(vllm_config) is True
-
-
 class _ExtraForwardContextProxy:
     """Unified forward-context access for v1/v2 model runners."""
 
@@ -483,31 +476,21 @@ class _ExtraForwardContextProxy:
         return get_forward_context()
 
     def __getattr__(self, name: str) -> Any:
-        return _extra_ctx_getattr(self, name)
+        self.check_extra_attr(name)
+        ctx = self._ctx()
+        if _USE_V2_EXTRA_KWARGS:
+            # Unset known extras default to None so optional flags (e.g. `sinks`)
+            # can be read with truthiness checks before the V2 path populates them.
+            return ctx.additional_kwargs.get(name)
+        return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        _extra_ctx_setattr(self, name, value)
-
-
-@torch._dynamo.disable
-def _extra_ctx_getattr(proxy: _ExtraForwardContextProxy, name: str) -> Any:
-    proxy.check_extra_attr(name)
-    ctx = proxy._ctx()
-    if _use_v2_extra_kwargs():
-        # Unset known extras default to None so optional flags (e.g. `sinks`)
-        # can be read with truthiness checks before the V2 path populates them.
-        return ctx.additional_kwargs.get(name)
-    return getattr(ctx, name, None)
-
-
-@torch._dynamo.disable
-def _extra_ctx_setattr(proxy: _ExtraForwardContextProxy, name: str, value: Any) -> None:
-    proxy.check_extra_attr(name)
-    ctx = proxy._ctx()
-    if _use_v2_extra_kwargs():
-        ctx.additional_kwargs[name] = value
-    else:
-        setattr(ctx, name, value)
+        self.check_extra_attr(name)
+        ctx = self._ctx()
+        if _USE_V2_EXTRA_KWARGS:
+            ctx.additional_kwargs[name] = value
+        else:
+            setattr(ctx, name, value)
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX
