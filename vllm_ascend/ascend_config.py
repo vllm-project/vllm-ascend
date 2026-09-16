@@ -1541,17 +1541,19 @@ def init_ascend_config(vllm_config):
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
-    # only the triton path is available; CUDA-only values (flashinfer/cutedsl
-    # for GDN, flashkda for KDA) have no kernel on Ascend. Strip the keys here
-    # so extra="forbid" does not reject them as typos, and warn only when the
-    # user requested an unsupported value.
+    # only the triton path is available: the FLA Triton kernels run on Ascend
+    # via triton-ascend (the CUDA triton package is replaced in Ascend images).
+    # CUDA-only values (flashinfer/cutedsl for GDN, flashkda for KDA) have no
+    # kernel on Ascend. Strip the keys here so extra="forbid" does not reject
+    # them as typos, and warn only when the user requested an unsupported value.
     _TRITON_COMPATIBLE_VALUES = ("auto", "triton")
     for _prefill_key in ("gdn_prefill_backend", "kda_prefill_backend"):
         _prefill_value = additional_config.get(_prefill_key)
         if _prefill_value is not None and str(_prefill_value).strip().lower() not in _TRITON_COMPATIBLE_VALUES:
             logger.warning(
-                "Ascend does not support %s=%r; only the 'triton' prefill "
-                "path is available on Ascend for GDN/KDA. The option is ignored.",
+                "Ascend does not support %s=%r; only the 'triton' value is "
+                "available on Ascend for GDN/KDA prefill (FLA kernels run via "
+                "triton-ascend). The option is ignored.",
                 _prefill_key,
                 _prefill_value,
             )
@@ -1592,10 +1594,10 @@ def init_ascend_config(vllm_config):
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
-        # backend selector; Ascend supports only the triton path, and the
-        # triton default applies either way (warned above when the user
-        # requested a CUDA-only value). Strip instead of letting extra="forbid"
-        # report them as typos.
+        # backend selector; Ascend supports only the triton value (FLA kernels
+        # run via triton-ascend), and the triton default applies either way
+        # (warned above when the user requested a CUDA-only value). Strip
+        # instead of letting extra="forbid" report them as typos.
         "gdn_prefill_backend",
         "kda_prefill_backend",
         # Removed upstream option: warn above, but do not pass it into the

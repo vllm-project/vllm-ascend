@@ -226,9 +226,9 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_warns_unsupported_prefill_backend(self, mock_fix_incompatible_config, mock_logger):
         # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
-        # into additional_config. Only the triton path exists on Ascend, so
-        # CUDA-only values must be stripped with a warning instead of being
-        # rejected as typos by extra="forbid".
+        # into additional_config. Only the 'triton' value (FLA kernels run via
+        # triton-ascend) exists on Ascend, so CUDA-only values must be stripped
+        # with a warning instead of being rejected as typos by extra="forbid".
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "gdn_prefill_backend": "flashinfer",
@@ -252,7 +252,7 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_silent_triton_prefill_backend(self, mock_fix_incompatible_config, mock_logger):
         # 'triton'/'auto' are the Ascend-supported values; they are stripped
-        # silently (identical to the default) without any warning.
+        # silently (equivalent to the default) without any warning.
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "gdn_prefill_backend": "triton",
