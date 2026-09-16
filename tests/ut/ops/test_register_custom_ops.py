@@ -149,9 +149,8 @@ def test_sp_ep_pcp_token_order_and_round_trip(monkeypatch, dp_size, pcp_size, sp
         assert custom_ops._maybe_pad_and_reduce_fake(gathered).shape == chunks[rank].shape
 
 
-def test_sp_ep_rejects_inconsistent_topology(monkeypatch):
+def test_sp_ep_returns_none_for_inconsistent_topology(monkeypatch):
     metadata = SimpleNamespace(get_chunk_sizes_across_dp_rank=lambda: [2, 2, 2])
     monkeypatch.setattr(custom_ops, "get_dp_group", lambda: SimpleNamespace(world_size=2))
     monkeypatch.setattr(custom_ops, "get_pcp_group", lambda: SimpleNamespace(world_size=2), raising=False)
-    with pytest.raises(ValueError, match="DP/PCP/TP"):
-        custom_ops._get_ep_local_sizes(metadata, SimpleNamespace(world_size=8))
+    assert custom_ops._get_ep_local_sizes(metadata, SimpleNamespace(world_size=8)) is None

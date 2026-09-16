@@ -31,7 +31,7 @@ def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
         pcp_size = get_pcp_group().world_size
         dp_size = get_dp_group().world_size
         if len(local_sizes) * pcp_size != ep_group.world_size or len(local_sizes) % dp_size:
-            raise ValueError("SP token sizes do not match the DP/PCP/TP expert-parallel layout")
+            return None
         sp_size = len(local_sizes) // dp_size
         # Upstream describes DP x SP; EP ranks are ordered DP x PCP x TP.
         local_sizes = [
