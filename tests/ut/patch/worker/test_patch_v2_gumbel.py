@@ -9,13 +9,23 @@ import torch
 from vllm.v1.worker.gpu.sample import gumbel, sampler
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
+from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
 from vllm_ascend.utils import vllm_version_is
 
 
-@pytest.mark.parametrize("consumer", [gumbel, sampler, base_speculator, dspark_speculator])
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        gumbel,
+        sampler,
+        base_speculator,
+        dspark_speculator,
+        eagle_speculator,
+    ],
+)
 def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
     # Simulate a consumer retaining its original `from ... import` binding.
     stale_gumbel = MagicMock()
@@ -23,27 +33,31 @@ def test_gumbel_patch_rebinds_preimported_consumers(monkeypatch, consumer):
 
     importlib.reload(patch_triton)
 
-    # vLLM-Ascend replaces gumbel_sample with categorical_sample for NPU performance.
-    # Verify that pre-imported consumers are rebound to the version-compatible entry.
+    # vLLM-Ascend replaces gumbel_sample with categorical_sample for NPU.
     assert consumer.gumbel_sample is categorical_sample
     stale_gumbel.assert_not_called()
 
 
 @pytest.mark.parametrize("probabilistic", [False, True])
 def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
-    speculator = dspark_speculator.DSparkSpeculator.__new__(dspark_speculator.DSparkSpeculator)
+    speculator = dspark_speculator.DSparkSpeculator.__new__(
+        dspark_speculator.DSparkSpeculator
+    )
     speculator.model = MagicMock()
     speculator.model.map_draft_to_target.side_effect = lambda tokens: tokens + 10
     speculator._d2t_scatter_index = None
     speculator.temperature = torch.tensor([0.5, 1.5])
     speculator.seeds = torch.tensor([3, 7])
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
-    speculator.draft_logits = torch.empty(2, 2, 3) if probabilistic else None
+    speculator.draft_logits = (
+        torch.empty(2, 2, 3) if probabilistic else None
+    )
     speculator.use_fp64_gumbel = False
-    if not vllm_version_is("0.28.0"):
-        # Newer upstream DSpark initializes this in __init__. This fixture uses
-        # __new__ directly, so provide the real default explicitly.
-        speculator.draft_watermarker = None
+
+    # This fixture bypasses __init__, so provide defaults used by current main.
+    # They are harmless extra instance attributes on the v0.28-compatible lane.
+    speculator.acceptance_estimator = None
+    speculator.draft_watermarker = None
 
     logits = torch.tensor([[1.0, 3.0, 2.0], [4.0, 2.0, 1.0]])
     idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
@@ -52,7 +66,12 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     sample = create_autospec(categorical_sample, return_value=sampled)
     monkeypatch.setattr(dspark_speculator, "gumbel_sample", sample)
 
-    result = speculator._sample_logits(logits, idx_mapping, sample_pos, step=1)
+    result = speculator._sample_logits(
+        logits,
+        idx_mapping,
+        sample_pos,
+        step=1,
+    )
 
     if probabilistic:
         assert result is sampled
@@ -67,8 +86,14 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         else:
             assert kwargs["is_drafting"] is True
         assert kwargs["logits_cache"] is speculator.draft_logits
-        torch.testing.assert_close(kwargs["logits_cache_col"], speculator._step_cols[1])
+        torch.testing.assert_close(
+            kwargs["logits_cache_col"],
+            speculator._step_cols[1],
+        )
         assert kwargs["use_fp64"] is False
     else:
         sample.assert_not_called()
-        torch.testing.assert_close(result, logits.argmax(dim=-1) + 10)
+        torch.testing.assert_close(
+            result,
+            logits.argmax(dim=-1) + 10,
+        )
