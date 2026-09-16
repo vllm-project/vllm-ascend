@@ -9,20 +9,20 @@ from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from .mm_preprocess import (
+from vllm.models.deepseek_v4_1.common.mm_preprocess import (
     IMAGE,
     IMAGE_END,
     IMAGE_NEW_LINE,
     IMAGE_PAD_ID,
     IMAGE_PLACEHOLDER,
+    IMAGE_SENTINEL_BASE_ID,
     IMAGE_START,
-    IMAGE_TOKEN_ID,
-    DeepseekV41VLDummyInputsBuilder,
-    DeepseekV41VLMultiModalProcessor,
-    DeepseekV41VLProcessingInfo,
+    DeepseekV4VLDummyInputsBuilder,
+    DeepseekV4VLMultiModalProcessor,
+    DeepseekV4VLProcessingInfo,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
 
@@ -37,9 +37,9 @@ def _vision_parameter_name(name: str) -> str | None:
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    DeepseekV41VLMultiModalProcessor,
-    info=DeepseekV41VLProcessingInfo,
-    dummy_inputs=DeepseekV41VLDummyInputsBuilder,
+    DeepseekV4VLMultiModalProcessor,
+    info=DeepseekV4VLProcessingInfo,
+    dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
 class AscendDeepseekV41ForCausalLM(
     nn.Module,
@@ -201,7 +201,7 @@ class AscendDeepseekV41ForCausalLM(
 
         # The leading alignment row is not an image-feature position. It uses
         # the checkpoint's ordinary image-token embedding instead.
-        embedding_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_TOKEN_ID)
+        embedding_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID)
         inputs_embeds = self.language_model.embed_input_ids(embedding_ids)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds

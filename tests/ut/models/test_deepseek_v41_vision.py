@@ -4,26 +4,25 @@ import torch
 from PIL import Image
 from torch import nn
 from vllm.model_executor.models.interfaces import supports_multimodal
+from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+    COMPRESS_PAD_TO,
+    IMAGE,
+    IMAGE_END,
+    IMAGE_NEW_LINE,
+    IMAGE_PAD_ID,
+    IMAGE_SENTINEL_BASE_ID,
+    IMAGE_START,
+    DeepseekV4VLProcessingInfo,
+    DeepseekV4VLProcessor,
+    image_sentinel_mask,
+    image_token_types,
+)
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
 from vllm_ascend.config_utils import normalize_deepseek_v41_config
 from vllm_ascend.models.deepseek_v41.engram_hash import (
     valid_engram_token_mask,
-)
-from vllm_ascend.models.deepseek_v41.mm_preprocess import (
-    COMPRESS_PAD_TO,
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
-    IMAGE_START,
-    IMAGE_TOKEN_ID,
-    DeepseekV41VLProcessingInfo,
-    DeepseekV41VLProcessor,
-    image_sentinel_mask,
-    image_token_types,
-    leading_compressor_pad,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
 from vllm_ascend.models.deepseek_v41.vl_model import (
@@ -54,8 +53,8 @@ def test_v41_processing_info_accepts_v41_config():
     model_config = SimpleNamespace(hf_config=config)
     ctx = InputProcessingContext(model_config=model_config, tokenizer=None)
 
-    assert DeepseekV41VLProcessingInfo(ctx).get_hf_config() is config
-    assert config.image_sentinel_base_id == IMAGE_TOKEN_ID
+    assert DeepseekV4VLProcessingInfo(ctx).get_hf_config() is config
+    assert config.image_sentinel_base_id == IMAGE_SENTINEL_BASE_ID
     assert config.image_pad_token_id == IMAGE_PAD_ID
     assert config.is_mm_prefix_lm
     assert config.mm_prefix_clamp_sliding_window
@@ -76,8 +75,6 @@ def test_v41_image_roles_use_reference_reading_order():
         IMAGE_END,
     ]
 
-    assert [leading_compressor_pad(i) for i in range(4)] == [1, 0, 1, 0]
-
 
 def test_v41_processor_emits_types_without_v4_perm():
     config = make_v41_config(
@@ -95,7 +92,7 @@ def test_v41_processor_emits_types_without_v4_perm():
             "max_wh_ratio": None,
         },
     )
-    result = DeepseekV41VLProcessor(config)(images=[Image.new("RGB", (84, 42))])
+    result = DeepseekV4VLProcessor(config)(images=[Image.new("RGB", (84, 42))])
 
     assert result["vit_grid"].tolist() == [[3, 6]]
     assert result["llm_grid"].tolist() == [[1, 2]]
@@ -110,12 +107,12 @@ def test_v41_processor_emits_types_without_v4_perm():
 
 
 def test_v41_image_and_alignment_pad_are_dead_to_engram():
-    token_ids = torch.tensor([17, IMAGE_TOKEN_ID, IMAGE_PAD_ID, 18])
+    token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 18])
     expected = torch.tensor([True, False, False, True])
 
     torch.testing.assert_close(image_sentinel_mask(token_ids), ~expected)
     torch.testing.assert_close(
-        valid_engram_token_mask(token_ids, IMAGE_TOKEN_ID, IMAGE_PAD_ID),
+        valid_engram_token_mask(token_ids, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID),
         expected,
     )
 
@@ -157,5 +154,5 @@ def test_v41_alignment_pad_uses_plain_image_token_embedding():
     nn.Module.__init__(wrapper)
     wrapper.language_model = LanguageModel()
 
-    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_TOKEN_ID]))
-    assert embeddings.squeeze(-1).tolist() == [7, IMAGE_TOKEN_ID, IMAGE_TOKEN_ID]
+    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID]))
+    assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID]
