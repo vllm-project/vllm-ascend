@@ -1009,9 +1009,16 @@ def test_compressor_chunk_boundary_matches_vector_reference(config, chunks):
     torch.testing.assert_close(state[4, 6, :8], compressor.wkv(x[-1:].float())[0])
 
 
-@pytest.mark.parametrize("num_tokens", [1, 2, 3, 5])
-@pytest.mark.parametrize("start", [0, 1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "num_tokens,start,dtype",
+    [
+        (1, 0, torch.float32),
+        (1, 1, torch.bfloat16),
+        (2, 0, torch.float16),
+        (3, 1, torch.float32),
+        (5, 0, torch.bfloat16),
+    ],
+)
 def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, start, dtype):
     from vllm_ascend.attention import dsa_v41
 

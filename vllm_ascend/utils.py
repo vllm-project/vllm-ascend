@@ -77,7 +77,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -1270,11 +1269,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-
-    global _HAS_LAYER_IDX
-    if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
-    return _HAS_LAYER_IDX
+    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
 def refresh_block_size(vllm_config):
