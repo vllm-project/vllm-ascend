@@ -65,20 +65,9 @@ establish full-model or dataset accuracy.
 Build with `pip install -v -e . --no-deps --no-build-isolation` on the paired
 CANN/NPU environment. Both new symbols are registered on PrivateUse1 and Meta.
 
-`tests/e2e/nightly/single_node/ops/singlecard_ops/test_deepseek_v41_qli.py`
-checks candidate generation/consumption, different consumer queries, ratio
-boundaries, paged views, mixed requests, 2048 candidate blocks, 64 heads, empty
-contexts and Meta shapes against an independent CPU reference. Ties at the
-TopK cutoff use score validity, uniqueness and count rather than arbitrary
-index ordering.
-
-The mixed-request model-indexer cases allocate the actual four-slot cache
-configuration, including the null ID, and test source/consumer selection on
-its strided index K/scale views. The SparseFlashMla suite also compares the
-slot-backed BF16 views against the earlier block-outermost layout for ratios
-0/1/2 and decode, prefill and mixed requests. These updated tests have not yet
-been executed; remote torch/NPU verification is deferred. The end-to-end
-results below describe the original layout.
+Standalone operator-level E2E coverage for candidate generation/consumption,
+mixed requests, paged views, Meta shapes, and slot-backed SparseFlashMla is
+deferred. The end-to-end results below describe the original layout.
 
 The imported host tiling needed one semantic fix: TND candidate size is
 `T * N_k * blocks`, because T already includes every request. Multiplying by
