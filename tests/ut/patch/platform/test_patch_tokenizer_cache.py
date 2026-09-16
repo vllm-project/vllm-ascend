@@ -28,9 +28,11 @@ import pytest
 import regex as re
 
 from vllm_ascend.patch.platform.patch_tokenizer_cache import (
+    _CACHES,
     IncrementalTokenizerCache,
     _cache_for,
     _chat_ids,
+    _patch_renderer_chat,
     _probe_corpus,
 )
 
@@ -301,3 +303,41 @@ def test_chat_ids_falls_through_when_the_template_identity_does_not_hold():
         return [123, 456] if kwargs.get("tokenize", True) else text
 
     assert _chat_ids(cache, mismatched, {}) is None
+
+
+class _KeywordOnlyRenderer:
+    """Mirrors ``DeepseekV4Renderer``: the conversation arrives as a keyword."""
+
+    def __init__(self, tokenizer) -> None:
+        self.tokenizer = tokenizer
+
+    def _apply_chat_template(self, messages, *, tokenize=True, chat_template=None):
+        text = f"{messages['content']}{_END}reply"
+        if not tokenize:
+            return text
+        return self.tokenizer(text, add_special_tokens=False)["input_ids"]
+
+
+def test_renderer_chat_patch_forwards_the_callers_keyword_arguments():
+    """The probe must keep the caller's kwargs; DeepSeek passes `messages` there.
+
+    Dropping them made the probe raise, which silently kept the chat fast path
+    switched off for every DeepSeek model even though its identity holds.
+    """
+    tokenizer, cache = _build()
+    original = _KeywordOnlyRenderer._apply_chat_template
+    _CACHES[tokenizer] = cache
+    try:
+        _patch_renderer_chat(_KeywordOnlyRenderer)
+        renderer = _KeywordOnlyRenderer(tokenizer)
+
+        first = renderer._apply_chat_template(messages={"content": "hi"}, chat_template=None)
+        assert first == tokenizer.reference(f"hi{_END}reply")
+
+        tokenized = len(tokenizer.calls)
+        second = renderer._apply_chat_template(messages={"content": "hi"}, chat_template=None)
+        assert second == first
+        assert len(tokenizer.calls) == tokenized, "the repeat call must not re-tokenize"
+    finally:
+        _KeywordOnlyRenderer._apply_chat_template = original
+        _CACHES.pop(tokenizer, None)

@@ -428,9 +428,10 @@ def _patch_renderer_chat(renderer_cls) -> None:
     def patched(self, *args, **kwargs):
         cache = _cache_for(self.tokenizer)
         if cache is not None:
-
+            # ``kwargs`` carries the conversation (``messages``/``conversation``),
+            # so the probe below has to keep it and only override ``tokenize``.
             def render(**kw):
-                return original(self, *args, **kw)
+                return original(self, *args, **{**kwargs, **kw})
 
             token_ids = _chat_ids(cache, render, kwargs)
             if token_ids is not None:
