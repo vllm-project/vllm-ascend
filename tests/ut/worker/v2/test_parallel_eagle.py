@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import SchedulerConfig
 
 from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -28,12 +29,18 @@ def test_expanded_compile_range_is_installed_before_base_initialization():
         ),
     )
     target_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192, max_num_seqs=256),
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192, is_encoder_decoder=False, max_num_batched_tokens=8192, max_num_seqs=256
+        ),
         speculative_config=SimpleNamespace(num_speculative_tokens=8),
         compilation_config=compilation,
+        model_config=SimpleNamespace(max_model_len=8192, is_encoder_decoder=False),
     )
+    replace_scheduler = module.replace
 
     def replace_config(config, **changes):
+        if isinstance(config, SchedulerConfig):
+            return replace_scheduler(config, **changes)
         result = copy(config)
         result.__dict__.update(changes)
         if "scheduler_config" in changes:

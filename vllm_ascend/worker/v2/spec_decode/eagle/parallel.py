@@ -36,7 +36,14 @@ class AscendParallelEagleSpeculator(AscendEagleSpeculator):
         # sharing the layer registry so target and draft KV discovery still work.
         vllm_config = replace(
             vllm_config,
-            scheduler_config=replace(scheduler_config, max_num_batched_tokens=expanded_max_tokens),
+            scheduler_config=replace(
+                scheduler_config,
+                max_num_batched_tokens=expanded_max_tokens,
+                # InitVars are validated at construction and not retained in
+                # SchedulerConfig.__dict__; replace cannot recover them.
+                max_model_len=vllm_config.model_config.max_model_len,
+                is_encoder_decoder=vllm_config.model_config.is_encoder_decoder,
+            ),
             compilation_config=copy(vllm_config.compilation_config),
         )
         super().__init__(vllm_config, device)
