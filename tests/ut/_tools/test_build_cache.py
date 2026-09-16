@@ -86,6 +86,7 @@ def _run_cache(
     action: str = "TestOperator-0",
     stage_dir: Path | None = None,
     publish_state_dir: Path | None = None,
+    normalize_paths: list[Path] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     actual_output = output_dir
     if domain == "custom_operator":
@@ -120,6 +121,9 @@ def _run_cache(
 
     for value in environment_values or ["abi=test"]:
         command.extend(["--environment-value", value])
+
+    for path in normalize_paths or []:
+        command.extend(["--normalize-path", str(path)])
 
     for pattern in artifact_includes or []:
         command.extend(["--artifact-include", pattern])
@@ -323,6 +327,114 @@ def test_prepared_input_change_invalidates_and_revert_hits_history(tmp_path: Pat
     assert "[build-cache] HIT" in reverted.stdout
     assert _extract_key(reverted) == key_original
     assert counter.read_text() == "2"
+
+
+def _prepared_path_key(
+    tmp_path: Path,
+    *,
+    root_name: str,
+    prepared_payload: bytes,
+    normalize_root: bool = True,
+    semantic_input_payload: bytes | None = None,
+) -> str:
+    root = tmp_path / root_name
+    source = root / "source"
+    source.mkdir(parents=True)
+    (source / "kernel.cpp").write_text("int source = 1;\n", encoding="utf-8")
+
+    prepared = root / "prepared"
+    prepared.mkdir()
+    (prepared / "generated.py").write_bytes(prepared_payload)
+    prepared_inputs = [prepared]
+    if semantic_input_payload is not None:
+        semantic_input = root / "cann_compat.h"
+        semantic_input.write_bytes(semantic_input_payload)
+        prepared_inputs.append(semantic_input)
+
+    output = root / "output"
+    output.mkdir()
+    proc = _run_cache(
+        cache_root=tmp_path / "cache",
+        prepared_inputs=prepared_inputs,
+        operator_source=source,
+        output_dir=output,
+        builder=_write_builder(tmp_path),
+        counter=tmp_path / "counter",
+        stage_dir=root / "stage",
+        publish_state_dir=root / "publish-state",
+        normalize_paths=[root] if normalize_root else [],
+    )
+    _assert_success(proc)
+    return _extract_key(proc)
+
+
+def test_prepared_text_normalizes_explicit_root(tmp_path: Path):
+    root_a = tmp_path / "pep517-a"
+    root_b = tmp_path / "pep517-b"
+
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_a}"\nVALUE = 1\n'.encode(),
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_b}"\nVALUE = 1\n'.encode(),
+    )
+    assert key_a == key_b
+
+
+def test_prepared_text_semantic_change_remains_identity_sensitive(tmp_path: Path):
+    root_a = tmp_path / "semantic-a"
+    root_b = tmp_path / "semantic-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_a}"\nVALUE = 1\n'.encode(),
+    )
+    key_semantic_change = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'SOURCE_ROOT = "{root_b}"\nVALUE = 2\n'.encode(),
+    )
+    assert key_semantic_change != key_a
+
+
+def test_binary_prepared_input_remains_raw_byte_sensitive(tmp_path: Path):
+    root_a = tmp_path / "binary-a"
+    root_b = tmp_path / "binary-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=b"\x00prefix:" + str(root_a).encode() + b":suffix",
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=b"\x00prefix:" + str(root_b).encode() + b":suffix",
+    )
+    assert key_a != key_b
+
+
+def test_prepared_path_outside_explicit_normalize_root_remains_sensitive(
+    tmp_path: Path,
+):
+    root_a = tmp_path / "outside-a"
+    root_b = tmp_path / "outside-b"
+    external_a = tmp_path / "external-a"
+    external_b = tmp_path / "external-b"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'EXTERNAL_ROOT = "{external_a}"\n'.encode(),
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'EXTERNAL_ROOT = "{external_b}"\n'.encode(),
+    )
+    assert key_a != key_b
 
 
 def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
@@ -1303,6 +1415,34 @@ def test_top_level_prepared_input_symlink_tracks_link_and_target_content(
     assert "[build-cache] MISS" in changed.stdout
     assert _extract_key(changed) != key_b
     assert counter.read_text() == "3"
+
+
+def test_normalized_prepared_path_keeps_referenced_semantic_input_sensitive(
+    tmp_path: Path,
+):
+    root_a = tmp_path / "covered-a"
+    root_b = tmp_path / "covered-b"
+    root_changed = tmp_path / "covered-changed"
+    key_a = _prepared_path_key(
+        tmp_path,
+        root_name=root_a.name,
+        prepared_payload=f'HEADER = "{root_a}/cann_compat.h"\n'.encode(),
+        semantic_input_payload=b"#define COMPAT 1\n",
+    )
+    key_b = _prepared_path_key(
+        tmp_path,
+        root_name=root_b.name,
+        prepared_payload=f'HEADER = "{root_b}/cann_compat.h"\n'.encode(),
+        semantic_input_payload=b"#define COMPAT 1\n",
+    )
+    key_changed = _prepared_path_key(
+        tmp_path,
+        root_name=root_changed.name,
+        prepared_payload=(f'HEADER = "{root_changed}/cann_compat.h"\n'.encode()),
+        semantic_input_payload=b"#define COMPAT 2\n",
+    )
+    assert key_b == key_a
+    assert key_changed != key_a
 
 
 def test_save_entry_rolls_back_old_entry_if_publish_replace_fails(

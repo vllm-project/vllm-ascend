@@ -621,16 +621,32 @@ function(add_bin_compile_target)
 
         if (_compile_flag)
             # prepared_input_hash: what is compiled?
-            set(_CACHE_PREPARED_INPUTS ${OP_SRC_OUT_DIR})
+            set(_CACHE_OPERATOR_GENERATED_INPUTS ${OP_SRC_OUT_DIR})
+            set(_CACHE_DEPENDENT_GENERATED_INPUTS)
             if (DEFINED ${op_file}_depends)
                 foreach(depend_info ${${op_file}_depends})
                     get_filename_component(_depend_op_name "${depend_info}" NAME)
-                    list(APPEND _CACHE_PREPARED_INPUTS ${SRC_OUT_DIR}/${_depend_op_name})
+                    list(APPEND _CACHE_DEPENDENT_GENERATED_INPUTS ${SRC_OUT_DIR}/${_depend_op_name})
                 endforeach()
             endif()
+
+            set(_CACHE_SHARED_COMPILER_INPUTS)
             if (EXISTS ${OPS_ADV_UTILS_KERNEL_INC})
-                list(APPEND _CACHE_PREPARED_INPUTS ${SRC_OUT_DIR}/ascendc/common)
+                list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${SRC_OUT_DIR}/ascendc/common)
             endif()
+            # The generated adapter embeds this absolute -include path. Its
+            # location is normalized by the cache wrapper, but its contents
+            # are a semantic compiler input and must remain identity-sensitive.
+            if (EXISTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
+                list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
+            endif()
+
+            set(
+                _CACHE_PREPARED_INPUTS
+                ${_CACHE_OPERATOR_GENERATED_INPUTS}
+                ${_CACHE_DEPENDENT_GENERATED_INPUTS}
+                ${_CACHE_SHARED_COMPILER_INPUTS}
+            )
 
             # compiler_environment_hash: what compiler/toolkit produces it?
             set(_CACHE_ENVIRONMENT_FILES)
