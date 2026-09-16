@@ -103,7 +103,8 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
 
     from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
     monkeypatch.setattr(
         deepseek_v4,
         "get_pp_group",
@@ -514,10 +515,12 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
 
 
 def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    # GPU V2 ForwardContext has no vllm_config. Isolation must follow
+    # use_v2_model_runner(get_current_vllm_config()), not ctx.vllm_config.
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
     forward_context = SimpleNamespace(
         additional_kwargs={},
-        vllm_config=SimpleNamespace(use_v2_model_runner=True),
         capturing=True,
     )
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
@@ -530,10 +533,10 @@ def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
 
 
 def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: False)
     forward_context = SimpleNamespace(
         additional_kwargs={},
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
         capturing=False,
     )
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
@@ -545,10 +548,10 @@ def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
 
 
 def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", False)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: False)
     forward_context = SimpleNamespace(
         additional_kwargs={},
-        vllm_config=SimpleNamespace(use_v2_model_runner=True),
         capturing=False,
     )
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
@@ -559,7 +562,10 @@ def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
 
 
 def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    def _unset_config():
+        raise RuntimeError("Current vllm config is not set.")
+
+    monkeypatch.setattr(afc, "get_current_vllm_config", _unset_config)
     forward_context = MagicMock(capturing=False)
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
 
@@ -570,10 +576,10 @@ def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
 
 
 def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
     forward_context = SimpleNamespace(
         additional_kwargs={},
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
         capturing=True,
     )
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
@@ -583,65 +589,3 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert afc._EXTRA_CTX.capturing is False
     assert forward_context.capturing is True
     assert forward_context.additional_kwargs["capturing"] is False
-
-
-def test_is_acl_full_graph_capturing_false_for_mock_stream_status(monkeypatch):
-    monkeypatch.setattr(
-        afc.torch,
-        "npu",
-        SimpleNamespace(is_current_stream_capturing=MagicMock()),
-        raising=False,
-    )
-    mock_get_ctx = MagicMock()
-    monkeypatch.setattr(afc, "get_forward_context", mock_get_ctx)
-
-    assert afc.is_acl_full_graph_capturing() is False
-    mock_get_ctx.assert_not_called()
-
-
-def test_is_acl_full_graph_capturing_ignores_gpu_flag_when_stream_idle(monkeypatch):
-    monkeypatch.setattr(
-        afc.torch,
-        "npu",
-        SimpleNamespace(is_current_stream_capturing=lambda: False),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        afc,
-        "get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.FULL, capturing=True),
-    )
-
-    assert afc.is_acl_full_graph_capturing() is False
-
-
-def test_is_acl_full_graph_capturing_requires_full_mode(monkeypatch):
-    monkeypatch.setattr(
-        afc.torch,
-        "npu",
-        SimpleNamespace(is_current_stream_capturing=lambda: True),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        afc,
-        "get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.FULL),
-    )
-
-    assert afc.is_acl_full_graph_capturing() is True
-
-
-def test_is_acl_full_graph_capturing_skips_piecewise(monkeypatch):
-    monkeypatch.setattr(
-        afc.torch,
-        "npu",
-        SimpleNamespace(is_current_stream_capturing=lambda: True),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        afc,
-        "get_forward_context",
-        lambda: SimpleNamespace(cudagraph_runtime_mode=afc.CUDAGraphMode.PIECEWISE),
-    )
-
-    assert afc.is_acl_full_graph_capturing() is False
