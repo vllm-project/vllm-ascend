@@ -825,7 +825,7 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer._per_group_slot_mappings = {}
         return proposer
 
-    def test_aurora_draft_uses_only_group_twelve(self, monkeypatch):
+    def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
         from tests.deepseek_v41_utils import make_cache_config
 
         config = make_cache_config(17, draft_layers=3)

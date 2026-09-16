@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Aurora / DeepSeek-V4.1 dSPark draft model for Ascend."""
+"""DeepSeek V4.1 dSPark draft model for Ascend."""
 
 import typing
 from collections.abc import Iterable
@@ -97,7 +97,7 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.compress_ratio != 0:
-            raise ValueError("Aurora DSpark supports only uncompressed draft SWA layers")
+            raise ValueError("DeepSeek V4.1 DSpark supports only uncompressed draft SWA layers")
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
@@ -150,7 +150,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.target_layer_ids = list(config.dspark_target_layer_ids)
         self.num_dspark_layers = _get_dspark_num_mtp_layers(config)
         if self.num_dspark_layers != 3:
-            raise ValueError("Aurora's DSpark cache group requires exactly three draft layers")
+            raise ValueError("DeepSeek V4.1's DSpark cache group requires exactly three draft layers")
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
 
@@ -181,7 +181,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             config.hidden_size,
             bias=False,
             return_bias=False,
-            quant_config=None,  # Aurora stores this projection in BF16.
+            quant_config=None,  # DeepSeek V4.1 stores this projection in BF16.
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
             gather_output=True,
         )
@@ -351,7 +351,7 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
         mapped = self._remap_checkpoint_name(name)
         if mapped is None:
             return None
-        # Aurora names the low-rank Markov matrices after their operations,
+        # DeepSeek V4.1 names the low-rank Markov matrices after their operations,
         # while the runtime uses explicit embedding/projection parameter names.
         mapped = mapped.replace(".markov_head.embed.weight", ".markov_head.markov_w1.weight")
         mapped = mapped.replace(".markov_head.head.weight", ".markov_head.markov_w2.weight")
