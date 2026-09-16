@@ -796,7 +796,11 @@ class AscendConfig:
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
         # whole-group LM-head collective path; the two are mutually exclusive.
-        if vc.parallel_config.enable_batch_sharded_sampling:
+        # enable_batch_sharded_sampling is only defined on vLLM newer than
+        # 0.28.0 (upstream #50465); guard the attribute access for 0.28.0.
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.28.0") and vc.parallel_config.enable_batch_sharded_sampling:
             if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
