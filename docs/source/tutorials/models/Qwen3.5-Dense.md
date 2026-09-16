@@ -20,11 +20,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
-| Qwen3.5-4B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
-| Qwen3.5-9B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
+| Qwen3.5-2B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
+| Qwen3.5-4B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
+| Qwen3.5-9B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -183,6 +185,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-2B
 
     vllm serve $MODEL_PATH \
@@ -211,6 +214,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-4B
 
     vllm serve $MODEL_PATH \
@@ -239,6 +243,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     export VLLM_USE_MODELSCOPE=True
 
     # Model weight path; can be a ModelScope model id or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Qwen/Qwen3.5-9B
 
     vllm serve $MODEL_PATH \

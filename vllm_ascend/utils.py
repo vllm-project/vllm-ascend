@@ -1014,18 +1014,16 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -1037,14 +1035,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1430,6 +1428,15 @@ def enable_dsa_cp() -> bool:
     return get_ascend_config().enable_dsa_cp
 
 
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
+
+
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
     """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
@@ -1535,6 +1542,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 def get_compressed_pos_and_indices(
@@ -1688,3 +1716,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

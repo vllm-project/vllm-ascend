@@ -18,9 +18,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2).
+|  Weight Version  | Download Links |
+| -----------------|----------------|
+| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-OCR-2) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication
 
@@ -125,6 +129,7 @@ Run the following script to execute online inference.
 
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \
@@ -156,7 +161,7 @@ Single-node deployment is recommended.
 
 ### 5.3 Prefill-Decode Disaggregation
 
-We don't need to Prefill-Decode disaggregation
+Prefill-Decode disaggregation is not required.
 
 ## 6 Functional Verification
 

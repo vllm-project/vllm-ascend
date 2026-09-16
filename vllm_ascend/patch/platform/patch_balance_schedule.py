@@ -61,7 +61,6 @@ import time
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
-import vllm.v1.engine.core as _engine_core_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -72,7 +71,7 @@ from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -908,25 +907,4 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 # scheduler_cls and correctly bypass this name.
 _sched_mod.Scheduler = BalanceScheduler
 
-# Activate BalanceDPEngineCoreProc ONLY when balance scheduling is enabled.
-# Upstream ``run_engine_core`` resolves ``DPEngineCoreProc`` via the
-# ``vllm.v1.engine.core`` module-global name whenever DP>1 + MoE, so an
-# unconditional swap would inject balance machinery into configs that don't use
-# it -- e.g. PD-disaggregated recompute, whose scheduler is AsyncRecomputeScheduler
-# and must not be touched by balance. A conditional swap at run_engine_core
-# entry (where vllm_config is available) restores the pre-refactor "balance off
-# => no involvement" invariant without copying run_engine_core's body.
-_OriginalDPEngineCoreProc = _engine_core_mod.DPEngineCoreProc
-_OriginalRunEngineCore = EngineCoreProc.run_engine_core
-
-
-def _balance_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    vllm_config = kwargs.get("vllm_config")
-    if _balance_scheduling_enabled(vllm_config):
-        _engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
-    else:
-        _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
-    return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-
-EngineCoreProc.run_engine_core = staticmethod(_balance_run_engine_core)
+# The patch for engine core has been moved to patch_engine_core.py

@@ -38,7 +38,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import GroupCoordinator, get_embed_tp_group, get_lmhead_tp_group
+from vllm_ascend.distributed.parallel_state import (
+    GroupCoordinator,
+    get_embed_tp_group,
+    get_lmhead_tp_group,
+    get_replicated_group,
+)
 from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
 
@@ -65,8 +70,21 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         self.forward_type = None
         self.disable_tp = disable_tp
 
+        # A disable_tp layer is pinned to the world_size=1 ReplicatedGroup:
+        # every rank holds the full table, tp_size==1 makes shard_indices
+        # cover the full vocab, and forward / logits skip all TP
+        # communication. The DSpark Markov head reaches this through the
+        # upstream interface — vllm's DSparkMarkovHead constructs the markov
+        # lm_head with disable_tp=True (vllm#49731; its markov_w1 is a plain
+        # nn.Embedding) — so Ascend needs no prefix heuristic of its own.
+        # disable_tp must be matched before the lmhead prefix: the markov
+        # prefix ("layers.N.markov_head.markov_w2") also contains "head" and
+        # would otherwise be routed to the lmhead_tp group. The
+        # ReplicatedGroup is a pure stand-in (no hcclCommInitRootInfoConfig)
+        # exposing the attributes read below, so tp_size / tp_rank always
+        # derive from the group — no None special case.
         if disable_tp:
-            self.comm_group = None
+            self.comm_group = get_replicated_group()
         elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
@@ -75,12 +93,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         else:
             self.comm_group = get_tp_group()
 
-        if self.comm_group:
-            self.tp_size = self.comm_group.world_size
-            self.tp_rank = self.comm_group.rank_in_group
-        else:
-            self.tp_size = 1
-            self.tp_rank = 0
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -179,7 +193,6 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
-        assert self.comm_group is not None
         num_tokens = input_.shape[0]
 
         # potential_max_tokens is computed once in the model runner __init__, so
@@ -382,7 +395,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         # untruncated apply_head result for spec-decode/top-k callers.
         if skip_gather:
             return self._apply_head(lm_head, hidden_states, embedding_bias)
-        if lmhead_tp_enable() and not lm_head.disable_tp:
+        # A replicated head (tp_size==1, e.g. the DSpark markov lm_head)
+        # must take the normal path: the lmhead_tp path gathers hidden
+        # states / scatters logits across the finegrained group, which a
+        # replicated head must not participate in.
+        if lmhead_tp_enable() and lm_head.tp_size > 1:
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
@@ -415,7 +432,10 @@ class AscendLogitsProcessor(LogitsProcessor):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
-        # Gather logits for tensor parallel
+        # Gather logits for tensor parallel. _gather_logits uses the global TP
+        # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
+        # each rank already holds the full vocab logits locally and no
+        # all-gather is needed.
         if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker-side handler for Ascend RecomputeCPUOffloadConnector."""
+"""Worker-side handler for Ascend PreemptOffloadConnector."""
 
 from typing import TYPE_CHECKING
 
@@ -8,9 +8,9 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
-    RecomputeCPUOffloadMetadata,
-    RecomputeCPUOffloadWorkerMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
+    PreemptOffloadMetadata,
+    PreemptOffloadWorkerMetadata,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -18,18 +18,20 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
-class RecomputeCPUOffloadWorker:
+class PreemptOffloadWorker:
     """Worker-side handler for recompute CPU/NPU KV cache transfers."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
-        cpu_capacity_bytes: int,
+        cpu_capacity_bytes: int | None,
+        offload_host_memory_ratio: float = 1,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self.offload_host_memory_ratio = offload_host_memory_ratio
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -42,7 +44,7 @@ class RecomputeCPUOffloadWorker:
         self._load_events: list[tuple[int, torch.npu.Event]] = []
         self._load_hwm: int = -1
 
-        self._connector_metadata: RecomputeCPUOffloadMetadata | None = None
+        self._connector_metadata: PreemptOffloadMetadata | None = None
         self._pending_load_event_indices: set[int] = set()
         self._submitted_load_event_indices: set[int] = set()
         self._completed_store_events: dict[int, int] = {}
@@ -71,7 +73,13 @@ class RecomputeCPUOffloadWorker:
             if get_kv_cache_tensor_layers(t):
                 scheduler_gpu_kv_cache_tensors.append(t)
         scheduler_gpu_total_bytes = sum(t.size for t in scheduler_gpu_kv_cache_tensors)
-        scheduler_num_cpu_blocks = max(1, self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes)
+        if self.cpu_capacity_bytes is None:
+            scheduler_num_cpu_blocks = max(1, int(self.offload_host_memory_ratio * self.num_gpu_blocks))
+        else:
+            scheduler_num_cpu_blocks = max(
+                1,
+                self.num_gpu_blocks * self.cpu_capacity_bytes // scheduler_gpu_total_bytes,
+            )
 
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         register_cache_ptrs = []
@@ -90,11 +98,14 @@ class RecomputeCPUOffloadWorker:
 
         per_tensor_bytes_per_block = [tensor.shape[-1] * tensor.element_size() for tensor in unique_gpu_caches.values()]
         total_bytes_per_block = sum(per_tensor_bytes_per_block)
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        if self.cpu_capacity_bytes is None:
+            self.num_cpu_blocks = scheduler_num_cpu_blocks
+        else:
+            self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
         if self.num_cpu_blocks != scheduler_num_cpu_blocks:
             self.num_cpu_blocks = scheduler_num_cpu_blocks
             logger.warning(
-                "RecomputeCPUOffloadScheduler has different num_blocks: %d,"
+                "PreemptOffloadScheduler has different num_blocks: %d,"
                 "worker-side num_block is set to %d to align with scheduler.",
                 scheduler_num_cpu_blocks,
                 scheduler_num_cpu_blocks,
@@ -116,13 +127,13 @@ class RecomputeCPUOffloadWorker:
         self.store_stream = torch.npu.Stream()
 
         logger.info(
-            "RecomputeCPUOffloadWorker scaffold registered %d unique KV tensors, allocating %d CPU blocks (%.2f GB).",
+            "PreemptOffloadWorker scaffold registered %d unique KV tensors, allocating %d CPU blocks (%.2f GB).",
             len(unique_gpu_caches),
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
-    def bind_connector_metadata(self, metadata: RecomputeCPUOffloadMetadata) -> None:
+    def bind_connector_metadata(self, metadata: PreemptOffloadMetadata) -> None:
         self._connector_metadata = metadata
         self._load_stream_waited = False
         if metadata.preempt_load_event >= 0:
@@ -134,7 +145,7 @@ class RecomputeCPUOffloadWorker:
 
     def handle_preemptions(
         self,
-        kv_connector_metadata: RecomputeCPUOffloadMetadata,
+        kv_connector_metadata: PreemptOffloadMetadata,
     ) -> None:
         """Save preempted blocks before input preparation can overwrite them."""
         if kv_connector_metadata.need_flush:
@@ -304,7 +315,7 @@ class RecomputeCPUOffloadWorker:
 
         return None, finished_recving or None
 
-    def build_connector_worker_meta(self) -> RecomputeCPUOffloadWorkerMetadata | None:
+    def build_connector_worker_meta(self) -> PreemptOffloadWorkerMetadata | None:
         """Return completed store events since the previous call.
 
         The scheduler aggregates this metadata across workers/ranks. A store
@@ -313,7 +324,7 @@ class RecomputeCPUOffloadWorker:
         """
         if not self._completed_store_events:
             return None
-        meta = RecomputeCPUOffloadWorkerMetadata(
+        meta = PreemptOffloadWorkerMetadata(
             completed_store_events=self._completed_store_events,
         )
         self._completed_store_events = {}

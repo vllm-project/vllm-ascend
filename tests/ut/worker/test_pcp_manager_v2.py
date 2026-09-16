@@ -447,12 +447,20 @@ def test_partition_batch_keeps_piecewise_request_extent():
     np.testing.assert_array_equal(result.seq_lens_np, np.array([11, 21], dtype=np.int32))
 
 
-def test_attention_context_collects_global_pcp_data():
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+@pytest.mark.parametrize("is_prefilling", [False, True])
+def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.device = torch.device("cpu")
+    manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
+    input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
+    input_batch.idx_mapping = torch.from_numpy(input_batch.idx_mapping_np)
+    input_batch.num_reqs_after_padding = 4
+    input_batch.is_prefilling_np[:] = is_prefilling
     block_tables = (
-        torch.tensor([[1]], dtype=torch.int32),
-        torch.tensor([[2]], dtype=torch.int32),
+        torch.tensor([[1], [2], [0], [0]], dtype=torch.int32),
+        torch.tensor([[3], [4], [0], [0]], dtype=torch.int32),
     )
     slot_mapping_capacity = input_batch.num_tokens_after_padding + 3
     global_slot_mappings = torch.arange(
@@ -460,9 +468,11 @@ def test_attention_context_collects_global_pcp_data():
         dtype=torch.int64,
     ).view(len(block_tables), slot_mapping_capacity)
     gather_block_tables = MagicMock(return_value=block_tables)
+    num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
     manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
+        num_blocks=SimpleNamespace(np=num_blocks),
     )
     manager._global_batch_slot_mappings = global_slot_mappings
     hidden_restore_idx = torch.arange(input_batch.num_tokens, dtype=torch.int64)
@@ -472,6 +482,15 @@ def test_attention_context_collects_global_pcp_data():
 
     actual = manager.build_attention_context()
 
+    if dcp_world_size > 1 and is_prefilling:
+        assert actual.global_block_table_num_blocks.device == manager.device
+        torch.testing.assert_close(
+            actual.global_block_table_num_blocks, torch.tensor([[7, 3], [15, 11]], dtype=torch.int32)
+        )
+        num_blocks.fill(0)
+        assert actual.global_block_table_num_blocks[0, 0] == 7
+    else:
+        assert actual.global_block_table_num_blocks is None
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
     assert torch.equal(
