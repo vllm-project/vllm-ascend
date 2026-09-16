@@ -46,7 +46,7 @@ on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
 After the checkpoint is available, download it to the same absolute path on
 every server; the examples use `<YOUR_MODEL_PATH>`.
 
-Alternatively, use [ModelSlim](https://gitcode.com/Ascend/msmodelslim) to
+Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
 Use one of the following hardware configurations:
