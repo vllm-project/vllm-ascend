@@ -183,7 +183,7 @@ class DeepseekV41Indexer(nn.Module):
         if not 1 <= self.index_topk <= 2048:
             raise ValueError("A3 QLI requires index_topk in [1, 2048]")
         if self.compress_ratio not in (1, 2):
-            raise ValueError("Aurora QLI supports compression ratios 1 and 2")
+            raise ValueError("DeepSeek V4.1 QLI supports compression ratios 1 and 2")
         if is_candidate_source or uses_candidate_filter:
             if not 0 < candidate_topk_blocks <= 2048 or candidate_topk_blocks % 64:
                 raise ValueError("candidate_topk_blocks must be a multiple of 64 in [64, 2048]")

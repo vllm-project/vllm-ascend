@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Aurora QLI/candidate correctness on A3, including real paged cache views."""
+"""DeepSeek V4.1 QLI/candidate correctness on A3, including real paged cache views."""
 
 from types import SimpleNamespace
 

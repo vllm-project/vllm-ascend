@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Compare Aurora's slot-backed BF16 cache with the prior block-outermost views."""
+"""Compare DeepSeek V4.1's slot-backed BF16 cache with the prior block-outermost views."""
 
 from types import SimpleNamespace
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Deferred torch checks for Aurora DSpark model/cache integration."""
+"""Deferred torch checks for DeepSeek V4.1 DSpark model/cache integration."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,7 +24,7 @@ from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41SWACache, Dee
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def test_draft_cache_uses_v41_backend_and_explicit_aurora_spec(monkeypatch):
+def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch):
     spec = AscendSlidingWindowMLASpec(
         block_size=128,
         num_kv_heads=1,

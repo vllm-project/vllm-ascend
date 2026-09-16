@@ -78,7 +78,7 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
 
     architecture = "DeepseekV41DSparkModel" if is_deepseek_v41_model else "DSparkDraftModel"
     if is_deepseek_v41_model:
-        # The Aurora target and draft experts intentionally have different
+        # The DeepSeek V4.1 target and draft experts intentionally have different
         # widths.  SpeculativeConfig owns a private config copy, so adapting
         # these fields cannot alter the target model.
         draft_hf_config.update(
