@@ -472,7 +472,8 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
 
-def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
+@pytest.mark.parametrize("model_owned", [False, True])
+def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_owned):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -500,14 +501,20 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
 
+    legacy_method = object()
+    target_method = object()
+    draft_method = object()
     moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
     if moe_mod_name in sys.modules:
-        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: None)
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: legacy_method)
     else:
-        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: None))
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: legacy_method))
 
-    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4):
-        assert seen["inside"] is True
-        assert seen["config"] is vllm_config
+    for expected in (target_method, draft_method, target_method):
+        model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
+        with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
+            assert seen["inside"] is True
+            assert seen["config"] is vllm_config
+            assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
 
     assert seen["inside"] is False

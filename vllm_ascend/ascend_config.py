@@ -21,6 +21,7 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import regex as re
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
@@ -454,6 +455,14 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Enable the V4.1 node-sharded Engram path.
+    enable_engram: bool = True
+    # Keep Engram tables on CPU and transfer only requested BF16 rows.
+    enable_engram_ple_offload: bool = False
+    # V4.1 node-sharded Engram storage; BF16 output and projections are unchanged.
+    engram_storage: Literal["bf16", "int8", "fp8", "mxfp8"] = "bf16"
+    # Opt-in mapped-host INT8 tables. Fresh capability namespace shared by job ranks.
+    engram_vmm_run: str | None = None
     multistream_dsv4_dsa_overlap: bool = True
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
@@ -556,6 +565,20 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.engram_vmm_run is not None:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", self.engram_vmm_run):
+                raise ValueError("engram_vmm_run must be a fresh 1-96 character alphanumeric/underscore/hyphen ID")
+            if not self.enable_engram or self.engram_storage != "int8" or self.enable_engram_ple_offload:
+                raise ValueError("Engram VMM requires enable_engram=True, engram_storage=int8 and PLE_OFFLOAD disabled")
+            if vc.load_config.load_format == "dummy":
+                raise ValueError("Engram VMM requires a real checkpoint; dummy loading is unsupported")
+            if vc.model_config is not None and vc.model_config.enable_sleep_mode:
+                raise ValueError("Engram VMM does not support sleep mode")
+        if self.enable_engram_ple_offload:
+            if not self.enable_engram:
+                raise ValueError("PLE_OFFLOAD requires enable_engram=True")
+            if "engram_storage" not in (vc.additional_config or {}):
+                self.engram_storage = "fp8"
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

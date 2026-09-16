@@ -114,9 +114,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
-  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
@@ -205,6 +206,31 @@ else()
 endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
+
+# Optional A3 host-backed Engram. Older CANN builds retain existing backends.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  check_cxx_source_compiles("
+    #include <acl/acl.h>
+    int main() {
+      aclrtMemFabricHandle handle{};
+      (void)handle;
+      (void)ACL_MEM_P2P_HUGE1G;
+      (void)ACL_MEM_LOCATION_TYPE_HOST_NUMA;
+      (void)ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION;
+      (void)aclrtMemExportToShareableHandleV2;
+      (void)aclrtMemImportFromShareableHandleV2;
+      return 0;
+    }
+  " HAVE_ENGRAM_HOST_VMM)
+  if(HAVE_ENGRAM_HOST_VMM)
+    find_package(Threads REQUIRED)
+    add_library(engram_host_vmm SHARED csrc/engram_vmm/native.cpp)
+    target_link_directories(engram_host_vmm PRIVATE ${ASCEND_HOME_PATH}/lib64)
+    target_link_libraries(engram_host_vmm PRIVATE ascendcl Threads::Threads)
+    add_dependencies(vllm_ascend_C engram_host_vmm)
+    install(TARGETS engram_host_vmm DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+  endif()
+endif()
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
