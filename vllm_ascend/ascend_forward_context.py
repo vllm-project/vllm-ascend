@@ -420,6 +420,24 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
+def _use_v2_extra_kwargs() -> bool:
+    """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
+
+    GPU V2 stores its own ``capturing`` flag on the forward-context object.
+    Isolate extras when Ascend enables V2, including whitelist-default V2
+    with ``VLLM_USE_V2_MODEL_RUNNER`` unset.
+
+    ``get_current_vllm_config()`` raises when no config is set (cpu-ut
+    attention fixtures). Treat that as V1 so FIA can read ``capturing``.
+    Require an actual bool: MagicMock configs can be truthy.
+    """
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return False
+    return use_v2_model_runner(vllm_config) is True
+
+
 class _ExtraForwardContextProxy:
     """Unified forward-context access for v1/v2 model runners."""
 
@@ -464,7 +482,7 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if use_v2_model_runner(get_current_vllm_config()) is True:
+        if _use_v2_extra_kwargs():
             # Unset known extras default to None so optional flags (e.g. `sinks`)
             # can be read with truthiness checks before the V2 path populates them.
             return ctx.additional_kwargs.get(name)
@@ -473,7 +491,7 @@ class _ExtraForwardContextProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if use_v2_model_runner(get_current_vllm_config()) is True:
+        if _use_v2_extra_kwargs():
             ctx.additional_kwargs[name] = value
         else:
             setattr(ctx, name, value)

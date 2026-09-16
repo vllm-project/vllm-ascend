@@ -572,6 +572,19 @@ def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
     assert forward_context.capturing is True
 
 
+def test_extra_ctx_unset_vllm_config_stays_on_v1_attrs(monkeypatch):
+    def _unset_config():
+        raise AssertionError("Current vLLM config is not set.")
+
+    monkeypatch.setattr(afc, "get_current_vllm_config", _unset_config)
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
 def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
     monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
