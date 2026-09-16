@@ -134,22 +134,19 @@ class TestIsSupportedV2ModelRunnerFeature:
         assert is_supported_v2_model_runner_feature(config) is True
         assert len(info_calls) == 1
 
-    def test_lora_is_excluded(self, monkeypatch):
-        warning_calls = []
-        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
+    def test_lora_is_supported(self):
         config = _make_vllm_config(lora_config=object())
 
-        assert is_supported_v2_model_runner_feature(config) is False
-        assert len(warning_calls) == 1
+        assert is_supported_v2_model_runner_feature(config) is True
 
-    def test_lora_is_excluded_even_with_whitelisted_spec(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+    def test_lora_does_not_block_whitelisted_spec(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(
             speculative_config=_make_speculative_config("eagle3"),
             lora_config=object(),
         )
 
-        assert is_supported_v2_model_runner_feature(config) is False
+        assert is_supported_v2_model_runner_feature(config) is True
 
     @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash", "dspark"])
     def test_dynamic_speculative_decoding_is_excluded(self, monkeypatch, method):
@@ -172,11 +169,12 @@ class TestV2ModelRunnerEnvironmentReady:
 
         assert _v2_model_runner_environment_ready(config) is False
 
-    def test_lora_is_not_ready(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+    def test_lora_is_ready(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         config = _make_vllm_config(lora_config=object())
 
-        assert _v2_model_runner_environment_ready(config) is False
+        assert _v2_model_runner_environment_ready(config) is True
 
     def test_dynamic_speculative_decoding_is_not_ready(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
@@ -256,17 +254,17 @@ class TestUseV2ModelRunner:
         assert use_v2_model_runner(config) is False
         assert len(warning_calls) == 1
 
-    def test_default_disabled_for_lora(self, monkeypatch):
+    def test_default_enabled_for_lora(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
         monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
-        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(
             model_config=_make_model_config(architectures=[DEFAULT_V2_ARCH]),
             lora_config=object(),
         )
 
-        assert use_v2_model_runner(config) is False
+        assert use_v2_model_runner(config) is True
 
     def test_default_disabled_for_dynamic_speculative_decoding(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
