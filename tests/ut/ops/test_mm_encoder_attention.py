@@ -2,20 +2,27 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
+from tests.ut.base import TestBase
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.config.vllm import get_cached_compilation_config
-
-from tests.ut.base import TestBase
-from vllm_ascend.ops.mm_encoder_attention import (
-    MAX_PAD_SIZE,
-    AscendMMEncoderAttention,
-)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_graph_params,
     set_encoder_forward_context,
     set_encoder_graph_params,
+)
+
+from vllm_ascend.ops import mm_encoder_attention as mm_encoder_attention_module
+from vllm_ascend.ops.mm_encoder_attention import (
+    MAX_PAD_SIZE,
+    AscendMMEncoderAttention,
+    _get_or_convert_cu_seqlens_host_lengths,
+    peek_cu_seqlens_host_lengths,
+    prime_cu_seqlens_host_lengths,
+    reset_vit_fusion_stats,
 )
 
 
@@ -180,12 +187,24 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
             )
         )
 
-        self.assertFalse(
+        # Packed multi-sequence inputs (multi-image, multi-frame, window
+        # attention) stay on the fused path; FIA separates the sequences via
+        # the host lengths derived from cu_seqlens.
+        self.assertTrue(
             layer._can_use_fused_qkv_rope_pad_fia(
                 qkv,
                 cos,
                 sin,
                 torch.tensor([0, 20, 41], dtype=torch.int32),
+            )
+        )
+
+        self.assertFalse(
+            layer._can_use_fused_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                torch.tensor([[0, 41]], dtype=torch.int32),
             )
         )
 
@@ -198,6 +217,268 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
                 torch.tensor([0, 41], dtype=torch.int32),
             )
         )
+
+
+class TestFusedQkvRopePadHostLengths(TestBase):
+    def setUp(self):
+        mm_encoder_attention_module._CU_SEQLENS_HOST_CACHE.clear()
+
+    def tearDown(self):
+        mm_encoder_attention_module._CU_SEQLENS_HOST_CACHE.clear()
+
+    def test_convert_multi_sequence_lengths(self):
+        cu_seqlens = torch.tensor([0, 100, 240, 400], dtype=torch.int32)
+        lengths = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, 400)
+        self.assertEqual(lengths, (100, 240, 400))
+
+    def test_cache_reuses_one_conversion(self):
+        cu_seqlens = torch.tensor([0, 100, 240, 400], dtype=torch.int32)
+        conversions = []
+
+        def fake_cpu(*args, **kwargs):
+            conversions.append(1)
+            return args[0] if args else cu_seqlens
+
+        with patch.object(torch.Tensor, "cpu", autospec=True, side_effect=fake_cpu):
+            first = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, 400)
+            second = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, 400)
+
+        self.assertEqual(first, (100, 240, 400))
+        self.assertEqual(second, (100, 240, 400))
+        self.assertEqual(len(conversions), 1)
+
+    def test_prime_skips_conversion(self):
+        cu_seqlens = torch.tensor([0, 100, 240, 400], dtype=torch.int32)
+        prime_cu_seqlens_host_lengths(cu_seqlens, [100, 240, 400])
+
+        conversions = []
+
+        def fake_cpu(*args, **kwargs):
+            conversions.append(1)
+            return args[0] if args else cu_seqlens
+
+        with patch.object(torch.Tensor, "cpu", autospec=True, side_effect=fake_cpu):
+            lengths = _get_or_convert_cu_seqlens_host_lengths(cu_seqlens, 400)
+
+        self.assertEqual(lengths, (100, 240, 400))
+        self.assertEqual(len(conversions), 0)
+
+    def test_invalid_values_return_none(self):
+        truncated = torch.tensor([0, 100, 240], dtype=torch.int32)
+        self.assertIsNone(_get_or_convert_cu_seqlens_host_lengths(truncated, 400))
+
+        non_monotonic = torch.tensor([0, 240, 100, 400], dtype=torch.int32)
+        self.assertIsNone(_get_or_convert_cu_seqlens_host_lengths(non_monotonic, 400))
+
+    def test_maybe_recompute_cu_seqlens_primes_cache(self):
+        boundaries = np.array([0, 100, 240, 400], dtype=np.int32)
+        result = AscendMMEncoderAttention.maybe_recompute_cu_seqlens(
+            AttentionBackendEnum.TORCH_SDPA,
+            boundaries,
+            1152,
+            1,
+            torch.device("cpu"),
+        )
+
+        self.assertEqual(peek_cu_seqlens_host_lengths(result), (100, 240, 400))
+        # The primed tensor needs no conversion when the fused path reads it.
+        self.assertEqual(
+            _get_or_convert_cu_seqlens_host_lengths(result, 400),
+            (100, 240, 400),
+        )
+
+    def test_maybe_recompute_cu_seqlens_skips_flashinfer(self):
+        boundaries = np.array([0, 100, 240, 400], dtype=np.int32)
+        result = AscendMMEncoderAttention.maybe_recompute_cu_seqlens(
+            AttentionBackendEnum.FLASHINFER,
+            boundaries,
+            1152,
+            1,
+            torch.device("cpu"),
+        )
+
+        self.assertIsNone(peek_cu_seqlens_host_lengths(result))
+
+
+class TestFusedQkvRopePadForward(TestBase):
+    def setUp(self):
+        mm_encoder_attention_module._CU_SEQLENS_HOST_CACHE.clear()
+        reset_vit_fusion_stats()
+
+    def tearDown(self):
+        mm_encoder_attention_module._CU_SEQLENS_HOST_CACHE.clear()
+        reset_vit_fusion_stats()
+
+    def _make_layer(self):
+        self._install_vllm_config_mock()
+        return AscendMMEncoderAttention(num_heads=8, num_kv_heads=8, head_size=72)
+
+    def _install_vllm_config_mock(self):
+        mock_vllm_config = MagicMock(spec=VllmConfig)
+        mock_vllm_config.compilation_config = CompilationConfig()
+        patcher = patch(
+            "vllm.config.vllm.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        get_cached_compilation_config.cache_clear()
+        self.addCleanup(get_cached_compilation_config.cache_clear)
+
+    def _make_forward_mocks(self, token_count: int, boundaries: list[int]):
+        device = SimpleNamespace(type="npu")
+        qkv = MagicMock(
+            ndim=3,
+            shape=(token_count, 1, 1728),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        qkv.is_contiguous.return_value = True
+        cos = MagicMock(shape=(token_count, 36), dtype=torch.bfloat16, device=device)
+        cos.is_contiguous.return_value = True
+        sin = MagicMock(shape=(token_count, 36), dtype=torch.bfloat16, device=device)
+        sin.is_contiguous.return_value = True
+        cu_seqlens = MagicMock(ndim=1)
+        cu_seqlens.numel.return_value = len(boundaries)
+        cu_seqlens.detach.return_value.cpu.return_value.view.return_value.tolist.return_value = boundaries
+        return qkv, cos, sin, cu_seqlens
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    def test_forward_multi_sequence_uses_real_lengths(
+        self,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer()
+        qkv, cos, sin, cu_seqlens = self._make_forward_mocks(400, [0, 100, 240, 400])
+
+        captured: dict[str, Any] = {}
+
+        def fake_run_fia(query, key, value, lengths_q, lengths_kv):
+            captured["lengths_q"] = lengths_q
+            captured["lengths_kv"] = lengths_kv
+            return MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.ops.triton.vision_qkv_rope_pad.vision_qkv_rope_pad",
+                return_value=(MagicMock(), MagicMock(), MagicMock()),
+            ) as mock_kernel,
+            patch.object(layer, "_run_vit_fia", side_effect=fake_run_fia),
+        ):
+            context = layer.forward_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                cu_seqlens=cu_seqlens,
+                sequence_lengths=None,
+            )
+
+        self.assertIsNotNone(context)
+        mock_kernel.assert_called_once()
+        self.assertEqual(captured["lengths_q"], [100, 240, 400])
+        self.assertEqual(captured["lengths_kv"], [100, 240, 400])
+        stats = reset_vit_fusion_stats()
+        self.assertEqual(stats["calls"], 1)
+        self.assertEqual(stats["fused"], 1)
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    def test_forward_single_sequence_avoids_conversion(
+        self,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer()
+        qkv, cos, sin, cu_seqlens = self._make_forward_mocks(257, [0, 257])
+
+        with (
+            patch(
+                "vllm_ascend.ops.triton.vision_qkv_rope_pad.vision_qkv_rope_pad",
+                return_value=(MagicMock(), MagicMock(), MagicMock()),
+            ),
+            patch.object(
+                layer,
+                "_run_vit_fia",
+                return_value=MagicMock(),
+            ) as mock_fia,
+        ):
+            context = layer.forward_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                cu_seqlens=cu_seqlens,
+                sequence_lengths=None,
+            )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(mock_fia.call_args[0][3], [257])
+        cu_seqlens.detach.assert_not_called()
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    def test_forward_invalid_boundaries_fall_back(
+        self,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer()
+        qkv, cos, sin, cu_seqlens = self._make_forward_mocks(400, [0, 100, 240])
+
+        with patch(
+            "vllm_ascend.ops.triton.vision_qkv_rope_pad.vision_qkv_rope_pad",
+        ) as mock_kernel:
+            context = layer.forward_qkv_rope_pad_fia(
+                qkv,
+                cos,
+                sin,
+                cu_seqlens=cu_seqlens,
+                sequence_lengths=None,
+            )
+
+        self.assertIsNone(context)
+        mock_kernel.assert_not_called()
+        stats = reset_vit_fusion_stats()
+        self.assertEqual(stats["fallback:cu_seqlens_values"], 1)
+
+    @patch(
+        "vllm_ascend.ops.mm_encoder_attention.get_encoder_forward_context",
+        return_value=SimpleNamespace(capturing=False),
+    )
+    @patch("vllm_ascend.ops.mm_encoder_attention.HAS_TRITON", True)
+    def test_forward_records_fallback_reason(
+        self,
+        _mock_forward_context,
+    ):
+        layer = self._make_layer()
+        device = SimpleNamespace(type="npu")
+        qkv = MagicMock(
+            ndim=3,
+            shape=(41, 1, 1728),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        qkv.is_contiguous.return_value = True
+
+        context = layer.forward_qkv_rope_pad_fia(
+            qkv,
+            None,
+            None,
+            cu_seqlens=torch.tensor([0, 41], dtype=torch.int32),
+            sequence_lengths=None,
+        )
+
+        self.assertIsNone(context)
+        stats = reset_vit_fusion_stats()
+        self.assertEqual(stats["calls"], 1)
+        self.assertEqual(stats["fallback:missing_inputs"], 1)
 
 
 class TestAscendMMEncoderAttentionCapture(FIAMockMixin):

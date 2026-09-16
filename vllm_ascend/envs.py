@@ -100,6 +100,39 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Fuse QKV layout extraction, vision RoPE, and FIA pad-to-128 for the
+    # Qwen3.5-VL BF16 D72 eager path. Set "0" to force the generic path.
+    "VLLM_ASCEND_ENABLE_VIT_FUSED_QKV_ROPE_PAD": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_VIT_FUSED_QKV_ROPE_PAD", "1"))
+    ),
+    # Log the fused vision QKV/RoPE/pad hit rate and fallback reasons every
+    # 1000 attention calls. Set "0" to silence the periodic summary.
+    "VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_VIT_FUSED_QKV_ROPE_PAD_STATS", "1"))
+    ),
+    # Vector-core launch strategy for the fused vision producer:
+    # "dynamic" = one core per token tile (default), "fixed" = always all
+    # vector cores, "bucket" = round up to a divisor of 40.
+    "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_VIT_ROPE_PAD_CORE_MODE", "dynamic"
+    ),
+    # Token tile size (BLOCK_T) for the fused vision producer kernel.
+    "VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T": lambda: os.getenv("VLLM_ASCEND_VIT_ROPE_PAD_BLOCK_T", "4"),
+    # Q/K store layout of the fused vision producer: "block" (default),
+    # "masked" (non-overlapping stores), "single" (one full-width store).
+    "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_VIT_ROPE_PAD_STORE_MODE", "block"
+    ),
+    # Q/K/V output allocation: "fused" (one buffer + views, default) or
+    # "split" (three allocations) for allocator A/B comparisons.
+    "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_VIT_ROPE_PAD_ALLOC_MODE", "fused"
+    ),
+    # Periodically log decode batch sizes and ACL graph dispatch results so
+    # capture-size coverage can be checked against the real decode batches.
+    "VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_LOG_DECODE_DISPATCH_STATS", "1"))
+    ),
 }
 
 # end-env-vars-definition
