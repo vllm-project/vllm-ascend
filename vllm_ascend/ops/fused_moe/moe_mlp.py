@@ -23,12 +23,17 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import dispose_tensor, enable_custom_op
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    dispose_tensor,
+    enable_custom_op,
+    get_ascend_device_type,
+)
 
+ASCEND_DEVICE_TYPE = get_ascend_device_type()
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
 
@@ -40,7 +45,7 @@ def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
 
 def _gmm_swiglu_quant_fusion_enabled(use_mxfp_quant, fusion, dynamic_eplb, activation=None):
     activation_name = getattr(activation, "value", activation)
-    return (use_mxfp_quant or (fusion and not dynamic_eplb)) and activation_name not in (
+    return ((use_mxfp_quant or fusion) and not dynamic_eplb) and activation_name not in (
         "situ",
         "swigluoai_uninterleave",
     )
@@ -138,7 +143,7 @@ def _apply_clipped_swiglu(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> torch.Tensor:
-    if get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
+    if ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
         hidden_size = hidden_states.shape[-1] // 2
         gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
         up = hidden_states[..., hidden_size:].clamp(
@@ -164,7 +169,7 @@ def _swiglu_oai_dynamic_mx_quant(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
+    if ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
         raise RuntimeError("The MiniMax-M3 SwiGLU-OAI MX quant path is only expected on Ascend A5.")
 
     hidden_states = _apply_clipped_swiglu(
@@ -514,7 +519,11 @@ def quant_apply_mlp(
             elif is_swigluoai_uninterleave:
                 scale = _prepare_swigluoai_grouped_matmul_scales(w1_scale, _output_dtype)
             else:
-                scale = [w1_scale[0].to(w2_scale[0].dtype)] if isinstance(w1_scale, list) else [w1_scale]
+                scale = (
+                    [item.to(w2_scale[0].dtype) for item in w1_scale]
+                    if isinstance(w1_scale, list)
+                    else [w1_scale]
+                )
             gmm1_kwargs = {
                 "x": [hidden_states],
                 "weight": w1 if isinstance(w1, list) else [w1],
@@ -541,10 +550,8 @@ def quant_apply_mlp(
                 else:
                     gmm1_kwargs.update(
                         {
-                            "scale_dtype": scale_type or torch_npu.float8_e8m0fnu,
-                            "per_token_scale_dtype": per_token_scale_type or torch_npu.float8_e8m0fnu,
-                            "x_dtype": act_quant_type,
-                            "weight_dtype": weight_quant_type,
+                            "scale_dtype": torch_npu.float8_e8m0fnu,
+                            "per_token_scale_dtype": torch_npu.float8_e8m0fnu,
                             "output_dtype": torch.bfloat16,
                         }
                     )
@@ -561,9 +568,7 @@ def quant_apply_mlp(
                 gate, up = hidden_states.chunk(2, dim=-1)
                 approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
                 hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
-                hidden_states, swiglu_out_scale = DeviceOperator.npu_dynamic_quant(
-                    hidden_states, act_quant_type=act_quant_type, use_mxfp_quant=use_mxfp_quant
-                )
+                hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
             elif is_situ_activation:
                 if quantize_situ_output and use_mxfp_quant:
                     hidden_states, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(

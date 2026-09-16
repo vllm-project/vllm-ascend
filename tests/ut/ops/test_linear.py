@@ -58,6 +58,10 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         type(self.layer.weight.data).dtype = mock_dtype
         mock_is_meta = mock.PropertyMock(return_value=False)
         type(self.layer.weight.data).is_meta = mock_is_meta
+        mock_ndim = mock.PropertyMock(return_value=2)
+        type(self.layer.weight.data).ndim = mock_ndim
+        mock_shape = mock.PropertyMock(return_value=torch.Size([32, 64]))
+        type(self.layer.weight.data).shape = mock_shape
         self.layer.precast_fp32_weight = False
 
     @patch("vllm_ascend.utils.get_ascend_config")

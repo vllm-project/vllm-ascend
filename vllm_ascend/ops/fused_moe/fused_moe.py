@@ -97,6 +97,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     persistent=False,
                 )
 
+        if self.is_internal_router and self.gate is not None and not hasattr(self.gate, "weight_fp32"):
+            self.gate.precast_fp32_weight = True
+
     @property
     def is_internal_router(self) -> bool:
         if vllm_version_is("0.27.1"):

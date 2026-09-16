@@ -162,7 +162,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
-            layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            # Cast weight to FRACTAL_NZ so npu_quant_matmul dispatches to
+            # aclnnQuantMatmulWeightNz instead of aclnnQuantMatmulV5.
+            layer._mxfp8_weight_buf = torch_npu.npu_format_cast(
+                layer.weight.data.transpose(0, 1).contiguous(), ACL_FORMAT_FRACTAL_NZ
+            )
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
@@ -207,6 +211,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         orig_scale_shape = orig_shapes["weight_scale"]
 
         # Restore weight: (input_size, output_size) -> (output_size, input_size)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, ACL_FORMAT_FRACTAL_ND)
         target_weight = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight.data.copy_(target_weight)
@@ -236,6 +241,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_expert_weight_list = (
+            (vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True)
+            or self.dynamic_eplb
+        )
 
     @staticmethod
     def get_weight(
@@ -284,10 +293,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=layer.w13_weight_list if self.use_expert_weight_list else layer.w13_weight,
+                w2=layer.w2_weight_list if self.use_expert_weight_list else layer.w2_weight,
                 quant_type=self.quant_type,
-                dynamic_eplb=self.dynamic_eplb,
+                dynamic_eplb=self.dynamic_eplb or self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
                 global_redundant_expert_num=layer.global_redundant_expert_num,
                 mc2_mask=layer.ascend_mc2_mask,
@@ -299,13 +308,20 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=layer.w13_weight_scale_list if self.use_expert_weight_list else layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale_list if self.use_expert_weight_list else layer.w2_weight_scale,
             )
         )
 
     @staticmethod
-    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list:
+        if hasattr(layer, "w13_weight_list"):
+            return [
+                layer.w13_weight_list,
+                layer.w2_weight_list,
+                layer.w13_weight_scale_list,
+                layer.w2_weight_scale_list,
+            ]
         return [
             layer.w13_weight.transpose(1, 2),
             layer.w2_weight.transpose(1, 2),
@@ -348,10 +364,30 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+
+        if self.use_expert_weight_list:
+            # clone() is not supported for views of FRACTAL_NZ tensors on NPU.
+            # Split the ND tensors first, then format-cast every independent
+            # expert weight to FRACTAL_NZ. Scales remain in ND format.
+            for tensor_name in ("w13_weight", "w2_weight"):
+                tensor = getattr(layer, tensor_name)
+                expert_list = [
+                    torch_npu.npu_format_cast(expert.clone(), ACL_FORMAT_FRACTAL_NZ)
+                    for expert in tensor.data.unbind(dim=0)
+                ]
+                setattr(layer, f"{tensor_name}_list", expert_list)
+                delattr(layer, tensor_name)
+            for tensor_name in ("w13_weight_scale", "w2_weight_scale"):
+                tensor = getattr(layer, tensor_name)
+                expert_list = [expert.clone() for expert in tensor.data.unbind(dim=0)]
+                setattr(layer, f"{tensor_name}_list", expert_list)
+                delattr(layer, tensor_name)
+            torch.npu.empty_cache()
+        else:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
