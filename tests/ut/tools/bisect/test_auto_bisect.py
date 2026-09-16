@@ -7,7 +7,7 @@ from tools.bisect import git_ops
 from tools.bisect.auto_bisect import Bisector, _parse_args, _resolve_num_nodes, main
 from tools.bisect.config import SCENE_MULTI, BisectInput, BisectOptions, Candidate
 from tools.bisect.runner import BisectFatalError
-from tools.bisect.version_compat import PackageVersions
+from tools.bisect.version_compat import PackageVersions, VersionPolicy
 
 
 def test_pick_mid_prefers_midpoint_then_nearest_unskipped_index():
@@ -244,7 +244,11 @@ def test_main_returns_2_on_fatal_abort(tmp_path: Path, monkeypatch: pytest.Monke
     assert rc == 2
 
 
-def _wired_bisector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift):
+def _wired_bisector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: tuple[str, ...],
+) -> tuple[Bisector, dict[str, VersionPolicy]]:
     """Bisector whose git/version reads are stubbed so run() reaches the
     version-policy wiring; returns (bisector, captured_policy_dict)."""
     monkeypatch.setattr("tools.bisect.runner.kill_stray_servers", lambda: None)
@@ -261,11 +265,14 @@ def _wired_bisector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drift):
         "tools.bisect.auto_bisect.expected_versions",
         lambda repo, commit=None: PackageVersions(vllm="v0.27.1"),
     )
-    monkeypatch.setattr("tools.bisect.auto_bisect.environment_drift", lambda expected: drift)
+    monkeypatch.setattr(
+        "tools.bisect.auto_bisect.policy_with_environment_drift",
+        lambda good, bad: (VersionPolicy(checked_packages=drift, good=good, bad=bad), drift),
+    )
     inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit="b" * 40, soc="a2", good_commit="a" * 40)
     opt = BisectOptions(repo_dir=tmp_path, work_dir=str(tmp_path / "work"), assume_built_head=False)
     bisector = Bisector(inp, opt)
-    captured = {}
+    captured: dict[str, VersionPolicy] = {}
     monkeypatch.setattr(bisector.runner, "configure_version_policy", lambda policy: captured.update(policy=policy))
 
     def fatal(good, candidates, state):

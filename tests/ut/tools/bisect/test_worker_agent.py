@@ -89,8 +89,13 @@ def test_worker_deploys_ancestor_commit_missing_from_shallow_clone(
     inp = BisectInput(scene="multi_node", config_yaml="case.yaml", bad_commit="bad", soc="a3")
     opt = _worker_options(tmp_path, worker_repo, coord_dir)
 
-    launched = []
-    monkeypatch.setattr("tools.bisect.worker_agent._launch_pytest", lambda *a, **k: launched.append(a) or 0)
+    launched: list[tuple[object, ...]] = []
+
+    def launch_pytest(*args: object, **_kwargs: object) -> int:
+        launched.append(args)
+        return 0
+
+    monkeypatch.setattr("tools.bisect.worker_agent._launch_pytest", launch_pytest)
     monkeypatch.setattr("tools.bisect.worker_agent.runner.kill_stray_servers", lambda: None)
 
     thread, errors = _start_worker(inp, opt)
