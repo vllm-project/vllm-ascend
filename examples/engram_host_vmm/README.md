@@ -107,6 +107,11 @@ model-specific initialization helper and an optional legacy granularity override
 the tested default allocation/fallback and kernel paths are preserved. This
 extracted example has not been rerun on NPU hardware at the community revision.
 
+The extracted native library was freshly compiled and loaded with ABI version 2
+in the tested A3/CANN image. This check did not allocate device memory or execute
+NPU kernels. Python compilation, shell syntax and applicable source-format checks
+also passed; it is not a substitute for combined model integration tests.
+
 Separate matched inference measurements used 32 A3 NPUs, TP8/DP4/EP32, fixed
 8 GiB KV/NPU, DSpark5, FlashComm1 and prefix caching disabled, 64 short varied
 requests per concurrency and 64 generated tokens per request:
