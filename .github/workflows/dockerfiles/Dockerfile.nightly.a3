@@ -21,7 +21,7 @@ ARG OS_MARK=""
 ARG TAG_SUFFIX=""
 FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a3${OS_MARK}${TAG_SUFFIX}
 
-ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG PIP_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
 ARG AIS_BENCH_TAG="v3.1-20260609-master"
 ARG AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 ARG GIT_PROXY=""
@@ -31,10 +31,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
-RUN pip config set global.index-url ${PIP_INDEX_URL}
+RUN pip config set global.index-url ${PIP_INDEX_URL} && \
+    pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
 
 # Install requirements-dev.txt for tests
-RUN export PIP_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi" && \
+RUN export PIP_EXTRA_INDEX_URL="http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi" && \
     cd /vllm-workspace/vllm-ascend && \
     python3 -m pip install -r requirements-dev.txt && \
     python3 -m pip cache purge
