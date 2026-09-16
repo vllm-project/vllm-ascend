@@ -238,6 +238,18 @@ class AdaptiveDraftKController:
         configured_k = max(min(int(configured_k), self.max_k), 0)
         if configured_k == 0:
             return 0
+        # Small decode batches cannot amortize adaptive-K probing.  They are
+        # also deliberately kept at full K by the hybrid policy, so avoid
+        # touching the auto-tune bucket/model on every scheduler step.  This
+        # is the hot path for c1-c7 when the dynamic policy is enabled.
+        if (
+            self.hybrid_enabled
+            and batch_size is not None
+            and batch_size < self.hybrid_min_batch_size
+        ):
+            self._current_k = configured_k
+            self.last_reason = "small_batch_fixed_k"
+            return configured_k
         if self.auto_tune_enabled and batch_size:
             bucket = self._batch_bucket(batch_size)
             selected = self._auto_k_by_bucket.get(bucket, configured_k)
@@ -466,6 +478,19 @@ class AdaptiveDraftKController:
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
         self.last_scheduled_widths = widths
         self.last_accepted_lengths = accepted
+
+        # Keep the small-batch fast path symmetric with cap(): c1-c7 always
+        # use the configured full width and must not consume observations or
+        # update the online cost model.  Otherwise noisy small-batch timings
+        # can add scheduler/controller overhead without contributing useful
+        # information for the large-batch policy.
+        if self.hybrid_enabled and len(widths) < self.hybrid_min_batch_size:
+            self._current_k = self.max_k
+            if self.auto_tune_enabled:
+                self._auto_k_by_bucket[self._batch_bucket(len(widths))] = self.max_k
+            self.last_reason = "small_batch_fixed_k"
+            return
+
         self.observation_count += 1
         if self.auto_tune_enabled and not self._auto_tune_feedback_ready:
             logger.warning(
@@ -484,15 +509,6 @@ class AdaptiveDraftKController:
                 float(elapsed_ms),
                 physical_k=physical_k,
             )
-            if self.hybrid_enabled and len(widths) < self.hybrid_min_batch_size:
-                self._current_k = self.max_k
-                self._auto_k_by_bucket[
-                    self._batch_bucket(len(widths))
-                ] = self.max_k
-                self.last_reason = "auto_small_batch_full_k"
-                if self._current_k != previous_k:
-                    self._log_auto_decision(len(widths), float(elapsed_ms))
-                return
             self._choose_auto_k(len(widths))
             if self._current_k != previous_k or self.last_reason.startswith("auto_cost_model"):
                 self._log_auto_decision(len(widths), float(elapsed_ms))
