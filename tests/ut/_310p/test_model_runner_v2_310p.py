@@ -509,16 +509,19 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
         )
 
     post_update.assert_called_once()
-    runner.model_state.postprocess_state.assert_called_once_with(
+    runner.model_state.postprocess_state.assert_called_once()
+    postprocess_args = runner.model_state.postprocess_state.call_args.args
+    torch.testing.assert_close(
+        postprocess_args[0],
         torch.from_numpy(runner._postprocess_idx_mapping_np),
-        num_sampled.cpu(),
-        runner.req_states.num_computed_tokens_cpu,
     )
+    torch.testing.assert_close(postprocess_args[1], num_sampled.cpu())
+    assert postprocess_args[2] is runner.req_states.num_computed_tokens_cpu
     torch.testing.assert_close(runner.req_states.last_sampled_tokens, runner.req_states.last_sampled_tokens_cpu)
 
 
 def test_sampler_does_not_copy_sampled_tokens_to_cpu() -> None:
-    sampler = Ascend310PSampler(device="cpu")
+    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu")
     input_batch = SimpleNamespace(
         expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         idx_mapping_np=np.array([0, 1], dtype=np.int32),
