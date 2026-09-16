@@ -75,6 +75,8 @@ logger.info_once(
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_REDUCED_CAPTURE_SIZES = 4
+_DEFAULT_MAX_CAPTURE_TOKENS = 512
+_SPECULATIVE_DECODE_MAX_CAPTURE_TOKENS = 1024
 
 
 class NPUPlatform(Platform):
@@ -1387,9 +1389,10 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
     Ascend injects this default earlier via `apply_config_platform_defaults()`
     so the rest of `_set_cudagraph_sizes()` can keep using upstream logic for
     size-list generation, token-cap clipping, SP filtering, and later
-    post-processing. The only intentional difference from upstream is removing
-    the CUDA-oriented trailing `* 2`: Ascend wants the default capture upper
-    bound to track `max_num_seqs * decode_query_len`, capped at 512.
+    post-processing. Ascend omits the CUDA-oriented trailing `* 2` and uses
+    a bounded default for `max_num_seqs * decode_query_len`. Speculative PD
+    consumers using FULL_DECODE_ONLY get a larger resource cap so three draft
+    tokens can cover up to 256 uniform decode requests per DP rank.
 
     Returning `None` means the platform should not inject a default. This
     covers the cases where the user has already provided either
@@ -1411,7 +1414,31 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
     if speculative_config and speculative_config.num_speculative_tokens:
         decode_query_len += speculative_config.num_speculative_tokens
 
-    return min(max_num_seqs * decode_query_len, 512)
+    requested_tokens = max_num_seqs * decode_query_len
+    capture_limit = _DEFAULT_MAX_CAPTURE_TOKENS
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    graph_mode = compilation_config.cudagraph_mode
+    if (
+        decode_query_len > 1
+        and getattr(kv_transfer_config, "kv_role", None) == "kv_consumer"
+        and getattr(graph_mode, "name", None) == "FULL_DECODE_ONLY"
+        and not vllm_config.model_config.enforce_eager
+    ):
+        capture_limit = _SPECULATIVE_DECODE_MAX_CAPTURE_TOKENS
+        if requested_tokens > capture_limit:
+            logger.warning(
+                "The default Ascend graph cap is %s scheduled tokens, but "
+                "max_num_seqs=%s with decode query length %s can require %s. "
+                "Larger batches may run without a full graph. Configure "
+                "max_cudagraph_capture_size explicitly after checking graph "
+                "memory and KV-cache capacity.",
+                capture_limit,
+                max_num_seqs,
+                decode_query_len,
+                requested_tokens,
+            )
+
+    return min(requested_tokens, capture_limit)
 
 
 def _config_deprecated_logging():
