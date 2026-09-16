@@ -126,7 +126,7 @@ struct FusedScatterCopySparseFlashAttentionParaInfo {
     const int64_t *sparseMode = nullptr;
 };
 
-struct FusedScatterCopySparseFlashAttentionInnerSplitParams {
+struct FusedScatterCopySparseFlashAttentionInnerSplitConfig {
     uint32_t s1GBaseSize = 1;
     uint32_t s2BaseSize = 1;
 };
@@ -199,8 +199,6 @@ std::string FusedScatterCopySparseFlashAttentionShape2String(const T &shape)
     return oss.str();
 }
 
-static std::string GetShapeStr(gert::Shape shape);
-static std::string FusedScatterCopySparseFlashAttentionDataTypeToSerialString(ge::DataType type);
 std::string FusedScatterCopySparseFlashAttentionTensorDesc2String(const gert::StorageShape *shape, const gert::CompileTimeTensorDesc *tensor);
 std::string FusedScatterCopySparseFlashAttentionDebugTilingContext(const gert::TilingContext *context);
 std::string FusedScatterCopySparseFlashAttentionLayoutToSerialString(FusedScatterCopySparseFlashAttentionLayout layout);

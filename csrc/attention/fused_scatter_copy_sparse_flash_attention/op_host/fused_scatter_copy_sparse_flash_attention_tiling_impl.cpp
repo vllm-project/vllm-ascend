@@ -97,10 +97,6 @@ const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
     {ge::DT_UINT2, "DT_UINT2"}                    // dt_variant type
 };
 
-struct FusedScatterCopySparseFlashAttentionCompileInfo {
-    int64_t core_num;
-};
-
 static const std::map<FusedScatterCopySparseFlashAttentionLayout, std::vector<FusedScatterCopySparseFlashAttentionAxis>> FusedScatterCopySparseFlashAttention_LAYOUT_AXIS_MAP = {
     {FusedScatterCopySparseFlashAttentionLayout::BSND, {FusedScatterCopySparseFlashAttentionAxis::B, FusedScatterCopySparseFlashAttentionAxis::S, FusedScatterCopySparseFlashAttentionAxis::N, FusedScatterCopySparseFlashAttentionAxis::D}},
     {FusedScatterCopySparseFlashAttentionLayout::TND, {FusedScatterCopySparseFlashAttentionAxis::T, FusedScatterCopySparseFlashAttentionAxis::N, FusedScatterCopySparseFlashAttentionAxis::D}},
@@ -301,7 +297,7 @@ void FusedScatterCopySparseFlashAttentionTiling::SplitBalanced()
 {
     CalcInnerSize(sfaInfo_->s2Size);
 
-    FusedScatterCopySparseFlashAttentionInnerSplitParams innerSplitParams;
+    FusedScatterCopySparseFlashAttentionInnerSplitConfig innerSplitParams;
     innerSplitParams.s1GBaseSize = sfaInfo_->gSize;
     innerSplitParams.s2BaseSize = sInnerSize_;
     tilingData_.innerSplitParams.set_mBaseSize(innerSplitParams.s1GBaseSize);
@@ -447,56 +443,6 @@ ge::graphStatus FusedScatterCopySparseFlashAttentionTiling::DoOpTiling(FusedScat
         return ge::GRAPH_FAILED;
     }
 
-    return ge::GRAPH_SUCCESS;
-}
-
-ge::graphStatus TilingFusedScatterCopySparseFlashAttention(gert::TilingContext *context)
-{
-    FusedScatterCopySparseFlashAttentionTilingInfo sfaInfo;
-    FusedScatterCopySparseFlashAttentionInfoParser sfaInfoParser(context);
-    if (sfaInfoParser.Parse(sfaInfo) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-
-    FusedScatterCopySparseFlashAttentionTilingCheck tilingChecker(sfaInfo);
-    if (tilingChecker.Process() != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-
-    FusedScatterCopySparseFlashAttentionTiling tiling(context);
-    return tiling.DoOpTiling(&sfaInfo);
-}
-
-ge::graphStatus TilingFusedScatterCopySparseFlashAttentionMtp(gert::TilingContext *context)
-{
-    FusedScatterCopySparseFlashAttentionTilingInfo sfaInfo;
-    FusedScatterCopySparseFlashAttentionInfoParser sfaInfoParser(context);
-    if (sfaInfoParser.Parse(sfaInfo) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-    OPS_ERR_IF(sfaInfo.bSize == 0 || sfaInfo.qTSize < sfaInfo.bSize ||
-                   sfaInfo.qTSize > sfaInfo.bSize * 16U,
-               OPS_LOG_E(context->GetNodeName(),
-                         "MTP TND query rows must satisfy B <= T <= 16B."),
-               return ge::GRAPH_FAILED);
-
-    // The standalone non-MTP operator keeps the strict single-query checker.
-    // MTP uses the same variable-width TND contract and device-side prefix
-    // validation as standardized COPYFusedScatterCopySparseFlashAttention-MTP: B <= T <= 16B.
-    FusedScatterCopySparseFlashAttentionTiling tiling(context);
-    const ge::graphStatus status = tiling.DoOpTiling(&sfaInfo);
-    if (status == ge::GRAPH_SUCCESS) {
-        // Variable-width MTP has one TND/PA_BSND V-template specialization.
-        context->SetTilingKey(1U);
-        // Match the official FusedScatterCopySparseFlashAttention batch scheduler for one AIC plus two AIVs.
-        context->SetScheduleMode(1);
-    }
-    return status;
-}
-
-ge::graphStatus TilingPrepareForFusedScatterCopySparseFlashAttention(gert::TilingParseContext *context)
-{
-    (void)context;
     return ge::GRAPH_SUCCESS;
 }
 
