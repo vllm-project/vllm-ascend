@@ -1,6 +1,6 @@
-# Aurora QLI V2 and candidate integration
+# DeepSeek V4.1 QLI V2 and candidate integration
 
-Aurora's indexer uses `QuantLightningIndexerV2` with paged INT8 index K.
+DeepSeek V4.1's indexer uses `QuantLightningIndexerV2` with paged INT8 index K.
 The imported operator source is from `ops-transformer-qli_candidate.zip`,
 SHA256 `771f0c16b9119c676c10cebef713b168f127ff194f3f2f98edcbcd0979c6f966`.
 Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
@@ -12,7 +12,7 @@ Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
 scale. Head weights and K scales are FP16. Existing source-owned K-cache
 updates remain unchanged.
 
-The operator consumes `TND` Q and `PA_BBND` index K directly. Aurora's
+The operator consumes `TND` Q and `PA_BBND` index K directly. DeepSeek V4.1's
 four-slot layer-outermost allocator packs index K and FP16 scales after KV
 inside each shared page. C2 uses 64-row views with a 131072-byte block stride;
 C1 uses 128-row views with a 147712-byte block stride. The Torch adapter passes
@@ -48,7 +48,7 @@ raises an error.
 
 - INT8 Q/K, FP16 head weights and per-head Q/per-token K scales; quant mode 2.
 - 32 or 64 replicated index heads, head dimension 128, one index-K head.
-- Aurora compression ratios 1 and 2, causal mask mode 3.
+- DeepSeek V4.1 compression ratios 1 and 2, causal mask mode 3.
 - Position TopK in `[1, 2048]`; candidate blocks a multiple of 64 in `[64, 2048]`.
 - Candidate block size is exactly 8 in this kernel implementation.
 - TND query and PA_BBND key layouts only in the compiled package.
@@ -90,12 +90,12 @@ cases, not a baseline-versus-candidate dataset accuracy comparison. Graph,
 
 ## Compilation scope
 
-Aurora's A2/A3 path uses INT8 Q/K, FP16 weights/scales and quant mode 2. Its
+DeepSeek V4.1's A2/A3 path uses INT8 Q/K, FP16 weights/scales and quant mode 2. Its
 compiled QLI V2 template matrix has one key, down from 4. A5 retains the full
 16-key matrix, including paged BSND/TND queries and matching nonpaged BSND/TND
 layouts. A5 dtype registration, host validation and kernel dispatch retain
 FP8, MXFP8, HiFloat8, MXFP4 and INT8 (quant modes 1/3/4/5/2 respectively).
-The Aurora INT8 call sites do not establish that other A5 paths are unused.
+The DeepSeek V4.1 INT8 call sites do not establish that other A5 paths are unused.
 Both architectures retain their original template argument encodings.
 
 Candidate modes 1/2/3, compression ratio, TopK and sequence lengths remain
