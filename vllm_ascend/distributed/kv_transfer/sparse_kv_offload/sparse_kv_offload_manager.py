@@ -120,6 +120,9 @@ def allocate_kv_offload_topk_buffer_pair(
         vllm_config.scheduler_config.max_num_batched_tokens,
         vllm_config.scheduler_config.max_num_seqs * decode_width,
     )
+    if sparse_kv_offload_config.use_nano:
+        max_num_topk_rows = max(max_num_topk_rows, 2 * (vllm_config.scheduler_config.max_num_seqs + 2))
+        topk_buffer_size += 2 * vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
     topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
     # NOTE make sure to allocate k+v together and split them after allocate.
@@ -135,6 +138,9 @@ def allocate_kv_offload_topk_buffer_pair(
         .view(torch.bfloat16)
         .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
     )
+    if sparse_kv_offload_config.use_nano:
+        # Dummy copy-SFA reads its private hot rows during capture/replay.
+        topk_buffer_raw.zero_()
     return (topk_buffer_k, topk_buffer_v)
 
 
@@ -491,6 +497,7 @@ class SparseKVOffloadManager:
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
+        self.use_nano = sparse_kv_offload_config.use_nano
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -848,7 +855,7 @@ class SparseKVOffloadManager:
                 )
             )
 
-        if self.use_fused_overlap and self.tp_rank != 0:
+        if (self.use_fused_overlap or self.use_nano) and self.tp_rank != 0:
             cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
             cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
             self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
@@ -1073,6 +1080,12 @@ class SparseKVOffloadManager:
         self.lru_miss_position_workspace_ptr = self.lru_miss_position_workspace.data_ptr()
         self.lru_epochs_ptr = self.lru_epochs.data_ptr()
         self.lru_physical_row_workspace_ptr = self.lru_physical_row_workspace.data_ptr()
+
+    def copy_nano_kv(self, sources, destinations, lengths, count) -> None:
+        """Enqueue bounded descriptor copies on the current compute stream."""
+        result = offload.sparse_copy(sources, destinations, lengths, count, sources.device)
+        if result not in (None, 0):
+            raise RuntimeError(f"memfabric nano tail H2D failed with result={result}")
 
     def offload_new_kv(
         self,

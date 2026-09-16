@@ -660,9 +660,17 @@ class NPUModelRunner(GPUModelRunner):
         # Per-request metadata consumed by the Sparse KV offload resident LRU.
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
+        self._offload_pool_slots = None
+        self._offload_pool_generations = None
+        self._offload_request_slots: dict[str, int] = {}
+        self._offload_slot_generation = 0
+        self._offload_slot_generations: dict[int, int] = {}
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+            if self.sparse_kv_offload_config.use_nano:
+                self._offload_pool_slots = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int32)
+                self._offload_pool_generations = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int64)
 
     @property
     def use_dcp(self) -> bool:
@@ -3335,9 +3343,13 @@ class NPUModelRunner(GPUModelRunner):
         )
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
+        nano_requires_eager = (
+            self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_nano
+            and force_uniform_decode is None and not self._nano_batch_eligible(num_reqs)
+        )
         # ruff: noqa: E731
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
-            if force_eager:
+            if force_eager or nano_requires_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
             return self.cudagraph_dispatcher.dispatch(
@@ -3397,6 +3409,42 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
+    def _nano_batch_eligible(self, num_reqs: int) -> bool:
+        # Prompt lengths are immutable lower bounds in decode. Keep short
+        # prompts on the existing eager offload path, even if generation later
+        # grows them past TopK. This avoids reading rejection-adjusted lengths
+        # back from the device merely to choose a graph specialization.
+        return bool(np.all(self.input_batch.num_prompt_tokens[:num_reqs] >= 2048 + 128 + 7))
+
+    def _prepare_nano_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
+        if self._offload_pool_slots is None:
+            return
+        capacity = self.max_num_reqs + 2
+        slots = self._offload_pool_slots.np
+        generations = self._offload_pool_generations.np
+        slots[:padded_reqs] = np.arange(padded_reqs, dtype=np.int32) + capacity
+        generations[:padded_reqs] = -1
+        if not dummy:
+            # Batch compaction preserves ownership. Preemption releases the
+            # row; resuming allocates a new generation and forces first fill.
+            live = self.input_batch.req_id_to_index
+            self._offload_request_slots = {
+                req: slot for req, slot in self._offload_request_slots.items() if req in live
+            }
+            used = set(self._offload_request_slots.values())
+            available = iter(slot for slot in range(capacity) if slot not in used)
+            for row, req in enumerate(self.input_batch.req_ids[:num_reqs]):
+                if req not in self._offload_request_slots:
+                    slot = next(available)
+                    self._offload_request_slots[req] = slot
+                    self._offload_slot_generation += 1
+                    self._offload_slot_generations[slot] = self._offload_slot_generation
+                slot = self._offload_request_slots[req]
+                slots[row] = slot
+                generations[row] = self._offload_slot_generations[slot]
+        self._offload_pool_slots.copy_to_gpu(padded_reqs)
+        self._offload_pool_generations.copy_to_gpu(padded_reqs)
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -3415,6 +3463,7 @@ class NPUModelRunner(GPUModelRunner):
         skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_descriptor: BatchDescriptor | None = None,
+        offload_dummy: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3435,6 +3484,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_req_ids_tensor,
                 self._offload_token_to_req,
             )
+        if self.sparse_kv_offload_config.use_nano and self.sparse_kv_offload_enabled:
+            self._prepare_nano_request_slots(num_reqs, num_reqs_padded, dummy=offload_dummy)
         attn_metadata: PerLayerAttnMetadata = {}
         device_metadata_tasks: list[DeviceMetadataTask] | None = (
             [] if self.device_metadata_executor is not None else None
@@ -3621,6 +3672,13 @@ class NPUModelRunner(GPUModelRunner):
                 if self._offload_token_to_req is not None
                 else None
             ),
+            req_topk_buffer_slots=(self._offload_pool_slots.gpu[:num_reqs_padded]
+                                   if self._offload_pool_slots is not None else None),
+            req_topk_buffer_generations=(self._offload_pool_generations.gpu[:num_reqs_padded]
+                                         if self._offload_pool_generations is not None else None),
+            nano_eligible=(offload_dummy or self._nano_batch_eligible(num_reqs))
+                          if self._offload_pool_slots is not None else False,
+            offload_dummy=offload_dummy,
             mm_req_doc_ranges=req_doc_ranges,
         )
 
@@ -4077,6 +4135,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len=max_query_len,
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
+                    offload_dummy=True,
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     dcp_dummy_metadata=dcp_dummy_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -4369,6 +4428,24 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
+        if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_nano:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+            owners = {}
+            for layer in self.compilation_config.static_forward_context.values():
+                impl = getattr(layer, "impl", None)
+                if not isinstance(impl, AscendSFAKVOffloadImpl):
+                    continue
+                shared = impl.topk_indices_buffer
+                if shared is None:
+                    continue
+                key = shared.data_ptr()
+                if impl.skip_topk:
+                    if key not in owners:
+                        raise RuntimeError("nano shared attention precedes its indexer owner")
+                    impl.nano_indexer_owner = owners[key]
+                else:
+                    owners[key] = impl
 
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
@@ -4528,6 +4605,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
+            if self.sparse_kv_offload_config.use_nano:
+                for layer_name in self.sparse_kv_offload_manager.offload_layer_names:
+                    layer = self.compilation_config.static_forward_context[layer_name]
+                    layer.impl.bind_nano_kv_cache(self.sparse_kv_offload_manager, layer_name)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 

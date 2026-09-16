@@ -43,7 +43,7 @@ class AscendRMSNorm(RMSNorm):
 
         # quantization with anti_method m4 will generate none-zero norm bias
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
-        if any("norm.bias" in name for name in quant_description):
+        if any("norm.bias" in name and not name.endswith(".indexer.k_norm.bias") for name in quant_description):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
 

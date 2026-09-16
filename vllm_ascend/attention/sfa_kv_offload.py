@@ -58,6 +58,27 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 _FSA_SELECTION_STATUS_ALIGNMENT = 8
 
 
+def prepare_copy_sfa_queries(query, query_rope):
+    """Prepare contiguous queries for native 8/16/32/64/128-head tiles.
+
+    MLA shares KV across query heads, and softmax is independent per head.
+    Zero-filled extra query heads cannot affect the original heads; callers
+    must return only the original head range from the kernel output.
+    """
+    heads = query.shape[1]
+    if 1 <= heads < 8:
+        padded_query = query.new_zeros((query.shape[0], 8, query.shape[2]))
+        padded_rope = query_rope.new_zeros((query_rope.shape[0], 8, query_rope.shape[2]))
+        padded_query[:, :heads].copy_(query)
+        padded_rope[:, :heads].copy_(query_rope)
+        return padded_query, padded_rope
+    if heads not in (8, 16, 32, 64, 128):
+        raise ValueError(
+            f"Generalized copy-SFA serving requires 1–8, 16, 32, 64 or 128 query heads per rank, got {heads}"
+        )
+    return query.contiguous(), query_rope.contiguous()
+
+
 class _FusedOverlapDecodeCommonInputs(NamedTuple):
     seq_len_thresholds: torch.Tensor
     current_req_ids: torch.Tensor
@@ -106,6 +127,10 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls,
             supports_dcp_with_varlen,
         )
+        cfg = get_ascend_config().sparse_kv_offload_config
+        self.use_nano = cfg.use_nano
+        if self.use_nano:
+            self._init_nano_metadata_buffers(vllm_config, device)
         kv_transfer_config = vllm_config.kv_transfer_config
         self.is_pd_decode_consumer = (
             kv_transfer_config is not None
@@ -113,10 +138,60 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             and not kv_transfer_config.is_kv_producer
         )
 
+    def _init_nano_metadata_buffers(self, vllm_config, device) -> None:
+        cfg = get_ascend_config().sparse_kv_offload_config
+        requests = vllm_config.scheduler_config.max_num_seqs + 2
+        self.nano_pool_capacity = requests
+        # The proposer builds all draft metadata before executing any step.
+        # Keep each step's derived tensors alive at distinct, stable addresses.
+        # build() uses slot 0; build_for_drafting() selects the later slots.
+        speculative_config = vllm_config.speculative_config
+        self.nano_metadata_steps = max(1, speculative_config.num_speculative_tokens if speculative_config else 1)
+        steps = self.nano_metadata_steps
+        self.nano_hot_tokens = cfg.topk_buffer_size
+        self.nano_stride_blocks = cfg.topk_buffer_size // 128 + 2
+        self.nano_rows = torch.arange(requests, dtype=torch.int32, device=device)
+        self.nano_blocks = torch.arange(self.nano_stride_blocks, dtype=torch.int32, device=device)
+        self.nano_parts = torch.arange(2, dtype=torch.int64, device=device)
+        self.nano_vectors = {
+            name: torch.empty((steps, requests), dtype=dtype, device=device)
+            for name, dtype in (
+                ("query_ends", torch.int32),
+                ("seq_lens", torch.int32),
+                ("prefix_lens", torch.int32),
+                ("cache_tokens", torch.int32),
+                ("logical_lens", torch.int32),
+                ("pool_entries", torch.int32),
+                ("generations", torch.int64),
+                ("active", torch.bool),
+            )
+        }
+        self.nano_hbm_block_table = torch.empty(
+            (steps, requests, self.nano_stride_blocks), dtype=torch.int32, device=device
+        )
+        source_blocks = cdiv(vllm_config.model_config.max_model_len, 128)
+        self.nano_source_block_table = torch.empty((steps, requests, source_blocks), dtype=torch.int32, device=device)
+        tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.nano_token_positions = torch.arange(tokens, dtype=torch.int64, device=device)
+        self.nano_device_slots = torch.empty((steps, tokens), dtype=torch.int64, device=device)
+        self.nano_token_active = torch.empty((steps, tokens), dtype=torch.bool, device=device)
+        self.nano_tail_src = torch.empty((steps, requests, 2), dtype=torch.int64, device=device)
+        self.nano_tail_dst = torch.empty_like(self.nano_tail_src)
+        self.nano_tail_lengths = torch.empty((steps, requests, 2), dtype=torch.int32, device=device)
+        hf_config = vllm_config.model_config.hf_text_config
+        self.nano_token_bytes = torch.tensor(
+            [hf_config.kv_lora_rank * 2, hf_config.qk_rope_head_dim * 2], dtype=torch.int64, device=device
+        ).view(2, 1, 1)
+        self.nano_copy_src_offsets = torch.empty((steps, requests * 4), dtype=torch.int64, device=device)
+        self.nano_copy_dst_offsets = torch.empty_like(self.nano_copy_src_offsets)
+        self.nano_copy_lengths = torch.empty((steps, requests * 4), dtype=torch.int32, device=device)
+        self.nano_copy_count = torch.empty((steps, 1), dtype=torch.int32, device=device)
+
     def _populate_offload_metadata(
         self,
         metadata: AscendSFAMetadata,
         common_attn_metadata: AscendCommonAttentionMetadata,
+        draft_index: int = 0,
     ) -> AscendSFAMetadata:
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
@@ -133,6 +208,131 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.num_decode_tokens = num_decode_tokens
         metadata.req_ids_tensor = common_attn_metadata.req_ids_tensor
         metadata.token_to_req = common_attn_metadata.token_to_req
+        metadata.nano_enabled = (
+            self.use_nano
+            and common_attn_metadata.nano_eligible
+            and (num_prefills == 0 or common_attn_metadata.offload_dummy)
+            and 1 <= common_attn_metadata.max_query_len <= 7
+        )
+        if metadata.nano_enabled:
+            # Include graph padding in the operator batch. These addresses
+            # remain fixed from capture through replay; only device contents
+            # change. Real rows are identified by allocation generation, not
+            # by a Python branch evaluated while capturing.
+            count = common_attn_metadata.num_reqs
+            ends = common_attn_metadata.query_start_loc[1 : count + 1]
+            starts = common_attn_metadata.query_start_loc[:count]
+            widths = ends - starts
+            generations = common_attn_metadata.req_topk_buffer_generations
+            pools = common_attn_metadata.req_topk_buffer_slots
+            if generations is None or pools is None:
+                raise RuntimeError("nano offload requires runner-owned request slots and generations")
+            active = (generations[:count] >= 0) & (widths > 0)
+            # State -3 runs ordinary causal LI on just Q harmless keys for
+            # padding. S=Q makes the kernel write a complete safe TopK output;
+            # S=0 would skip LI and could leave selections from an earlier
+            # active replay in these shared output rows.
+            seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
+            prefix = torch.div((seq_lens - widths).clamp_min(0), 128, rounding_mode="floor") * 128
+            cache = torch.where(active, prefix.clamp_max(self.nano_hot_tokens), 2048)
+            safe_pools = torch.where(active, pools[:count], self.nano_rows[:count] + self.nano_pool_capacity)
+            logical = torch.where(active, cache + seq_lens - prefix, cache)
+            for name, value in (
+                ("query_ends", ends),
+                ("seq_lens", seq_lens),
+                ("prefix_lens", prefix),
+                ("cache_tokens", cache),
+                ("logical_lens", logical),
+                ("pool_entries", safe_pools),
+                ("generations", generations[:count]),
+                ("active", active),
+            ):
+                buffer = self.nano_vectors[name][draft_index, :count]
+                buffer.copy_(value)
+                setattr(metadata, "nano_" + name, buffer)
+            cache_blocks = cache[:, None] // 128
+            blocks = self.nano_blocks[None, :]
+            physical = safe_pools[:, None] * self.nano_stride_blocks
+            hbm_table = physical + torch.where(
+                blocks < cache_blocks,
+                blocks,
+                self.nano_stride_blocks - 2 + (prefix[:, None] // 128 + blocks - cache_blocks) % 2,
+            )
+            self.nano_hbm_block_table[draft_index, :count].copy_(hbm_table)
+            metadata.nano_hbm_block_table = self.nano_hbm_block_table[draft_index, :count]
+            # Main and indexer caches may have different block tables. Only
+            # main-KV addresses belong here; LIM receives the indexer's own.
+            source = common_attn_metadata.block_table_tensor[:count]
+            if self.nano_source_block_table.shape[2] != source.shape[1]:
+                # Block-table width is fixed by cache initialization. Allocate
+                # once before capture if scheduler padding added a column.
+                self.nano_source_block_table = torch.empty(
+                    (self.nano_metadata_steps, self.nano_pool_capacity, source.shape[1]),
+                    dtype=source.dtype,
+                    device=source.device,
+                )
+            self.nano_source_block_table[draft_index, :count].copy_(source)
+            metadata.nano_source_block_table = self.nano_source_block_table[draft_index, :count]
+            tail_blocks = prefix[:, None].to(torch.int64) // 128 + self.nano_parts
+            source_ids = source.gather(1, tail_blocks.clamp(0, source.shape[1] - 1)).to(torch.int64)
+            # Restore previously computed KV only. Every TP rank scatters
+            # its current query KV directly into its local tails, so it never
+            # races a read of another TP rank's current-token D2H write.
+            lengths = (seq_lens[:, None] - widths[:, None] - prefix[:, None] - self.nano_parts * 128).clamp(0, 128)
+            lengths = torch.where(active[:, None] & (tail_blocks < source.shape[1]) & (source_ids >= 0), lengths, 0)
+            self.nano_tail_src[draft_index, :count].copy_(source_ids.clamp_min(0) * 128)
+            self.nano_tail_dst[draft_index, :count].copy_(
+                safe_pools[:, None].to(torch.int64) * self.nano_stride_blocks * 128
+                + self.nano_hot_tokens
+                + tail_blocks % 2 * 128
+            )
+            self.nano_tail_lengths[draft_index, :count].copy_(lengths)
+            metadata.nano_tail_src = self.nano_tail_src[draft_index, :count]
+            metadata.nano_tail_dst = self.nano_tail_dst[draft_index, :count]
+            metadata.nano_tail_lengths = self.nano_tail_lengths[draft_index, :count]
+            descriptor_count = count * 4
+            self.nano_copy_src_offsets[draft_index, :descriptor_count].copy_(
+                (metadata.nano_tail_src[None] * self.nano_token_bytes).reshape(-1)
+            )
+            self.nano_copy_dst_offsets[draft_index, :descriptor_count].copy_(
+                (metadata.nano_tail_dst[None] * self.nano_token_bytes).reshape(-1)
+            )
+            self.nano_copy_lengths[draft_index, :descriptor_count].copy_(
+                (metadata.nano_tail_lengths[None] * self.nano_token_bytes).reshape(-1)
+            )
+            self.nano_copy_count[draft_index].fill_(descriptor_count)
+            metadata.nano_copy_src_offsets = self.nano_copy_src_offsets[draft_index, :descriptor_count]
+            metadata.nano_copy_dst_offsets = self.nano_copy_dst_offsets[draft_index, :descriptor_count]
+            metadata.nano_copy_lengths = self.nano_copy_lengths[draft_index, :descriptor_count]
+            metadata.nano_copy_count = self.nano_copy_count[draft_index]
+            tokens = common_attn_metadata.num_input_tokens
+            positions = self.nano_token_positions[:tokens]
+            token_rows = torch.searchsorted(ends.contiguous(), positions.to(torch.int32), right=True).clamp_max(
+                count - 1
+            )
+            token_active = active[token_rows] & (positions < ends[-1])
+            logical_positions = seq_lens[token_rows] - widths[token_rows] + positions - starts[token_rows]
+            # SP token padding in an eager draft can extend beyond the
+            # final query end without adding a request row. It also needs a
+            # private destination, never the final real request's tail.
+            token_pools = torch.where(token_active, safe_pools[token_rows], self.nano_pool_capacity + token_rows)
+            device_slots = token_pools.to(torch.int64) * self.nano_stride_blocks * 128
+            device_slots = device_slots + self.nano_hot_tokens + logical_positions % 256
+            self.nano_device_slots[draft_index, :tokens].copy_(device_slots)
+            self.nano_token_active[draft_index, :tokens].copy_(token_active)
+            metadata.nano_device_slots = self.nano_device_slots[draft_index, :tokens]
+            metadata.nano_token_active = self.nano_token_active[draft_index, :tokens]
+            metadata.num_prefills = 0
+            metadata.num_decodes = count
+            # Query boundaries already have an exact CPU mirror. Only
+            # query-row count is read here, never a device/CPU sequence length.
+            # Eager SP padding may be wider than the actual packed query batch.
+            metadata.num_decode_tokens = int(common_attn_metadata.query_start_loc_cpu[count])
+            metadata.attn_state = (
+                AscendAttentionState.SpecDecoding
+                if common_attn_metadata.max_query_len > 1
+                else AscendAttentionState.DecodeOnly
+            )
         return metadata
 
     def build(
@@ -156,7 +356,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             draft_index,
             **kwargs,
         )
-        return self._populate_offload_metadata(metadata, common_attn_metadata)
+        return self._populate_offload_metadata(metadata, common_attn_metadata, draft_index)
 
 
 class AscendSFAKVOffloadImpl(AscendSFAImpl):
@@ -201,6 +401,46 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self.block_size = self.vllm_config.cache_config.block_size
         offload_cfg = get_ascend_config().sparse_kv_offload_config
         self.use_fused_overlap = offload_cfg.use_fused_overlap
+        self.use_nano = offload_cfg.use_nano
+        self.nano_indexer_owner = self
+        self._nano_metadata = None
+        if self.use_nano:
+            if self.enable_sparse_li_c8:
+                raise NotImplementedError("MTP C8 LIM is built but nano C8 serving is not enabled yet")
+            requests = self.vllm_config.scheduler_config.max_num_seqs + 2
+            tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            device = torch.device("npu")
+            self.nano_states = torch.full((requests,), -3, dtype=torch.int32, device=device)
+            self.nano_last_generation = torch.full((requests * 2,), -1, dtype=torch.int64, device=device)
+            self.nano_last_prefix = torch.zeros(requests * 2, dtype=torch.int32, device=device)
+            self.nano_last_cache = torch.zeros_like(self.nano_last_prefix)
+            if not self.skip_topk:
+                source_capacity = cdiv(self.vllm_config.model_config.max_model_len, 128) * 128
+                self.nano_slot_map = torch.full(
+                    (requests * 2, source_capacity), -(1 << 31), dtype=torch.int32, device=device
+                )
+                width = 1 + (
+                    self.vllm_config.speculative_config.num_speculative_tokens
+                    if self.vllm_config.speculative_config
+                    else 0
+                )
+                output_tokens = min(tokens, requests * width + self.vllm_config.parallel_config.tensor_parallel_size)
+                self.nano_topk_src = torch.zeros((output_tokens, 1, 2048), dtype=torch.int32, device=device)
+                self.nano_topk_dst = torch.zeros_like(self.nano_topk_src)
+                self.nano_topk_misses = torch.zeros(output_tokens, dtype=torch.int32, device=device)
+                self.nano_miss_src = torch.empty((requests, 32768), dtype=torch.int32, device=device)
+                self.nano_miss_dst = torch.empty_like(self.nano_miss_src)
+                self.nano_misses = torch.zeros(requests, dtype=torch.int32, device=device)
+                self.nano_reuse_cache_tokens = torch.empty(requests, dtype=torch.int32, device=device)
+                self.nano_reuse_slots = torch.arange(2048, dtype=torch.int32, device=device)
+                self.nano_query_scale = None
+                self.nano_key_scale = None
+            # Descriptor storage belongs to the attention implementation;
+            # per-step source/destination geometry is supplied by metadata.
+            self.nano_copy_src = torch.empty(requests * 4, dtype=torch.int64, device=device)
+            self.nano_copy_dst = torch.empty_like(self.nano_copy_src)
+            self.nano_host_bases = None
+            self.nano_device_bases = None
         self.lru_resident_capacity = offload_cfg.topk_buffer_size
         self.sfa_sparse_topk = offload_cfg.topk
 
@@ -242,13 +482,17 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         buffer_v = manager.topk_buffers_v[layer_id]
         pages_per_row = manager.topk_buffer_size // manager.block_size
         resident_pages = rows * pages_per_row
-        resident_k = buffer_k[:rows].view(
+        resident_k = buffer_k.reshape(-1, buffer_k.shape[-2], buffer_k.shape[-1])[
+            : rows * manager.topk_buffer_size
+        ].view(
             resident_pages,
             manager.block_size,
             buffer_k.shape[-2],
             buffer_k.shape[-1],
         )
-        resident_v = buffer_v[:rows].view(
+        resident_v = buffer_v.reshape(-1, buffer_v.shape[-2], buffer_v.shape[-1])[
+            : rows * manager.topk_buffer_size
+        ].view(
             resident_pages,
             manager.block_size,
             buffer_v.shape[-2],
@@ -312,10 +556,230 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._current_layer_name = layer_name
+        self._nano_metadata = attn_metadata
+        if self.use_nano and attn_metadata is not None and not attn_metadata.nano_enabled:
+            # The fallback arena overlaps persistent nano rows. Force a cold
+            # fill after prefill/mixed/fallback execution, including owners
+            # whose source-to-slot maps otherwise still look valid.
+            self.nano_last_generation.fill_(-1)
         try:
             return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
         finally:
             self._current_layer_name = None
+            self._nano_metadata = None
+
+    def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
+        indexer_metadata.topk_selector = (
+            self._nano_select if attn_metadata.nano_enabled and not self.skip_topk else None
+        )
+        if attn_metadata.nano_enabled:
+            # Mask cache writes for every inactive graph/dummy query. This
+            # operation is captured and uses the replay's active-row tensor.
+            slots = indexer_metadata.slot_mapping
+            active = attn_metadata.nano_token_active[: slots.numel()]
+            indexer_metadata.slot_mapping = torch.where(active, slots, -1)
+
+    def _prepare_nano_lim_state(self, metadata) -> None:
+        count = metadata.nano_pool_entries.numel()
+        pools = metadata.nano_pool_entries.to(torch.int64)
+        generations = metadata.nano_generations
+        prefix = metadata.nano_prefix_lens
+        cache = metadata.nano_cache_tokens
+        ready = (
+            (self.nano_last_generation[pools] == generations)
+            & (self.nano_last_cache[pools] == cache)
+            & (self.nano_last_prefix[pools] <= prefix)
+        )
+        self.nano_states[:count].copy_(torch.where(metadata.nano_active, torch.where(ready, -1, -2), -3))
+        self.nano_last_generation.scatter_(0, pools, generations)
+        self.nano_last_prefix.scatter_(0, pools, prefix)
+        self.nano_last_cache.scatter_(0, pools, cache)
+
+    def _nano_select(self, query, weights, indexer, indexer_metadata):
+        metadata = self._nano_metadata
+        count = metadata.nano_pool_entries.numel()
+        tokens = metadata.num_decode_tokens
+        self._prepare_nano_lim_state(metadata)
+        prefix = metadata.nano_prefix_lens
+        cache = metadata.nano_cache_tokens
+        index_cache = indexer.k_cache.kv_cache[0].view(-1, 128, 1, 128)
+        table = indexer_metadata.block_table[:count].contiguous()
+        if table.shape[1] * 128 != self.nano_slot_map.shape[1]:
+            # The scheduler may pad its logical block-table width. This is
+            # fixed after initialization, before any graph capture.
+            if torch.npu.is_current_stream_capturing():
+                raise RuntimeError("nano indexer block-table layout must be initialized before graph capture")
+            self.nano_slot_map = torch.full(
+                (self.nano_slot_map.shape[0], table.shape[1] * 128), -(1 << 31), dtype=torch.int32, device=query.device
+            )
+            self.nano_last_generation.fill_(-1)
+            self.nano_states[:count].copy_(torch.where(metadata.nano_active, -2, -3))
+        if self.nano_key_scale is None:
+            self.nano_key_scale = torch.empty(index_cache.shape[:3], dtype=torch.float32, device=query.device)
+            self.nano_query_scale = torch.empty(
+                (self.nano_topk_src.shape[0], query.shape[1]), dtype=torch.float32, device=query.device
+            )
+        torch.ops._C_ascend.npu_fused_li_manage_mtp(
+            weights[:tokens].contiguous(),
+            self.nano_query_scale[:tokens],
+            query[:tokens].contiguous(),
+            self.nano_key_scale,
+            index_cache,
+            table,
+            metadata.nano_query_ends,
+            metadata.nano_seq_lens,
+            prefix,
+            cache,
+            self.nano_states[:count],
+            metadata.nano_pool_entries,
+            self.nano_slot_map,
+            self.nano_topk_src[:tokens],
+            self.nano_topk_dst[:tokens],
+            self.nano_topk_misses[:tokens],
+            self.nano_miss_src[:count],
+            self.nano_miss_dst[:count],
+            self.nano_misses[:count],
+        )
+        return self.nano_topk_src[:tokens]
+
+    def bind_nano_kv_cache(self, manager, layer_name) -> None:
+        """Bind immutable layer addresses after cache registration, before capture."""
+        layer_id = manager._get_offload_layer_id(layer_name)
+        device = manager.topk_buffers_k[layer_id].device
+        self.nano_host_bases = torch.tensor(
+            [manager.k_caches_cpu[layer_id].data_ptr(), manager.v_caches_cpu[layer_id].data_ptr()],
+            dtype=torch.int64,
+            device=device,
+        ).view(2, 1)
+        self.nano_device_bases = torch.tensor(
+            [manager.topk_buffers_k[layer_id].data_ptr(), manager.topk_buffers_v[layer_id].data_ptr()],
+            dtype=torch.int64,
+            device=device,
+        ).view(2, 1)
+
+    def _nano_restore_tail(self, metadata, manager, layer_name):
+        # Byte offsets and lengths are common to every layer and are already
+        # prepared by the metadata builder. Only these two base-address adds
+        # remain per layer; there is no per-layer mask/cast/length preparation.
+        if self.nano_host_bases is None:
+            raise RuntimeError("nano KV base addresses must be bound before graph capture")
+        count = metadata.nano_copy_src_offsets.numel()
+        torch.add(
+            metadata.nano_copy_src_offsets.view(2, -1), self.nano_host_bases, out=self.nano_copy_src[:count].view(2, -1)
+        )
+        torch.add(
+            metadata.nano_copy_dst_offsets.view(2, -1),
+            self.nano_device_bases,
+            out=self.nano_copy_dst[:count].view(2, -1),
+        )
+        manager.copy_nano_kv(
+            self.nano_copy_src[:count], self.nano_copy_dst[:count], metadata.nano_copy_lengths, metadata.nano_copy_count
+        )
+
+    def _prepare_nano_reused_topk(self, topk_indices, metadata):
+        """Resolve the proposer's compacted MTP indices without running LIM.
+
+        Later draft steps attend to the exact saved selection, as in regular
+        SFA. In particular, they must not append a newly advanced dense tail.
+        Usually every source is already resident from draft zero. A prefill
+        first step (or an invalidated arena) instead fills a compact TopK
+        cache once; subsequent drafts reuse it. Its source-to-slot map stays
+        coherent so the next LIM invocation can safely reuse or resize it.
+        """
+        count = metadata.nano_pool_entries.numel()
+        if metadata.num_decode_tokens != count:
+            raise RuntimeError("MTP index reuse requires one query per request")
+        topk = self.nano_reuse_slots.numel()
+        pools = metadata.nano_pool_entries.to(torch.int64)
+        sources = topk_indices[:count].reshape(count, topk).to(torch.int32)
+        source_capacity = self.nano_slot_map.shape[1]
+        valid = (
+            metadata.nano_active[:, None]
+            & (sources >= 0)
+            & (sources < metadata.nano_seq_lens[:, None])
+            & (sources < source_capacity)
+        )
+        source_ids = torch.where(valid, sources, 0).to(torch.int64)
+        mapping = self.nano_slot_map[pools]
+        cached_slots = mapping.gather(1, source_ids)
+        cached_count = self.nano_last_cache[pools]
+        ready = (self.nano_last_generation[pools] == metadata.nano_generations) & (cached_count >= topk)
+        hits = (cached_slots >= 0) & (cached_slots < cached_count[:, None])
+        cold = metadata.nano_active & ~(ready & (hits | ~valid).all(dim=1))
+        slots = torch.where(cold[:, None], self.nano_reuse_slots[None], cached_slots)
+        cache = torch.where(metadata.nano_active & ~cold, cached_count, topk)
+        self.nano_reuse_cache_tokens[:count].copy_(cache)
+        self.nano_topk_src[:count, 0].copy_(torch.where(valid, sources, -1))
+        self.nano_topk_dst[:count, 0].copy_(torch.where(valid, slots, -1))
+        misses = torch.where(cold, topk, 0)
+        self.nano_topk_misses[:count].copy_(misses)
+        self.nano_misses[:count].copy_(misses)
+        # FirstFillScatterCopy requires non-negative entries. Invalid TopK
+        # padding copies a harmless source to an unused slot, then attention
+        # ignores that slot through its -1 sparse index. Inactive rows copy 0.
+        self.nano_miss_src[:count, :topk].copy_(source_ids)
+        self.nano_miss_dst[:count, :topk].copy_(self.nano_reuse_slots[None])
+        invalid_slot = -(1 << 31)
+        mapping = torch.where(cold[:, None], invalid_slot, mapping)
+        # Padded indices use source zero. Restore its deterministic value
+        # after scatter so duplicate padding cannot overwrite a real entry.
+        # scatter_reduce falls back to CPU on some supported torch_npu builds.
+        zero_slot = torch.maximum(mapping[:, 0], torch.where(valid & (sources == 0), slots, invalid_slot).amax(dim=1))
+        mapping.scatter_(1, source_ids, torch.where(valid, slots, invalid_slot))
+        mapping[:, 0].copy_(zero_slot)
+        self.nano_slot_map.index_copy_(0, pools, mapping)
+        self.nano_last_generation.scatter_(0, pools, metadata.nano_generations)
+        self.nano_last_cache.scatter_(0, pools, cache)
+        self.nano_last_prefix.scatter_(0, pools, metadata.nano_prefix_lens)
+        return self.nano_reuse_cache_tokens[:count]
+
+    def _nano_attention(self, query, query_rope, topk_indices, metadata, manager, layer_name):
+        tokens = metadata.num_decode_tokens
+        count = metadata.nano_pool_entries.numel()
+        owner = self.nano_indexer_owner
+        reuse_indices = self.skip_topk and owner is self
+        if reuse_indices and not self.has_indexer:
+            raise RuntimeError("nano shared indexer owner was not bound during model initialization")
+        layer_id = manager._get_offload_layer_id(layer_name)
+        hbm_k = manager.topk_buffers_k[layer_id].view(-1, 128, 1, self.kv_lora_rank)
+        hbm_v = manager.topk_buffers_v[layer_id].view(-1, 128, 1, self.qk_rope_head_dim)
+        host_k = manager.k_caches_cpu[layer_id].view(-1, 128, self.kv_lora_rank)
+        host_v = manager.v_caches_cpu[layer_id].view(-1, 128, self.qk_rope_head_dim)
+        if reuse_indices:
+            # The existing proposer already compacted the model's TopK
+            # buffer to one sampled row per request. Reconstruct destinations
+            # from those logical IDs, never from stale draft-zero row order.
+            cache_tokens = self._prepare_nano_reused_topk(topk_indices, metadata)
+            logical_lens = cache_tokens  # exact saved selection; no extra tail
+        else:
+            self._nano_restore_tail(metadata, manager, layer_name)
+            cache_tokens = metadata.nano_cache_tokens
+            logical_lens = metadata.nano_logical_lens
+        heads = query.shape[1]
+        q, qr = prepare_copy_sfa_queries(query[:tokens], query_rope[:tokens])
+        out = torch.empty_like(q)
+        torch.ops._C_ascend.npu_fused_copy_sfa_mtp(
+            qr,
+            q,
+            metadata.nano_query_ends,
+            logical_lens,
+            cache_tokens,
+            owner.nano_topk_dst[:tokens],
+            owner.nano_topk_src[:tokens],
+            owner.nano_topk_misses[:tokens],
+            owner.nano_miss_src[:count],
+            owner.nano_miss_dst[:count],
+            owner.nano_misses[:count],
+            metadata.nano_hbm_block_table,
+            metadata.nano_source_block_table,
+            hbm_v,
+            hbm_k,
+            host_v,
+            host_k,
+            float(self.scale),
+            out,
+        )
+        return torch.where(metadata.nano_token_active[:tokens, None, None], out[:, :heads], 0).contiguous()
 
     def _compute_kv_only(
         self,
@@ -357,6 +821,16 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
             k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
+            if attn_metadata.nano_enabled:
+                layer_id = manager._get_offload_layer_id(layer_name)
+                device_slots = attn_metadata.nano_device_slots
+                for cache_tensor, value in (
+                    (manager.topk_buffers_k[layer_id], k_nope),
+                    (manager.topk_buffers_v[layer_id], k_pe),
+                ):
+                    rows = cache_tensor.view(-1, cache_tensor.shape[-1])
+                    rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
+                slots = torch.where(attn_metadata.nano_token_active[: slots.numel()], slots, -1)
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,
@@ -1014,6 +1488,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         num_prefills = int(getattr(attn_metadata, "num_prefills", 0) or 0)
         manager = get_sparse_kv_offload_manager()
         layer_name = self._offload_layer_name()
+
+        if attn_metadata.nano_enabled:
+            result = self._nano_attention(ql_nope, q_pe, topk_indices, attn_metadata, manager, layer_name)
+            return self._pad_to_input_tokens(result, ql_nope.shape[0])
 
         if num_decode_tokens == 0:
             # Pure prefill batch (colocate debug only).
