@@ -24,23 +24,23 @@
 #if __has_include("../../common/op_kernel/offset_calculator.h")
 #include "../../common/op_kernel/offset_calculator.h"
 #else
-#include "../common/offset_calculator.h"
+#include "../../../common/op_kernel/offset_calculator.h"
 #endif
 
 #if __has_include("../../common/op_kernel/matmul.h")
 #include "../../common/op_kernel/matmul.h"
 #else
-#include "../common/matmul.h"
+#include "../../../common/op_kernel/matmul.h"
 #endif
 #if __has_include("../../common/op_kernel/CopyInL1.h")
 #include "../../common/op_kernel/CopyInL1.h"
 #else
-#include "../common/CopyInL1.h"
+#include "../../../common/op_kernel/CopyInL1.h"
 #endif
 #if __has_include("../../common/op_kernel/FixpipeOut.h")
 #include "../../common/op_kernel/FixpipeOut.h"
 #else
-#include "../common/FixpipeOut.h"
+#include "../../../common/op_kernel/FixpipeOut.h"
 #endif
 
 using namespace AscendC;
@@ -183,11 +183,11 @@ QSFAMatmulService<TEMPLATE_ARGS>::InitGmTensor(__gm__ uint8_t *qsfaActualSeqLeng
 {
     if constexpr (LAYOUT_T == QSFA_LAYOUT::BSND) {
         this->queryGm.offsetCalculator.Init(constInfo.bSize, constInfo.n2Size, constInfo.gSize,
-            constInfo.s1Size, constInfo.dSize);
+            constInfo.s1Size, QueryInputDim(constInfo));
     } else {  // QSFA_LAYOUT::TND
         GlobalTensor<int32_t> actualSeqQLen;
         actualSeqQLen.SetGlobalBuffer((__gm__ int32_t *)qsfaActualSeqLengthsQ);
-        this->queryGm.offsetCalculator.Init(constInfo.n2Size, constInfo.gSize, constInfo.dSize,
+        this->queryGm.offsetCalculator.Init(constInfo.n2Size, constInfo.gSize, QueryInputDim(constInfo),
             actualSeqQLen, constInfo.actualSeqLenSize);
     }
 }
@@ -291,7 +291,19 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void QSFAMatmulService<TEMPLATE_ARGS>
         LocalTensor<Q_T> inputLeftTensor = inputLeftBuf.GetTensor<Q_T>();
         uint64_t gmOffset = this->queryGm.offsetCalculator.GetOffset(runInfo.boIdx, runInfo.n2oIdx, runInfo.goIdx,
             coordInfo[runInfo.taskIdMod3].s1Coord, 0);
-        CopyToL1Nd2Nz<Q_T>(inputLeftTensor, this->queryGm.gmTensor[gmOffset], runInfo.mRealSize, constInfo.dSize,
+        const uint32_t inputDim = QueryInputDim(constInfo);
+        if (inputDim == QSFA_NOPE_DIM) {
+            // Refresh the entire NZ buffer on reuse, including absent RoPE lanes.
+            auto zeroTensor = inputLeftTensor.template ReinterpretCast<half>();
+            InitConstValueParams<half> zeroParams;
+            zeroParams.repeatTimes = 1;
+            zeroParams.blockNum = Align16Func(runInfo.mRealSize) * constInfo.dSize * sizeof(Q_T) / BLOCK_BYTE;
+            zeroParams.dstGap = 0;
+            zeroParams.initValue = static_cast<half>(0);
+            InitConstValue(zeroTensor, zeroParams);
+            PipeBarrier<PIPE_MTE2>();
+        }
+        CopyToL1Nd2Nz<Q_T>(inputLeftTensor, this->queryGm.gmTensor[gmOffset], runInfo.mRealSize, inputDim,
             constInfo.mm1Ka);
 
         inputLeftBuf.Set<HardEvent::MTE2_MTE1>(); // 通知
