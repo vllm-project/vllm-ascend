@@ -61,6 +61,11 @@ class BlockTable:
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
+        # Compressor-tail groups keep only a fixed per-request ring of
+        # persistent state blocks. Like mamba groups they have no per-token
+        # slot mapping: the compressor operator addresses the ring by
+        # absolute position modulo ring size inside its own kernel.
+        self.is_compressor_tail_group = is_compressor_tail_group
         self.is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
@@ -435,7 +440,7 @@ class MultiGroupBlockTable:
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
+            if block_table.is_mamba_group or block_table.is_compressor_tail_group:
                 continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
@@ -450,7 +455,7 @@ class MultiGroupBlockTable:
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
+            if block_table.is_mamba_group or block_table.is_compressor_tail_group:
                 continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
