@@ -699,7 +699,6 @@ class DeepseekV41SWAAttention(nn.Module):
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
             need_gather_q_kv=need_gather_q_kv,
-            apply_q_head_norm=False,
         )
 
 

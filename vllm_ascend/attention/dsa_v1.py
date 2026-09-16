@@ -1532,7 +1532,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.wkv = kwargs["wkv"]
         self.q_norm = kwargs["q_norm"]
         self.q_norm_without_weight = kwargs["q_norm_without_weight"]
-        self.apply_q_head_norm = kwargs.get("apply_q_head_norm", True)
         self.kv_norm = kwargs["kv_norm"]
 
         # CV wrapper: split wq_a/wkv/wq_b into quantize(Vector) + matmul(Cube)
@@ -1849,8 +1848,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             qr = self.q_norm(q_a)
             q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
             qr_pertoken_scale = None
-        if self.apply_q_head_norm:
-            q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
+        q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
@@ -2024,8 +2022,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 e_tail_overlap_done = torch.npu.current_stream().record_event()
             tail_overlap_output = overlap_result, e_tail_overlap_done
 
-        if self.apply_q_head_norm:
-            q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
+        q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
