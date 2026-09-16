@@ -2489,15 +2489,6 @@ class NPUModelRunner(GPUModelRunner):
             self.model_config.is_encoder_decoder
             or self.model_config.requires_raw_input_tokens
         )
-        # V4.1's Python reference compressor/indexer path is correctness-safe
-        # in eager mode, while only uniform decode is prepared for a full ACL
-        # graph. FULL_DECODE_ONLY dispatches prefills and unsupported decode
-        # shapes as runtime NONE; bypass the compiled model for those calls so
-        # the mode is genuinely "eager prefill + full-graph decode".
-        from vllm_ascend.config_utils import is_deepseek_v41
-
-        v41_eager_fallback = is_deepseek_v41(self.model_config.hf_config) and cudagraph_mode == CUDAGraphMode.NONE
-
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
@@ -2515,7 +2506,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
-                skip_compiled=has_encoder_input or v41_eager_fallback,
+                skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
