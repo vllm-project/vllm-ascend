@@ -10,7 +10,6 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
-  DYNAMIC_EPLB: true
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -29,6 +28,9 @@ deployment:
         --tensor-parallel-size 8
         --seed 1024
         --enable-expert-parallel
+        --enable-eplb
+        --eplb-config
+        '{"window_size": 50, "step_interval": 5, "use_async": false}'
         --max-num-seqs 16
         --max-model-len 8192
         --max-num-batched-tokens 8192
@@ -51,8 +53,6 @@ deployment:
                   }
             }
         }'
-        --additional-config
-        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5}}'
 
   -
     envs:
@@ -70,6 +70,9 @@ deployment:
         --max-model-len 8192
         --max-num-batched-tokens 8192
         --enable-expert-parallel
+        --enable-eplb
+        --eplb-config
+        '{"window_size": 600, "step_interval": 50, "use_async": false}'
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
@@ -88,6 +91,4 @@ deployment:
                   }
             }
         }'
-        --additional-config
-        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":600,"algorithm_execution_interval":50}}'
 benchmarks:
