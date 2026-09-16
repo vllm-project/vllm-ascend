@@ -119,37 +119,25 @@ class RejectionSampler310V2(RejectionSampler):
 
         num_reqs = input_batch.num_reqs
         cu_num_logits_np = input_batch.cu_num_logits_np
-        num_draft_tokens = (
-            cu_num_logits_np[1 : num_reqs + 1]
-            - cu_num_logits_np[:num_reqs]
-            - 1
-        ).tolist()
+        num_draft_tokens = (cu_num_logits_np[1 : num_reqs + 1] - cu_num_logits_np[:num_reqs] - 1).tolist()
         cu_num_logits = input_batch.cu_num_logits[: num_reqs + 1]
         draft_counts = cu_num_logits[1:] - cu_num_logits[:-1] - 1
-        cu_num_draft_tokens = cu_num_logits[1:] - torch.arange(
-            1, num_reqs + 1, dtype=torch.int32, device=logits.device
-        )
+        cu_num_draft_tokens = cu_num_logits[1:] - torch.arange(1, num_reqs + 1, dtype=torch.int32, device=logits.device)
 
         if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1:
             # MTP1: every request contributes one target row and one draft row.
             target_rows = cu_num_logits[:-1].to(torch.int64)
         else:
             # Variable/MTP2+: remove one interleaved bonus row per request.
-            token_req_ids = torch.repeat_interleave(
-                torch.arange(num_reqs, device=logits.device), draft_counts
-            )
-            target_rows = torch.arange(
-                int(sum(num_draft_tokens)), device=logits.device
-            ) + token_req_ids
+            token_req_ids = torch.repeat_interleave(torch.arange(num_reqs, device=logits.device), draft_counts)
+            target_rows = torch.arange(int(sum(num_draft_tokens)), device=logits.device) + token_req_ids
         draft_rows = target_rows + 1
         bonus_rows = (cu_num_logits[1:] - 1).to(torch.int64)
 
         sampled_inputs = input_batch.input_ids[input_batch.logits_indices]
         draft_token_ids = sampled_inputs.index_select(0, draft_rows)
         target_logits = logits.index_select(0, target_rows)
-        bonus_token_ids = logits.index_select(0, bonus_rows).argmax(
-            dim=-1
-        ).to(torch.int32).view(-1, 1)
+        bonus_token_ids = logits.index_select(0, bonus_rows).argmax(dim=-1).to(torch.int32).view(-1, 1)
 
         target_argmax = target_logits.argmax(dim=-1).to(torch.int32)
         sampled = torch.full(
@@ -178,9 +166,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         num_sampled = (sampled != -1).sum(dim=1).to(torch.int32)
         num_logits = cu_num_logits[1:] - cu_num_logits[:-1]
-        is_chunked_prefill = torch.from_numpy(
-            input_batch.seq_lens_np[:num_reqs] < input_batch.prefill_len_np
-        ).to(device=self.device, non_blocking=True)
+        is_chunked_prefill = torch.from_numpy(input_batch.seq_lens_np[:num_reqs] < input_batch.prefill_len_np).to(
+            device=self.device, non_blocking=True
+        )
         num_sampled = torch.where(is_chunked_prefill, 0, num_sampled)
         num_rejected = torch.where(
             is_chunked_prefill,

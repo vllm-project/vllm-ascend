@@ -193,17 +193,13 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
             # v0.28.0: one copy-function tuple shared by every Mamba group.
             group_ids, mamba_spec = mamba_groups
             copy_funcs = self.model.get_mamba_state_copy_func()
-            self._mamba_copy_funcs_by_group = {
-                group_id: copy_funcs for group_id in group_ids
-            }
+            self._mamba_copy_funcs_by_group = {group_id: copy_funcs for group_id in group_ids}
             self._mamba_group_ids = group_ids
             self._mamba_spec = mamba_spec
             return
 
         # Verified vLLM main: Mamba specs may use different state layouts.
-        copy_funcs_by_type = self.model.get_mamba_state_copy_funcs(
-            {spec.mamba_type for spec in mamba_groups}
-        )
+        copy_funcs_by_type = self.model.get_mamba_state_copy_funcs({spec.mamba_type for spec in mamba_groups})
         self._mamba_copy_funcs_by_group = {
             group_id: copy_funcs_by_type[spec.mamba_type]
             for spec, group_ids in mamba_groups.items()
@@ -230,9 +226,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
             for layer_name in group.layer_names:
                 attention = forward_context[layer_name]
                 states: list[torch.Tensor] = attention.kv_cache
-                for state, copy_func in zip(
-                    states, self._mamba_copy_funcs_by_group[group_id]
-                ):
+                for state, copy_func in zip(states, self._mamba_copy_funcs_by_group[group_id]):
                     if "conv" in copy_func.__name__:
                         src = state[src_block]
                         dst = state[dst_block]

@@ -683,9 +683,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Main derives this field from KVCacheConfig.has_mamba_layers, which is
         # broader than the 310P requirement. Filter at the actual consumer
         # before GPUModelRunner.update_requests invokes the zeroer.
-        if scheduler_output.new_block_ids_to_zero and not self._needs_kv_cache_zeroing_310p(
-            self.kv_cache_config
-        ):
+        if scheduler_output.new_block_ids_to_zero and not self._needs_kv_cache_zeroing_310p(self.kv_cache_config):
             scheduler_output.new_block_ids_to_zero = None
         # Skip upstream copy (mishandles 310P NZ attention storages).
         scheduler_output.kv_cache_block_copies = None
@@ -810,15 +808,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         if spec_config is None:
             return False
         if vllm_version_is("0.28.0"):
-            uses_eagle_block_drop = any(
-                group.is_eagle_group for group in kv_cache_config.kv_cache_groups
-            )
+            uses_eagle_block_drop = any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups)
         else:
             uses_eagle_block_drop = spec_config.use_eagle_block_drop()
         return bool(
-            kv_cache_config.has_mamba_layers
-            and uses_eagle_block_drop
-            and spec_config.num_speculative_tokens > 1
+            kv_cache_config.has_mamba_layers and uses_eagle_block_drop and spec_config.num_speculative_tokens > 1
         )
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
