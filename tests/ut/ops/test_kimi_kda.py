@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.layers.mamba.gdn import kimi_gdn_linear_attn
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -109,6 +110,29 @@ def _expected_packed_conv_weights(
         ],
         dim=1,
     ).to(attention.model_config.dtype)
+
+
+def test_upstream_kda_dispatch_accepts_beta_keyword_during_profile():
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    context = SimpleNamespace(
+        attn_metadata=None,
+        no_compile_layers={"kda": attention},
+    )
+    qkv = torch.empty(2, 6)
+    gate = torch.empty(1, 2, 2, 3)
+    raw_beta = torch.empty(1, 2, 2)
+    output = torch.randn(1, 2, 2, 3)
+    expected = output.clone()
+
+    with (
+        patch.object(kimi_gdn_linear_attn, "get_forward_context", return_value=context),
+        patch("vllm_ascend.ops.kimi_kda.get_forward_context", return_value=context) as get_context,
+    ):
+        kimi_gdn_linear_attn.kda_attention(qkv, qkv, qkv, gate, raw_beta, output, "kda")
+
+    get_context.assert_called_once_with()
+    torch.testing.assert_close(output, expected)
 
 
 def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():

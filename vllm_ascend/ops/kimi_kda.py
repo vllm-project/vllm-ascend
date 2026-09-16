@@ -532,7 +532,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         k_proj_states: torch.Tensor,
         v_proj_states: torch.Tensor,
         g1: torch.Tensor,
-        raw_beta: torch.Tensor,
+        beta: torch.Tensor,
         core_attn_out: torch.Tensor,
     ) -> None:
         forward_context = get_forward_context()
@@ -549,7 +549,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         k_proj_states = k_proj_states[:num_actual_tokens]
         v_proj_states = v_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
-        raw_beta = raw_beta[:, :num_actual_tokens]
+        # Preserve vLLM's beta keyword while passing raw logits to CANNBot.
+        raw_beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache
         mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
