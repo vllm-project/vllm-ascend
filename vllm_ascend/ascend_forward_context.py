@@ -5,8 +5,7 @@ from enum import Enum
 from typing import Any
 
 import torch
-import vllm.envs as envs_vllm
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -17,6 +16,7 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     has_layer_idx,
@@ -419,52 +419,26 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
-def is_acl_full_graph_capturing() -> bool:
-    """Return whether FIA should wrap kernels in ACL ``graph_task_group``.
-
-    GPU V2 sets ``forward_context.capturing`` during CUDA-graph warmup and
-    piecewise capture. That flag is not "the current NPU stream is in ACL
-    capture". Calling ``graph_task_group_begin`` on a non-capturing stream
-    raises error 107029 and hung Qwen3 whitelist-MRv2 e2e.
-
-    Piecewise graphs must not use FIA task groups. ``ModelWithContext`` already
-    excludes ``PIECEWISE`` when writing ``_EXTRA_CTX.capturing``; this helper
-    re-checks the live stream so compiled attention cannot bake in GPU's flag.
-
-    Require an actual ``True``. cpu-ut stubs ``torch.npu`` as a MagicMock, so
-    ``is_current_stream_capturing()`` is truthy even when no stream is
-    capturing. That would send eager FIA UTs into ``full_graph_fia``.
-    """
-    npu = getattr(torch, "npu", None)
-    is_capturing = getattr(npu, "is_current_stream_capturing", None)
-    if is_capturing is None:
-        return False
-    # MagicMock is truthy; only a real True means the NPU stream is capturing.
-    if is_capturing() is not True:
-        return False
-    ctx = get_forward_context()
-    return getattr(ctx, "cudagraph_runtime_mode", None) != CUDAGraphMode.PIECEWISE
-
-
-def _extra_ctx_uses_additional_kwargs(ctx: Any) -> bool:
+def _extra_ctx_uses_additional_kwargs(_ctx: Any) -> bool:
     """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
 
     GPU V2 stores its own ``capturing`` flag on the forward-context object.
-    Ascend FIA treats ``_EXTRA_CTX.capturing`` as "this stream is in ACL graph
-    capture, so call ``graph_task_group_begin``". Those meanings must not mix.
+    Ascend FIA treats ``_EXTRA_CTX.capturing`` as ACL graph capture. Isolate
+    extras whenever Ascend enables V2, including the architecture whitelist
+    with ``VLLM_USE_V2_MODEL_RUNNER`` unset.
 
-    ``VLLM_USE_V2_MODEL_RUNNER=1`` already isolated extras in
-    ``additional_kwargs``. The Ascend whitelist can enable V2 with the env
-    unset, so also follow ``VllmConfig.use_v2_model_runner``.
+    Use ``get_current_vllm_config()`` rather than ``ctx.vllm_config``: GPU V2
+    ``ForwardContext`` has no ``vllm_config`` field, so whitelist-default V2
+    would otherwise leak GPU's ``capturing`` onto ``_EXTRA_CTX``.
     """
-    env = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-    if env is not None:
-        return bool(env)
-    vllm_config = getattr(ctx, "vllm_config", None)
-    # Require an actual bool. MagicMock forward-context fixtures auto-create a
-    # truthy use_v2_model_runner and would otherwise hide attrs like capturing
-    # behind additional_kwargs.get(), which is None.
-    return getattr(vllm_config, "use_v2_model_runner", False) is True
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return False
+    if vllm_config is None:
+        return False
+    # Require an actual bool. MagicMock configs can be truthy.
+    return use_v2_model_runner(vllm_config) is True
 
 
 class _ExtraForwardContextProxy:
