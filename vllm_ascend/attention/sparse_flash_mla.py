@@ -33,6 +33,16 @@ def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
         kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
 
 
+def _drop_paged_kv_cu_seqlens(kwargs: dict[str, Any]) -> None:
+    """Drop KV cu_seqlens; SparseFlashMla only accepts them when layout_kv is TND.
+
+    This adapter always uses PA_BBND paged cache. Passing cu_seqlens_ori_kv or
+    cu_seqlens_cmp_kv raises EZ0037 from aclnnSparseFlashMla.
+    """
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
+
+
 def sparse_flash_mla_metadata(**kwargs):
     """Adapt existing DSA metadata kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("device", None)
@@ -44,6 +54,7 @@ def sparse_flash_mla_metadata(**kwargs):
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
+    _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
     _, metadata_op = _get_sparse_flash_mla_ops()
     return metadata_op(**kwargs)
@@ -57,6 +68,7 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     kwargs["layout_kv"] = "PA_BBND"
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
     attention_op, _ = _get_sparse_flash_mla_ops()
     return attention_op(q, **kwargs)

@@ -18,42 +18,29 @@
 name: Doc Test
 
 on:
-  # Explicit case selection; both inputs set to none produce no NPU jobs.
+  # Comma-separated manual selection; an empty input skips that test type.
   workflow_dispatch:
     inputs:
-      quickstart_device:
-        description: Quick Start device to test
-        required: true
-        type: choice
-        default: none
-        options:
-          - none
-          - a2
-          - 310p
-      installation_method:
-        description: Installation method to test
-        required: true
-        type: choice
-        default: none
-        options:
-          - none
-          - pip
-          - uv
-          - source
+      quickstart_devices:
+        description: 'e.g. a2,310p; leave empty to skip'
+        required: false
+        type: string
+        default: ''
+      installation_methods:
+        description: 'e.g. pip,uv,source; leave empty to skip'
+        required: false
+        type: string
+        default: ''
   # Path filtering starts planning; the helper then selects affected marked blocks.
   pull_request:
     branches:
       - main
       - 'releases/v*'
     paths:
-      - '.github/workflows/schedule_doctest.yaml'
+      - '.github/workflows/schedule_doc_getting_started_test.yaml'
       - 'mkdocs.yml'
       - 'docs/source/getting_started/**'
-      - 'tests/e2e/doctests/scripts/common.sh'
-      - 'tests/e2e/doctests/scripts/run_doctests.sh'
-      - 'tests/e2e/doctests/001-quickstart-test.sh'
-      - 'tests/e2e/doctests/002-installation-test.sh'
-      - 'tests/e2e/doctests/scripts/doctest_helper.py'
+      - 'tests/e2e/doctests/**'
 
 permissions:
   contents: read
@@ -99,8 +86,8 @@ jobs:
           DOCTEST_EVENT_NAME: ${{ github.event_name }}
           DOCTEST_BASE_REF: ${{ github.event.pull_request.base.sha }}
           DOCTEST_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-          DOCTEST_QUICKSTART_DEVICE: ${{ inputs.quickstart_device }}
-          DOCTEST_INSTALLATION_METHOD: ${{ inputs.installation_method }}
+          DOCTEST_QUICKSTART_DEVICES: ${{ inputs.quickstart_devices }}
+          DOCTEST_INSTALLATION_METHODS: ${{ inputs.installation_methods }}
         run: |
           # Trust the checkout in the shell environment used by the planner.
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
@@ -118,8 +105,8 @@ jobs:
             )
           else
             args+=(
-              --quickstart "${DOCTEST_QUICKSTART_DEVICE}"
-              --installation "${DOCTEST_INSTALLATION_METHOD}"
+              --quickstart-devices "${DOCTEST_QUICKSTART_DEVICES}"
+              --installation-methods "${DOCTEST_INSTALLATION_METHODS}"
             )
           fi
           python3 tests/e2e/doctests/scripts/doctest_helper.py \

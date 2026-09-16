@@ -194,11 +194,11 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
                         CUDAGraphMode.NONE,
                     )
                     last_hidden_states = last_hidden_states[:num_reqs]
-                    positions = self.speculator.input_buffers.positions[:num_reqs]
+                    sample_src_positions = self.speculator.sample_src_positions[:num_reqs]
                     idx_mapping = self.speculator.idx_mapping[:num_reqs]
                     draft_tokens = self.speculator.sample_draft(
                         last_hidden_states,
-                        positions,
+                        sample_src_positions,
                         idx_mapping,
                         self.speculator.temperature,
                         self.speculator.seeds,

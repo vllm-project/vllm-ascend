@@ -58,6 +58,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
+    is_mtp_layer,
     maybe_trans_nz,
 )
 
@@ -642,6 +643,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # A replicated MTP draft may inherit a PCP target's non-trivial interleave
+    # value. With DCP disabled it does not change the draft KV-cache layout.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -682,7 +687,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
         # Optional platform service injected by the model runner. Attention
         # stays independent of KVPP scheduling and the concrete transport.
@@ -709,6 +714,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or index_cache_enabled
+        self._is_mtp_layer = is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -756,6 +763,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @staticmethod
     def update_graph_params(
@@ -1515,7 +1536,7 @@ class AscendSFAImpl(MLAAttentionImpl):
           indexer ``(indexer_k_cache, indexer_scale_cache)``
           -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
 
-        Layers that reuse another layer's top-k indices have no local indexer;
+        Static shared-index layers have no runtime indexer cache;
         for those layers, the main cache tuple is returned unchanged.
         """
         # TODO: Remove this recomposition once SFA kernels accept split
@@ -1536,7 +1557,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # The indexer owns and consumes its own cache. No LightningIndexer
             # cache layout is imposed on this attention operator.
             return main_cache
-        if not self.has_indexer:
+        if not self.runtime_has_indexer:
             return main_cache
 
         # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -1564,10 +1585,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (*main_cache, *indexer_cache)
 
-    def _get_indexer_attn_metadata(self) -> Any | None:
+    def _get_indexer_attn_metadata(self, attn_metadata: M) -> Any | None:
         """Fetch the indexer cache layer's own metadata, built by the indexer
-        backend's builder; ``None`` when this layer has no indexer."""
-        if not self.has_indexer:
+        backend's builder; ``None`` when this layer has no runtime indexer."""
+        if not self.runtime_has_indexer:
             return None
         prefix = self.indexer.k_cache.prefix
         kv_sharing_target = getattr(self, "kv_sharing_target_layer_name", None)
@@ -1621,7 +1642,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos = attn_metadata.cos
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
-        indexer_attn_metadata = self._get_indexer_attn_metadata()
+        indexer_attn_metadata = self._get_indexer_attn_metadata(attn_metadata)
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
@@ -1650,7 +1671,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
-            k_hidden_states = hidden_states if self.has_indexer else None
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
                 # The fused preprocess is the first operation that may read or
@@ -1688,7 +1709,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             # The prepared hidden states feed the indexer's k path (same stage
             # as the weights path input).
-            k_hidden_states = hidden_states if self.has_indexer else None
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
 
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
@@ -1740,10 +1761,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-        if self.has_indexer:
+        if self.runtime_has_indexer:
             # One unified indexer call: k path -> cache write -> top-k
             # selection (the selection kernel reads the freshly written
-            # cache). skip_topk layers still run the k path and the write
+            # cache). MTP skip_topk layers still run the k path and the write
             # (compute_topk=False) so their cache stays up to date, then
             # reuse the shared top-k indices. The parallel-layout values the
             # indexer needs ride on its own metadata: sequence lengths
@@ -1768,8 +1789,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             elif self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
         elif self.skip_topk:
-            # Layers sharing another layer's indexer (e.g. GLM-5.2 "shared"
-            # layers) own no indexer and only reuse the shared top-k indices.
+            # Static shared-index layers keep no runtime indexer cache and
+            # only reuse the shared top-k indices.
             topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")

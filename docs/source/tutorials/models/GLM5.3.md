@@ -127,6 +127,10 @@ If you don't want to use the docker image as above, you can also build all from 
 
 The deployment scenarios validated for this release are organized by context window size (below 1M), hardware (Atlas 800 A3 / A2), and deployment mode (multi-node co-located). All startup scripts below are the verified reference commands; key parameters are explained after each scenario.
 
+!!! note
+
+    Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3, otherwise the output quality may degrade.
+
 !!! warning
 
     - The scripts below is tested on **v0.23.0**, some params may have changed in main branch.
@@ -467,6 +471,10 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+
+- **Q: Does GLM-5.3 support `enable_thinking: false`?**
+
+  A: No, GLM-5.3 does not support `enable_thinking`.
 
 ## 10 Declaration
 
