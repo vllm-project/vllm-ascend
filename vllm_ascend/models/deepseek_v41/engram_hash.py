@@ -222,7 +222,14 @@ class PagedNgramHistory:
                     if previous < 0:
                         break
                     page = block_table[request, previous // block_size].item()
-                    token = self.pages[page][previous % block_size]
+                    page_tokens = self.pages.get(page)
+                    if page_tokens is None:
+                        # This replica never wrote that page: a prefix that was
+                        # transferred from another instance (P/D split) or a
+                        # recompute that has not reached it yet. There is no
+                        # history to read, exactly like an unwritten slot.
+                        break
+                    token = page_tokens[previous % block_size]
                     if token < 0:
                         break
                     history[row, shift] = token
@@ -239,8 +246,13 @@ class PagedNgramHistory:
                 offsets = previous[rows] % block_size
                 with torch.device("cpu"):
                     unique_pages, slab_indices = torch.unique(page_ids, return_inverse=True)
-                # Reachable pages must exist, just as in the row path. Inactive
-                # rows never read past an image or unwritten-token barrier.
+                # Inactive rows never read past an image or unwritten-token
+                # barrier. Pages this replica never wrote (transferred prefix,
+                # in-flight recompute) carry no token, so materialize them as
+                # unwritten instead of failing the lookup.
+                for page in unique_pages.tolist():
+                    if page not in self.pages:
+                        self.pages[page] = torch.full((block_size,), -1, dtype=torch.int64, device="cpu")
                 slab = torch.stack([self.pages[page] for page in unique_pages.tolist()])
                 values = slab[slab_indices, offsets]
                 present = values >= 0

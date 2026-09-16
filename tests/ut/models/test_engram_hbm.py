@@ -377,3 +377,26 @@ def test_hash_causal_barrier(barrier_token):
     assert values.shape == (6, 1, 2) and not mask[3]
     # The first token on the next page must hash against padding, not the image.
     assert values[4, 0, 0].item() == ((13 * 3) ^ (h.pad_id * 5)) % 101
+
+
+@pytest.mark.parametrize("tokens", [4, 32])
+def test_hash_reads_pages_this_replica_never_wrote(tokens):
+    # A prefix transferred from another instance (P/D split) or an in-flight
+    # recompute leaves page holes; reading one must behave like an unwritten
+    # slot instead of failing the lookup.  4 tokens uses the row path, 32 the
+    # slab path.
+    h = hash_mod.PagedNgramHistory.__new__(hash_mod.PagedNgramHistory)
+    h.token_map = torch.arange(100)
+    h.pad_id = 2
+    h.image_token_id = 99
+    h.lookback = 2
+    h.image_pad_token_id = 98
+    h.primes = torch.tensor([[[101, 103]]])
+    h.offsets = torch.tensor([[0, 101]])
+    h.multipliers = torch.tensor([[3, 5]])
+    h.pages = {}
+    # Position 4 owns page 11; its look-back reaches page 10, never written here.
+    block_table = torch.arange(10, 26).reshape(1, -1)
+    values, mask = h.update(torch.arange(tokens) % 50, torch.arange(4, 4 + tokens),
+                            torch.zeros(tokens, dtype=torch.long), block_table, 4)
+    assert values.shape == (tokens, 1, 2) and mask.all()
