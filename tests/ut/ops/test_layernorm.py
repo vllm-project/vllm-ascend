@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,11 +7,74 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, _enable_a5_add_rms_norm_bias
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
+
+
+@pytest.mark.parametrize("width", [16, 128, 1024, 6144])
+def test_a5_add_rms_norm_bias_loads_extension_only_when_supported(width):
+    tensor = MagicMock(shape=(3, width))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": MagicMock()}),
+    ):
+        assert _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_called_once_with(include_vendor_lib=True)
+
+
+@pytest.mark.parametrize(
+    "enabled, device, invariant, width",
+    [
+        (False, AscendDeviceType.A5, False, 6144),
+        (True, AscendDeviceType.A2, False, 6144),
+        (True, AscendDeviceType.A5, True, 6144),
+        (True, AscendDeviceType.A5, False, 0),
+        (True, AscendDeviceType.A5, False, 15),
+        (True, AscendDeviceType.A5, False, 6145),
+        (True, AscendDeviceType.A5, False, 8192),
+    ],
+)
+def test_a5_add_rms_norm_bias_keeps_existing_path(enabled, device, invariant, width):
+    tensor = MagicMock(shape=(3, width))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", enabled),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=device),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", invariant),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+    ):
+        assert not _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_not_called()
+
+
+def test_a5_add_rms_norm_bias_keeps_existing_path_for_scalar():
+    tensor = MagicMock(shape=())
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+    ):
+        assert not _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_not_called()
+
+
+def test_a5_add_rms_norm_bias_reports_missing_extension():
+    tensor = MagicMock(shape=(3, 6144))
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env"),
+        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": None}),
+        pytest.raises(ImportError),
+    ):
+        _enable_a5_add_rms_norm_bias(tensor)
 
 
 @pytest.fixture

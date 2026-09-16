@@ -21,10 +21,35 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend import envs
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    bootstrap_custom_op_env,
+    enable_custom_op,
+    get_ascend_device_type,
+)
+
+
+def _enable_a5_add_rms_norm_bias(x: torch.Tensor) -> bool:
+    if not envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS:
+        return False
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return False
+    import vllm.envs as vllm_envs
+
+    if vllm_envs.VLLM_BATCH_INVARIANT:
+        return False
+    if not x.shape or x.shape[-1] == 0 or x.shape[-1] > 6144 or x.shape[-1] % 16:
+        return False
+    bootstrap_custom_op_env(include_vendor_lib=True)
+    # Explicit opt-in must report a missing build instead of silently benchmarking
+    # the baseline. Keep the global custom-op enablement unchanged on A5.
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
+    return True
 
 
 class AscendRMSNorm(RMSNorm):
@@ -69,7 +94,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if _enable_a5_add_rms_norm_bias(x) or enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -95,7 +120,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if _enable_a5_add_rms_norm_bias(x) or enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
