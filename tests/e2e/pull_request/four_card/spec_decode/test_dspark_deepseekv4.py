@@ -20,6 +20,7 @@
 
 Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py`.
 """
+
 import os
 import time
 from unittest.mock import patch
@@ -98,8 +99,4 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         )
     finally:
         elapsed = time.perf_counter() - start_time
-        print(
-            f"[DSpark CI baseline] "
-            f"case={request.node.name} "
-            f"elapsed={elapsed:.2f}s"
-        )
+        print(f"[DSpark CI timing] case={request.node.name} elapsed={elapsed:.2f}s")
