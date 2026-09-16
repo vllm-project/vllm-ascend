@@ -25,7 +25,8 @@ Usage from the repository root (these commands do not execute the blocks):
   python3 tests/e2e/doctests/scripts/doctest_helper.py plan [selection] [image repositories]
 Raw extraction preserves macros; expansion and planning require PyYAML.
 Diff planning compares Git refs but uses working-tree MkDocs values for image tags.
-Manual selections default to none; non-none choices cannot be combined with diff selection.
+Manual selections accept comma-separated values; empty values skip that test type.
+Manual selections cannot be combined with diff selection.
 Use plan --check-resources for PR planning; explicit manual runs remain strict.
 Run the actual tests with scripts/run_doctests.sh under tests/e2e/doctests/.
 """
@@ -53,6 +54,8 @@ DOCTEST_CODE_FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)```(?:bash|python)[ \t]*
 MKDOCS_EXTRA_MACRO_RE = re.compile(r"{{\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*}}")
 
 DOCTEST_OSES = ("ubuntu", "openeuler")
+QUICKSTART_DEVICES = ("a2", "310p")
+INSTALLATION_METHODS = ("pip", "uv", "source")
 INSTALLATION_OS_IMAGE_TAGS = {
     "ubuntu": "ubuntu22.04",
     "openeuler": "openeuler24.03",
@@ -167,7 +170,7 @@ INSTALLATION_UV_MARKERS = (
 INSTALLATION_SOURCE_MARKERS = ("installation-source-install",)
 
 SHARED_DOCTEST_PATHS = {
-    ".github/workflows/schedule_doctest.yaml",
+    ".github/workflows/schedule_doc_getting_started_test.yaml",
     "tests/e2e/doctests/scripts",
 }
 QUICKSTART_TEST_SCRIPT = "tests/e2e/doctests/001-quickstart-test.sh"
@@ -176,6 +179,17 @@ INSTALLATION_TEST_SCRIPT = "tests/e2e/doctests/002-installation-test.sh"
 
 class DoctestError(ValueError):
     pass
+
+
+def parse_manual_selection(value: str, choices: tuple[str, ...], name: str) -> list[str]:
+    """Parse a comma-separated manual selection, with an empty value meaning no tests."""
+    if not value.strip():
+        return []
+    selected = [item.strip() for item in value.split(",")]
+    invalid = [item for item in selected if item not in choices]
+    if invalid:
+        raise DoctestError(f"Invalid {name}: {', '.join(invalid)}. Choose from: {', '.join(choices)}.")
+    return list(dict.fromkeys(selected))
 
 
 def extract_doctest_block(text: str, marker: str, source: str = "input") -> str | None:
@@ -607,8 +621,8 @@ def parse_args() -> argparse.Namespace:
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--base")
     plan_parser.add_argument("--head")
-    plan_parser.add_argument("--quickstart", choices=("none", "a2", "310p"), default="none")
-    plan_parser.add_argument("--installation", choices=("none", "pip", "uv", "source"), default="none")
+    plan_parser.add_argument("--quickstart-devices", default="")
+    plan_parser.add_argument("--installation-methods", default="")
     plan_parser.add_argument("--quickstart-image-repository", required=True)
     plan_parser.add_argument("--installation-image-repository", required=True)
     plan_parser.add_argument("--check-resources", action="store_true")
@@ -616,7 +630,7 @@ def parse_args() -> argparse.Namespace:
     if args.command == "plan" and (args.base is not None or args.head is not None):
         if args.base is None or args.head is None:
             parser.error("--base and --head must be used together")
-        if args.quickstart != "none" or args.installation != "none":
+        if args.quickstart_devices.strip() or args.installation_methods.strip():
             parser.error("manual doctest options cannot be used with --base/--head")
     return args
 
@@ -640,8 +654,12 @@ def main() -> int:
                 args.installation_image_repository,
             )
         else:
-            quickstart_devices = [] if args.quickstart == "none" else [args.quickstart]
-            installation_methods = [] if args.installation == "none" else [args.installation]
+            quickstart_devices = parse_manual_selection(
+                args.quickstart_devices, QUICKSTART_DEVICES, "Quick Start device"
+            )
+            installation_methods = parse_manual_selection(
+                args.installation_methods, INSTALLATION_METHODS, "installation method"
+            )
             plan = build_doctest_plan(
                 quickstart_devices,
                 installation_methods,

@@ -66,6 +66,24 @@ def test_mkdocs_helpers(helper):
 
 
 @pytest.mark.parametrize(
+    "value, choices, expected",
+    [
+        ("", ("a2", "310p"), []),
+        ("  ", ("a2", "310p"), []),
+        ("a2, 310p", ("a2", "310p"), ["a2", "310p"]),
+        ("pip,pip,source", ("pip", "uv", "source"), ["pip", "source"]),
+    ],
+)
+def test_parse_manual_selection(helper, value, choices, expected):
+    assert helper.parse_manual_selection(value, choices, "selection") == expected
+
+
+def test_parse_manual_selection_rejects_unknown_value(helper):
+    with pytest.raises(helper.DoctestError, match="Invalid Quick Start device: a5"):
+        helper.parse_manual_selection("a2,a5", helper.QUICKSTART_DEVICES, "Quick Start device")
+
+
+@pytest.mark.parametrize(
     "group_name, expected",
     [
         ("QUICKSTART_COMMON_MARKERS", {"quickstart": ["a2", "310p"], "installation": []}),

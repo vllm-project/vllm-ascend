@@ -161,7 +161,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | Cancelled | Not cancelled |
 |---|---|
 | `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
-| `schedule_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |
 | `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
 | `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
 | `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
