@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, cast
 
 import numpy as np
@@ -11,21 +12,24 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
-def resolve_request_hash_block_size(
-    vllm_config: Any,
-    kv_cache_config: Any | None,
-    fallback: int,
-) -> int:
+def resolve_request_hash_block_size(vllm_config: Any, kv_cache_config: Any | None, fallback: int) -> int:
     """Return the granularity used to populate ``Request.block_hashes``."""
     if kv_cache_config is None:
         return fallback
     return kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)[1]
+
+
+class LookupHashMode(str, Enum):
+    """Block-hash representation carried by the scheduler lookup RPC."""
+
+    FULL = "full"
+    SUFFIX = "suffix"
 
 
 def make_layerwise_block_key(
@@ -552,7 +556,7 @@ class ChunkedTokenDatabase:
     def _iter_token_chunks(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: Sequence[BlockHash | str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
@@ -604,7 +608,7 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: Sequence[BlockHash | str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
@@ -633,7 +637,7 @@ class ChunkedTokenDatabase:
     def process_token_key_strings(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: Sequence[BlockHash | str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         chunk_filter: Callable[[int], bool] | None = None,
@@ -652,7 +656,7 @@ class ChunkedTokenDatabase:
     def process_token_key_strings_with_block_ids(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: Sequence[BlockHash | str],
         block_ids: list[int],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
@@ -717,7 +721,7 @@ def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | 
 
 
 def get_block_hashes(
-    block_hashes: BlockHashList | list[str],
+    block_hashes: Sequence[BlockHash | str],
     group_block_size: int,
     hash_block_size: int,
 ) -> Sequence[BlockHash | str]:
