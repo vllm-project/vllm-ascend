@@ -129,18 +129,10 @@ MIXED_BATCH_SCENARIOS = (
 )
 
 LONG_SEQUENCE_SCENARIOS = (
-    pytest.param(
-        [1], [-1], 131200, 8192, 1 << 17, torch.bfloat16, 32, id="cross-2pow17"
-    ),
-    pytest.param(
-        [4], [-1], 262272, 12288, 1 << 18, torch.bfloat16, 32, id="cross-2pow18"
-    ),
-    pytest.param(
-        [7], [-2], 524416, 14336, 1 << 19, torch.bfloat16, 64, id="cross-2pow19"
-    ),
-    pytest.param(
-        [14], [-1], 1048704, 32640, 1 << 20, torch.float16, 64, id="cross-2pow20"
-    ),
+    pytest.param([1], [-1], 131200, 8192, 1 << 17, torch.bfloat16, 32, id="cross-2pow17"),
+    pytest.param([4], [-1], 262272, 12288, 1 << 18, torch.bfloat16, 32, id="cross-2pow18"),
+    pytest.param([7], [-2], 524416, 14336, 1 << 19, torch.bfloat16, 64, id="cross-2pow19"),
+    pytest.param([14], [-1], 1048704, 32640, 1 << 20, torch.float16, 64, id="cross-2pow20"),
     pytest.param(
         [1],
         [-1],
@@ -254,9 +246,7 @@ def _build_case(
     index_block_table = table_cpu.to("npu")
 
     query_to_request = [request for request, q in enumerate(q_values) for _ in range(q)]
-    route_block_table = index_block_table[
-        torch.tensor(query_to_request, dtype=torch.int64, device="npu")
-    ].contiguous()
+    route_block_table = index_block_table[torch.tensor(query_to_request, dtype=torch.int64, device="npu")].contiguous()
 
     cache_cpu = torch.full((pool_size, source_capacity), INVALID_SLOT, dtype=torch.int32)
     for request, state in enumerate(states):
@@ -505,18 +495,14 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
             _assert_resident_bijection(cache_cpu[row], length, capacity)
         else:
             expected_union = torch.unique(reference[query_start:query_end].reshape(-1), sorted=True)
-            expected_misses = expected_union[
-                old_cache[row, expected_union.to(torch.int64)] == INVALID_SLOT
-            ]
+            expected_misses = expected_union[old_cache[row, expected_union.to(torch.int64)] == INVALID_SLOT]
             count = int(miss_count[request])
             assert count == expected_misses.numel()
             torch.testing.assert_close(miss_src[request, :count], expected_misses, rtol=0, atol=0)
 
             for route in range(query_start, query_end):
                 route_sources = reference[route]
-                expected_route_misses = int(
-                    (old_cache[row, route_sources.to(torch.int64)] == INVALID_SLOT).sum()
-                )
+                expected_route_misses = int((old_cache[row, route_sources.to(torch.int64)] == INVALID_SLOT).sum())
                 assert int(route_miss[route]) == expected_route_misses
 
             _assert_resident_bijection(cache_cpu[row], length, case.cache_tokens[request])
@@ -619,13 +605,20 @@ def test_fused_lightning_indexer_manage_mixed_state_mtp():
 
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_lifecycle():
-    common = dict(q_values=[1, 4], offload_len=8320, cache_tokens=8192)
+    q_values = [1, 4]
+    offload_len = 8320
+    cache_tokens = 8192
 
     for sequence in ((-2, -1, -1), (-3, -2, -1)):
         cache = None
         last_outputs = None
         for state in sequence:
-            case = _build_case(states=[state, state], **common)
+            case = _build_case(
+                q_values=q_values,
+                states=[state, state],
+                offload_len=offload_len,
+                cache_tokens=cache_tokens,
+            )
             if cache is not None:
                 case.cache_seed = cache
             cache, last_outputs = _run_and_assert(case)
@@ -634,9 +627,19 @@ def test_fused_lightning_indexer_manage_lifecycle():
             assert torch.all(last_outputs[2] == 0)
             assert torch.all(last_outputs[5] == 0)
 
-    standard = _build_case(states=[-3, -3], **common)
+    standard = _build_case(
+        q_values=q_values,
+        states=[-3, -3],
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+    )
     identity_cache, _ = _run_and_assert(standard)
-    transition = _build_case(states=[-1, -1], **common)
+    transition = _build_case(
+        q_values=q_values,
+        states=[-1, -1],
+        offload_len=offload_len,
+        cache_tokens=cache_tokens,
+    )
     transition.cache_seed = identity_cache
     transition_outputs = _make_outputs(transition)
     _call_op(transition, identity_cache, transition_outputs)
@@ -658,9 +661,7 @@ def test_fused_lightning_indexer_manage_lifecycle():
     ROUTE_STATE_SCENARIOS,
 )
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_route_state_matrix(
-    q, state, offload_len, cache_tokens
-):
+def test_fused_lightning_indexer_manage_route_state_matrix(q, state, offload_len, cache_tokens):
     case = _build_case(
         q_values=[q],
         states=[state],
@@ -675,9 +676,7 @@ def test_fused_lightning_indexer_manage_route_state_matrix(
     DTYPE_HEAD_ROUTE_SCENARIOS,
 )
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_dtype_head_matrix(
-    q, state, offload_len, cache_tokens, dtype, heads
-):
+def test_fused_lightning_indexer_manage_dtype_head_matrix(q, state, offload_len, cache_tokens, dtype, heads):
     case = _build_case(
         q_values=[q],
         states=[state],
@@ -694,9 +693,7 @@ def test_fused_lightning_indexer_manage_dtype_head_matrix(
     MIXED_BATCH_SCENARIOS,
 )
 @torch.inference_mode()
-def test_fused_lightning_indexer_manage_mixed_batch_matrix(
-    q_values, states, offload_len, cache_tokens
-):
+def test_fused_lightning_indexer_manage_mixed_batch_matrix(q_values, states, offload_len, cache_tokens):
     case = _build_case(
         q_values=q_values,
         states=states,

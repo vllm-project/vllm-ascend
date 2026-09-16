@@ -106,11 +106,11 @@ visible_length = actual_seq_lengths_key[i] - (query_end - 1 - query_row)
 - `actual_seq_lengths_query`必须严格递增，最后一个元素必须等于T；每个请求的Q必须在[1,14]范围内。
 - 每个请求必须满足`Q<=actual_seq_lengths_key[i]<=source_capacity`。`index_key_cache`和`index_block_table`必须覆盖实际访问的物理块。
 - 对-2和-1状态，令`L=offload_seq_lengths_key[i]`、`C=num_cache_tokens[i]`，必须满足：
-  - `L>=2048`，`C<=L<=actual_seq_lengths_key[i]`；
-  - L和C均为128的倍数；
-  - 当`L<=Q*2048`时，必须满足`C=L`；
-  - 当`L>Q*2048`时，必须满足`Q*2048<=C<=32640`；
-  - `L<=floor((actual_seq_lengths_key[i]-Q)/128)*128`，保证稳定Prefix对全部Query因果可见。
+    - `L>=2048`，`C<=L<=actual_seq_lengths_key[i]`；
+    - L和C均为128的倍数；
+    - 当`L<=Q*2048`时，必须满足`C=L`；
+    - 当`L>Q*2048`时，必须满足`Q*2048<=C<=32640`；
+    - `L<=floor((actual_seq_lengths_key[i]-Q)/128)*128`，保证稳定Prefix对全部Query因果可见。
 - `req_pool_entries[i]`必须位于`[0,pool_size)`，同一次调用的有效请求不能写入同一Pool行。同一请求生命周期内，Pool行号必须保持不变。
 - `source_capacity`最大为`2^21 = 2097152`。Source长度超过`2^17 = 131072`时，内部使用21-bit Source ID编码；所有对外输出始终为完整INT32 Source ID。
 - HBM Logical Slot使用15 bit编码，32767为内部无效值，因此C最大为32640。`INT32_MIN`仅用于`cache_slots_pool`中的非Resident标记，不会作为有效Slot输出。
