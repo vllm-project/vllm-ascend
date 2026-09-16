@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -34,7 +35,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
@@ -44,6 +45,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
@@ -129,6 +131,127 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
     expected_shape = (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
     assert key_cache.shape == expected_shape
     assert value_cache.shape == expected_shape
+
+
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
+def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    num_blocks = 2
+    spec = AscendMLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=488448,
+    )
+    attn_module = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(attn_module)
+    attn_module.kv_lora_rank = 512
+    attn_module.qk_rope_head_dim = 64
+    attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+    backend = MagicMock()
+    backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
+        num_block_ids,
+        block_size,
+        num_kv_heads,
+        head_size,
+    )
+    attn_module.get_attn_backend = lambda: backend
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[_make_kv_cache_tensor(num_blocks * 488448, [layer_name], 488448)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: attn_module})
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _config: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    raw_caches = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device=torch.device("cpu"))
+    (raw_cache,) = raw_caches[layer_name]
+    assert raw_cache.numel() == num_blocks * 488448
+
+    attn_group = AttentionGroup(
+        backend=backend,
+        layer_names=[layer_name],
+        kv_cache_spec=spec,
+        kv_cache_group_id=0,
+    )
+    flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
+    component_profile = SimpleNamespace(supports=lambda capability: False)
+    for profile, expected_tensor_count in ((flash_profile, None), (component_profile, 2)):
+        monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda profile=profile: profile)
+        cache = attn_utils._reshape_kv_cache_v2(
+            attn_groups=[attn_group],
+            kv_cache_raw_tensors=raw_caches,
+            cache_dtype="auto",
+            kernel_block_sizes=[128],
+            shared_kv_cache_layers={},
+            kv_cache_config=kv_cache_config,
+        )[layer_name]
+
+        if expected_tensor_count is None:
+            assert isinstance(cache, torch.Tensor)
+            assert cache.shape == (6, 128, 1, 576)
+            assert cache.stride() == (81408, 576, 576, 1)
+        else:
+            nope, rope = cache
+            assert nope.shape == (6, 128, 1, 512)
+            assert nope.stride() == (81408, 512, 512, 1)
+            assert rope.shape == (6, 128, 1, 64)
+            assert rope.stride() == (81408, 64, 64, 1)
+            assert rope.storage_offset() - nope.storage_offset() == 65536
+            assert nope.untyped_storage() is rope.untyped_storage()
+
+
+def test_v2_zeroer_covers_each_mla_component_view():
+    raw = torch.zeros(2 * 488448, dtype=torch.uint8)
+    typed_raw = raw.view(torch.bfloat16)
+    nope = torch.as_strided(
+        typed_raw,
+        size=(6, 128, 1, 512),
+        stride=(81408, 512, 512, 1),
+    )
+    rope = torch.as_strided(
+        typed_raw,
+        size=(6, 128, 1, 64),
+        stride=(81408, 64, 64, 1),
+        storage_offset=65536,
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=488448,
+    )
+    zeroer = AscendV2KVBlockZeroer(
+        torch.device("cpu"),
+        attn_groups_iter=[
+            AttentionGroup(
+                backend=AscendAttentionBackend,
+                layer_names=["layer"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ],
+        kernel_block_sizes=[128],
+        static_forward_context={"layer": SimpleNamespace(kv_cache=(nope, rope))},
+        num_blocks=2,
+    )
+
+    assert len(zeroer._zeroers) == 2
+    assert all(zeroer._meta is not None for zeroer in zeroer._zeroers)
+    assert all(zeroer._meta[-1] == 3 for zeroer in zeroer._zeroers)
 
 
 @pytest.mark.skipif(
