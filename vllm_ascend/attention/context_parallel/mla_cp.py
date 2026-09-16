@@ -133,8 +133,8 @@ class AscendMlaDCPMetadataBuilder(
             # the base MLA builder; MLA needs them when reorganizing chunked KV.
             local_context_lens_allranks = get_dcp_local_seq_lens(
                 self.context_lens_cpu,
-                self.dcp_size,
-                self.cp_local_block_size,
+                dcp_size=self.dcp_size,
+                cp_kv_cache_interleave_size=self.cp_local_block_size,
             )
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
@@ -209,8 +209,8 @@ class AscendMlaDCPMetadataBuilder(
             # maintained by the base MLA builder, avoiding a device-to-host sync.
             local_lengths = get_dcp_local_seq_lens(
                 self.seq_lens[: self.num_decodes],
-                self.dcp_size,
-                self.cp_local_block_size,
+                dcp_size=self.dcp_size,
+                cp_kv_cache_interleave_size=self.cp_local_block_size,
             )
             decode_metadata.cp_seq_len = local_lengths[:, self.dcp_rank].tolist()
         # DCP lengths contain real requests; FULL graph query lengths also
