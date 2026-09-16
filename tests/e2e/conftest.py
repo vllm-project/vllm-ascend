@@ -902,13 +902,11 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         if not full_device_ids:
             full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
-        if llm_kwargs.get("distributed_executor_backend") == "ray":
-            devs = full_device_ids
-            chunk = max(len(devs) // dp_size, 1)
-            start = dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-        else:
-            llm_kwargs["device_ids"] = full_device_ids
+        # Pass the full (un-sharded) device list for every backend. vLLM
+        # slices it per DP rank internally via assigned_physical_gpu_ids
+        # (see get_physical_gpu_ids_for_local_dp_rank), so the env var must
+        # not be pre-sharded here.
+        llm_kwargs["device_ids"] = full_device_ids
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})
