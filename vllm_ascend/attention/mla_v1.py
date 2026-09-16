@@ -1635,6 +1635,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
+        if self.enable_kv_nz:
+            raise NotImplementedError("enable_kv_nz currently only supports the MLA rope KV cache path.")
         DeviceOperator.reshape_and_cache(
             key=kv_c_normed,
             value=k_pe,
@@ -1700,7 +1702,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA"
+        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
         if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal

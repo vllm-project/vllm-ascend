@@ -278,10 +278,19 @@ class AscendConfig:
                 raise RuntimeError("enable_kv_nz requires a valid model_config.")
             if not vllm_config.model_config.is_deepseek_mla or use_sparse:
                 raise RuntimeError("enable_kv_nz is only supported for mla currently.")
-            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise NotImplementedError(
-                    "enable_kv_nz is only supported in pd scenario and can only be used in D node."
-                )
+            kv_transfer_config = vllm_config.kv_transfer_config
+            if kv_transfer_config is not None:
+                connector_name = getattr(kv_transfer_config, "kv_connector", "")
+                if kv_transfer_config.is_kv_producer:
+                    if connector_name not in ("MooncakeConnector", "MooncakeConnectorV1"):
+                        raise NotImplementedError(
+                            "enable_kv_nz on a PD-disaggregated prefill node currently requires "
+                            "MooncakeConnector or MooncakeConnectorV1."
+                        )
+                elif not kv_transfer_config.is_kv_consumer:
+                    raise NotImplementedError(
+                        "enable_kv_nz in PD-disaggregated mode requires a kv_producer or kv_consumer role."
+                    )
 
         self.enable_sparse_sfa_c8 = additional_config.get("enable_sparse_sfa_c8", False) and use_sparse
         self.enable_sparse_li_c8 = additional_config.get("enable_sparse_li_c8", False) and use_sparse
