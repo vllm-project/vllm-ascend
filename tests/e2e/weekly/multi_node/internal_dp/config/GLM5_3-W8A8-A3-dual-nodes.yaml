@@ -76,6 +76,7 @@ deployment:
       --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 
+# https://github.com/vllm-project/vllm-ascend/actions/runs/35073504457/job/104721840433
 benchmarks:
   perf:
     case_type: performance
@@ -86,7 +87,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 3
     request_rate: 0
-    baseline: 34.49
+    baseline: 40.6891
     threshold: 0.97
   acc_GPQA:
     case_type: accuracy
@@ -97,5 +98,5 @@ benchmarks:
     temperature: 1.0
     top_p: 0.95
     batch_size: 32
-    baseline: 87.6
+    baseline: 91.92
     threshold: 5
