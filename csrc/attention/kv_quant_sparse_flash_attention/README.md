@@ -48,21 +48,21 @@
       <tr>
           <td>query</td>
           <td>输入</td>
-          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D值仅支持576，即q_nope+q_rope=512+64；Q_N值支持1/2/4/8/16/32/48/64/128。</td>
+          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D = 512 + rope_head_dim。A2/A3支持Q_D为512（rope_head_dim=0）或576（rope_head_dim=64）；A5 INT8场景同样支持这两种Q_D，FP8/HiFloat8场景仍仅支持576。rope_head_dim=0时query仅包含q_nope；Q_N值支持1/2/4/8/16/32/48/64/128。</td>
           <td>FLOAT16、BFLOAT16</td>
           <td>ND</td>
       </tr>
       <tr>
           <td>key</td>
           <td>输入</td>
-          <td>attention结构的K输入，不支持非连续。k_nope、query相同数据类型的k_rope和float32的量化参数按D维度拼接得到。layout_kv为"BSND"时shape为[B, KV_S, KV_N, KV_D]。layout_kv为"TND"时shape为[KV_T, KV_N, KV_D]。layout_kv为"PA_BSND"时shape为[block_num, block_size, KV_N, KV_D]，其中block_num为PageAttention时block总数，block_size为一个block的token数，block_size取值为16的整数倍，最大支持到1024。KV_N仅支持1；KV_D值仅支持656，即nope+rope*2+dequant_scale*4=512+64*2+4*4。</td>
+          <td>attention结构的K输入，不支持非连续。k_nope、query相同数据类型的k_rope和float32的量化参数按D维度拼接得到。layout_kv为"BSND"时shape为[B, KV_S, KV_N, KV_D]。layout_kv为"TND"时shape为[KV_T, KV_N, KV_D]。layout_kv为"PA_BSND"时shape为[block_num, block_size, KV_N, KV_D]，其中block_num为PageAttention时block总数，block_size为一个block的token数，block_size取值为16的整数倍，最大支持到1024。KV_N仅支持1；KV_D = 512 + rope_head_dim*2 + 4*4，表示每行拼接数据的字节数。A2/A3 C8支持528（rope_head_dim=0）或656（rope_head_dim=64）；A5 INT8场景同样支持528或656，FP8/HiFloat8场景仍仅支持656。4个FLOAT32 scale组成的区域起始偏移分别为512或640字节，偏移从0开始。</td>
           <td>FLOAT8_E4M3、INT8、HIFLOAT8</td>
           <td>ND</td>
       </tr>
       <tr>
           <td>value</td>
           <td>输入</td>
-          <td>attention结构的V输入，不支持非连续。</td>
+          <td>attention结构的V输入，不支持非连续。A2/A3 C8 MLA场景下，有效V为key反量化后的512维NoPE部分。算子调用时key和value可复用同一份packed KV缓存，物理最后一维为528（rope_head_dim=0）或656（rope_head_dim=64）；原独立算子测试也支持传入最后一维为512的NoPE value张量。输出最后一维始终为512。</td>
           <td>FLOAT8_E4M3、INT8、HIFLOAT8</td>
           <td>ND</td>
       </tr>
@@ -76,7 +76,7 @@
       <tr>
           <td>scale_value</td>
           <td>属性</td>
-          <td>公式中d<sub>k</sub>开根号的倒数，代表缩放系数，作为query和key矩阵乘后Muls的scalar值。</td>
+          <td>公式中d<sub>k</sub>开根号的倒数，代表缩放系数，作为query和key矩阵乘后Muls的scalar值。rope_head_dim变化时继续使用调用方传入的scale_value。</td>
           <td>FLOAT</td>
           <td>-</td>
       </tr>
@@ -174,7 +174,7 @@
       <tr>
           <td>attention_mode</td>
           <td>属性</td>
-          <td>表示attention的模式，仅支持传入2，表示MLA-absorb模式，即QK的D包含rope和nope两部分，且KV是同一份。</td>
+          <td>表示attention的模式，仅支持传入2，表示MLA-absorb模式，即QK的D由512维NoPE和可选的RoPE部分组成，且KV是同一份。</td>
           <td>INT64</td>
           <td>-</td>
       </tr>
@@ -195,15 +195,29 @@
       <tr>
           <td>rope_head_dim</td>
           <td>属性</td>
-          <td>表示MLA架构下的rope_head_dim大小，仅在attention_mode为2时有效，仅支持64。</td>
+          <td>表示MLA架构下的RoPE维度，仅在attention_mode为2时有效。A2/A3 C8支持0或64：0表示省略输入中的RoPE分支；A5 INT8场景同样支持0或64，FP8/HiFloat8场景仍仅支持64。默认值保持64。</td>
           <td>INT64</td>
+          <td>-</td>
+      </tr>
+      <tr>
+          <td>return_softmax_lse</td>
+          <td>属性</td>
+          <td>默认False。A2/A3为True时返回softmax_max和softmax_sum；有效query行的LSE可由softmax_max + log(softmax_sum)计算。rope_head_dim为0或64时均保留此行为。A5当前仅写attention输出，应使用False。</td>
+          <td>BOOL</td>
           <td>-</td>
       </tr>
       <tr>
           <td>output</td>
           <td>输出</td>
-          <td>代表公式中的输出Attention。输出shape与入参query的shape保持一致，layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_out_D]，layout_query为"TND"时shape为[Q_T, Q_N, Q_out_D]，其中Q_out_D = Q_D - rope_head_dim。</td>
+          <td>代表公式中的输出Attention。输出的token/head维度与query一致，最后一维为512。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_out_D]，layout_query为"TND"时shape为[Q_T, Q_N, Q_out_D]，其中Q_out_D = Q_D - rope_head_dim。</td>
           <td>FLOAT16、BFLOAT16</td>
+          <td>ND</td>
+      </tr>
+      <tr>
+          <td>softmax_max / softmax_sum</td>
+          <td>输出</td>
+          <td>return_softmax_lse为False时均为空张量；A2/A3为True时，layout_query为"BSND"的shape为[B, KV_N, Q_S, Q_N/KV_N]，为"TND"的shape为[KV_N, Q_T, Q_N/KV_N]。</td>
+          <td>FLOAT32</td>
           <td>ND</td>
       </tr>
       </tbody>
@@ -220,3 +234,50 @@
     - <term>Ascend 950PR/Ascend 950DT</term>：只支持sparse\_block\_size为1。
     - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：支持[1,16]，且要求是2的幂次方，在PageAttention场景下要求sparse\_block\_size整除block\_size
 - 非PageAttention场景layout\_query和layout\_kv取值需要保持一致。
+
+## A2/A3 C8 NoPE（rope_head_dim=0）
+
+本节描述A2/A3的INT8 C8路径；A5 INT8扩展见下方独立章节。两种输入合同如下：
+
+| rope_head_dim | Q最后一维（元素） | packed Key每行（字节） | scale起始偏移（字节，从0开始） | 有效V / output最后一维 |
+| --- | --- | --- | --- | --- |
+| 0 | 512 | 528 = 512 INT8 NoPE + 4 FLOAT32 scale | 512 | 512 |
+| 64 | 576 | 656 = 512 INT8 NoPE + 64 FP16/BF16 RoPE + 4 FLOAT32 scale | 640 | 512 |
+
+表中的V维度指有效计算数据。算子调用时Key/Value可复用同一份528或656字节的packed缓存。
+
+rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维RoPE。
+内核跳过RoPE输入读取，在内部原有计算区域补零，保留原计算分块和缓冲区大小。
+这使紧凑输入与相同NoPE、scale、稀疏索引及页表下的显式零RoPE输入保持功能一致；
+调用方传入的scale_value保持不变。输出仍为512维，return_softmax_lse和图捕获/重放接口保持不变。
+
+### 测试入口
+
+在仓库根目录、已编译并安装自定义算子的A2/A3环境中运行：
+
+```bash
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention.py
+python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py
+```
+
+原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_rope0.py)
+共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
+LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
+随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
+并校验有效query行的softmax_max、softmax_sum及LSE。
+两项Python接入测试调用真实RMSNorm/INT8量化、cache写入和attention路径，
+验证空RoPE、FLOAT32 scale字节、slot=-1不写cache以及独立均值精度。
+
+### Python SFA接入
+
+A2/A3的C8 NoPE接入复用现有SFA接口：量化并打包INT8 NoPE和FLOAT32 scale，
+跳过空RoPE旋转，按当前层的实际维度生成缓存规格，再调用自定义QSFA算子。
+全局RoPE维度为64、当前层为0时，该层使用528字节的packed缓存。
+浮点NoPE继续使用原有计算路径。本次不扩展C8 NoPE的上下文并行模型接入。
+
+这里的模型接入范围与各平台算子的能力分开管理。A5模型默认的FP8缓存和调用路径
+尚未接入C8 NoPE，模型初始化检查保留；该检查不表示A5的INT8算子不支持RoPE0。
+
+## Ascend 950 INT8 RoPE0
+
+接口约束、缓存布局和测试入口见 [A5 INT8 C8 with RoPE0](ROPE0_A5.md)。
