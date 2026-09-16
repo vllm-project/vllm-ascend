@@ -96,6 +96,20 @@ class TestIsDefaultV2ModelRunnerModel:
 
         assert is_default_v2_model_runner_model(config) is False
 
+    def test_draft_runner_type_inherits_v2(self):
+        # Draft ModelConfig uses runner_type="draft" and a draft architecture
+        # (e.g. DeepSeekV4MTPModel) that is not on the generate whitelist.
+        # The target already passed the whitelist; re-checking the draft
+        # architecture would drop the V2 speculator back to V1.
+        config = _make_vllm_config(
+            model_config=_make_model_config(
+                runner_type="draft",
+                architectures=["DeepSeekV4MTPModel"],
+            )
+        )
+
+        assert is_default_v2_model_runner_model(config) is True
+
     def test_hybrid_model(self):
         config = _make_vllm_config(model_config=_make_model_config(is_hybrid=True, architectures=[DEFAULT_V2_ARCH]))
 
@@ -332,6 +346,21 @@ class TestUseV2ModelRunner:
         )
 
         assert use_v2_model_runner(config) is False
+
+    def test_default_enabled_for_deepseek_v4_mtp_draft(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            model_config=_make_model_config(
+                runner_type="draft",
+                architectures=["DeepSeekV4MTPModel"],
+            ),
+            speculative_config=_make_speculative_config("mtp"),
+        )
+
+        assert use_v2_model_runner(config) is True
 
     def test_env_override_wins_with_lora(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)

@@ -81,12 +81,21 @@ def apply_v2_model_runner_config_patch() -> None:
 
 
 def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
-    """Model whitelist: enable V2 for default-V2 architectures."""
+    """Model whitelist: enable V2 for default-V2 architectures.
+
+    Draft configs (``runner_type="draft"``) are built from a target that already
+    passed this whitelist. Re-checking the draft architecture (for example
+    ``DeepSeekV4MTPModel``) would fall back to V1 inside the V2 runner.
+    """
     model_config = vllm_config.model_config
     if model_config is None:
         return False
 
-    if getattr(model_config, "runner_type", "generate") != "generate":
+    runner_type = getattr(model_config, "runner_type", "generate")
+    if runner_type == "draft":
+        return True
+
+    if runner_type != "generate":
         return False
 
     if getattr(model_config, "is_hybrid", False):
