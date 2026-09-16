@@ -419,6 +419,7 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
+@torch._dynamo.disable
 def _use_v2_extra_kwargs() -> bool:
     """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
 
@@ -429,6 +430,9 @@ def _use_v2_extra_kwargs() -> bool:
     ``get_current_vllm_config()`` raises when no config is set (cpu-ut
     attention fixtures). Treat that as V1 so FIA can read ``capturing``.
     Require an actual bool: MagicMock configs can be truthy.
+
+    Disabled under Dynamo: ``use_v2_model_runner`` logs with
+    ``warning_once`` / ``info_once``, which Dynamo cannot trace.
     """
     try:
         vllm_config = get_current_vllm_config()
@@ -478,6 +482,7 @@ class _ExtraForwardContextProxy:
     def _ctx():
         return get_forward_context()
 
+    @torch._dynamo.disable
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
@@ -487,6 +492,7 @@ class _ExtraForwardContextProxy:
             return ctx.additional_kwargs.get(name)
         return getattr(ctx, name, None)
 
+    @torch._dynamo.disable
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()

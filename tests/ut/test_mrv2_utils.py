@@ -282,6 +282,9 @@ class TestUseV2ModelRunner:
 
 
 class TestV2ModelRunnerValidationPatch:
+    def test_use_v2_model_runner_is_dynamo_disabled(self):
+        assert getattr(mrv2_utils.use_v2_model_runner, "_dynamo_disable", False)
+
     def test_validation_is_decoupled_from_upstream(self):
         # The Ascend V2 runner decision is fully owned by use_v2_model_runner,
         # so the replacement validation must never raise (e.g. the upstream

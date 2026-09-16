@@ -514,6 +514,14 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     assert seen["inside"] is False
 
 
+def test_extra_ctx_v2_isolation_is_dynamo_disabled():
+    # Compiled attention/MoE read _EXTRA_CTX. Dynamo cannot trace
+    # use_v2_model_runner's logger.warning_once / info_once.
+    assert getattr(afc._use_v2_extra_kwargs, "_dynamo_disable", False)
+    assert getattr(afc._ExtraForwardContextProxy.__getattr__, "_dynamo_disable", False)
+    assert getattr(afc._ExtraForwardContextProxy.__setattr__, "_dynamo_disable", False)
+
+
 def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
     # GPU V2 ForwardContext has no vllm_config. Isolation must follow
     # use_v2_model_runner(get_current_vllm_config()), not ctx.vllm_config.

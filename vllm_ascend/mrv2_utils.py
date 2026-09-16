@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import torch
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 
@@ -146,6 +147,7 @@ def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
     return True
 
 
+@torch._dynamo.disable
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Return whether the V2 model runner should be used on Ascend.
 
