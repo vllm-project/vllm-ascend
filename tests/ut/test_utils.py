@@ -711,3 +711,35 @@ def test_check_gdn_layer_returns_false_without_linear_attention():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
 
     assert utils.check_gdn_layer(vllm_config) is False
+
+
+class TestIsMtpLayer(TestBase):
+    """``utils.is_mtp_layer`` backs the SFA indexer-ownership decision."""
+
+    def test_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.2.self_attn.attn"))
+
+    def test_last_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.79.self_attn.attn"))
+
+    def test_layer_at_or_past_backbone_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.81.self_attn.attn"))
+
+    def test_explicit_mtp_segment_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "mtp.0.self_attn.attn"))
+
+    def test_missing_layer_info_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "unknown"))
+        self.assertFalse(utils.is_mtp_layer(config, None))
+        self.assertFalse(utils.is_mtp_layer(SimpleNamespace(), "model.layers.0.self_attn.attn"))
+
+    def test_non_integer_num_hidden_layers_is_not_mtp(self):
+        # Mocked/partial hf_configs must not be classified as MTP layers.
+        config = SimpleNamespace(num_hidden_layers="80")
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))

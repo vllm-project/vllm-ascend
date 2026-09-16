@@ -21,6 +21,7 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
     CANN_MEGAMOE = auto()
+    CANN_MEGAMOE_MXFP = auto()
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
@@ -228,6 +229,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.CANN_MEGAMOE,
+                    HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

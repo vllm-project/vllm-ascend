@@ -220,10 +220,14 @@ class AscendRejectionSampler(RejectionSampler):
         # Use float32 for the target_logits.
         raw_target_logits = raw_target_logits.to(torch.float32)
         target_logits = raw_target_logits
-        if not self.is_processed_logprobs_mode:
+        if (
+            not self.is_processed_logprobs_mode and sampling_metadata.max_num_logprobs is not None
+        ) or get_ascend_config().rejection_sampler_config.enable_entropy_verify:
             # Clone raw_target_logits before applying processors to preserve
-            # the original raw logits for logprobs computation, since
-            # apply_logits_processors modifies the tensor in-place.
+            # the original raw logits for logprobs computation or entropy
+            # verification, since apply_logits_processors modifies the tensor
+            # in-place. When neither is needed, preserving the raw logits is
+            # unnecessary and can duplicate several GiB at high concurrency.
             target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
         # [num_tokens, vocab_size]

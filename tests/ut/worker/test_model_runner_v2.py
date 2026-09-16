@@ -522,6 +522,11 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
 
     def _super(self, kv_cache_config):
         self.kv_cache_config = kv_cache_config
