@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -89,25 +90,17 @@ def scatter_paged_cache(
     if cache.shape[1] != block_size:
         raise ValueError(f"Cache block size mismatch: metadata={block_size}, tensor={cache.shape[1]}.")
     values = values.reshape(values.shape[0], *cache.shape[2:])
-    valid = (slots >= 0) & (slots < cache.shape[0] * block_size)
-    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
-    block_ids = torch.div(safe_slots, block_size, rounding_mode="floor")
-    block_offsets = torch.remainder(safe_slots, block_size)
-    row_mask = valid.view(-1, *([1] * (values.ndim - 1)))
-
-    # Invalid rows use a fixed sentinel; restore its original value unless
-    # slot zero is itself a valid write. All operations retain static shapes.
-    old_zero = cache[0, 0].clone()
-    safe_values = torch.where(row_mask, values, old_zero.unsqueeze(0))
-    writes_zero = valid & (slots == 0)
-    zero_value = torch.where(
-        writes_zero.view(-1, *([1] * (values.ndim - 1))),
-        values,
-        torch.zeros_like(values),
-    ).sum(dim=0)
-    expected_zero = torch.where(writes_zero.any(), zero_value, old_zero)
-    cache[block_ids, block_offsets] = safe_values
-    cache[0, 0].copy_(expected_zero)
+    # Bound invalid int64 slots before address calculation: extreme indices
+    # can overflow inside the native scatter and alias a valid cache row.
+    slots = slots.clamp(min=-1, max=cache.shape[0] * block_size)
+    # Keep the paged view: flattening its first two dimensions can copy a
+    # cache whose pages include padding. Out-of-range coordinates, including
+    # the negative page of a padding slot, are ignored by the native scatter.
+    indices = torch.stack(
+        (torch.div(slots, block_size, rounding_mode="floor"), torch.remainder(slots, block_size)),
+        dim=-1,
+    )
+    torch_npu.npu_scatter_nd_update_(cache, indices, values)
 
 
 @dataclass

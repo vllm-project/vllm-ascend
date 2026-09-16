@@ -9,7 +9,41 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.sfa_v1 as sparse_mla
+import vllm_ascend.attention.utils as attention_utils
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
+
+
+@pytest.fixture(autouse=True)
+def mock_scatter_nd_update(monkeypatch):
+    def scatter(cache, indices, updates):
+        valid = ((indices >= 0) & (indices < torch.tensor(cache.shape[:2]))).all(dim=-1)
+        cache[indices[valid, 0], indices[valid, 1]] = updates[valid]
+        return cache
+
+    monkeypatch.setattr(attention_utils.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
+
+
+@pytest.mark.parametrize("block_size", [128, 640])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_paged_cache_scatter_preserves_padding_and_special_values(block_size, dtype):
+    dim = 512
+    backing = torch.randn(3, block_size + 7, 1, dim, dtype=dtype)
+    cache = backing[:, :block_size]
+    before = backing.clone()
+    slots = torch.tensor([0, block_size + 1, -1, 3 * block_size, -(2**63), 2**63 - 1, 2**32])
+    values = torch.randn(slots.numel(), dim, dtype=dtype)
+    values[0, :4] = torch.tensor([-0.0, float("nan"), float("inf"), -float("inf")], dtype=dtype)
+    expected = before.clone()
+    expected[0, 0, 0] = values[0]
+    expected[1, 1, 0] = values[1]
+    native = attention_utils.torch_npu.npu_scatter_nd_update_
+    with patch.object(attention_utils.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
+        attention_utils.scatter_paged_cache(cache, slots, values, block_size)
+    scatter.assert_called_once()
+    # The native kernel must never receive the original extreme coordinates.
+    indices = scatter.call_args.args[1]
+    assert bool(((indices[:, 0] >= -1) & (indices[:, 0] <= cache.shape[0])).all())
+    assert torch.equal(backing.view(torch.uint8), expected.view(torch.uint8))
 
 
 class _Linear:
