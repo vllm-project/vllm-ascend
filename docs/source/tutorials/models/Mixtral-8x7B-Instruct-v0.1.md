@@ -1,6 +1,6 @@
 # Mixtral-8x7B-Instruct-v0.1
 
-## Introduction
+## 1 Introduction
 
 Mixtral-8x7B-Instruct-v0.1 is a state-of-the-art mixture-of-experts (MoE) language model developed by Mistral AI. It features 8 expert models, each with 7B parameters, and is specifically fine-tuned for instruction following tasks.
 
@@ -15,16 +15,16 @@ This document will show the main verification steps of the model, including supp
 
 The `Mixtral-8x7B-Instruct-v0.1` model is supported in vllm-ascend.
 
-## Environment Preparation
+## 2 Environment Preparation
 
-### Model Weight
+### 2.1 Model Weight
 
 - `Mixtral-8x7B-Instruct-v0.1`(BF16 version): [Download model weight](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1)
 - Quantized versions may be available from third-party providers.
 
 It is recommended to download the model weight to a local directory, such as `/data/models/`.
 
-### Installation
+## 3 Installation
 
 You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` directly.
 
@@ -61,9 +61,9 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-## Deployment
+## 4 Deployment
 
-### Single-node Deployment
+### 4.1 Single-node Deployment
 
 - `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
@@ -102,7 +102,7 @@ The parameters are explained as follows:
 - `--block-size` specifies the block size for KV cache management, with a value of `128` used here.
 - `--gpu-memory-utilization` sets the proportion of NPU memory to use for the model, with a value of `0.7` used here to reduce memory usage.
 
-## Functional Verification
+## 5 Functional Verification
 
 Once your server is started, you can query the model with input prompts. Mixtral-8x7B-Instruct-v0.1 uses a specific prompt format with [INST] and [/INST] tags:
 
@@ -149,21 +149,21 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-## Accuracy Evaluation
+## 6 Accuracy Evaluation
 
-### Using AISBench
+### 6.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result. For reference, Mixtral-8x7B-Instruct-v0.1 typically performs well on various benchmarks including reasoning, comprehension, and instruction following tasks.
 
-## Performance Evaluation
+## 7 Performance Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 7.2 Using vLLM Benchmark
 
 Run performance evaluation of `Mixtral-8x7B-Instruct-v0.1` as an example.
 
@@ -191,7 +191,7 @@ python -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization 0.7
 ```
 
-## Conclusion
+## 8 Conclusion
 
 Mixtral-8x7B-Instruct-v0.1 is a powerful MoE model that offers excellent performance for instruction following tasks. With proper deployment on Ascend hardware using vllm-ascend, you can achieve high throughput and low latency for your AI applications.
 
