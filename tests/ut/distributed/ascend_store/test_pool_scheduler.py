@@ -117,7 +117,9 @@ class TestKVPoolScheduler(unittest.TestCase):
         config = self._make_config(extra_config={"backend": "memcache"})
         config.speculative_config.num_speculative_tokens = 3
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
-        scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups))
+        scheduler = KVPoolScheduler(
+            config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups)
+        )
         self.assertEqual(scheduler.mamba_group_ids, [1])
         self.assertEqual(scheduler.num_speculative_blocks, 3)
 
