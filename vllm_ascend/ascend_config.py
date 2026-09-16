@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.

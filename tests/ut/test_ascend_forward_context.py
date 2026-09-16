@@ -9,6 +9,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "is_a3_mega_moe_enabled", lambda _: False)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -68,11 +69,13 @@ def _patch_select_moe_comm_method_deps(
     enable_fused_mc2: int = 0,
     is_moe: bool = True,
     spec_decode_enabled: bool = False,
+    a3_mega_moe_enabled: bool = False,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(afc, "is_a3_mega_moe_enabled", lambda _: a3_mega_moe_enabled)
     monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2))
     monkeypatch.setattr(
         afc,
@@ -112,6 +115,20 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+def test_set_mc2_tokens_capacity_a3_mega_moe_uses_larger_per_rank_limit(monkeypatch):
+    monkeypatch.setattr(afc, "is_a3_mega_moe_enabled", lambda _: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1),
+    )
+    vllm_config = _make_vllm_config(tensor_parallel_size=1, max_num_batched_tokens=8192)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == afc.A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
@@ -186,6 +203,25 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
+    )
+
+    assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (128, MoECommType.FUSED_MC2),
+        (129, MoECommType.ALLTOALL),
+    ],
+)
+def test_select_moe_comm_method_a3_mega_moe_honors_buffer_capacity(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        enable_fused_mc2=1,
+        a3_mega_moe_enabled=True,
     )
 
     assert afc.select_moe_comm_method(num_tokens, _make_vllm_config()) == expected
