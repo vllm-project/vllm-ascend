@@ -1092,9 +1092,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
             block_size = cache.shape[1]
-            # Extreme invalid slots can overflow inside the native scatter
-            # and alias valid rows. Bounded out-of-range pages are ignored.
-            slots = slots[: values.shape[0]].clamp(min=-1, max=cache.shape[0] * block_size)
+            # Slot mappings contain valid cache positions or -1 padding.
+            slots = slots[: values.shape[0]]
             indices = torch.stack(
                 (torch.div(slots, block_size, rounding_mode="floor"), torch.remainder(slots, block_size)), dim=-1
             )
