@@ -231,8 +231,6 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             return None
         if not self.role.is_index_source:
             shared = attn.shared_state
-            if shared is None:
-                raise RuntimeError("V4.1 shared attention state is not initialized")
             # ``hidden_states`` still owns the full pre-CP token batch here,
             # while ``qr`` was projected from this rank's local query slice.
             # SparseFlashMla requires cmp_sparse_indices.T to match q.T.

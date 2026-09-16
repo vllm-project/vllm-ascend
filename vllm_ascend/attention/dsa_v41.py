@@ -170,13 +170,9 @@ class DeepseekV41LayerMetadata:
 
     @property
     def positions(self) -> torch.Tensor:
-        if self.swa.positions is None:
-            raise RuntimeError("V4.1 SWA metadata does not contain input positions")
         return self.swa.positions
 
     def rope(self, layer_name: str, num_tokens: int):
-        if self.swa.cos is None or self.swa.sin is None:
-            raise RuntimeError("V4.1 SWA metadata does not contain RoPE tensors")
         return self.swa.cos[layer_name][:num_tokens], self.swa.sin[layer_name][:num_tokens]
 
 
@@ -186,8 +182,6 @@ def compressed_slot_mapping(slot_mapping: torch.Tensor, ratio: int) -> torch.Ten
     Logical block sizes must be divisible by ratio. Negative/padded slots and
     incomplete compression groups never produce a write.
     """
-    if ratio not in (1, 2):
-        raise ValueError("V4.1 only supports ratio 1 or 2")
     valid = (slot_mapping >= 0) & ((slot_mapping + 1) % ratio == 0)
     return torch.where(valid, slot_mapping // ratio, -1)
 
@@ -267,15 +261,10 @@ class AscendDSAV41Impl:
         )
 
     def _get_layer_metadata(self, metadata) -> DeepseekV41LayerMetadata:
-        try:
-            swa = metadata[self.swa_prefix]
-            long_kv = metadata[self.long_kv_source_prefix] if self.long_kv_source_prefix is not None else None
-            index_k = metadata[self.index_k_source_prefix] if self.index_k_source_prefix is not None else None
-            compressor_state = (
-                metadata[self.compressor_state_prefix] if self.compressor_state_prefix is not None else None
-            )
-        except KeyError as exc:
-            raise RuntimeError(f"Missing V4.1 cache metadata for {exc.args[0]}") from exc
+        swa = metadata[self.swa_prefix]
+        long_kv = metadata[self.long_kv_source_prefix] if self.long_kv_source_prefix is not None else None
+        index_k = metadata[self.index_k_source_prefix] if self.index_k_source_prefix is not None else None
+        compressor_state = metadata[self.compressor_state_prefix] if self.compressor_state_prefix is not None else None
         return DeepseekV41LayerMetadata(
             attention=long_kv,
             swa=swa,
@@ -432,8 +421,6 @@ class AscendDSAV41Impl:
         metadata,
     ):
         compressor = attn.compressor
-        if compressor is None or metadata.compressor is None or metadata.indexer is None:
-            raise RuntimeError("V4.1 KV source is missing compressor or source metadata")
         compressor_metadata = metadata.compressor
         indexer_metadata = metadata.indexer
         ratio = self.role.compress_ratio
@@ -447,8 +434,6 @@ class AscendDSAV41Impl:
             index_slots = indexer_metadata.cache.slot_mapping[: positions.shape[0]]
             long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
         else:
-            if compressor_metadata.state is None:
-                raise RuntimeError("V4.1 ratio-2 source is missing compressor-state metadata")
             state_metadata = compressor_metadata.state
             if state_metadata.c2_ring_metadata is None or state_metadata.c2_metadata_group_id is None:
                 raise RuntimeError("V4.1 ring compressor metadata is missing")
@@ -468,8 +453,6 @@ class AscendDSAV41Impl:
             index_slots = indexer_metadata.cache.slot_mapping[: positions.shape[0]]
             long_slots = compressor_metadata.cache.slot_mapping[: positions.shape[0]]
 
-        if attn.indexer is None:
-            raise RuntimeError("V4.1 KV source is missing its indexer")
         attn.indexer.update_keys(
             latent,
             index_slots,
@@ -495,12 +478,8 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context:
             return None
         shared = attn.shared_state
-        if shared is None:
-            raise RuntimeError("V4.1 shared attention state is not initialized")
         if not self.role.is_index_source:
             return shared.topk_indices[: hidden_states.shape[0]]
-        if attn.indexer is None or metadata.indexer is None:
-            raise RuntimeError("V4.1 index source is missing indexer metadata")
 
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]

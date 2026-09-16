@@ -174,8 +174,6 @@ class DeepseekV41Indexer(nn.Module):
         block IDs only within this forward. Query quantization and position
         ordering stay outside the native QLI/candidate operator.
         """
-        if is_candidate_source and uses_candidate_filter:
-            raise ValueError("A candidate source must use the unfiltered position TopK")
         if uses_candidate_filter and candidates is None:
             raise RuntimeError("V4.1 candidate-filtering indexer ran before its source")
         if self.width != 128 or self.n_heads not in (32, 64):

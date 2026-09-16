@@ -14,14 +14,8 @@ from vllm_ascend.core.deepseek_v41_kv_cache import STATE_RING_ROWS, DeepseekV41C
 
 def _read(config: Any, name: str) -> Any:
     if isinstance(config, dict):
-        try:
-            return config[name]
-        except KeyError as exc:
-            raise ValueError(f"DeepSeek V4.1 config is missing {name!r}") from exc
-    try:
-        return getattr(config, name)
-    except AttributeError as exc:
-        raise ValueError(f"DeepSeek V4.1 config is missing {name!r}") from exc
+        return config[name]
+    return getattr(config, name)
 
 
 def text_config_of(config: Any) -> Any:
@@ -38,8 +32,6 @@ class DeepseekV41CompressorStateCache(DeepseekV41CacheLayer):
     """
 
     def __init__(self, vllm_config, prefix, spec):
-        if spec.dtype != torch.float32 or spec.compress_ratio != 1 or spec.block_size != STATE_RING_ROWS:
-            raise ValueError("V4.1 compressor state requires a 32-row FP32 ring")
         super().__init__(vllm_config, prefix, spec)
         self.state_dim = spec.head_size
         self.dtype = spec.dtype
