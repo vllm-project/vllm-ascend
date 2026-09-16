@@ -290,14 +290,12 @@ class DeepseekV41MoE(nn.Module):
 
             if hidden_states.dtype != torch.float16:
                 if self.shared_experts is not None:
-                    assert shared_output is not None
                     final_hidden_states = muls_add_triton(
                         final_hidden_states, shared_output, self.routed_scaling_factor
                     )
                 else:
                     final_hidden_states *= self.routed_scaling_factor
             elif self.shared_experts is not None:
-                assert shared_output is not None
                 final_hidden_states = muls_add_triton(
                     shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor
                 )
@@ -1151,7 +1149,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         lookups, mask = self.prepare_engram(input_ids, positions)
         if mask.numel() > num_tokens:
             raise ValueError("Engram query count exceeds the input token count")
-        assert self._engram_input_buffers is not None
         buffers, mask_buffer = self._engram_input_buffers
         mask_buffer[: mask.numel()].copy_(mask)
         mask_buffer[mask.numel() : output_tokens].zero_()
@@ -1250,7 +1247,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.config.rms_norm_eps,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
-        assert last_layer is not None
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]

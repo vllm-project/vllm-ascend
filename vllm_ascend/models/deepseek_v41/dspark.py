@@ -139,7 +139,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
     def __init__(self, *, vllm_config, prefix="") -> None:
         super().__init__()
-        assert vllm_config.speculative_config is not None
         self.vllm_config = vllm_config
         validate_cache_runtime(vllm_config)
         draft_model_config = vllm_config.speculative_config.draft_model_config
@@ -248,7 +247,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 llama_4_scaling=None,
                 input_ids=moe_input_ids,
             )
-        assert last_layer is not None
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -264,9 +262,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        attn: type[nn.Module] | None = None,
+        attn: type[nn.Module],
     ) -> torch.Tensor:
-        assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
         k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
         k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
@@ -328,7 +325,6 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def __init__(self, *, vllm_config, prefix="") -> None:
         super().__init__()
-        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_text_config
 
         from vllm_ascend.utils import get_rotation_path
@@ -417,7 +413,6 @@ class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts,
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
-        assert self.model.confidence_head is not None
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:

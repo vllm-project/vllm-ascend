@@ -71,7 +71,6 @@ class AscendDeepseekV41ForCausalLM(
             config.mm_prefix_span_leading_pad_modulus = 2
         self.config = config
         self.multimodal_config = model_config.multimodal_config
-        assert self.multimodal_config is not None
 
         image_enabled = config.vision_n_layers > 0 and self.multimodal_config.get_limit_per_prompt("image") > 0
         with self._mark_tower_model(vllm_config, {"image"}):
@@ -122,7 +121,6 @@ class AscendDeepseekV41ForCausalLM(
         n_vit_h: int,
         n_vit_w: int,
     ) -> torch.Tensor:
-        assert self.vision is not None and self.aligner is not None
         return self.aligner(
             self.vision(patches, n_vit_h, n_vit_w),
             n_vit_h,
@@ -137,9 +135,6 @@ class AscendDeepseekV41ForCausalLM(
         types = types.to(image_embeds.device)
         span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
         dtype = image_embeds.dtype
-        assert self.image_start is not None
-        assert self.image_end is not None
-        assert self.image_newline is not None
         span[types == IMAGE_START] = self.image_start.to(dtype)
         span[types == IMAGE_END] = self.image_end.to(dtype)
         span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
@@ -153,7 +148,6 @@ class AscendDeepseekV41ForCausalLM(
         llm_grid: torch.Tensor,
         types: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        assert self.aligner is not None
         patches = patches.to(self.aligner.w1.weight.dtype)
         embeds: list[torch.Tensor] = []
         vit_offset = 0
