@@ -42,6 +42,8 @@ inline void npu_fused_lightning_indexer_manage(
                   index_block_table.size(1) > 0 && index_block_table.size(1) <= (1 << 14),
               "index_block_table must be non-empty [B, max_blocks], max_blocks<=16384.");
   const int64_t batch_size = index_block_table.size(0);
+  TORCH_CHECK(total_queries >= batch_size && total_queries <= batch_size * 14,
+              "total_queries must satisfy B <= T <= 14B.");
   auto check_batch_vector = [batch_size](const at::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.dim() == 1 && tensor.size(0) == batch_size, name, " must be [B].");
   };
