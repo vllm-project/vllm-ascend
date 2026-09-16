@@ -190,6 +190,8 @@ def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
 
 def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
+    state.max_num_reqs = 4
+    state._align_mode = False
     config = object()
     model = object()
     encoder_cache = object()
@@ -361,6 +363,7 @@ def test_runner_installs_310p_request_state() -> None:
         runner.num_speculative_steps = 0
         runner.vocab_size = 1024
         runner.device = device
+        runner.input_buffers = SimpleNamespace()
 
     with (
         patch.object(
@@ -374,6 +377,7 @@ def test_runner_installs_310p_request_state() -> None:
             "Ascend310PRequestState",
             return_value=request_state,
         ) as request_state_cls,
+        patch.object(model_runner_module, "is_pin_memory_available", return_value=False),
     ):
         runner = NPUModelRunner310V2(_make_vllm_config(), torch.device("cpu"))
 
@@ -403,6 +407,7 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
 
 def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
     runner = object.__new__(NPUModelRunner310V2)
+    runner.speculator = None
     runner.req_states = SimpleNamespace(
         req_id_to_index={"same": 0, "rewound": 1},
         num_computed_tokens_np=np.array([4, 3], dtype=np.int32),
@@ -420,8 +425,14 @@ def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
     changed = runner._update_seq_lens_cpu(scheduler_output, ["same", "rewound"])
 
     assert changed == [1]
-    torch.testing.assert_close(runner.req_states.num_computed_tokens_cpu, torch.tensor([4, 3]))
-    torch.testing.assert_close(runner.input_buffers.seq_lens_cpu, torch.tensor([5, 5]))
+    torch.testing.assert_close(
+        runner.req_states.num_computed_tokens_cpu,
+        torch.tensor([4, 3], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        runner.input_buffers.seq_lens_cpu,
+        torch.tensor([5, 5], dtype=torch.int32),
+    )
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_np, [5, 5])
 
 
@@ -453,7 +464,10 @@ def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     np.testing.assert_array_equal(req_states.total_len.np, [1, 2])
     np.testing.assert_array_equal(req_states.num_computed_tokens_np, [1, 2])
     torch.testing.assert_close(req_states.last_sampled_tokens_cpu[:, 0], torch.tensor([20, 11]))
-    torch.testing.assert_close(req_states.all_token_ids.cpu[1, :2], torch.tensor([10, 11]))
+    torch.testing.assert_close(
+        req_states.all_token_ids.cpu[1, :2],
+        torch.tensor([10, 11], dtype=torch.int32),
+    )
 
 
 def test_postprocess_sampled_keeps_last_token_on_device() -> None:
@@ -469,6 +483,7 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     )
     runner.model_state = MagicMock()
     runner.speculator = object()
+    runner.rejection_sampler = MagicMock()
     runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
         2, dtype=torch.int64, device=runner.device, pin_memory=False
     )
@@ -505,6 +520,8 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
 def test_sampler_does_not_copy_sampled_tokens_to_cpu() -> None:
     sampler = Ascend310PSampler(device="cpu")
     input_batch = SimpleNamespace(
+        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+        idx_mapping_np=np.array([0, 1], dtype=np.int32),
         seq_lens=torch.ones(2, dtype=torch.int32),
         num_reqs=2,
     )
@@ -592,6 +609,7 @@ def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     sampler.add_request(0, 4, SamplingParams(temperature=0))
     sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
@@ -677,6 +695,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    sampler.apply_staged_writes()
     # max at idx1, second at idx2; top_k=2 must keep only {1,2}
     logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}
@@ -702,6 +721,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    sampler.apply_staged_writes()
     logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
 
     def _argmax_sample(probs: torch.Tensor, generators):
@@ -719,6 +739,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    sampler.apply_staged_writes()
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}
 
@@ -736,7 +757,8 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
-def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4],
         max_num_reqs=3,
@@ -765,7 +787,8 @@ def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
     )
 
 
-def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[128],
         max_num_reqs=1,
@@ -778,7 +801,8 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
 
 
-def test_slot_mapping_copies_only_active_prefix() -> None:
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_slot_mapping_copies_only_active_prefix(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4],
         max_num_reqs=1,
