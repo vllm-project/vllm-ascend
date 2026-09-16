@@ -37,11 +37,23 @@ _HYBRID_DEFAULTS = {
 }
 _AUTO_TUNE_DEFAULTS = {
     "enabled": False,
-    "warmup_steps": 64,
+    # Warmup has to cover every candidate several times over, otherwise no
+    # candidate has settled a throughput sample by the time the policy starts
+    # choosing.  Round-robin exploration spends roughly
+    # ``warmup_steps / len(candidates)`` observations on each candidate, so the
+    # default keeps that comfortably above ``window_steps``.
+    "warmup_steps": 128,
     "explore_ratio": 0.05,
     "update_interval": 32,
     "min_gain": 0.02,
     "ema_decay": 0.9,
+    # Consecutive observations accumulated before one throughput sample is
+    # settled.  A per-step `elapsed_ms` under async scheduling spans scheduler
+    # queueing as well as execution, so a single step is not a usable score
+    # (the same batch width was observed to report 27 ms and 64 ms).  Summing a
+    # window yields tokens over wall-clock milliseconds, which is the quantity
+    # the policy actually wants to maximise.
+    "window_steps": 16,
 }
 
 
@@ -119,14 +131,39 @@ def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
 
 @dataclass
 class _CostEstimate:
-    """EMA of effective output tokens per millisecond for one K candidate."""
+    """EMA of effective output tokens per millisecond for one K candidate.
+
+    An instantaneous step timing is not usable as a score: under async
+    scheduling ``elapsed_ms`` covers scheduler queueing in addition to
+    execution, so identical batch widths were measured anywhere between 27 ms
+    and 64 ms.  The accumulator below therefore sums consecutive observations
+    and settles one sample from the window total, i.e. ``tokens / total_ms``.
+    """
 
     ema_score: float = 0.0
     samples: int = 0
+    window_tokens: float = 0.0
+    window_ms: float = 0.0
+    window_count: int = 0
 
-    def observe(self, score: float, decay: float) -> None:
+    def observe(
+        self,
+        tokens: float,
+        elapsed_ms: float,
+        window_steps: int,
+        decay: float,
+    ) -> None:
+        self.window_tokens += tokens
+        self.window_ms += elapsed_ms
+        self.window_count += 1
+        if self.window_count < window_steps or self.window_ms <= 0:
+            return
+        score = self.window_tokens / self.window_ms
         self.ema_score = score if not self.samples else decay * self.ema_score + (1 - decay) * score
         self.samples += 1
+        self.window_tokens = 0.0
+        self.window_ms = 0.0
+        self.window_count = 0
 
 
 @dataclass
@@ -146,11 +183,12 @@ class AdaptiveDraftKController:
     capture_k: tuple[int, ...] = ()
     graph_mode: str = "unknown"
     auto_tune_enabled: bool = False
-    auto_tune_warmup_steps: int = 64
+    auto_tune_warmup_steps: int = 128
     auto_tune_explore_ratio: float = 0.05
     auto_tune_update_interval: int = 32
     auto_tune_min_gain: float = 0.02
     auto_tune_ema_decay: float = 0.9
+    auto_tune_window_steps: int = 16
 
     def __post_init__(self) -> None:
         self.max_k = max(int(self.max_k), 0)
@@ -167,6 +205,7 @@ class AdaptiveDraftKController:
         self.auto_tune_update_interval = max(int(self.auto_tune_update_interval), 1)
         self.auto_tune_min_gain = min(max(float(self.auto_tune_min_gain), 0.0), 1.0)
         self.auto_tune_ema_decay = min(max(float(self.auto_tune_ema_decay), 0.0), 1.0)
+        self.auto_tune_window_steps = max(int(self.auto_tune_window_steps), 1)
         candidates = {
             int(k)
             for k in self.capture_k
@@ -181,6 +220,9 @@ class AdaptiveDraftKController:
         self._last_auto_log = -32
         self._auto_tune_feedback_ready = False
         self._current_k: int | None = None
+        self._explore_cursor = 0
+        self._dwell_k: int | None = None
+        self._dwell_remaining = 0
         self._low_acceptance_steps = 0
         self._high_acceptance_steps = 0
         self.observation_count = 0
@@ -227,6 +269,27 @@ class AdaptiveDraftKController:
             ),
         )
 
+    def _next_explore_k(self, exclude: int | None = None) -> int | None:
+        """Cycle through candidates so every K is periodically re-measured.
+
+        Least-sampled selection alone cannot recover a candidate that scored
+        badly once: it stops being sampled, its estimate goes stale, and it is
+        never reconsidered.  A transient batch mix can make any single K look
+        poor for a while, so probing the full candidate set round-robin is what
+        keeps the learned preference from locking onto a bad K.
+        """
+
+        if not self._candidate_k:
+            return None
+        total = len(self._candidate_k)
+        for offset in range(total):
+            index = (self._explore_cursor + offset) % total
+            candidate = self._candidate_k[index]
+            if candidate != exclude:
+                self._explore_cursor = (index + 1) % total
+                return candidate
+        return None
+
     def _observe_cost(
         self,
         widths: Sequence[int],
@@ -242,22 +305,44 @@ class AdaptiveDraftKController:
             return
         # Every request produces one target token, in addition to accepted
         # draft tokens.  This makes candidates with different K comparable.
-        effective_tokens = sum(accepted) + batch_size
-        score = effective_tokens / elapsed_ms
+        effective_tokens = float(sum(accepted) + batch_size)
         key = self._cost_key(batch_size, observed_k)
         estimate = self._cost_model.setdefault(key, _CostEstimate())
-        estimate.observe(score, self.auto_tune_ema_decay)
+        estimate.observe(
+            effective_tokens,
+            float(elapsed_ms),
+            self.auto_tune_window_steps,
+            self.auto_tune_ema_decay,
+        )
 
     def _choose_auto_k(self, batch_size: int) -> None:
         if not self._candidate_k:
             return
         bucket = self._batch_bucket(batch_size)
+
+        # A probe is only useful when it lasts long enough to settle one
+        # throughput sample.  Deciding the width for a single step at a time
+        # never fills the window, so an explored candidate would accumulate a
+        # few steps and stay unusable forever (observed on hardware: K=6 had 3
+        # samples of budget after thousands of steps).  Hold the explored width
+        # for a full window instead.
+        if self._dwell_remaining > 0 and self._dwell_k is not None:
+            self._dwell_remaining -= 1
+            self._auto_k_by_bucket[bucket] = self._dwell_k
+            self._current_k = self._dwell_k
+            self.last_reason = "auto_explore_dwell"
+            return
+
         selected = self._auto_k_by_bucket.get(bucket, self.max_k)
         reason = "auto_hold_interval"
         # During warmup, deliberately cover every configured candidate.  This
         # is bounded exploration and does not require extra graph capture.
+        # Round-robin (rather than least-sampled) is required here: with a
+        # dwell that spans a whole window, a candidate does not gain a sample
+        # until its dwell finishes, so least-sampled would keep picking the
+        # same candidate and never cover the others.
         if self.observation_count <= self.auto_tune_warmup_steps:
-            explored = self._select_least_sampled(batch_size)
+            explored = self._next_explore_k(selected)
             if explored is not None:
                 selected = explored
                 reason = "auto_warmup_explore"
@@ -272,7 +357,10 @@ class AdaptiveDraftKController:
                 )
                 decision_count = self.observation_count // self.auto_tune_update_interval
                 if period and decision_count % period == 0:
-                    explored = self._select_least_sampled(batch_size, selected)
+                    # Round-robin is used here instead of least-sampled: once
+                    # the policy settles on a candidate, a badly scoring K
+                    # stops being sampled and can never recover.
+                    explored = self._next_explore_k(selected)
                     if explored is not None:
                         selected = explored
                         reason = "auto_periodic_explore"
@@ -304,6 +392,14 @@ class AdaptiveDraftKController:
                             reason = "auto_cost_model_best_k"
                         else:
                             reason = "auto_cost_model_keep_k"
+
+        if reason in (
+            "auto_warmup_explore",
+            "auto_periodic_explore",
+            "auto_new_batch_bucket_explore",
+        ):
+            self._dwell_k = selected
+            self._dwell_remaining = max(self.auto_tune_window_steps - 1, 0)
 
         self._auto_k_by_bucket[bucket] = selected
         self._current_k = selected
@@ -470,6 +566,7 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
         auto_tune_update_interval=params["auto_tune_update_interval"],
         auto_tune_min_gain=params["auto_tune_min_gain"],
         auto_tune_ema_decay=params["auto_tune_ema_decay"],
+        auto_tune_window_steps=params["auto_tune_window_steps"],
     )
 
 
@@ -522,13 +619,14 @@ def install_scheduler_policy() -> None:
                 self._ascend_physical_k_profile_starts = deque()
                 logger.warning(
                     "ASCEND_AUTO_K_INIT mode=%s candidates=%s warmup_steps=%s "
-                    "explore_ratio=%s update_interval=%s min_gain=%s",
+                    "explore_ratio=%s update_interval=%s min_gain=%s window_steps=%s",
                     controller.graph_mode,
                     controller._candidate_k,
                     controller.auto_tune_warmup_steps,
                     controller.auto_tune_explore_ratio,
                     controller.auto_tune_update_interval,
                     controller.auto_tune_min_gain,
+                    controller.auto_tune_window_steps,
                 )
 
         patched_init._vllm_ascend_physical_k_patched = True  # type: ignore[attr-defined]
