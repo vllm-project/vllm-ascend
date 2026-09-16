@@ -82,6 +82,9 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    # Optional selection supplied by the owning attention implementation.
+    # Projection, rope and cache writes continue to use this backend.
+    topk_selector: Any | None = None
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -478,6 +481,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
+        if getattr(indexer_metadata, "topk_selector", None) is not None:
+            return indexer_metadata.topk_selector(q_li, weights, self, indexer_metadata)
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,

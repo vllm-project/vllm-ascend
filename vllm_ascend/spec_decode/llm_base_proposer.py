@@ -782,6 +782,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                self.runner._prepare_nano_request_slots(num_reqs, num_reqs, dummy=True)
                 req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
                     num_tokens,
                     num_reqs,
@@ -817,6 +818,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_topk_buffer_slots=(
+                        self.runner._offload_pool_slots.gpu[:num_reqs]
+                        if self.runner._offload_pool_slots is not None
+                        else None
+                    ),
+                    req_topk_buffer_generations=(
+                        self.runner._offload_pool_generations.gpu[:num_reqs]
+                        if self.runner._offload_pool_generations is not None
+                        else None
+                    ),
+                    nano_eligible=True,
+                    offload_dummy=True,
                     req_ids_tensor=req_ids_tensor,
                     token_to_req=token_to_req,
                 )
@@ -2371,6 +2384,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
+            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            nano_eligible=common_attn_metadata.nano_eligible,
+            offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=token_to_req,
         )
@@ -2468,6 +2485,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
+            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            nano_eligible=common_attn_metadata.nano_eligible,
+            offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=common_attn_metadata.token_to_req,
         )
