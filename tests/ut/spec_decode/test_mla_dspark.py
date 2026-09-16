@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -10,9 +10,10 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadata
-from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -49,78 +50,70 @@ def make_draft(config):
     return draft
 
 
-@pytest.mark.parametrize("target_use_mla", [False, True])
+class DerivedMLABackend(AscendMLABackend):
+    pass
+
+
+@pytest.mark.parametrize("target_backend", [AscendMLABackend, AscendAttentionBackend])
 @pytest.mark.parametrize(
-    "architecture,draft_use_mla,text_fields,outer_fields,expect_dense_mla",
+    "draft_backend,expected",
     [
-        ("K3DSparkModel", True, {}, {}, True),
-        ("OtherMLADraftModel", True, {}, {}, True),
-        ("K3DSparkModel", False, {}, {}, False),
-        ("Qwen3DSparkModel", False, {}, {}, False),
-        ("DSparkDraftModel", False, {}, {}, False),
-        ("DSparkDraftModel", True, {"compress_ratios": [0, 4, 128], "index_topk": 2048}, {}, False),
-        ("CompressedMLADraftModel", True, {"compress_ratios": [0]}, {}, False),
-        ("WrappedMLADraftModel", True, {}, {"compress_ratios": [0, 4]}, False),
-        ("SparseMLADraftModel", True, {"index_topk": 2048}, {}, False),
-        ("KpoolMLADraftModel", True, {"index_topk": 2048, "index_kpool": 4}, {}, True),
+        (AscendMLABackend, "MLA"),
+        (DerivedMLABackend, "MLA"),
+        (AscendAttentionBackend, None),
+        (AscendDSABackend, None),
+        (AscendSFABackend, None),
     ],
 )
-def test_shared_speculator_selects_draft_mla_metadata(
-    monkeypatch, architecture, draft_use_mla, target_use_mla, text_fields, outer_fields, expect_dense_mla
-):
-    patch_upstream_init(monkeypatch)
-    text_config = SimpleNamespace(**text_fields)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(use_mla=target_use_mla),
-        speculative_config=SimpleNamespace(
-            method="dspark",
-            use_dspark=lambda: True,
-            draft_model_config=SimpleNamespace(
-                use_mla=draft_use_mla,
-                hf_config=SimpleNamespace(architectures=[architecture], **outer_fields),
-                hf_text_config=text_config,
-            ),
-        ),
-    )
-    device = torch.device("cpu")
-    result = init_speculator(config, device)
-    assert type(result) is AscendDSparkSpeculator
-    assert result.attn_architecture == ("MLA" if expect_dense_mla else None)
+def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, draft_backend, expected):
+    spec = initialize_attention(monkeypatch, draft_backend, target_backend)
+    assert spec.attn_architecture == expected
+    assert spec.attn_backends == {"draft": draft_backend}
 
 
-def patch_upstream_init(monkeypatch):
-    def init(self, config, device):
-        self.draft_model_config = config.speculative_config.draft_model_config
-
-    monkeypatch.setattr(DSparkSpeculator, "__init__", init)
+def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
+    monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
+    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, *args: None)
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
+    config = SimpleNamespace(speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True))
+    spec = init_speculator(config, torch.device("cpu"))
+    assert type(spec) is AscendDSparkSpeculator
+    assert spec.attn_architecture is None
+    spec.vllm_config = spec.attn_vllm_config = config
+    spec.draft_attn_layer_names = {"draft"}
+    spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
+    target_groups = [[SimpleNamespace(backend=target_backend)]]
+    draft_groups = [[], [SimpleNamespace(backend=draft_backend)]]
+
+    def set_attn(self, model_state, kv_cache_config, block_tables, input_buffers, target_attn_groups):
+        assert target_attn_groups is target_groups
+        self.attn_groups = draft_groups
+
+    monkeypatch.setattr(DSparkSpeculator, "set_attn", set_attn)
+    monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
+
+    def get_layers(config, layer_type, layer_names):
+        assert layer_names == ["draft"]
+        return {"draft": SimpleNamespace(get_attn_backend=lambda: draft_backend)}
+
+    monkeypatch.setattr(shared, "get_layers_from_vllm_config", get_layers)
+    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["target", "draft"])])
+    spec.set_attn(None, cache_config, None, None, target_groups)
+    assert spec._context_slot_mappings.dtype == torch.int32
+    return spec
 
 
 @pytest.mark.parametrize(
-    "metadata_cls,config_fields",
-    [
-        (AscendDSAMetadata, {"compress_ratios": [0, 4, 128], "index_topk": 2048}),
-        (AscendSFAMetadata, {"index_topk": 2048}),
-    ],
+    "backend,metadata_cls", [(AscendDSABackend, AscendDSAMetadata), (AscendSFABackend, AscendSFAMetadata)]
 )
-def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, metadata_cls, config_fields):
-    patch_upstream_init(monkeypatch)
-    hf_config = SimpleNamespace(architectures=["DSparkDraftModel"], **config_fields)
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            method="dspark",
-            use_dspark=lambda: True,
-            draft_model_config=SimpleNamespace(use_mla=True, hf_config=hf_config, hf_text_config=hf_config),
-        )
-    )
-    selected = init_speculator(config, torch.device("cpu"))
-    assert type(selected) is AscendDSparkSpeculator
-    assert selected.attn_architecture is None
-    selected.num_query_per_req = 5
+def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, backend, metadata_cls):
+    spec = initialize_attention(monkeypatch, backend)
+    assert spec.attn_architecture is None
+    spec.num_query_per_req = 5
     metadata = metadata_cls.__new__(metadata_cls)
     assert not hasattr(metadata, "decode")
     layers = {"draft": metadata}
-    assert selected._update_draft_attn_metadata(layers, 2) is layers
+    assert spec._update_draft_attn_metadata(layers, 2) is layers
     assert metadata.actual_seq_lengths_q == [5, 10]
 
 
