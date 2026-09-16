@@ -419,28 +419,6 @@ def select_moe_comm_method(
     return moe_comm_type
 
 
-def _extra_ctx_uses_additional_kwargs(_ctx: Any) -> bool:
-    """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
-
-    GPU V2 stores its own ``capturing`` flag on the forward-context object.
-    Ascend FIA treats ``_EXTRA_CTX.capturing`` as ACL graph capture. Isolate
-    extras whenever Ascend enables V2, including the architecture whitelist
-    with ``VLLM_USE_V2_MODEL_RUNNER`` unset.
-
-    Use ``get_current_vllm_config()`` rather than ``ctx.vllm_config``: GPU V2
-    ``ForwardContext`` has no ``vllm_config`` field, so whitelist-default V2
-    would otherwise leak GPU's ``capturing`` onto ``_EXTRA_CTX``.
-    """
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
-        return False
-    if vllm_config is None:
-        return False
-    # Require an actual bool. MagicMock configs can be truthy.
-    return use_v2_model_runner(vllm_config) is True
-
-
 class _ExtraForwardContextProxy:
     """Unified forward-context access for v1/v2 model runners."""
 
@@ -485,26 +463,30 @@ class _ExtraForwardContextProxy:
     def __getattr__(self, name: str) -> Any:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _extra_ctx_uses_additional_kwargs(ctx):
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            additional_kwargs = getattr(ctx, "additional_kwargs", None)
-            if additional_kwargs is None:
-                return None
-            return additional_kwargs.get(name)
+        try:
+            if use_v2_model_runner(get_current_vllm_config()) is True:
+                additional_kwargs = getattr(ctx, "additional_kwargs", None)
+                if additional_kwargs is None:
+                    return None
+                return additional_kwargs.get(name)
+        except Exception:
+            pass
         return getattr(ctx, name, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.check_extra_attr(name)
         ctx = self._ctx()
-        if _extra_ctx_uses_additional_kwargs(ctx):
-            additional_kwargs = getattr(ctx, "additional_kwargs", None)
-            if additional_kwargs is None:
-                additional_kwargs = {}
-                ctx.additional_kwargs = additional_kwargs
-            additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        try:
+            if use_v2_model_runner(get_current_vllm_config()) is True:
+                additional_kwargs = getattr(ctx, "additional_kwargs", None)
+                if additional_kwargs is None:
+                    additional_kwargs = {}
+                    ctx.additional_kwargs = additional_kwargs
+                additional_kwargs[name] = value
+                return
+        except Exception:
+            pass
+        setattr(ctx, name, value)
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX

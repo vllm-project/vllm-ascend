@@ -569,7 +569,6 @@ def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
     forward_context = MagicMock(capturing=False)
     monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
 
-    assert afc._extra_ctx_uses_additional_kwargs(forward_context) is False
     assert afc._EXTRA_CTX.capturing is False
     afc._EXTRA_CTX.capturing = True
     assert forward_context.capturing is True
