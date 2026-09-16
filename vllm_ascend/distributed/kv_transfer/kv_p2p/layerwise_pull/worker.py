@@ -19,6 +19,9 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
+    SUPPORTED_TRANSFER_MODES,
+    TRANSFER_MODE_PULL,
+    TRANSFER_MODE_PUSH,
     ComponentLayout,
     SendTask,
     get_external_request_id,
@@ -73,6 +76,18 @@ def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     return backend
 
 
+def _resolve_transfer_mode(vllm_config: VllmConfig) -> str:
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+    mode = extra.get("transfer_mode", TRANSFER_MODE_PULL)
+    if mode not in SUPPORTED_TRANSFER_MODES:
+        raise ValueError(
+            "LayerwisePullConnector requires "
+            'kv_connector_extra_config["transfer_mode"] to be one of '
+            f"{SUPPORTED_TRANSFER_MODES}, got {mode!r}"
+        )
+    return mode
+
+
 def _validate_tcp_port(port: int, *, description: str) -> None:
     if not MIN_TCP_PORT <= port <= MAX_TCP_PORT:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
@@ -94,6 +109,7 @@ class LayerwisePullConsumerWorker:
         self.kv_cache_config = kv_cache_config
         self.use_layerwise = use_layerwise
         self._backend_name = _resolve_kv_transfer_backend(vllm_config)
+        self._transfer_mode = _resolve_transfer_mode(vllm_config)
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
@@ -126,7 +142,13 @@ class LayerwisePullConsumerWorker:
         if self.engine is None:
             device_id = torch.npu.current_device()
             if self._backend_name == BACKEND_MEMFABRIC:
-                global_memfabric_te.configure(role=MEMFABRIC_ROLE_DECODE, device_id=device_id)
+                # Push writes into D's memory, so D must host the store server.
+                store_server_role = (
+                    MEMFABRIC_ROLE_DECODE if self._transfer_mode == TRANSFER_MODE_PUSH else MEMFABRIC_ROLE_PREFILL
+                )
+                global_memfabric_te.configure(
+                    role=MEMFABRIC_ROLE_DECODE, device_id=device_id, store_server_role=store_server_role
+                )
                 self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
             else:
                 device_name = str(device_id) if self.pp_size > 1 else None
@@ -202,6 +224,11 @@ class LayerwisePullConsumerWorker:
         main_names: set[str] = set()
         hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
+            if getattr(self, "_transfer_mode", TRANSFER_MODE_PULL) == TRANSFER_MODE_PUSH:
+                raise ValueError(
+                    "LayerwisePullConnector transfer_mode=push is not supported with sparse decode offload: "
+                    "P would write directly into the shared CPU pool GVA, which is unvalidated (坑5)"
+                )
             if self._backend_name != BACKEND_MEMFABRIC:
                 raise ValueError(
                     "LayerwisePullConnector with sparse decode offload requires "
@@ -266,8 +293,13 @@ class LayerwisePullConsumerWorker:
         _, backend = self._ensure_engine()
         if self._backend_name == BACKEND_MEMFABRIC:
             global_memfabric_te.register_buffer(registration.ptrs, registration.lengths)
+            d_session = global_memfabric_te.unique_id
         else:
             global_te.register_buffer(registration.ptrs, registration.lengths)
+            # getattr: unit-test doubles bypass _ensure_engine/self.engine.
+            engine_obj = getattr(self, "engine", None)
+            rpc_port = engine_obj.get_rpc_port() if engine_obj is not None else 0
+            d_session = f"{getattr(self, 'side_channel_host', '')}:{rpc_port}"
 
         self._read_thread = LayerwisePullReadThread(
             tp_rank=self.tp_rank,
@@ -279,6 +311,8 @@ class LayerwisePullConsumerWorker:
                 dest_blocks_by_req=self._dest_blocks_by_req,
                 tp_shared_components=frozenset(tp_shared_components),
                 dest_blocks_condition=self._dest_blocks_condition,
+                d_session=d_session,
+                transfer_mode=getattr(self, "_transfer_mode", TRANSFER_MODE_PULL),
             ),
         )
         self._read_thread.start()
@@ -416,9 +450,16 @@ class LayerwisePullProducerWorker:
         self.side_channel_host = get_ip()
         self.side_channel_port = vllm_config.kv_transfer_config.kv_port + self.dp_rank * self.pp_size * self.tp_size
         self.block_size = tuple(group.kv_cache_spec.block_size for group in self.kv_cache_config.kv_cache_groups)
+        self._transfer_mode = _resolve_transfer_mode(vllm_config)
         device_id = torch.npu.current_device()
         if self._backend_name == BACKEND_MEMFABRIC:
-            global_memfabric_te.configure(role=MEMFABRIC_ROLE_PREFILL, device_id=device_id)
+            # Push writes into D's memory, so the store server is hosted by Decode.
+            store_server_role = (
+                MEMFABRIC_ROLE_DECODE if self._transfer_mode == TRANSFER_MODE_PUSH else MEMFABRIC_ROLE_PREFILL
+            )
+            global_memfabric_te.configure(
+                role=MEMFABRIC_ROLE_PREFILL, device_id=device_id, store_server_role=store_server_role
+            )
             self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
             self.session_id = global_memfabric_te.unique_id
         else:
@@ -527,6 +568,15 @@ class LayerwisePullProducerWorker:
         return prefill_tp_rank // (prefill_tp_size // decode_tp_size)
 
     def _build_send_state(self) -> ProducerSendState:
+        # Push mode: this thread writes into D-advertised destinations and needs
+        # a backend; pull mode never transfers from P (backend stays None).
+        push_backend = None
+        if getattr(self, "_transfer_mode", TRANSFER_MODE_PULL) == TRANSFER_MODE_PUSH:
+            push_backend = (
+                PullBackend.memfabric(self.engine)
+                if self._backend_name == BACKEND_MEMFABRIC
+                else PullBackend.mooncake(self.engine)
+            )
         return ProducerSendState(
             last_layer_idx=self.last_layer_idx,
             layer_layouts=self.layer_layouts,
@@ -536,6 +586,8 @@ class LayerwisePullProducerWorker:
             num_blocks=self.kv_cache_config.num_blocks,
             pp_rank=self.pp_rank,
             tp_rank=self.tp_rank,
+            transfer_mode=getattr(self, "_transfer_mode", TRANSFER_MODE_PULL),
+            backend=push_backend,
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:

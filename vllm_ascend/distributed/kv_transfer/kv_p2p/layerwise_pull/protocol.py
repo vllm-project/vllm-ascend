@@ -17,6 +17,18 @@ READ_READY_BATCH = b"read_ready_batch"
 READ_DONE = b"read_done"
 READ_FAILED = b"read_failed"
 
+# Push mode (transfer_mode="push"): D advertises destinations, P writes.
+PUSH_META = b"push_meta"  # P→D (on connect): producer topology for completion counting
+DEST_LAYOUT_META = b"dest_layout_meta"  # D→P (reply): destination component layouts + D session
+DEST_BLOCKS_REQUEST = b"dest_blocks_request"  # P→D: (ext_req_id,) block-id query
+DEST_BLOCKS = b"dest_blocks"  # D→P: (ext_req_id, block_ids_by_group)
+WRITE_DONE = b"write_done"  # P→D: terminal-layer write completion (chunk_done semantics)
+WRITE_FAILED = b"write_failed"  # P→D: write failure (fails the request on D)
+
+TRANSFER_MODE_PULL = "pull"
+TRANSFER_MODE_PUSH = "push"
+SUPPORTED_TRANSFER_MODES = (TRANSFER_MODE_PULL, TRANSFER_MODE_PUSH)
+
 
 @dataclass(frozen=True)
 class LayerwisePullHandshakeMetadata(KVConnectorHandshakeMetadata):

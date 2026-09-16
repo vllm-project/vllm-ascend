@@ -15,10 +15,16 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
+    DEST_BLOCKS,
+    DEST_BLOCKS_REQUEST,
+    DEST_LAYOUT_META,
     LAYOUT_META,
+    PUSH_META,
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    WRITE_DONE,
+    WRITE_FAILED,
     ComponentLayout,
 )
 
@@ -70,6 +76,36 @@ class PullBackend:
         )
         if self._is_error(ret):
             raise RuntimeError(f"{self._name} READ failed for session {session_id}, ret={ret}")
+
+    def write(
+        self,
+        session_id: str,
+        local_addrs: Sequence[int],
+        remote_addrs: Sequence[int],
+        lengths: Sequence[int],
+    ) -> None:
+        """Push mode: synchronously write local buffers into the peer's memory.
+
+        Used on the P side only. Sync write is the v1 correctness path (bare-link
+        validated: return implies the payload has left the source buffer and is
+        visible at the destination); the async-submit + completion-reaping
+        variant is a planned follow-up for send-thread pipelining.
+        """
+        if not (len(local_addrs) == len(remote_addrs) == len(lengths)):
+            raise ValueError(
+                "Layerwise push descriptor counts differ: "
+                f"local={len(local_addrs)}, remote={len(remote_addrs)}, lengths={len(lengths)}"
+            )
+        if not local_addrs:
+            return
+        ret = self._engine.batch_transfer_sync_write(
+            session_id,
+            local_addrs if isinstance(local_addrs, list) else list(local_addrs),
+            remote_addrs if isinstance(remote_addrs, list) else list(remote_addrs),
+            lengths if isinstance(lengths, list) else list(lengths),
+        )
+        if self._is_error(ret):
+            raise RuntimeError(f"{self._name} WRITE failed for session {session_id}, ret={ret}")
 
 
 def _coalesce_read_descriptors(
@@ -130,6 +166,9 @@ class ConsumerReadState:
     # adapter hint prevents duplicate reads; ordinary HBM layouts leave it empty.
     tp_shared_components: frozenset[str] = frozenset()
     dest_blocks_condition: threading.Condition = field(default_factory=threading.Condition)
+    # Push mode: D's own backend session id, advertised to P via DEST_LAYOUT_META.
+    d_session: str = ""
+    transfer_mode: str = "pull"
 
 
 def _tp_block_range(
@@ -177,6 +216,8 @@ class LayerwisePullReadThread(threading.Thread):
         self._expected_sources: dict[str, frozenset[tuple[int, int]]] = {}
         self._p_completion_sources: dict[bytes, tuple[tuple[int, int], int, frozenset[tuple[int, int]]]] = {}
         self._terminal_requests: set[str] = set()
+        # Push mode: ext_req_id → P-side identities waiting for DEST_BLOCKS.
+        self._pending_dest_queries: dict[str, set[bytes]] = {}
         self._lock = threading.Lock()
         self._host = get_ip()
         self._stop_event = threading.Event()
@@ -205,6 +246,7 @@ class LayerwisePullReadThread(threading.Thread):
                 self._done_contributors.pop(ext_id, None)
                 self._expected_sources.pop(ext_id, None)
                 self._terminal_requests.discard(ext_id)
+                self._pending_dest_queries.pop(ext_id, None)
 
     def _register_remote_layout(self, identity: bytes, msg: tuple) -> None:
         """Establish all expected PP/TP sources before accepting completion."""
@@ -258,6 +300,116 @@ class LayerwisePullReadThread(threading.Thread):
         self._p_completion_sources[identity] = (contributor, ratio, expected)
         self._component_pairs_by_source.pop(identity, None)
 
+    # ------------------------------------------------------------------
+    # Push mode (transfer_mode="push"): D publishes destinations, P writes.
+    # ------------------------------------------------------------------
+    def _encode_local_layouts(self) -> bytes:
+        layouts = {
+            layer_idx: {
+                "components": [
+                    {
+                        "name": component.name,
+                        "group_index": component.group_index,
+                        "block_size": component.block_size,
+                        "dtypes": list(component.dtypes),
+                        "base_addrs": list(component.base_addrs),
+                        "block_strides": list(component.block_strides),
+                        "block_lengths": list(component.block_lengths),
+                        "block_shapes": [list(shape) for shape in component.block_shapes],
+                        "block_size_scales": list(component.block_size_scales),
+                    }
+                    for component in components
+                ],
+            }
+            for layer_idx, components in self._state.layer_layouts.items()
+        }
+        return msgspec.msgpack.encode(layouts)
+
+    def _register_push_source(self, identity: bytes, msg: tuple) -> None:
+        """PUSH_META: register a P producer's topology for WRITE_DONE counting.
+
+        Mirrors the topology validation of _register_remote_layout, but P sends
+        no layouts in push mode (D never plans transfers). Returns nothing; the
+        caller replies with DEST_LAYOUT_META carrying D's destination layouts.
+        """
+        _, pp_layers, tp_size, pp_rank, tp_rank = msg
+        if self._state.tp_shared_components:
+            raise ValueError(
+                "Layerwise push (transfer_mode=push) is not supported with sparse decode offload: "
+                "P would write directly into the shared CPU pool GVA, which is unvalidated"
+            )
+        if tp_size < self._state.tp_size or tp_size % self._state.tp_size:
+            raise ValueError("Layerwise push requires P TP size divisible by D TP size")
+        ratio = tp_size // self._state.tp_size
+        if not 0 <= pp_rank < len(pp_layers) or not 0 <= tp_rank < tp_size:
+            raise ValueError("Layerwise push received an invalid producer rank")
+        if tp_rank // ratio != self.tp_rank:
+            raise ValueError("Layerwise push producer connected to the wrong D TP rank")
+        all_layers = [layer for layers in pp_layers for layer in layers]
+        if len(all_layers) != len(set(all_layers)):
+            raise ValueError("Layerwise push producer PP stages have overlapping layers")
+        local_layers = set(self._state.layer_layouts)
+        if not local_layers.issubset(all_layers):
+            raise ValueError("Layerwise push producer topology is missing local destination layers")
+        expected = frozenset(
+            (pp, member)
+            for pp, layers in enumerate(pp_layers)
+            if local_layers.intersection(layers)
+            for member in range(ratio)
+        )
+        contributor = (pp_rank, tp_rank % ratio)
+        if contributor not in expected:
+            raise ValueError("Layerwise push producer has no layers for this D stage")
+        self._p_completion_sources[identity] = (contributor, ratio, expected)
+        logger.info(
+            "Layerwise push D registered producer: contributor=%s, expected_sources=%s",
+            contributor,
+            sorted(expected),
+        )
+
+    def _handle_dest_blocks_request(self, sock: Any, identity: bytes, ext_req_id: str, encoder: Any) -> None:
+        blocks = self._state.dest_blocks_by_req.get(ext_req_id)
+        if blocks is None:
+            self._pending_dest_queries.setdefault(ext_req_id, set()).add(identity)
+            return
+        sock.send_multipart((identity, b"", encoder.encode((DEST_BLOCKS, ext_req_id, blocks))))
+
+    def _flush_pending_dest_queries(self, sock: Any, encoder: Any) -> None:
+        if not self._pending_dest_queries:
+            return
+        for ext_id in list(self._pending_dest_queries):
+            blocks = self._state.dest_blocks_by_req.get(ext_id)
+            if blocks is None:
+                continue
+            for identity in self._pending_dest_queries.pop(ext_id):
+                sock.send_multipart((identity, b"", encoder.encode((DEST_BLOCKS, ext_id, blocks))))
+
+    def _handle_write_done(self, msg: tuple, identity: bytes) -> None:
+        # (WRITE_DONE, layer_idx, done_ext_ids, transfer_id)
+        done_ext_ids = list(msg[2]) if len(msg) > 2 else []
+        if not done_ext_ids:
+            return
+        source = self._p_completion_sources.get(identity)
+        if source is None:
+            logger.error("Layerwise push D got WRITE_DONE from an unregistered producer")
+            return
+        contributor, _, expected = source
+        self._record_chunk_done(done_ext_ids, contributor, expected)
+
+    def _handle_write_failed(self, msg: tuple) -> None:
+        # (WRITE_FAILED, layer_idx, error, failed_ext_ids)
+        layer_idx = int(msg[1])
+        error = str(msg[2]) if len(msg) > 2 else ""
+        failed = set(msg[3]) if len(msg) > 3 else set()
+        logger.error("Layerwise push D received WRITE_FAILED: layer=%d, error=%s", layer_idx, error)
+        with self._lock:
+            self._failed_requests.update(failed - self._failed_request_ids)
+            self._failed_request_ids.update(failed)
+            self._done_requests.difference_update(failed)
+            for ext_id in failed:
+                self._done_contributors.pop(ext_id, None)
+                self._expected_sources.pop(ext_id, None)
+
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
             done = self._done_requests
@@ -308,6 +460,26 @@ class LayerwisePullReadThread(threading.Thread):
                     if msg[0] == LAYOUT_META:
                         self._register_remote_layout(identity, msg)
                         sock.send_multipart((identity, b"", b"ACK"))
+                        continue
+
+                    # ---- Push mode messages ----
+                    if msg[0] == PUSH_META:
+                        try:
+                            self._register_push_source(identity, msg)
+                            reply = (DEST_LAYOUT_META, self._encode_local_layouts(), self._state.d_session)
+                        except Exception as error:
+                            logger.error("Layerwise push handshake failed: %s", error)
+                            reply = (WRITE_FAILED, -1, str(error), [])
+                        sock.send_multipart((identity, b"", encoder.encode(reply)))
+                        continue
+                    if msg[0] == DEST_BLOCKS_REQUEST:
+                        self._handle_dest_blocks_request(sock, identity, str(msg[1]), encoder)
+                        continue
+                    if msg[0] == WRITE_DONE:
+                        self._handle_write_done(msg, identity)
+                        continue
+                    if msg[0] == WRITE_FAILED:
+                        self._handle_write_failed(msg)
                         continue
 
                     if msg[0] != READ_READY_BATCH:
@@ -365,6 +537,13 @@ class LayerwisePullReadThread(threading.Thread):
                         )
                         sock.send_multipart((identity, b"", encoder.encode(reply)))
                 except zmq.Again:  # type: ignore[attr-defined]
+                    # Poll timeout: D's scheduler may have allocated blocks for
+                    # previously unanswered DEST_BLOCKS_REQUESTs.
+                    if self._pending_dest_queries:
+                        try:
+                            self._flush_pending_dest_queries(sock, encoder)
+                        except Exception as error:
+                            logger.error("Layerwise push dest-block flush failed: %s", error)
                     continue
                 except Exception as error:
                     logger.error("Layerwise pull read thread error: %s: %s", type(error).__name__, error)
