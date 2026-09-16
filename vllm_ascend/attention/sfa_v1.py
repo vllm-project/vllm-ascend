@@ -20,7 +20,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
-from vllm_ascend.ascend_config import AscendConfig, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -58,6 +58,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
+    is_live_weight_reload_enabled,
     is_mtp_layer,
     maybe_trans_nz,
 )
@@ -263,22 +264,6 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
-
-
-def is_live_weight_reload_enabled(vllm_config: VllmConfig, ascend_config: AscendConfig) -> bool:
-    """Whether in-place weight updates may be pushed into the live model.
-
-    RL rollout workers receive weights through vLLM's layerwise reload, which
-    writes every checkpoint parameter back into the storage that exists when
-    the transaction starts. A parameter whose storage was released therefore
-    has no valid reload destination, so the absorbed projections must be kept.
-
-    Two switches mark such a deployment: the Ascend RL defaults
-    (``additional_config.rl_config.enabled``) and the upstream weight transfer
-    service (``--weight-transfer-config``), which is how a rollout worker
-    declares that a trainer may update its weights in place.
-    """
-    return ascend_config.rl_config.enabled or vllm_config.weight_transfer_config is not None
 
 
 class AscendSFABackend(AttentionBackend):
@@ -711,15 +696,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
-        # RL rollout workers receive in-place weight updates through vLLM's
-        # layerwise reload, which reloads each checkpoint parameter into its
-        # *existing* storage (the kernel tensor captured at transaction start)
-        # and copies the processed value back into it. A parameter whose storage
-        # was replaced by an empty tensor therefore has no valid load
-        # destination: the new weight is dropped and the model keeps serving the
-        # derived state built from the empty tensor. Keep the absorbed
-        # projections alive whenever live weight updates are possible.
-        self.live_weight_reload_enabled = is_live_weight_reload_enabled(self.vllm_config, ascend_config)
+        # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
+        # qkv/q projections) and disposes the source parameters. A disposed
+        # parameter is no longer a valid destination for the in-place weight
+        # updates that live weight reload performs, so those sources must
+        # survive whenever such updates are possible.
+        self.live_weight_reload_enabled = is_live_weight_reload_enabled(self.vllm_config)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer

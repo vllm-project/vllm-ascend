@@ -28,7 +28,6 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     PreprocessType,
     custom_kv_rmsnorm_rope,
-    is_live_weight_reload_enabled,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
@@ -1382,53 +1381,3 @@ class TestAscendSFAImpl(TestBase):
         self.assertIs(impl._quant_type, AscendW8A8MXFP8DynamicLinearMethod)
 
     # (MLAPO runtime path requires NPU hardware; covered by integration tests.)
-
-
-class TestIsLiveWeightReloadEnabled(TestBase):
-    """In-place weight updates arrive through either deployment switch.
-
-    Both the Ascend RL defaults and the upstream weight transfer service must
-    be recognized on their own: missing either one leaves the absorbed SFA
-    projections without a valid reload destination.
-    """
-
-    @staticmethod
-    def _ascend_config(rl_enabled: bool) -> SimpleNamespace:
-        return SimpleNamespace(rl_config=SimpleNamespace(enabled=rl_enabled))
-
-    @staticmethod
-    def _vllm_config(weight_transfer_config: object) -> SimpleNamespace:
-        return SimpleNamespace(weight_transfer_config=weight_transfer_config)
-
-    def test_disabled_without_any_switch(self):
-        self.assertFalse(
-            is_live_weight_reload_enabled(
-                self._vllm_config(None),
-                self._ascend_config(False),
-            )
-        )
-
-    def test_enabled_by_rl_config(self):
-        self.assertTrue(
-            is_live_weight_reload_enabled(
-                self._vllm_config(None),
-                self._ascend_config(True),
-            )
-        )
-
-    def test_enabled_by_weight_transfer_config(self):
-        """`--weight-transfer-config` alone marks a weight update deployment."""
-        self.assertTrue(
-            is_live_weight_reload_enabled(
-                self._vllm_config(SimpleNamespace(backend="hccl")),
-                self._ascend_config(False),
-            )
-        )
-
-    def test_enabled_by_both_switches(self):
-        self.assertTrue(
-            is_live_weight_reload_enabled(
-                self._vllm_config(SimpleNamespace(backend="npu_ipc")),
-                self._ascend_config(True),
-            )
-        )
