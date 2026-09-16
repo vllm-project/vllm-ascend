@@ -57,6 +57,13 @@ _QUANT_SETTING_MAP: dict[QuantType, tuple[int, int | None, int | None]] = {
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
+    if output_split_sizes is not None:
+        output_split_sizes = [int(size) for size in output_split_sizes]
+    if input_split_sizes is not None:
+        input_split_sizes = [int(size) for size in input_split_sizes]
+        if sum(input_split_sizes) != input_.size(0):
+            raise RuntimeError("MoE all-to-all input split mismatch")
+
     if output_split_sizes is None:
         # Equal split (all2all)
         a2a_out = torch.empty_like(input_)

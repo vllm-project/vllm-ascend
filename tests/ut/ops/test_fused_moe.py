@@ -916,7 +916,6 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
             eplb_heat_collection_status=False,
         ),
     )
-    monkeypatch.setattr(routed_experts_module, "activate_moe_comm_method", lambda *args: None)
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: SimpleNamespace(all_moe_layers=None))
     monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
