@@ -4,8 +4,8 @@ from vllm import ModelRegistry
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
-from vllm_ascend.config_utils import normalize_deepseek_v41_config
 from vllm_ascend.models import register_model
+from vllm_ascend.utils import normalize_deepseek_v41_config
 
 
 def make_v41_config(**kwargs):

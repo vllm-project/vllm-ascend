@@ -54,7 +54,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.config_utils import normalize_deepseek_v41_config
 from vllm_ascend.core.deepseek_v41_kv_cache import (
     DeepseekV41FullSpec,
     DeepseekV41SWASpec,
@@ -69,7 +68,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
-from vllm_ascend.utils import enable_custom_op, enable_dsa_cp
+from vllm_ascend.utils import enable_custom_op, enable_dsa_cp, normalize_deepseek_v41_config
 
 from .compressor import DeepseekV41Compressor, _read, text_config_of
 from .engram_gate import engram_gate

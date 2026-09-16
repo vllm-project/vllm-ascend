@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.config_utils import is_deepseek_v41
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.utils import is_deepseek_v41
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.worker import NPUWorker

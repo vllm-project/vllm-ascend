@@ -32,7 +32,6 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, proce
 
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
-from vllm_ascend.config_utils import normalize_deepseek_v41_config
 from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41DraftSWASpec, validate_cache_runtime
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -47,7 +46,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
 

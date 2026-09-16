@@ -7,7 +7,7 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
 
-from vllm_ascend.config_utils import is_deepseek_v41
+from vllm_ascend.utils import is_deepseek_v41
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
