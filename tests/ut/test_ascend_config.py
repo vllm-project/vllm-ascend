@@ -224,44 +224,63 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_strips_dead_prefill_backend_keys(self, mock_fix_incompatible_config, mock_logger):
+    def test_init_ascend_config_warns_unsupported_prefill_backend(self, mock_fix_incompatible_config, mock_logger):
         # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
-        # into additional_config. Ascend has no consumer for them, so they must
-        # be stripped (with a warning) instead of being rejected as typos.
+        # into additional_config. Only the triton path exists on Ascend, so
+        # CUDA-only values must be stripped with a warning instead of being
+        # rejected as typos by extra="forbid".
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
             "gdn_prefill_backend": "flashinfer",
             "kda_prefill_backend": "flashkda",
         }
-        # extra="forbid" would raise if the dead keys reached AscendConfig.
+        # extra="forbid" would raise if the injected keys reached AscendConfig.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertIsNotNone(ascend_config)
 
-        warned_keys = [
-            call.args[1]
-            for call in mock_logger.warning.call_args_list
-            if len(call.args) > 1 and "does not support" in str(call.args[0])
+        prefill_warnings = [
+            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
         ]
-        self.assertIn("gdn_prefill_backend", warned_keys)
-        self.assertIn("kda_prefill_backend", warned_keys)
+        warned_text = " ".join(str(call.args) for call in prefill_warnings)
+        self.assertIn("gdn_prefill_backend", warned_text)
+        self.assertIn("flashinfer", warned_text)
+        self.assertIn("kda_prefill_backend", warned_text)
+        self.assertIn("flashkda", warned_text)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_without_dead_prefill_backend_keys(self, mock_fix_incompatible_config, mock_logger):
-        # Without the dead keys, initialization succeeds and emits no
+    def test_init_ascend_config_silent_triton_prefill_backend(self, mock_fix_incompatible_config, mock_logger):
+        # 'triton'/'auto' are the Ascend-supported values; they are stripped
+        # silently (identical to the default) without any warning.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "gdn_prefill_backend": "triton",
+            "kda_prefill_backend": "auto",
+        }
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertIsNotNone(ascend_config)
+
+        prefill_warnings = [
+            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
+        ]
+        self.assertEqual(prefill_warnings, [])
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_without_prefill_backend_keys(self, mock_fix_incompatible_config, mock_logger):
+        # Without the injected keys, initialization succeeds and emits no
         # "does not support" warning.
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"mega_moe_max_tokens": 65536}
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertIsNotNone(ascend_config)
 
-        warned_keys = [
-            call.args[1]
-            for call in mock_logger.warning.call_args_list
-            if len(call.args) > 1 and "does not support" in str(call.args[0])
+        prefill_warnings = [
+            call for call in mock_logger.warning.call_args_list if "does not support" in str(call.args[0])
         ]
-        self.assertEqual(warned_keys, [])
+        self.assertEqual(prefill_warnings, [])
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
