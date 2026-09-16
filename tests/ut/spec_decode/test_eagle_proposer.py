@@ -592,18 +592,12 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_dp_group = patch("vllm_ascend.ascend_forward_context.get_dp_group", return_value=mock_dp_group)
         self.mock_dp_group.start()
 
-        self.mock_use_updatable_graph = patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
-        )
-        self.mock_use_updatable_graph.start()
-
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
         self.proposer.update_stream = MagicMock()
-        self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
         self.mock_get_ascend_config.stop()
@@ -611,7 +605,6 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
-        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -656,7 +649,6 @@ class TestEagleProposerDummyRun(TestBase):
         mock_get_context.return_value = mock_return_context
         mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
-        self.proposer.draft_attn_groups = [MagicMock()]
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -851,11 +843,6 @@ class TestEagleProposerPropose:
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
-        self.mock_use_updatable_graph = patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
-        )
-        self.mock_use_updatable_graph.start()
-
         yield
 
         self.mock_cpugpubuffer.stop()
@@ -863,7 +850,6 @@ class TestEagleProposerPropose:
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
         self.mock_get_ascend_config.stop()
-        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
         clear_ascend_config()
