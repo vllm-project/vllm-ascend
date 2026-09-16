@@ -67,63 +67,59 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '910b'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   build-a3:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a3') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: 'a3'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   build-310p:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), '310p') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '310p'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
   build-a5:
     if: ${{ (github.event_name != 'pull_request' || github.event.label.name == 'nightly-image-build') && contains(fromJSON(inputs.chips || '["a2","a3","310p","a5"]'), 'a5') }}
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
-      build_type: ${{ inputs.build_type }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '950'
-      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
-      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag || '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}').base_image_date }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
   trigger-image-sync:
     name: Trigger quay.io sync

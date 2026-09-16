@@ -74,8 +74,6 @@ on:
         required: false
       SWR_PASSWORD:
         required: false
-      GITEE_TOKEN:
-        required: false
 
 jobs:
   generate-matrix:
@@ -128,8 +126,6 @@ jobs:
       - name: Build nightly-${{ inputs.target }} image
         id: build
         env:
-          GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GIT_PROXY: https://gh-proxy.test.osinfra.cn/
         shell: bash
         run: |
@@ -191,8 +187,6 @@ jobs:
             --platform ${{ matrix.arch_platform }}
             -f .github/workflows/dockerfiles/Dockerfile.nightly.${{ inputs.target }}
             --build-arg VLLM_ASCEND_BRANCH="${BRANCH_TAG}"
-            --build-arg GITEE_USERNAME="${GITEE_USERNAME}"
-            --build-arg GITEE_TOKEN="${GITEE_TOKEN}"
             --build-arg GIT_PROXY="${GIT_PROXY}"
           )
 
