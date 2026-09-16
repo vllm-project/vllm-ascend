@@ -381,9 +381,32 @@ class NPUWorker(WorkerBase):
             weight_transfer_engine.shutdown()
 
         if model_runner := getattr(self, "model_runner", None):
+            model = getattr(model_runner, "model", None)
+            engram_models = (
+                [module for module in model.modules() if callable(getattr(module, "close_engram", None))]
+                if model is not None
+                else []
+            )
             shutdown_fn = getattr(model_runner, "shutdown", None)
-            if callable(shutdown_fn):
-                shutdown_fn()
+            try:
+                if callable(shutdown_fn):
+                    shutdown_fn()
+            finally:
+                errors = []
+                for module in engram_models:
+                    try:
+                        module.close_engram()
+                    except Exception as exc:
+                        errors.append(str(exc))
+                if getattr(get_ascend_config(), "engram_vmm_run", None) is not None:
+                    from vllm_ascend.models.deepseek_v41.engram_vmm.mapping import retry_rollbacks
+
+                    try:
+                        retry_rollbacks()
+                    except Exception as exc:
+                        errors.append(str(exc))
+                if errors:
+                    raise RuntimeError("Engram VMM cleanup: " + "; ".join(errors))
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

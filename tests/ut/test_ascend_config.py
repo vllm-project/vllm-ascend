@@ -1083,6 +1083,31 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_engram_vmm_config(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.enable_sleep_mode = False
+        vc.additional_config = {"engram_vmm_run": "job-123", "engram_storage": "int8"}
+        self.assertEqual(init_ascend_config(vc).engram_vmm_run, "job-123")
+        for overrides in (
+            {"engram_vmm_run": "../unsafe"},
+            {"engram_vmm_run": ""},
+            {"engram_storage": "bf16"},
+            {"enable_engram": False},
+            {"enable_engram_ple_offload": True},
+        ):
+            clear_ascend_config()
+            vc.additional_config = {"engram_vmm_run": "job-123", "engram_storage": "int8", **overrides}
+            with self.assertRaises(ValueError):
+                init_ascend_config(vc)
+
+        clear_ascend_config()
+        vc.additional_config = {"engram_vmm_run": "job-123", "engram_storage": "int8"}
+        vc.model_config.enable_sleep_mode = True
+        with self.assertRaisesRegex(ValueError, "sleep mode"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {

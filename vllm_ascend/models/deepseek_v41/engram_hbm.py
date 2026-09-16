@@ -180,10 +180,15 @@ class NodeShardedEngram(nn.Module):
             codes, scales = quantize_engram_rows(rows.to(self.weight.device))
             if not bool((torch.isfinite(scales) & (scales > 0)).all()):
                 raise ValueError("INT8 Engram requires finite positive group scales")
-            self.weight.data[start:end].copy_(codes)
-            self.weight_scale[start:end].copy_(scales)
+            self.set_int8_rows(start, codes, scales)
         else:
             self.weight.data[start:end].copy_(rows)
+
+    def set_int8_rows(self, start, codes, scales):
+        """Publish a shard-relative INT8 chunk; storage backends may override."""
+        end = start + codes.shape[0]
+        self.weight.data[start:end].copy_(codes)
+        self.weight_scale[start:end].copy_(scales)
 
     def lookup_local(self, ids, *, pin_output=False):
         # Idle DP replicas still enter routing collectives, but must not launch
@@ -339,8 +344,7 @@ class NodeShardedEngram(nn.Module):
                         raise ValueError(f"{scale_key}: expected FP32 [{self.rows}, {self.width // 32}]")
                     for start in range(self.start, self.end, chunk_rows):
                         stop = min(start + chunk_rows, self.end)
-                        self.weight.data[start - self.start : stop - self.start].copy_(tensor[start:stop])
-                        self.weight_scale[start - self.start : stop - self.start].copy_(scale[start:stop])
+                        self.set_int8_rows(start - self.start, tensor[start:stop], scale[start:stop])
                 return
             if self.storage_format in ("fp8", "mxfp8"):
                 if source_dtype not in ("F8_E4M3", "F8_E4M3FN") or scale_key not in index:

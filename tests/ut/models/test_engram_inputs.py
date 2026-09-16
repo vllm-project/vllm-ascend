@@ -53,6 +53,41 @@ def test_disabled_engram_capture_and_replay_do_not_access_layers(model, monkeypa
         assert result["engram_mask"].numel() == 0
 
 
+def test_vmm_refreshes_captured_outputs_without_routing_or_copy(model, monkeypatch):
+    captured = model.prepare_engram_graph_inputs(4)
+    monkeypatch.setattr(implementation, "get_forward_context", lambda: SimpleNamespace(flash_comm_v1_enabled=False))
+    model._engram_vmm_run = "unit-job"
+    calls = []
+
+    def prepare(hashes, mask):
+        calls.append(hashes.shape[0])
+        # Deliberately fill the entire capacity. The outer model must not apply
+        # the old routed zero/copy path after direct final-buffer stores.
+        for buffer in captured["engram_lookups"].values():
+            buffer.fill_(7)
+        captured["engram_mask"].fill_(True)
+        return captured
+
+    model._engram_vmm_inputs = SimpleNamespace(prepare=prepare)
+    model._prepare_engram_hashes = lambda *args: (
+        torch.zeros(1, 2, 24, dtype=torch.int64),
+        torch.ones(1, dtype=torch.bool),
+    )
+    model.prepare_engram = lambda *args: pytest.fail("VMM must bypass owner routing")
+    actual = model.prepare_engram_inputs(torch.arange(1), torch.arange(1), 4)
+    assert actual is captured and calls == [1]
+    assert all((buffer == 7).all() for buffer in actual["engram_lookups"].values())
+    assert actual["engram_mask"].all()
+
+
+def test_vmm_rejects_flashcomm_before_history(model, monkeypatch):
+    model._engram_vmm_run = "unit-job"
+    monkeypatch.setattr(implementation, "get_forward_context", lambda: SimpleNamespace(flash_comm_v1_enabled=True))
+    model._prepare_engram_hashes = lambda *args: pytest.fail("must fail before mutating history")
+    with pytest.raises(ValueError, match="FlashComm1"):
+        model.prepare_engram_inputs(torch.arange(1), torch.arange(1), 4)
+
+
 @pytest.mark.parametrize("tokens,padded", [(4, 3), (1, 17), (17, None), (1, -1)])
 def test_invalid_capacity_fails_before_history_or_routing(model, tokens, padded):
     def unexpected(*args):
