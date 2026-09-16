@@ -205,9 +205,9 @@ jobs:
           fi
 
           if [ "${{ inputs.should_push }}" = "true" ]; then
-            docker buildx build "${BUILD_ARGS[@]}" --tag "$IMAGE" --provenance=false --sbom=false --push .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false,push=true" .
           else
-            docker buildx build "${BUILD_ARGS[@]}" --tag "$IMAGE" --provenance=false --sbom=false .
+            docker buildx build "${BUILD_ARGS[@]}" --provenance=false --sbom=false --output "type=image,name=${IMAGE},oci-mediatypes=false" .
           fi
 
           # Export outputs for merge job
