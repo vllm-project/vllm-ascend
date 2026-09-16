@@ -2764,8 +2764,10 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertTrue(all(tensor.data_ptr() % alignment == 0 for tensor in layer_tensors))
         self.assertTrue(all(cache[0].data_ptr() % alignment != 0 for cache in kv_caches.values()))
-        self.assertEqual(ptrs, [tensor.data_ptr() for tensor in layer_tensors])
-        self.assertEqual(lengths, [layer_size, layer_size])
+        # Registration regions are sorted by address (required for overlap
+        # merging), which is independent of the layer allocation order.
+        expected_regions = sorted((tensor.data_ptr(), layer_size) for tensor in layer_tensors)
+        self.assertEqual(sorted(zip(ptrs, lengths)), expected_regions)
 
     def test_registered_hybrid_buffer_supports_single_private_storage(self):
         alignment = 2 * 1024 * 1024
