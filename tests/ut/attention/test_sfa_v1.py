@@ -375,7 +375,7 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
-        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
+        "vllm_ascend.device.device_op.torch_npu.npu_quant_lightning_indexer",
         create=True,
     )
     def test_li_c8_indexer_uses_own_cache_tuple_slots(self, mock_indexer):
@@ -410,6 +410,8 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertIs(result, expected_topk)
         call_kwargs = mock_indexer.call_args.kwargs
         self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(call_kwargs["pre_tokens"], torch.iinfo(torch.int64).max)
+        self.assertEqual(call_kwargs["next_tokens"], torch.iinfo(torch.int64).max)
         self.assertEqual(
             call_kwargs["key_dequant_scale"].data_ptr(),
             indexer_scale_cache.data_ptr(),

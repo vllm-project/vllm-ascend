@@ -38,13 +38,11 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
-#include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
-#include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
@@ -3141,24 +3139,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 
-    // vLLM-Ascend custom ops
-    ops.def(
-        "moe_gating_top_k(Tensor x, "
-                            "int k, "
-                            "int k_group, "
-                            "int group_count, "
-                            "int group_select_mode, "
-                            "int renorm, "
-                            "int norm_type, "
-                            "bool out_flag, "
-                            "float routed_scaling_factor, "
-                            "float eps,"
-                            "Tensor? bias_opt=None)"
-
-        "-> (Tensor y ,Tensor expert_idx, Tensor out)"
-        );
-    ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
-
     ops.def(
         "npu_add_rms_norm_bias(Tensor x1, "
                             "Tensor x2, "
@@ -3520,18 +3500,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             ") -> ()"
     );
     ops.impl("npu_scatter_nd_update_sk", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_sk);
-
-    // This operator is planned to be integrated into PTA in the near future.
-    // Once that happens, the implementation in csrc will be removed.
-    ops.def(
-        "npu_lightning_indexer_quant(Tensor query, Tensor key, Tensor weights, Tensor query_dequant_scale, "
-        "                            Tensor key_dequant_scale, *, Tensor? actual_seq_lengths_query=None, "
-        "                            Tensor? actual_seq_lengths_key=None, Tensor? block_table=None, "
-        "                            int query_quant_mode=0, int key_quant_mode=0, "
-        "                            str layout_query='BSND', str layout_key='BSND',"
-        "                            int sparse_count=2048, int sparse_mode=3) -> Tensor"
-    );
-    ops.impl("npu_lightning_indexer_quant", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer_quant);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
