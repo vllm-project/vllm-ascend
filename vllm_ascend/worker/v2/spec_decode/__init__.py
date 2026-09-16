@@ -72,6 +72,10 @@ def init_speculator(
 
         return AscendMTPSpeculator(vllm_config, device)
     if speculative_config.use_eagle():
+        if speculative_config.parallel_drafting:
+            from vllm_ascend.worker.v2.spec_decode.eagle.parallel import AscendParallelEagleSpeculator
+
+            return AscendParallelEagleSpeculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 
         return AscendEagleSpeculator(vllm_config, device)
