@@ -249,6 +249,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+                    HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
