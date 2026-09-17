@@ -16,6 +16,8 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.third_party.flash_linear_attention.ops.utils import SUPPRESS_LEVEL
 
+from vllm_ascend import envs
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
@@ -25,6 +27,64 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
+
+
+def _torch_gated_delta_rule_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Portable recurrence for images without the AscendC GDN kernels.
+
+    This path intentionally favors compatibility over performance.  It is used
+    only when the runtime reports that ``aclnnChunkGatedDeltaRuleFwdH`` is not
+    installed; current images continue to use the fused AscendC implementation.
+    """
+    batch, seq_len, num_heads, value_dim = v.shape
+    output = torch.empty(
+        (batch, seq_len, num_heads, value_dim), dtype=v.dtype, device=v.device
+    )
+    if cu_seqlens is None:
+        boundaries = tuple(range(0, (batch + 1) * seq_len, seq_len))
+    else:
+        boundaries = tuple(int(offset) for offset in cu_seqlens.tolist())
+
+    final_states = []
+    for sequence_idx, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+        state = initial_state[sequence_idx].float()
+        state_heads = state.shape[0]
+        for flat_idx in range(start, end):
+            batch_idx, token_idx = divmod(flat_idx, seq_len)
+            q_t = q[batch_idx, token_idx].float()
+            k_t = k[batch_idx, token_idx].float()
+            v_t = v[batch_idx, token_idx].float()
+            decay_t = g[batch_idx, token_idx].float().exp()
+            beta_t = beta[batch_idx, token_idx].float()
+
+            def expand_kv_heads(tensor: torch.Tensor) -> torch.Tensor:
+                if tensor.shape[0] == state_heads:
+                    return tensor
+                assert state_heads % tensor.shape[0] == 0
+                return tensor.repeat_interleave(state_heads // tensor.shape[0], dim=0)
+
+            q_t = expand_kv_heads(q_t)
+            k_t = expand_kv_heads(k_t)
+            decay_t = expand_kv_heads(decay_t)
+            beta_t = expand_kv_heads(beta_t)
+
+            state = state * decay_t[:, None, None]
+            residual = v_t - torch.einsum("hkv,hk->hv", state, k_t)
+            state = state + torch.einsum("hk,hv->hkv", k_t, beta_t[:, None] * residual)
+            output[batch_idx, token_idx] = (
+                torch.einsum("hkv,hk->hv", state, q_t) * scale
+            ).to(v.dtype)
+        final_states.append(state.to(initial_state.dtype))
+    return output, torch.stack(final_states)
 
 
 def chunk_gated_delta_rule_fwd(
@@ -39,13 +99,37 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     prebuilt_meta=None,
 ):
+    if envs.VLLM_ASCEND_FORCE_GDN_TORCH_FALLBACK:
+        o, final_state = _torch_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
+        placeholder = q.new_empty(0)
+        return g, o, placeholder, final_state, None, None, None
+
     forward_context = get_forward_context()
     num_decodes = 0
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is not None and isinstance(attn_metadata, dict):
-        attn_metadata = next(iter(attn_metadata.values()), None)
-    if attn_metadata is not None:
-        num_decodes = attn_metadata.num_decodes
+    if prebuilt_meta is not None:
+        num_decodes = prebuilt_meta.num_decodes
+    else:
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = next(
+                (
+                    metadata
+                    for metadata in attn_metadata.values()
+                    if hasattr(metadata, "num_decodes")
+                ),
+                None,
+            )
+        if attn_metadata is not None:
+            num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
     cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
@@ -55,6 +139,7 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
+    g_raw = g
     g = chunk_local_cumsum(
         g,
         chunk_size=chunk_size,
@@ -112,21 +197,37 @@ def chunk_gated_delta_rule_fwd(
     else:
         cu_seqlens_kern, initial_state_kern = cu_seqlens_host, initial_state
         keep_meta = None
-    h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
-        k_ascendc,
-        w_ascendc,
-        u_ascendc,
-        g=g_ascendc,
-        gk=None,
-        initial_state=initial_state_kern,
-        output_final_state=True,
-        chunk_size=64,
-        save_new_value=True,
-        cu_seqlens=cu_seqlens_kern,
-        chunk_indices=chunk_indices_chunk64_host,
-        use_exp2=False,
-        transpose_state_layout=False,
-    )
+    used_triton_h = False
+    try:
+        h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+            k_ascendc,
+            w_ascendc,
+            u_ascendc,
+            g=g_ascendc,
+            gk=None,
+            initial_state=initial_state_kern,
+            output_final_state=True,
+            chunk_size=64,
+            save_new_value=True,
+            cu_seqlens=cu_seqlens_kern,
+            chunk_indices=chunk_indices_chunk64_host,
+            use_exp2=False,
+            transpose_state_layout=False,
+        )
+    except RuntimeError as exc:
+        if "aclnnChunkGatedDeltaRuleFwdH" not in str(exc):
+            raise
+        o, final_state = _torch_gated_delta_rule_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g_raw,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
+        return g, o, A, final_state, None, None, None
     if keep_meta is not None:
         # Scatter the compacted final_state back to the original [N, H, K, V]
         # layout the PCP state recursion expects; empty segments keep their
@@ -194,23 +295,47 @@ def chunk_gated_delta_rule_fwd(
             h = h.transpose(1, 2).contiguous()
             v_new = v_new.transpose(1, 2).contiguous()
 
-    o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
-        q_ascendc,
-        k_ascendc,
-        v_new,
-        h,
-        scale,
-        g=g_ascendc,
-        g_gamma=None,
-        cu_seqlens=cu_seqlens_host,
-        chunk_indices=chunk_indices_chunk64_host,
-        chunk_size=64,
-        transpose_state_layout=False,
-    )
+    used_triton_o = False
+    try:
+        o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
+            q_ascendc,
+            k_ascendc,
+            v_new,
+            h,
+            scale,
+            g=g_ascendc,
+            g_gamma=None,
+            cu_seqlens=cu_seqlens_host,
+            chunk_indices=chunk_indices_chunk64_host,
+            chunk_size=64,
+            transpose_state_layout=False,
+        )
+    except RuntimeError as exc:
+        if "aclnnChunkFwdO" not in str(exc):
+            raise
+        h_triton = h if used_triton_h else h.transpose(1, 2).contiguous()
+        v_new_triton = (
+            v_new if used_triton_h else v_new.transpose(1, 2).contiguous()
+        )
+        o = chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v_new_triton,
+            h=h_triton,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=64,
+            chunk_offsets=chunk_offsets_chunk64,
+        )
+        h = h_triton
+        v_new = v_new_triton
+        used_triton_o = True
 
-    o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
-    v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
-    h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
+    if not used_triton_o:
+        o = o_ascendc.to(torch.bfloat16).transpose(1, 2).contiguous()
+        v_new = v_new.to(torch.bfloat16).transpose(1, 2).contiguous()
+        h = h.to(torch.bfloat16).transpose(1, 2).contiguous()
 
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None

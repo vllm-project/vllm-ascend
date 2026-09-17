@@ -104,6 +104,34 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Compatibility switches for Qwen3.8 Flash-Next on older CANN/Triton images.
+    # Both are non-sensitive booleans and default to the optimized kernel paths.
+    "VLLM_ASCEND_FORCE_GDN_TORCH_FALLBACK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FORCE_GDN_TORCH_FALLBACK", "0"))
+    ),
+    "VLLM_ASCEND_FORCE_QSA_REFERENCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FORCE_QSA_REFERENCE", "0"))
+    ),
+    # Fuse QSA-main QKV split, Gemma RMSNorm, partial MRoPE and gate extraction.
+    # Opt-in so unsupported shapes and deployments keep the established path.
+    "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE", "0"))
+    ),
+    # Keep QSA-indexer GemmaNorm -> BF16 materialization semantics, but fuse
+    # the three-axis MRoPE cos/sin lookup. Keep this independently opt-in for
+    # deployment A/B and exact fallback coverage.
+    "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE", "0"))
+    ),
+    # Qwen3.8 QSA selector using BF16 LightningIndexer and the fused AscendC
+    # compressed-group expansion. Unsupported configurations fall back to the
+    # established Triton selector.
+    "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER", "0"))
+    ),
+    "VLLM_ASCEND_ENABLE_QSA_E3V": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_E3V", "0"))
+    ),
 }
 
 # end-env-vars-definition
