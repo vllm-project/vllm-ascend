@@ -771,6 +771,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         coordinates = dict(batch_metadata)
         seq_lens = coordinates["seq_lens"]
         positions = coordinates["positions"]
+        full_graph_mode = bool(kwargs.get("full_graph_mode", False))
 
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
@@ -840,7 +841,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if rope is None:
                 rope = batch_shared.get("rope")
             if rope is None:
-                rope = get_cos_and_sin_dsa(positions, use_cache=coordinates["num_prefills"] == 0)
+                rope = get_cos_and_sin_dsa(positions, use_cache=(coordinates["num_prefills"] == 0 or full_graph_mode))
                 batch_shared["rope"] = rope
             cos, sin = rope
         text_config = self.vllm_config.model_config.hf_text_config
