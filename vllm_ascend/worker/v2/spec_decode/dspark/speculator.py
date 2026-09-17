@@ -29,7 +29,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.models.dspark import draft_model_load_context, post_process_dspark_model
 from vllm_ascend.utils import (
     vllm_version_is,
 )
@@ -55,9 +54,14 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with draft_model_load_context(self.vllm_config):
-            model = super().load_draft_model(target_model, target_attn_layer_names)
-        post_process_dspark_model(model, target_model)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        post_process = getattr(model, "post_process", None)
+        if post_process is not None:
+            with set_current_vllm_config(self.vllm_config):
+                post_process(self.vllm_config)
+        configure_capture = getattr(model, "configure_target_aux_hidden_capture", None)
+        if configure_capture is not None:
+            configure_capture(target_model)
 
         return model
 

@@ -10,10 +10,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -33,19 +29,12 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
-from vllm_ascend.models.dspark import get_target_rotation_path
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
-from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
-from vllm_ascend.models.qwen3_dspark import (
-    TARGET_EMBED_WEIGHT_NAMES,
-    TARGET_LM_HEAD_WEIGHT_NAMES,
-    process_weight,
-)
+from vllm_ascend.models.qwen3_dspark import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.utils import (
-    get_rotation_matrix,
     vllm_version_is,
 )
 
@@ -258,21 +247,9 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
-        self.rotation_path = get_target_rotation_path(vllm_config)
-        self.target_model_path = vllm_config.model_config.model
-        if self.rotation_path is not None:
-            target_config = vllm_config.model_config.hf_text_config
-            model_prefix = maybe_prefix(prefix, "model")
-            self.model.embed_tokens = VocabParallelEmbedding(
-                target_config.vocab_size,
-                target_config.hidden_size,
-                prefix=maybe_prefix(model_prefix, "embed_tokens"),
-            )
-            self.lm_head = ParallelLMHead(
-                target_config.vocab_size,
-                target_config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+
+    def post_process(self, vllm_config: VllmConfig) -> None:
+        align_draft_weights(self, self.model.context_proj, vllm_config)
 
     def configure_target_aux_hidden_capture(self, target_model: nn.Module) -> None:
         """Select the raw-prefix-sum inputs required by this MLA checkpoint."""
@@ -316,40 +293,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             # Current vLLM drops the training-only and shared checkpoint
             # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
             loader = AutoWeightsLoader(self)
-        rotation_weight = None
-        if self.rotation_path is not None:
-            rotation_weight = get_rotation_matrix(self.rotation_path)
-            weights = (
-                (
-                    name,
-                    process_weight(loaded_weight, rotation_weight) if "context_proj." in name else loaded_weight,
-                )
-                for name, loaded_weight in weights
-            )
-        loaded_weights = loader.load_weights(
-            weights,
-            mapper=self.hf_to_vllm_mapper,
-        )
-        if rotation_weight is not None:
-            assert self.model.embed_tokens is not None
-            assert self.lm_head is not None
-            load_quarot_target_layer(
-                self.model.embed_tokens,
-                self.target_model_path,
-                TARGET_EMBED_WEIGHT_NAMES,
-                rotation_weight,
-                "draft embed_tokens.weight",
-            )
-            load_quarot_target_layer(
-                self.lm_head,
-                self.target_model_path,
-                TARGET_LM_HEAD_WEIGHT_NAMES,
-                rotation_weight,
-                "draft lm_head.weight",
-            )
-            self.has_own_embed_tokens = True
-            self.has_own_lm_head = True
-        return loaded_weights
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def embed_input_ids(
         self,

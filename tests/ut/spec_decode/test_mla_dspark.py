@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager, nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,7 +14,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
-from vllm_ascend.models import dspark as dspark_model
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
 from vllm_ascend.worker.v2 import attn_utils
@@ -123,15 +121,14 @@ def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, backend, metadata_
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-@pytest.mark.parametrize("rotation_path", [None, "/rotation"])
-def test_shared_loader_configures_mla_model(monkeypatch, wrapped, rotation_path):
+def test_shared_loader_configures_mla_model(monkeypatch, wrapped):
     spec, target = make_speculator(), make_target()
     config = spec.draft_model_config.hf_config
-    monkeypatch.setattr(dspark_model, "get_rotation_path", lambda _: rotation_path)
     draft = make_draft(config)
+    draft.post_process = MagicMock()
+    monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
 
     def load(*args):
-        assert config._ascend_target_rotation_path == rotation_path
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
@@ -274,16 +271,6 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     assert kwargs["num_reqs_padded"] == 2
     assert kwargs["causal"] == {0: False}
     assert spec.input_batch.is_prefilling_np.tolist() == [True, True]
-
-
-@pytest.mark.parametrize(
-    "direct,preserved,expected", [("target", "saved", "saved"), (None, "saved", "saved"), ("draft", None, None)]
-)
-def test_mla_model_recovers_target_rotation(monkeypatch, direct, preserved, expected):
-    draft_config = SimpleNamespace(hf_config=SimpleNamespace(_ascend_target_rotation_path=preserved))
-    config = SimpleNamespace(speculative_config=SimpleNamespace(draft_model_config=draft_config))
-    monkeypatch.setattr(dspark_model, "get_rotation_path", lambda _: direct)
-    assert dspark_model.get_target_rotation_path(config) == (Path(expected) if expected else None)
 
 
 @pytest.mark.parametrize("missing", [False, True])
