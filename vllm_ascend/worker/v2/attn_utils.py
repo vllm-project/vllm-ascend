@@ -1230,35 +1230,37 @@ _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator
 
 
 @contextmanager
-def build_attn_metadata_wrapper():
+def build_attn_metadata_wrapper(module=None):
     """Context manager to override attention metadata building for Ascend NPUs."""
-    original_func = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    module = _BUILD_ATTN_METADATA_MODULE if module is None else module
+    original_func = module.build_attn_metadata
     try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        module.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+        module.build_attn_metadata = original_func
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata with Ascend draft-model context.
-
-    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
-    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Attention state is left to the
-    caller/backend instead of forcing the legacy speculative state. Must run inside
-    ``build_attn_metadata_wrapper()``.
-    """
-    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, module=None, attn_state=None):
+    """Forward draft positions and request flags to the metadata builder."""
+    module = _BUILD_ATTN_METADATA_MODULE if module is None else module
+    raw = module.build_attn_metadata
 
     def build_attn_metadata(*args, **kwargs):
-        kwargs["positions"] = positions[:pad]
-        kwargs["is_prefilling"] = is_prefilling
+        num_tokens = kwargs["num_tokens"] if pad is None else pad
+        kwargs["positions"] = positions[:num_tokens]
+        if is_prefilling is not None:
+            kwargs["is_prefilling"] = is_prefilling
+        elif kwargs.get("for_cudagraph_capture") and kwargs.get("dcp_local_seq_lens") is not None:
+            # DCP separates short prefills from speculative decode queries.
+            kwargs["is_prefilling"] = torch.zeros(kwargs["num_reqs"], dtype=torch.bool)
+        if attn_state is not None:
+            kwargs["attn_state"] = attn_state
         return raw(*args, **kwargs)
 
     try:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        module.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore
+        module.build_attn_metadata = raw

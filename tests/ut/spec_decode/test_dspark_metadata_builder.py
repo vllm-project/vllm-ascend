@@ -40,7 +40,7 @@ def test_direct_mla_builder_updates_speculative_metadata(monkeypatch, num_reqs_p
         num_reqs=1, num_reqs_padded=num_reqs_padded, num_tokens_padded=num_reqs_padded * 5, step=5
     )
     assert result is metadata
-    assert result["draft"].attn_state == AscendAttentionState.SpecDecoding
+    assert result["draft"].attn_state == AscendAttentionState.ChunkedPrefill
     assert result["draft"].decode.actual_seq_lengths_q == [5 * (i + 1) for i in range(num_reqs_padded)]
     assert not hasattr(result["draft"], "actual_seq_lengths_q")
 

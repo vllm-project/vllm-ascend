@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -14,9 +15,12 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
+from vllm_ascend.models import dspark as dspark_model
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
@@ -28,6 +32,7 @@ def make_speculator():
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )
+    spec.vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
     spec.num_query_per_req = 5
     spec.input_buffers = SimpleNamespace(positions=torch.arange(20))
     return spec
@@ -122,7 +127,7 @@ def test_sparse_mla_metadata_keeps_shared_update(monkeypatch, backend, metadata_
 def test_shared_loader_configures_mla_model(monkeypatch, wrapped, rotation_path):
     spec, target = make_speculator(), make_target()
     config = spec.draft_model_config.hf_config
-    monkeypatch.setattr(shared, "get_rotation_path", lambda _: rotation_path)
+    monkeypatch.setattr(dspark_model, "get_rotation_path", lambda _: rotation_path)
     draft = make_draft(config)
 
     def load(*args):
@@ -138,13 +143,12 @@ def test_shared_loader_configures_mla_model(monkeypatch, wrapped, rotation_path)
 @pytest.mark.parametrize(
     "field,value,message",
     [
-        ("target_layer_ids", [], "requires target_layer_ids"),
-        ("target_layer_ids", [0, 0], "Invalid"),
-        ("target_layer_ids", [-1, 2], "Invalid"),
-        ("target_layer_ids", [0, 9], "Invalid"),
-        ("target_layer_ids", [1, 2], "boundaries do not match"),
-        ("target_hidden_size", 8, "hidden sizes"),
-        ("num_target_layers", 3, "num_target_layers"),
+        ("target_layer_ids", [], "incompatible"),
+        ("target_layer_ids", [0, 0], "incompatible"),
+        ("target_layer_ids", [-1, 2], "incompatible"),
+        ("target_layer_ids", [0, 9], "incompatible"),
+        ("target_layer_ids", [1, 2], "incompatible"),
+        ("target_hidden_size", 8, "incompatible"),
     ],
 )
 def test_rejects_invalid_raw_contract(field, value, message):
@@ -192,29 +196,48 @@ def test_empty_metadata_is_a_noop(architecture):
     assert spec._update_draft_attn_metadata(metadata, 1) is metadata
 
 
-def test_capture_uses_descriptor_positions_and_restores_on_error(monkeypatch):
-    spec = make_speculator()
-    original = shared.dflash_cudagraph.build_attn_metadata
+@pytest.mark.parametrize("architecture", [None, "MLA"])
+@pytest.mark.parametrize("dcp", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_capture_uses_shared_factory_and_restores(monkeypatch, architecture, dcp, fail):
+    manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(attn_architecture=architecture)
+    buffers = SimpleNamespace(positions=torch.arange(20))
+    original = MagicMock()
     builder = MagicMock()
-    monkeypatch.setattr(shared, "build_attn_metadata", builder)
-    with pytest.raises(RuntimeError, match="capture failed"), spec.draft_capture_context():
-        shared.dflash_cudagraph.build_attn_metadata(num_tokens=10, num_reqs=2, causal=False)
+    monkeypatch.setattr(graph.dflash_cudagraph, "build_attn_metadata", original)
+    monkeypatch.setattr(attn_utils, "build_attn_metadata", builder)
+    monkeypatch.setattr(graph, "communicator_switch", nullcontext)
+    monkeypatch.setattr(graph, "model_capture_wrapper", lambda *args: nullcontext())
+
+    def capture(*args):
+        graph.dflash_cudagraph.build_attn_metadata(
+            num_tokens=10,
+            num_reqs=2,
+            causal=False,
+            for_cudagraph_capture=True,
+            dcp_local_seq_lens=torch.ones(2) if dcp else None,
+        )
+        if fail:
+            raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(graph.DFlashCudaGraphManager, "capture", capture)
+    with pytest.raises(RuntimeError, match="capture failed") if fail else nullcontext():
+        manager.capture(None, buffers, None, [], None, 128)
+    assert graph.dflash_cudagraph.build_attn_metadata is original
+    if architecture == "MLA":
         kwargs = builder.call_args.kwargs
         torch.testing.assert_close(kwargs["positions"], torch.arange(10))
-        assert kwargs["is_prefilling"].tolist() == [False, False]
-        assert kwargs["attn_state"] == AscendAttentionState.SpecDecoding
+        assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
         assert kwargs["causal"] is False
-        raise RuntimeError("capture failed")
-    assert shared.dflash_cudagraph.build_attn_metadata is original
-
-
-def test_non_mla_capture_keeps_shared_builder():
-    spec = make_speculator()
-    spec.attn_architecture = None
-    original = shared.dflash_cudagraph.build_attn_metadata
-    with spec.draft_capture_context():
-        assert shared.dflash_cudagraph.build_attn_metadata is original
-    assert shared.dflash_cudagraph.build_attn_metadata is original
+        if dcp:
+            assert kwargs["is_prefilling"].tolist() == [False, False]
+        else:
+            assert "is_prefilling" not in kwargs
+        original.assert_not_called()
+    else:
+        original.assert_called_once()
+        builder.assert_not_called()
 
 
 @pytest.mark.parametrize("architecture", [None, "MLA"])
@@ -243,7 +266,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     assert query_metadata.actual_seq_lengths_q == [5, 10]
     if architecture == "MLA":
         assert captured["is_prefilling"].tolist() == [False, False]
-        assert result[0]["draft"].attn_state == AscendAttentionState.SpecDecoding
+        assert result[0]["draft"].attn_state == AscendAttentionState.ChunkedPrefill
     else:
         assert captured["is_prefilling"].tolist() == [True, True]
         assert np.shares_memory(captured["is_prefilling"].numpy(), spec.input_batch.is_prefilling_np)
@@ -259,10 +282,42 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
 
 
 @pytest.mark.parametrize(
-    "direct,preserved,expected", [("target", "fallback", "target"), (None, "fallback", "fallback"), (None, None, None)]
+    "direct,preserved,expected", [("target", "saved", "saved"), (None, "saved", "saved"), ("draft", None, None)]
 )
 def test_mla_model_recovers_target_rotation(monkeypatch, direct, preserved, expected):
     draft_config = SimpleNamespace(hf_config=SimpleNamespace(_ascend_target_rotation_path=preserved))
     config = SimpleNamespace(speculative_config=SimpleNamespace(draft_model_config=draft_config))
-    monkeypatch.setattr(kimi_k3_dspark, "get_rotation_path", lambda _: direct)
-    assert kimi_k3_dspark._get_target_rotation_path(config) == expected
+    monkeypatch.setattr(dspark_model, "get_rotation_path", lambda _: direct)
+    assert dspark_model.get_target_rotation_path(config) == (Path(expected) if expected else None)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_missing_target_aux_layers_reports_incompatibility(missing):
+    target = make_target()
+    if missing:
+        del target.model.aux_hidden_state_layers
+    else:
+        target.model.aux_hidden_state_layers = None
+    with pytest.raises(ValueError, match="incompatible"):
+        make_draft(make_speculator().draft_model_config.hf_config).configure_target_aux_hidden_capture(target)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_default_metadata_factory_preserves_caller_state(monkeypatch, fail):
+    module = attn_utils._BUILD_ATTN_METADATA_MODULE
+    original = module.build_attn_metadata
+    builder = MagicMock()
+    flags = torch.tensor([True, False])
+    monkeypatch.setattr(attn_utils, "build_attn_metadata", builder)
+    with (
+        pytest.raises(RuntimeError, match="build failed") if fail else nullcontext(),
+        attn_utils.build_attn_metadata_wrapper(),
+        attn_utils.build_draft_attn_metadata_factory(torch.arange(10), 6, flags),
+    ):
+        module.build_attn_metadata(num_tokens=6, attn_state=AscendAttentionState.DecodeOnly)
+        if fail:
+            raise RuntimeError("build failed")
+    assert module.build_attn_metadata is original
+    assert builder.call_args.kwargs["is_prefilling"] is flags
+    assert builder.call_args.kwargs["attn_state"] == AscendAttentionState.DecodeOnly
+    torch.testing.assert_close(builder.call_args.kwargs["positions"], torch.arange(6))

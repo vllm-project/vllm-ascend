@@ -15,11 +15,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as dflash_cudagraph
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -31,13 +29,12 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.models.dspark import draft_model_load_context, post_process_dspark_model
 from vllm_ascend.utils import (
-    get_rotation_path,
     vllm_version_is,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_metadata,
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
@@ -58,17 +55,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        # Upstream replaces quant_config with None for a BF16 draft. Pass only
-        # the target QuaRot path so the draft's existing load_weights can fold
-        # input inverse rotation into FC (W @ R) and align fallback embedding /
-        # lm_head before upstream decides weight sharing. Do not rotate again
-        # after loading or replace the draft's own quantization configuration.
-        draft_hf_config = self.draft_model_config.hf_config
-        rotation_path = get_rotation_path(self.vllm_config)
-        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
-        model = super().load_draft_model(target_model, target_attn_layer_names)
-        if hasattr(model, "configure_target_aux_hidden_capture"):
-            model.configure_target_aux_hidden_capture(target_model)
+        with draft_model_load_context(self.vllm_config):
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        post_process_dspark_model(model, target_model)
 
         return model
 
@@ -120,27 +109,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             backend = _get_graph_update_backend(self.attn_groups)
             self.attn_architecture = "MLA" if issubclass(backend, AscendMLABackend) else None
 
-    @contextmanager
-    def draft_capture_context(self):
-        """Supply dense MLA query metadata during upstream graph capture."""
-        if self.attn_architecture != "MLA":
-            yield
-            return
-
-        original = dflash_cudagraph.build_attn_metadata
-
-        def build_mla_metadata(*args, **kwargs):
-            kwargs["positions"] = self.input_buffers.positions[: kwargs["num_tokens"]]
-            kwargs["is_prefilling"] = torch.zeros(kwargs["num_reqs"], dtype=torch.bool)
-            kwargs["attn_state"] = AscendAttentionState.SpecDecoding
-            return build_attn_metadata(*args, **kwargs)
-
-        try:
-            dflash_cudagraph.build_attn_metadata = build_mla_metadata
-            yield
-        finally:
-            dflash_cudagraph.build_attn_metadata = original
-
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
@@ -191,8 +159,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         for metadata in attn_metadata.values():
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             if self.attn_architecture == "MLA":
-                # Match capture: a parallel draft block is TND speculative decode.
-                metadata.attn_state = AscendAttentionState.SpecDecoding
+                metadata.attn_state = AscendAttentionState.ChunkedPrefill
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
