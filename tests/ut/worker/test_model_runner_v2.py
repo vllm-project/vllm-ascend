@@ -452,7 +452,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
-        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_spec_pp_token_broadcast") as install_pp,
+        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_upstream_spec_pp_protocol") as install_pp,
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.npu.Event", return_value="event"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
@@ -465,13 +465,14 @@ def test_init_spec_pp_full_graph_and_speculator():
     restore_pp.assert_called_once()
     assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
     assert runner.use_aclgraph is True
-    assert runner.use_spec_pp is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
     if vllm_version_is("0.28.0"):
+        assert runner.use_spec_pp is True
         install_pp.assert_called_once()
     else:
+        assert runner.use_spec_pp is False
         install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
