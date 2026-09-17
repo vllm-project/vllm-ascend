@@ -54,13 +54,8 @@ def zero_experts_compute(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
-        zero_expert_scales = expert_scales.clone()
-        zero_expert_scales = torch.where(zero_expert_mask, 0.0, zero_expert_scales)
-
-        hidden_states = hidden_states.unsqueeze(1)
-        zero_expert_scales = zero_expert_scales.unsqueeze(2)
-        result = hidden_states * zero_expert_scales
-        result = result.sum(dim=1)
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0, expert_scales)
+        result = hidden_states * zero_expert_scales.sum(dim=1, keepdim=True)
     elif zero_expert_type == "zero":
         result = None
     else:
