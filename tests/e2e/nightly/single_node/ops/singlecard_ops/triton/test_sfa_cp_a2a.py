@@ -324,8 +324,24 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
 @torch.inference_mode()
 def test_dcp8_local_combine_generalized_shapes(num_tokens: int, num_heads: int, head_dim: int, strided: bool) -> None:
     """Cover row-count dispatch, feature tails, strides and scalar fallbacks."""
+    _check_local_combine_generalized_shape(num_tokens, num_heads, head_dim, strided, dcp_size=8)
+
+
+@pytest.mark.parametrize("dcp_size", range(1, 9))
+@pytest.mark.parametrize("local_heads", [4, 8])
+@pytest.mark.parametrize("head_dim", [128, 512])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_local_combine_dcp_sizes(dcp_size: int, local_heads: int, head_dim: int, strided: bool) -> None:
+    """Cover rank counts, including non-powers of two, at dispatch boundaries."""
+    _check_local_combine_generalized_shape(64, dcp_size * local_heads, head_dim, strided, dcp_size)
+
+
+def _check_local_combine_generalized_shape(
+    num_tokens: int, num_heads: int, head_dim: int, strided: bool, dcp_size: int
+) -> None:
     torch.manual_seed(20260917)
-    dcp_size, destination_rank = 8, 3
+    destination_rank = min(3, dcp_size - 1)
     local_heads = num_heads // dcp_size
     stride = 2 if strided else 1
     values = torch.randn(dcp_size, num_tokens, num_heads, head_dim * stride, device="npu", dtype=torch.bfloat16)[

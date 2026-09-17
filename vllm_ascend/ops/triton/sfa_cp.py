@@ -320,7 +320,6 @@ def pack_sfa_dcp_output_lse(
     batched = (
         get_device_config().sfa_dcp_row_batch_size == 8
         and sfa_output.dtype == torch.bfloat16
-        and dcp_size == 8
         and scatter_dim == 1
         and head_dim <= 2048
         and total_rows >= 8 * vector_cores
@@ -420,14 +419,17 @@ def fused_sfa_dcp_lse_combine(
     vector_cores = get_vectorcore_num()
     grid_size = total_rows if total_rows < vector_cores else vector_cores
     # A5 measurements favor batching from four rows per vector core.
+    # Small DCP groups need more rows for wide tiles; strided local loads
+    # lose the benefit for DCP<=2 with wide features.
     # Larger feature tiles fail compiler memory planning with eight-row batches.
     batched = (
         get_device_config().sfa_dcp_row_batch_size == 8
         and recv.dtype == torch.bfloat16
-        and dcp_size == 8
+        and 1 <= dcp_size <= 8
         and scatter_dim == 1
         and head_dim <= 512
-        and total_rows >= 4 * vector_cores
+        and total_rows >= (8 if dcp_size <= 2 and head_dim > 256 else 4) * vector_cores
+        and (dcp_size > 2 or head_dim <= 256 or local_output is None or local_output.stride(-1) == 1)
         and local_output is not None
         and not return_lse
     )

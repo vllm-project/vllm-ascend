@@ -27,7 +27,7 @@ class DeviceConfig:
 
     @property
     def sfa_dcp_row_batch_size(self) -> int:
-        """Row tile for the validated DCP8 SFA specialization."""
+        """Row tile for the validated SFA DCP specializations."""
         return 8 if self._device_type == AscendDeviceType.A5 else 1
 
 
