@@ -129,9 +129,6 @@ jobs:
           - ${{ needs.select-all-tests.outputs.main_commit }}
           - ${{ needs.select-all-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
-    secrets:
-      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
-      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}

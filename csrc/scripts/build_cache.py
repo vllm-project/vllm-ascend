@@ -288,20 +288,37 @@ def _snapshot_compatibility(
     if not canonical_soc:
         raise ValueError("SOC version must be non-empty")
 
-    machine = {"x64": "x86_64", "arm64": "aarch64"}[canonical_architecture]
-    metadata = Path(f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/ascend_toolkit_install.info")
-    if metadata.is_file():
-        toolchain = {
-            "kind": "cann-metadata",
-            "sha256": _sha256_file(metadata),
-        }
-    elif toolchain_image.strip():
+    explicit_image = toolchain_image.strip()
+    if explicit_image:
         toolchain = {
             "kind": "container-image",
-            "value": toolchain_image.strip(),
+            "value": explicit_image,
         }
     else:
-        raise ValueError("CANN metadata is unavailable; toolchain-image fallback is required")
+        machine = {"x64": "x86_64", "arm64": "aarch64"}[canonical_architecture]
+        metadata = Path(
+            f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/ascend_toolkit_install.info"
+        )
+        if not metadata.is_file():
+            raise ValueError("CANN metadata is unavailable; toolchain-image is required")
+
+        # Host-built entries may consume libc and system headers that are not
+        # represented by CANN metadata. Keep different runtime operating-system
+        # environments out of the same persistent snapshot namespace.
+        runtime = {
+            "system": platform.system(),
+            "machine": platform.machine(),
+            "libc": list(platform.libc_ver()),
+        }
+        os_release = Path("/etc/os-release")
+        if os_release.is_file():
+            runtime["os_release_sha256"] = _sha256_file(os_release)
+
+        toolchain = {
+            "kind": "runtime-container",
+            "cann_metadata_sha256": _sha256_file(metadata),
+            "platform": runtime,
+        }
 
     descriptor = json.dumps(
         {
@@ -316,11 +333,15 @@ def _snapshot_compatibility(
 
 
 def snapshot_key(args: argparse.Namespace) -> int:
-    compatibility = _snapshot_compatibility(
-        args.architecture,
-        args.soc_version,
-        args.toolchain_image,
-    )
+    try:
+        compatibility = _snapshot_compatibility(
+            args.architecture,
+            args.soc_version,
+            args.toolchain_image,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"[build-cache] snapshot key unavailable: {exc}", file=sys.stderr)
+        return 2
     compatibility_prefix = f"vllm-ascend-inc-v1-schema{SCHEMA_VERSION}-{compatibility}-"
     same_csrc_prefix = f"{compatibility_prefix}{args.csrc_hash}-"
     print(f"{same_csrc_prefix}{args.unique_suffix}")

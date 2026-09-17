@@ -103,20 +103,23 @@ def _run_cache(
         publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
         actual_output = stage_dir
 
-    custom_options = {}
+    custom_soc: str | None = None
+    custom_operator: str | None = None
+    custom_action: str | None = None
+    custom_operator_source: Path | None = None
+    custom_publish_dir: Path | None = None
+    custom_publish_state_dir: Path | None = None
     if domain == "custom_operator":
         if operator_source is None:
             operator_source = prepared_inputs[0]
         assert stage_dir is not None
         assert publish_state_dir is not None
-        custom_options = {
-            "soc": "ascend910b",
-            "operator": "test_operator",
-            "action": action,
-            "operator_source": operator_source,
-            "publish_dir": output_dir,
-            "publish_state_dir": publish_state_dir,
-        }
+        custom_soc = "ascend910b"
+        custom_operator = "test_operator"
+        custom_action = action
+        custom_operator_source = operator_source
+        custom_publish_dir = output_dir
+        custom_publish_state_dir = publish_state_dir
 
     command = build_cache_command(
         cache_root=cache_root,
@@ -138,7 +141,12 @@ def _run_cache(
             builder_mode,
             artifact_name,
         ],
-        **custom_options,
+        soc=custom_soc,
+        operator=custom_operator,
+        action=custom_action,
+        operator_source=custom_operator_source,
+        publish_dir=custom_publish_dir,
+        publish_state_dir=custom_publish_state_dir,
     )
     return run_command(command)
 
@@ -1511,20 +1519,87 @@ def test_explicit_environment_metadata_cannot_be_silently_dropped(tmp_path: Path
 
 def test_snapshot_compatibility_aliases_share_identity(monkeypatch):
     engine = _load_engine("build_cache_engine_snapshot_key_test")
-    original_is_file = engine.Path.is_file
-
-    def hide_cann_metadata(path):
-        if path.name == "ascend_toolkit_install.info":
-            return False
-        return original_is_file(path)
-
-    monkeypatch.setattr(engine.Path, "is_file", hide_cann_metadata)
     image = "quay.io/ascend/manylinux:9.1.0-910b"
     canonical = engine._snapshot_compatibility("arm64", "ascend910b1", image)
     aliases = engine._snapshot_compatibility("aarch64", "a2", image)
     different_image = engine._snapshot_compatibility("arm64", "ascend910b1", f"{image}-new")
     assert canonical == aliases
     assert different_image != canonical
+
+
+def test_snapshot_compatibility_explicit_image_overrides_outer_runtime(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_image_test")
+    ubuntu_image = "quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12"
+    openeuler_image = "quay.io/ascend/cann:9.1.0-910b-openeuler24.03-py3.12"
+
+    monkeypatch.setattr(engine.platform, "system", lambda: "outer-system-a")
+    outer_a = engine._snapshot_compatibility("arm64", "a2", openeuler_image)
+    monkeypatch.setattr(engine.platform, "system", lambda: "outer-system-b")
+    outer_b = engine._snapshot_compatibility("arm64", "a2", openeuler_image)
+
+    assert outer_a == outer_b
+    assert outer_a != engine._snapshot_compatibility("arm64", "a2", ubuntu_image)
+
+
+def test_snapshot_compatibility_separates_runtime_operating_systems(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_runtime_test")
+    metadata = Path(
+        "/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info"
+    )
+    original_is_file = engine.Path.is_file
+
+    def expose_runtime_files(path):
+        if path == metadata or path == Path("/etc/os-release"):
+            return True
+        return original_is_file(path)
+
+    monkeypatch.setattr(engine.Path, "is_file", expose_runtime_files)
+    os_release_hash = {"value": "ubuntu-22.04"}
+
+    def hash_runtime_file(path):
+        if path == Path("/etc/os-release"):
+            return os_release_hash["value"]
+        return "cann-metadata"
+
+    monkeypatch.setattr(engine, "_sha256_file", hash_runtime_file)
+    monkeypatch.setattr(engine.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(engine.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(engine.platform, "libc_ver", lambda: ("glibc", "2.35"))
+    ubuntu = engine._snapshot_compatibility("arm64", "a2", "")
+
+    os_release_hash["value"] = "openeuler-24.03"
+    openeuler = engine._snapshot_compatibility("arm64", "a2", "")
+
+    assert ubuntu != openeuler
+
+
+def test_snapshot_key_reports_unavailable_toolchain_without_weaker_identity(monkeypatch, capsys):
+    engine = _load_engine("build_cache_engine_snapshot_unavailable_test")
+    args = engine.argparse.Namespace(
+        architecture="arm64",
+        soc_version="a2",
+        toolchain_image="",
+        csrc_hash="csrc",
+        unique_suffix="unique",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_snapshot_compatibility",
+        lambda *_args: (_ for _ in ()).throw(OSError("metadata unreadable")),
+    )
+
+    assert engine.snapshot_key(args) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "snapshot key unavailable: metadata unreadable" in captured.err
+
+
+def test_restore_action_skips_l1_when_snapshot_key_fails():
+    action = (REPO_ROOT / ".github" / "actions" / "csrc-l1-restore" / "action.yaml").read_text()
+
+    assert 'if ! key_output="$(' in action
+    assert "Unable to fingerprint the L1 build environment" in action
+    assert action.count('echo "supported=false" >> "$GITHUB_OUTPUT"') == 3
 
 
 def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
@@ -1566,6 +1641,7 @@ def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.skip("cmake is unavailable")
+    assert cmake is not None
 
     cache_root = tmp_path / "cache root"
     output_dir = tmp_path / "output dir"

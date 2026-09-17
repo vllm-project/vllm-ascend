@@ -14,7 +14,7 @@ inputs:
   toolchain-image:
     required: false
     default: ''
-    description: Compiler image fallback when the action runs outside the CANN container.
+    description: Exact compiler image for nested builds; overrides the outer runtime environment.
   source-root:
     required: false
     default: '.'
@@ -61,7 +61,6 @@ runs:
           echo "::notice::This source snapshot predates the fine-grained csrc cache; building without L1."
           exit 0
         fi
-        echo "supported=true" >> "$GITHUB_OUTPUT"
 
         if [ -n "$CALLER_CSRC_HASH" ]; then
           csrc_hash="$CALLER_CSRC_HASH"
@@ -76,18 +75,25 @@ runs:
         fi
 
         unique_suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)-$$-${RANDOM}"
-        readarray -t key_parts < <(
+        if ! key_output="$(
           python3 "$engine" snapshot-key \
             --architecture "$CACHE_ARCHITECTURE" \
             --soc-version "$CACHE_SOC_VERSION" \
             --toolchain-image "$CACHE_TOOLCHAIN_IMAGE" \
             --csrc-hash "$csrc_hash" \
             --unique-suffix "$unique_suffix"
-        )
-        if [ "${#key_parts[@]}" -ne 3 ]; then
-          echo "::error::snapshot-key returned an invalid response"
-          exit 1
+        )"; then
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Unable to fingerprint the L1 build environment; building without persistent L1."
+          exit 0
         fi
+        readarray -t key_parts <<< "$key_output"
+        if [ "${#key_parts[@]}" -ne 3 ]; then
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::snapshot-key returned an invalid response; building without persistent L1."
+          exit 0
+        fi
+        echo "supported=true" >> "$GITHUB_OUTPUT"
         primary_key="${key_parts[0]}"
         same_csrc_prefix="${key_parts[1]}"
         compat_prefix="${key_parts[2]}"

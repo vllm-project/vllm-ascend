@@ -182,12 +182,16 @@ The snapshot key command has one compatibility model:
 schema
 + architecture
 + canonical SOC
-+ CANN installation metadata hash
-  or an explicit container-image fallback
++ explicit compiler-image identity for a nested container build
+  or CANN metadata + runtime OS/libc identity for a direct build
 ```
 
 The restore action adds the tracked csrc hash and a unique publication suffix.
 Both producer and consumer keys therefore come from the same implementation.
+An explicit compiler image takes precedence over the outer runner environment,
+so a Docker build is keyed by the environment that actually compiles csrc.
+Direct builds include the runtime OS/libc identity to keep host-built artifacts
+from crossing incompatible system-header or ABI boundaries.
 
 ## Entry and artifact lifecycle
 
@@ -255,6 +259,7 @@ entry. OBS restore and save failures remain performance degradations.
 | Condition | Behavior |
 | --- | --- |
 | Historical source has no cache engine | Report unsupported and continue with the ordinary build. |
+| Snapshot environment cannot be fingerprinted | Skip L1 restore and continue with the ordinary build. |
 | Snapshot restore fails | Continue with an empty local L1. |
 | Entry is absent, invalid, or corrupt | Compile and replace it. |
 | Entry lock is unavailable | Bypass the entry and compile. |

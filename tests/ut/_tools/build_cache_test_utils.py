@@ -61,7 +61,7 @@ def build_cache_command(
     for pattern in artifact_includes:
         command.extend(["--artifact-include", pattern])
 
-    custom_values = {
+    custom_values: dict[str, str | Path | None] = {
         "--soc": soc,
         "--operator": operator,
         "--action": action,

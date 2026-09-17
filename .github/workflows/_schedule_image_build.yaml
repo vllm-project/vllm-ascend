@@ -373,6 +373,7 @@ jobs:
         cache-dir: ${{ github.workspace }}/build_cache
         architecture: ${{ matrix.runner_info.tag }}
         soc-version: ${{ inputs.soc }}
+        toolchain-image: ${{ inputs.cann_swr_url }}:${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}
         source-root: .
     - name: Build and push
       uses: docker/build-push-action@v7

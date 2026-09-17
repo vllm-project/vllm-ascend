@@ -67,10 +67,6 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
-      HW_OBS_AK:
-        required: false
-      HW_OBS_SK:
-        required: false
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly

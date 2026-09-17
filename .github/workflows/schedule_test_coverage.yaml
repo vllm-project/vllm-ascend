@@ -122,5 +122,3 @@ jobs:
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
-      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
-      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
