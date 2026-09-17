@@ -102,7 +102,7 @@ def validate_dflash_cache_views(vllm_config, cache_config, raw_caches, caches):
         math.prod(shape) * get_dtype_size(dtype) for shape, dtype in zip(mamba.shapes, mamba.dtypes)
     )
     count = cache_config.num_blocks
-    arena_offsets = {}
+    arena_offsets: dict[int, int] = {}
     for name, spec in specs.items():
         raw = raw_caches[name]
         if isinstance(raw, tuple) or raw.numel() * raw.element_size() != count * spec.page_size_bytes:
@@ -180,7 +180,7 @@ def wrap_dflash_cache_planner(original_planner):
             return configs
         if len(configs) != len(available_memory) or len(kv_cache_specs) != len(available_memory):
             raise ValueError("Mixed DFlash requires a cache plan and memory budget for every worker.")
-        limits = []
+        limits: list[int] = []
         active_configs = []
         for config, budget in zip(configs, available_memory):
             specs = _layer_specs(config)

@@ -76,7 +76,8 @@ def _load_production():
     )
     module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     module.body = [
-        node for node in module.body
+        node
+        for node in module.body
         if not (isinstance(node, ast.ImportFrom) and (node.module or "").startswith("vllm"))
     ]
     exec(compile(module, str(source), "exec"), namespace)
@@ -94,9 +95,11 @@ class TestDFlashCache(unittest.TestCase):
             use_v2_model_runner=True,
             speculative_config=SimpleNamespace(
                 method="dflash",
-                draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(
-                    layer_types=["sliding_attention"] * 4 + ["full_attention"],
-                )),
+                draft_model_config=SimpleNamespace(
+                    hf_config=SimpleNamespace(
+                        layer_types=["sliding_attention"] * 4 + ["full_attention"],
+                    )
+                ),
             ),
             cache_config=SimpleNamespace(num_gpu_blocks_override=None),
             parallel_config=SimpleNamespace(pipeline_parallel_size=1),
@@ -107,10 +110,7 @@ class TestDFlashCache(unittest.TestCase):
             "target.full": _FullAttentionSpec(page_size_padded=self.page),
             "target.mamba": _MambaSpec(page_size_padded=self.page),
             "draft.full": _FullAttentionSpec(num_kv_heads=4, head_size=128, head_size_v=128),
-            **{
-                f"draft.swa.{i}": _SlidingWindowSpec(num_kv_heads=4, head_size=128, head_size_v=128)
-                for i in range(4)
-            },
+            **{f"draft.swa.{i}": _SlidingWindowSpec(num_kv_heads=4, head_size=128, head_size_v=128) for i in range(4)},
         }
 
     def _plan(self, count, *, legacy=False):
@@ -124,9 +124,7 @@ class TestDFlashCache(unittest.TestCase):
             SimpleNamespace(layer_names=["target.mamba"], kv_cache_spec=specs["target.mamba"]),
             SimpleNamespace(
                 layer_names=[name for name in specs if ".swa." in name],
-                kv_cache_spec=_UniformTypeKVCacheSpecs({
-                    name: spec for name, spec in specs.items() if ".swa." in name
-                }),
+                kv_cache_spec=_UniformTypeKVCacheSpecs({name: spec for name, spec in specs.items() if ".swa." in name}),
             ),
         ]
         if legacy:
