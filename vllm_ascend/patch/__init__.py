@@ -29,7 +29,7 @@
 # What's Patched and how it works:
 # --------------------------------
 # * Platform Patch:
-# =================
+# ==========#
 # Entries are listed in alphabetical order by file name.
 #
 # ** 1. File: platform/patch_balance_schedule.py**
@@ -745,7 +745,7 @@
 #       Remove this workaround when vLLM 0.28.0 support is dropped.
 #
 # * Worker Patch:
-# ===============
+# ========#
 # Entries are listed in alphabetical order by file name.
 #
 # ** 0. File: worker/patch_kv_cache_dtype.py**
@@ -1463,4 +1463,31 @@
 #    Future Plan:
 #       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
 #       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
+#
+# ** 36. File: platform/patch_parallel_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
+#    Why:
+#       vLLM v0.29.0 rejects PCP > 1 combined with DP > 1 in its shared
+#       validator, preventing Ascend's PCP+DP implementation from being reached.
+#       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
+#       main already contains that fix.
+#    How:
+#       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
+#       except for the PCP+DP rejection, without changing parameter values or
+#       bypassing other validation. Update the class method and Pydantic
+#       model-validator registration, then rebuild ParallelConfig and VllmConfig
+#       so nested validation also uses the replacement.
+#       Read parallel.current_platform dynamically to preserve the Ascend EPLB
+#       platform proxy installed by platform/patch_eplb.py.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54523/files
+#       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
+#       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
+#    Future Plan:
+#       Remove this patch and its platform import when v0.29.0 support is dropped
+#       and all supported pins contain #54523 or an equivalent backend-scoped
+#       check. If the supported release pin first receives a backport, remove
+#       it after verifying PCP+DP construction and execution, retained invalid-
+#       config rejection, and Ascend EPLB validation.
 #
