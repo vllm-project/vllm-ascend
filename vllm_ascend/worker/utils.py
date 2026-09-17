@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from itertools import product as iprod
@@ -78,6 +79,74 @@ def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
         yield
     finally:
         compilation_model.do_not_compile = previous
+
+
+def _copy_kv_cache_blocks_inplace_ascend(
+    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    """Apply CoW copies to logical Ascend cache views.
+
+    KV-transfer allocations are over-allocated and then aligned by slicing.
+    The resulting tensors therefore retain a padded underlying storage whose
+    byte size is not necessarily divisible by ``num_blocks``.  Upstream's
+    storage-wide copier sees that padding and rejects an otherwise valid CoW
+    request.  Ascend cache views are contiguous and block-major, so copy each
+    logical view instead of its padded backing storage.
+    """
+    if not kv_cache_block_copies:
+        return
+    if os.getenv("VLLM_ASCEND_DIAG_DISABLE_KV_COW_COPY") == "1":
+        return
+
+    first_tensor = None
+    tensors: list[torch.Tensor] = []
+    seen_views: set[tuple[int, int, tuple[int, ...], torch.dtype]] = set()
+    for entry in kv_caches:
+        entry_tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
+        for tensor in entry_tensors:
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            key = (tensor.data_ptr(), tensor.numel(), tuple(tensor.stride()), tensor.dtype)
+            if key in seen_views:
+                continue
+            seen_views.add(key)
+            if tensor.numel() % num_blocks:
+                raise ValueError(
+                    "Ascend KV cache view is not divisible by the configured "
+                    f"block count: shape={tuple(tensor.shape)}, num_blocks={num_blocks}."
+                )
+            if not tensor.is_contiguous():
+                raise ValueError(
+                    "Ascend CoW requires contiguous logical KV cache views, "
+                    f"got shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}."
+                )
+            first_tensor = tensor if first_tensor is None else first_tensor
+            tensors.append(tensor)
+
+    if first_tensor is None:
+        return
+    src_indices = torch.tensor(
+        [copy.src_block_id for copy in kv_cache_block_copies],
+        dtype=torch.long,
+        device=first_tensor.device,
+    )
+    dst_indices = torch.tensor(
+        [copy.dst_block_id for copy in kv_cache_block_copies],
+        dtype=torch.long,
+        device=first_tensor.device,
+    )
+    # Different logical cache views can overlap the same hybrid backing
+    # allocation. Snapshot every source before writing any destination;
+    # otherwise an earlier view's destination may alias a later view's source
+    # and make the CoW result depend on view iteration order.
+    pending_writes: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for tensor in tensors:
+        logical_blocks = tensor.view(num_blocks, -1)
+        pending_writes.append((logical_blocks, logical_blocks[src_indices].clone()))
+    for logical_blocks, source_snapshot in pending_writes:
+        logical_blocks[dst_indices] = source_snapshot
 
 
 @triton.jit

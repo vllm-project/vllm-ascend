@@ -17,8 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import os
-from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager, contextmanager
 
 import numpy as np
@@ -28,7 +26,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.sequence import IntermediateTensors
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -63,7 +60,10 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
-from vllm_ascend.worker.utils import disable_compilation
+from vllm_ascend.worker.utils import (
+    _copy_kv_cache_blocks_inplace_ascend,
+    disable_compilation,
+)
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -82,74 +82,6 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 if vllm_version_is("0.28.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-
-
-def _copy_kv_cache_blocks_inplace_ascend(
-    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
-    num_blocks: int,
-    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
-) -> None:
-    """Apply CoW copies to logical Ascend cache views.
-
-    KV-transfer allocations are over-allocated and then aligned by slicing.
-    The resulting tensors therefore retain a padded underlying storage whose
-    byte size is not necessarily divisible by ``num_blocks``.  Upstream's
-    storage-wide copier sees that padding and rejects an otherwise valid CoW
-    request.  Ascend cache views are contiguous and block-major, so copy each
-    logical view instead of its padded backing storage.
-    """
-    if not kv_cache_block_copies:
-        return
-    if os.getenv("VLLM_ASCEND_DIAG_DISABLE_KV_COW_COPY") == "1":
-        return
-
-    first_tensor = None
-    tensors: list[torch.Tensor] = []
-    seen_views: set[tuple[int, int, tuple[int, ...], torch.dtype]] = set()
-    for entry in kv_caches:
-        entry_tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
-        for tensor in entry_tensors:
-            if not isinstance(tensor, torch.Tensor):
-                continue
-            key = (tensor.data_ptr(), tensor.numel(), tuple(tensor.stride()), tensor.dtype)
-            if key in seen_views:
-                continue
-            seen_views.add(key)
-            if tensor.numel() % num_blocks:
-                raise ValueError(
-                    "Ascend KV cache view is not divisible by the configured "
-                    f"block count: shape={tuple(tensor.shape)}, num_blocks={num_blocks}."
-                )
-            if not tensor.is_contiguous():
-                raise ValueError(
-                    "Ascend CoW requires contiguous logical KV cache views, "
-                    f"got shape={tuple(tensor.shape)}, stride={tuple(tensor.stride())}."
-                )
-            first_tensor = tensor if first_tensor is None else first_tensor
-            tensors.append(tensor)
-
-    if first_tensor is None:
-        return
-    src_indices = torch.tensor(
-        [copy.src_block_id for copy in kv_cache_block_copies],
-        dtype=torch.long,
-        device=first_tensor.device,
-    )
-    dst_indices = torch.tensor(
-        [copy.dst_block_id for copy in kv_cache_block_copies],
-        dtype=torch.long,
-        device=first_tensor.device,
-    )
-    # Different logical cache views can overlap the same hybrid backing
-    # allocation. Snapshot every source before writing any destination;
-    # otherwise an earlier view's destination may alias a later view's source
-    # and make the CoW result depend on view iteration order.
-    pending_writes: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for tensor in tensors:
-        logical_blocks = tensor.view(num_blocks, -1)
-        pending_writes.append((logical_blocks, logical_blocks[src_indices].clone()))
-    for logical_blocks, source_snapshot in pending_writes:
-        logical_blocks[dst_indices] = source_snapshot
 
 
 class NPUModelRunner(GPUModelRunner):

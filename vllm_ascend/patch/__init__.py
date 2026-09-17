@@ -293,12 +293,14 @@
 #       shared prefix of typical ~2K prompts, pinning producer prefix hits
 #       to 0 (the MTP prefix-cache "kill band").
 #    How:
-#       Tag `is_kv_producer` onto KVCacheConfig while it is built (the
-#       coordinator factory never receives VllmConfig; the tag survives the
-#       scheduler-side deepcopy and worker pickle IPC), read it back in the
-#       coordinator, and skip the EAGLE drop in both lookup entry points on
-#       a tagged producer. The EAGLE-group fallback marks FullAttention
-#       groups only.
+#       `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups` (the
+#       fork's builder) attaches `kv_transfer_config` onto every built
+#       KVCacheConfig (it survives the scheduler-side deepcopy and is
+#       dropped by worker pickle IPC, which never reads it); the
+#       coordinator derives `is_kv_producer` / `skips_eagle_block_drop`
+#       from it and skips the EAGLE drop in both lookup entry points on a
+#       pure producer or standalone instance. The EAGLE-group fallback
+#       marks FullAttention groups only.
 #    Related PR (if no, explain why):
 #       No upstream PR; producer-side drop exemption for hybrid PD.
 #    Future Plan:

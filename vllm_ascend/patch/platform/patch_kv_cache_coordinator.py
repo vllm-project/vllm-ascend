@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
-import functools
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from math import lcm
-from typing import Any
 
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
-import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -44,7 +41,8 @@ USE_MULTI_GROUPS_KV_CACHE = True
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
-def _is_pure_kv_producer(vllm_config) -> bool:
+@staticmethod
+def _is_kv_producer(kv_transfer_config) -> bool:
     """Whether this process is a PD prefill producer that never consumes.
 
     ``kv_both`` instances (both ``is_kv_producer`` and ``is_kv_consumer``)
@@ -52,7 +50,6 @@ def _is_pure_kv_producer(vllm_config) -> bool:
     ``getattr`` fallbacks keep this callable with partial config doubles in
     unit tests and across vLLM revisions.
     """
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     return (
         kv_transfer_config is not None
         and getattr(kv_transfer_config, "is_kv_producer", False)
@@ -60,69 +57,23 @@ def _is_pure_kv_producer(vllm_config) -> bool:
     )
 
 
-# Module anchors populated by _install_producer_role_kv_cache_config_tag:
-# the captured upstream/Ascend builder and its role-tagging wrapper. Keeping
-# them module-global lets the unit tests substitute a fake upstream builder.
-_orig_get_kv_cache_config_from_groups: Callable[..., Any]
-_get_kv_cache_config_from_groups: Callable[..., Any]
+@staticmethod
+def _skips_eagle_block_drop(kv_transfer_config) -> bool:
+    """Whether the EAGLE last-block drop must be suppressed on this process.
 
-
-def _install_producer_role_kv_cache_config_tag() -> None:
-    """Make every built ``KVCacheConfig`` carry the pure-PD-producer role.
-
-    The coordinator factory below receives ``KVCacheConfig`` but not
-    ``VllmConfig``, so the role has to ride on the config object. This one
-    routine performs the whole hand-off:
-
-    1. Wrap whichever builder is currently registered (the Ascend
-       stride-aware planner in ``patch_kv_cache_utils`` may already have
-       replaced the upstream one) so the resulting config gets an
-       ``is_kv_producer`` tag.
-    2. Publish the wrapper on the ``kv_cache_utils`` module global -
-       ``get_kv_cache_configs`` invokes the builder as a module global, so
-       this covers the engine's multi-config path.
-    3. Compensate importers that may already hold a direct symbol binding
-       (e.g. the worker profile-run path in ``gpu_model_runner``) when this
-       patch loads late.
-
-    In the supported vLLM revisions ``KVCacheConfig`` is a plain (non-frozen,
-    no-``__slots__``) dataclass; the scheduler-side config is derived via
-    ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config``, which keeps
-    the attribute, while worker IPC is pickle-based and simply carries (or,
-    on an msgspec boundary, silently drops) the extra bool - nothing on the
-    worker side reads it. A marker attribute makes re-installation
-    idempotent under module reload.
+    Suppressed for a pure PD prefill producer (see ``_is_kv_producer``)
+    and for a standalone instance (``kv_transfer_config is None``). A
+    standalone instance has no connector: ``num_external_computed_tokens``
+    is always zero and every content-hash match comes from verified local
+    prompt blocks, so the drop only erases hit length - on hybrid
+    mamba-align models with a fine ``prefix_match_unit`` it trims the
+    full-attention hit below the mamba partial-tail entry and collapses
+    the reconciled hybrid hit to 0 (the single-instance counterpart of the
+    P-side kill band). Consumers and ``kv_both`` instances keep upstream
+    behavior: they receive external loads whose verifier window the drop
+    protects.
     """
-    global _orig_get_kv_cache_config_from_groups, _get_kv_cache_config_from_groups
-
-    current_builder = vllm_kv_cache_utils.get_kv_cache_config_from_groups
-    if getattr(current_builder, "_ascend_producer_role_tag", False):
-        # Module reload: keep the existing tagged wrapper (its __wrapped__
-        # points at the builder captured on first install).
-        _get_kv_cache_config_from_groups = current_builder
-        _orig_get_kv_cache_config_from_groups = getattr(current_builder, "__wrapped__", current_builder)
-        return
-    _orig_get_kv_cache_config_from_groups = current_builder
-
-    @functools.wraps(current_builder)
-    def _get_kv_cache_config_from_groups(vllm_config, *args, **kwargs):
-        kv_cache_config = _orig_get_kv_cache_config_from_groups(vllm_config, *args, **kwargs)
-        kv_cache_config.is_kv_producer = _is_pure_kv_producer(vllm_config)
-        return kv_cache_config
-
-    _get_kv_cache_config_from_groups._ascend_producer_role_tag = True  # type: ignore[attr-defined]
-    vllm_kv_cache_utils.get_kv_cache_config_from_groups = (  # type: ignore[attr-defined]
-        _get_kv_cache_config_from_groups
-    )
-    for _importer_module_name in ("vllm.v1.worker.gpu_model_runner",):
-        _importer = sys.modules.get(_importer_module_name)
-        if _importer is not None and hasattr(_importer, "get_kv_cache_config_from_groups"):
-            _importer.get_kv_cache_config_from_groups = (  # type: ignore[attr-defined]
-                _get_kv_cache_config_from_groups
-            )
-
-
-_install_producer_role_kv_cache_config_tag()
+    return kv_transfer_config is None or _is_kv_producer(kv_transfer_config)
 
 
 def _select_kv_token_budget(
@@ -297,6 +248,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 mgr.scheduler_block_size = self.lcm_block_size
 
         self.use_eagle = use_eagle
+        # Roles are derived here, where they are used, from the kv-transfer
+        # config attached by the ``get_kv_cache_config_from_groups`` wrapper
+        # above; configs built without it (e.g. unit tests) read as
+        # standalone (``kv_transfer_config is None``).
+        #
         # A PD prefill producer only schedules fresh-request prefills;
         # every content-hash block it can match is a verified prompt block
         # (draft/lookahead tokens live in the request-private tail, whose
@@ -304,11 +260,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # is therefore never needed on the producer, and with hybrid
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
-        #
-        # The role is tagged onto KVCacheConfig by the
-        # ``get_kv_cache_config_from_groups`` wrapper above; configs built
-        # without the tag (e.g. unit tests) default to non-producer.
-        self.is_kv_producer = getattr(kv_cache_config, "is_kv_producer", False)
+        kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
+        self.is_kv_producer = _is_kv_producer(kv_transfer_config)
+        self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
         self.has_state_groups = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
         for manager in self.single_type_managers:
             if isinstance(manager, MambaManager):
@@ -491,7 +445,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified and not self.is_kv_producer
+                drop_eagle_block = (
+                    use_eagle and idx not in eagle_verified and not self.skips_eagle_block_drop
+                )
 
                 _max_length = curr_hit_length
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
@@ -559,8 +515,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
-        # producer (see ``self.is_kv_producer``): matched content blocks
-        # are always verified prompt blocks there.
+        # producer and on standalone instances (see
+        # ``self.skips_eagle_block_drop``): matched content blocks are
+        # always verified prompt blocks there.
         max_cache_hit_length = self._producer_hit_cap(max_cache_hit_length)
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
@@ -572,7 +529,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=use_eagle and not self.is_kv_producer,
+                drop_eagle_block=use_eagle and not self.skips_eagle_block_drop,
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=self.dcp_world_size,
                 pcp_world_size=1,
@@ -665,103 +622,3 @@ vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordi
 _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
 if _kv_cache_manager is not None:
     _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
-
-
-def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None) -> None:
-    """Suppress the EAGLE-block-drop backoff in ``_mamba_block_aligned_split``
-    on a PD prefill producer.
-
-    This is the scheduler-side companion of the producer drop exemption in
-    ``AscendHybridKVCacheCoordinator`` above.
-
-    ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
-    mamba-align page off by one block (and, on newer vLLM revisions, shifts
-    the partial-tail checkpoint boundary) whenever the EAGLE block drop is
-    active. Consequently a producer prefill can never end a chunk at its
-    final full-page boundary. In mamba "align" mode the recurrent state of a
-    page is only materialized across a chunk boundary (copy-on-write in
-    ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
-    final full state page unhashed. Hybrid coordinator hits reconcile to the
-    per-group minimum: even with the full-attention group fixed by the
-    coordinator exemption above, the mamba groups report one full page less
-    (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
-    align pages) - the observed MTP prefix-cache kill band.
-
-    Rather than copy the scheduler method (its body moves between vLLM
-    revisions), invoke the original with the drop bit temporarily cleared:
-    every read of the bit inside the method exists solely to compensate for
-    the block drop, and on the producer matched blocks are always verified
-    prompt blocks and the coordinator never drops. Scheduling is
-    single-threaded per scheduler instance, so the temporary toggle is safe.
-    vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
-    dedicated ``use_eagle_block_drop`` knob.
-
-    The wrapper is installed unconditionally and self-gates at call time on
-    ``self.vllm_config.kv_transfer_config`` (the same PD role source used by
-    the coordinator tag and the neighboring mamba split patch), so consumers
-    and standalone instances pass straight through with upstream behavior.
-
-    The producer wrapper is always installed around the method currently
-    registered on ``Scheduler``.  This ordering is important: the neighboring
-    consumer/sparse-index patch has early-return paths which never delegate to
-    its saved original.  An inner producer wrapper would therefore leave the
-    EAGLE drop enabled on those paths.
-    """
-    if scheduler_cls is None:
-        from vllm.v1.core.sched.scheduler import Scheduler
-
-        scheduler_cls = Scheduler
-
-    if not hasattr(scheduler_cls, "_mamba_block_aligned_split"):
-        return
-    registered_split = scheduler_cls._mamba_block_aligned_split
-    if getattr(registered_split, "_ascend_producer_no_eagle_drop", False):
-        # Idempotent under module reload.
-        return
-
-    original_split = registered_split
-
-    @functools.wraps(original_split)
-    def _producer_mamba_block_aligned_split(
-        self,
-        request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        if not _is_pure_kv_producer(getattr(self, "vllm_config", None)):
-            return original_split(
-                self,
-                request,
-                num_new_tokens,
-                num_new_local_computed_tokens,
-                num_external_computed_tokens,
-            )
-        # vLLM 0.28.x and newer revisions use different names.  Some
-        # transitional scheduler implementations expose both and different
-        # wrapper layers consult different attributes, so clear every
-        # attribute that exists and restore all of them after the call.
-        drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
-        original_drop_values = {name: getattr(self, name) for name in drop_attrs}
-        for name in drop_attrs:
-            setattr(self, name, False)
-        try:
-            return original_split(
-                self,
-                request,
-                num_new_tokens,
-                num_new_local_computed_tokens,
-                num_external_computed_tokens,
-            )
-        finally:
-            for name, value in original_drop_values.items():
-                setattr(self, name, value)
-
-    _producer_mamba_block_aligned_split._ascend_producer_no_eagle_drop = True  # type: ignore[attr-defined]
-    scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
-
-
-# The wrapper self-gates on the PD role at call time, so installation is
-# unconditional (mirrors the other scheduler-side patch imported earlier in
-# this package).
-_install_producer_mamba_block_aligned_split_patch()

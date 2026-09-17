@@ -102,7 +102,7 @@ def _make_coordinator(
     monkeypatch,
     *,
     use_eagle: bool,
-    is_kv_producer: bool = False,
+    kv_transfer_config=None,
     role_tagged: bool = True,
     mamba_eagle: bool = False,
 ):
@@ -110,9 +110,9 @@ def _make_coordinator(
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
     if role_tagged:
-        # The tag is placed by the get_kv_cache_config_from_groups wrapper in
-        # real engine startup.
-        kv_cache_config.is_kv_producer = is_kv_producer
+        # The kv-transfer config is attached by the
+        # get_kv_cache_config_from_groups wrapper in real engine startup.
+        kv_cache_config.kv_transfer_config = kv_transfer_config
     return AscendHybridKVCacheCoordinator(
         kv_cache_config=kv_cache_config,
         max_model_len=4096,
@@ -153,32 +153,46 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fix ② role detection: kv_transfer_config -> KVCacheConfig tag -> coordinator
+# Fix ② role detection: kv_transfer_config passthrough -> coordinator derives
 # ---------------------------------------------------------------------------
 
 
-def _vllm_config(*, is_kv_producer: bool, is_kv_consumer: bool):
+def _kv_transfer_config(*, is_kv_producer: bool, is_kv_consumer: bool):
     return SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            is_kv_producer=is_kv_producer,
-            is_kv_consumer=is_kv_consumer,
-        )
+        is_kv_producer=is_kv_producer,
+        is_kv_consumer=is_kv_consumer,
     )
 
 
 def test_coordinator_reads_producer_tag(monkeypatch):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=True)
+    coordinator = _make_coordinator(
+        monkeypatch, use_eagle=True, kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False)
+    )
     assert coordinator.is_kv_producer is True
 
 
 def test_coordinator_non_producer_tag(monkeypatch):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=False)
+    coordinator = _make_coordinator(
+        monkeypatch, use_eagle=True, kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True)
+    )
     assert coordinator.is_kv_producer is False
 
 
 def test_coordinator_defaults_non_producer_without_tag(monkeypatch):
+    # Config built without the passthrough attribute reads as standalone:
+    # no producer role, but the drop exemption applies.
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, role_tagged=False)
     assert coordinator.is_kv_producer is False
+
+
+def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
+    # Standalone instance: is_kv_producer stays False (no _producer_hit_cap,
+    # no connector offload) but the EAGLE drop exemption is on.
+    coordinator = _make_coordinator(
+        monkeypatch, use_eagle=True, kv_transfer_config=None
+    )
+    assert coordinator.is_kv_producer is False
+    assert coordinator.skips_eagle_block_drop is True
 
 
 @pytest.mark.parametrize(
@@ -191,80 +205,61 @@ def test_coordinator_defaults_non_producer_without_tag(monkeypatch):
     ],
 )
 def test_producer_hit_cap_leaves_recompute_token(monkeypatch, max_length, expected):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=True)
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
+    )
     coordinator.hash_block_size = 16
     assert coordinator._producer_hit_cap(max_length) == expected
 
 
 @pytest.mark.parametrize("max_length", [16, 17, 144, 145])
 def test_producer_hit_cap_is_transparent_on_consumer(monkeypatch, max_length):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True, is_kv_producer=False)
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True),
+    )
     coordinator.hash_block_size = 16
     assert coordinator._producer_hit_cap(max_length) == max_length
 
 
 @pytest.mark.parametrize(
-    ("vllm_config", "expected"),
+    ("kv_transfer_config", "expected"),
     [
-        (_vllm_config(is_kv_producer=True, is_kv_consumer=False), True),
-        (_vllm_config(is_kv_producer=False, is_kv_consumer=True), False),
-        (_vllm_config(is_kv_producer=True, is_kv_consumer=True), False),
-        (SimpleNamespace(kv_transfer_config=None), False),
-        (SimpleNamespace(), False),
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
         (None, False),
     ],
 )
-def test_is_pure_kv_producer_role_semantics(vllm_config, expected):
-    assert mod._is_pure_kv_producer(vllm_config) is expected
+def test_is_kv_producer_role_semantics(kv_transfer_config, expected):
+    assert mod._is_kv_producer(kv_transfer_config) is expected
 
 
-def test_kv_cache_config_builder_tags_and_forwards(monkeypatch):
-    sentinel_config = SimpleNamespace()
-    forwarded = {}
-
-    def _fake_builder(vllm_config, kv_cache_groups, available_memory):
-        forwarded["args"] = (vllm_config, kv_cache_groups, available_memory)
-        return sentinel_config
-
-    monkeypatch.setattr(mod, "_orig_get_kv_cache_config_from_groups", _fake_builder)
-    vllm_config = _vllm_config(is_kv_producer=True, is_kv_consumer=False)
-    result = mod._get_kv_cache_config_from_groups(vllm_config, "groups", 1234)
-    assert result is sentinel_config
-    assert result.is_kv_producer is True
-    assert forwarded["args"] == (vllm_config, "groups", 1234)
-
-
-def test_kv_cache_config_builder_tags_consumer_false(monkeypatch):
-    config = SimpleNamespace()
-
-    monkeypatch.setattr(
-        mod,
-        "_orig_get_kv_cache_config_from_groups",
-        lambda *args, **kwargs: config,
-    )
-    result = mod._get_kv_cache_config_from_groups(
-        _vllm_config(is_kv_producer=False, is_kv_consumer=True),
-        [],
-        0,
-    )
-    assert result.is_kv_producer is False
+@pytest.mark.parametrize(
+    ("kv_transfer_config", "expected"),
+    [
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
+        # Standalone instance (no connector at all): the EAGLE drop is
+        # suppressed - no external loads exist, so the drop only erases
+        # hit length on hybrid mamba-align models.
+        (None, True),
+    ],
+)
+def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
+    assert mod._skips_eagle_block_drop(kv_transfer_config) is expected
 
 
-def test_kv_cache_config_builder_install_is_idempotent():
-    import vllm.v1.core.kv_cache_utils as kcu
-
-    installed = kcu.get_kv_cache_config_from_groups
-    try:
-        mod._install_producer_role_kv_cache_config_tag()
-        once = kcu.get_kv_cache_config_from_groups
-        assert once is mod._get_kv_cache_config_from_groups
-        mod._install_producer_role_kv_cache_config_tag()
-        # The second install must not wrap the wrapper again.
-        assert kcu.get_kv_cache_config_from_groups is once
-        # The captured-original anchors still resolve through the tag logic.
-        assert mod._orig_get_kv_cache_config_from_groups is getattr(once, "__wrapped__", once)
-    finally:
-        kcu.get_kv_cache_config_from_groups = installed
+# NOTE: the kv-transfer config is now attached by the vLLM-side
+# ``get_kv_cache_config_from_groups`` builder (see
+# vllm/v1/core/kv_cache_utils.py), so there is no builder wrapper in this
+# patch to unit-test here; the coordinator reads the attached attribute.
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +299,12 @@ class _RecordingMamba(_RecordingManager):
     calls = []
 
 
-def _make_lookup_coordinator(*, producer: bool):
+def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.is_kv_producer = producer
+    # Standalone doubles carry the new drop-exemption tag but not the
+    # producer tag (mirroring real engine startup tagging).
+    coordinator.skips_eagle_block_drop = producer or standalone
     coordinator.dcp_world_size = 1
     coordinator.hash_block_size = HASH_BLOCK_SIZE
     coordinator.scheduler_block_size = None
@@ -352,6 +350,17 @@ def test_standard_lookup_skips_drop_on_producer():
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
+def test_standard_lookup_skips_drop_on_standalone():
+    # Standalone instance: no producer tag, but the EAGLE drop exemption
+    # applies - without it the FA hit is trimmed below the mamba
+    # partial-tail entry and the hybrid hit collapses to 0.
+    coordinator = _make_lookup_coordinator(producer=False, standalone=True)
+    assert coordinator.is_kv_producer is False
+    coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+
+
 # ---------------------------------------------------------------------------
 # Fix ③: per-group lookup drop gating + call-site signature
 # ---------------------------------------------------------------------------
@@ -373,6 +382,14 @@ def test_per_group_lookup_skips_drop_on_producer():
     assert hit_lengths == (2048, 2048)
 
 
+def test_per_group_lookup_skips_drop_on_standalone():
+    coordinator = _make_lookup_coordinator(producer=False, standalone=True)
+    _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    assert hit_lengths == (2048, 2048)
+
+
 def test_per_group_lookup_matches_scheduler_call_convention():
     # RecomputeScheduler / DyntraLBScheduler / BalanceScheduler all call with
     # exactly two positional args: (request.block_hashes, request.num_tokens-1).
@@ -384,208 +401,9 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert hit_lengths == (4095, 4095)
 
 
-# ---------------------------------------------------------------------------
-# Fix ④: producer scheduler companion patch - the EAGLE one-page backoff in
-# _mamba_block_aligned_split must be suppressed on the producer, otherwise the
-# final full mamba-align state page is never materialized across a chunk
-# boundary and hybrid hits stay one page (1536 tokens) short.
-# ---------------------------------------------------------------------------
 
-
-class _RecordingSplitScheduler:
-    """Minimal scheduler double: records the drop bit seen by the original
-    split implementation and echoes its arguments."""
-
-    def __init__(
-        self,
-        *,
-        drop_attr: str = "use_eagle",
-        drop_value: bool = True,
-        raise_in_split: bool = False,
-        is_kv_producer: bool = False,
-        is_kv_consumer: bool = False,
-        kv_transfer_config_present: bool = True,
-        vllm_config_present: bool = True,
-    ):
-        # Explicitly do NOT carry the other-era attribute: the wrapper must
-        # pick the knob the running vLLM revision actually exposes.
-        setattr(self, drop_attr, drop_value)
-        self.raise_in_split = raise_in_split
-        self.observed_drop_bits: list[bool] = []
-        self.calls: list[tuple] = []
-        if vllm_config_present:
-            vllm_config = SimpleNamespace(model_config=SimpleNamespace())
-            if kv_transfer_config_present:
-                vllm_config.kv_transfer_config = SimpleNamespace(
-                    is_kv_producer=is_kv_producer,
-                    is_kv_consumer=is_kv_consumer,
-                )
-            else:
-                vllm_config.kv_transfer_config = None
-            self.vllm_config = vllm_config
-
-
-def _split_observed_bit(scheduler) -> bool:
-    if hasattr(scheduler, "use_eagle_block_drop"):
-        return scheduler.use_eagle_block_drop
-    return scheduler.use_eagle
-
-
-def _fresh_split_scheduler(**kwargs):
-    # One-off subclass so binding/replacing the method never pollutes the
-    # shared base class used by the other cases.
-    cls = type("_IsolatedSplitScheduler", (_RecordingSplitScheduler,), {})
-
-    def _record(self, request, num_new_tokens, nlc=0, nec=0):
-        self.observed_drop_bits.append(_split_observed_bit(self))
-        self.calls.append((num_new_tokens, nlc, nec))
-        if self.raise_in_split:
-            raise RuntimeError("boom")
-        return ("split", num_new_tokens)
-
-    cls._mamba_block_aligned_split = _record  # type: ignore[attr-defined]
-    return cls, cls(**kwargs)
-
-
-def test_scheduler_split_patch_clears_use_eagle_for_producer():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    result = scheduler._mamba_block_aligned_split("req", 1600)
-    # The original implementation observes the drop as disabled...
-    assert scheduler.observed_drop_bits == [False]
-    assert result == ("split", 1600)
-    # ...and the scheduler's own bit is restored afterwards.
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_clears_use_eagle_block_drop_on_newer_vllm():
-    cls, scheduler = _fresh_split_scheduler(
-        drop_attr="use_eagle_block_drop",
-        drop_value=True,
-        is_kv_producer=True,
-    )
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    scheduler._mamba_block_aligned_split("req", 3200, 1536, 0)
-    assert scheduler.observed_drop_bits == [False]
-    assert scheduler.calls == [(3200, 1536, 0)]
-    assert scheduler.use_eagle_block_drop is True
-    assert not hasattr(scheduler, "use_eagle")
-
-
-def test_scheduler_split_patch_restores_bit_on_exception():
-    cls, scheduler = _fresh_split_scheduler(
-        drop_value=True,
-        raise_in_split=True,
-        is_kv_producer=True,
-    )
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    with pytest.raises(RuntimeError, match="boom"):
-        scheduler._mamba_block_aligned_split("req", 1600)
-    assert scheduler.use_eagle is True
-
-
-@pytest.mark.parametrize(
-    "scheduler_kwargs",
-    [
-        # Pure decode consumer.
-        {"is_kv_producer": False, "is_kv_consumer": True},
-        # kv_both serves both roles: keep upstream drop behavior.
-        {"is_kv_producer": True, "is_kv_consumer": True},
-        # Standalone instance, connector configured but neither PD role.
-        {"is_kv_producer": False, "is_kv_consumer": False},
-        # No connector at all / no vllm_config: must stay transparent.
-        {"kv_transfer_config_present": False},
-        {"vllm_config_present": False},
-    ],
-)
-def test_scheduler_split_patch_passes_through_non_producer(scheduler_kwargs):
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, **scheduler_kwargs)
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    result = scheduler._mamba_block_aligned_split("req", 1600)
-    # The original sees the untouched bit and runs exactly once.
-    assert scheduler.observed_drop_bits == [True]
-    assert result == ("split", 1600)
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_is_idempotent():
-    cls, _ = _fresh_split_scheduler()
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    wrapped_once = cls._mamba_block_aligned_split
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-    assert cls._mamba_block_aligned_split is wrapped_once
-
-
-def test_scheduler_split_patch_wraps_consumer_early_return_path():
-    # Model the neighboring consumer/sparse-index wrapper's early return: it
-    # consults use_eagle but deliberately never calls its saved original.
-    # The producer wrapper must be outermost for this path to see False.
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    inner = cls._mamba_block_aligned_split
-
-    def _consumer_early_return(self, request, num_new_tokens, nlc=0, nec=0):
-        self.observed_drop_bits.append(self.use_eagle)
-        return ("consumer-early-return", num_new_tokens)
-
-    _consumer_early_return.__wrapped__ = inner  # type: ignore[attr-defined]
-    cls._mamba_block_aligned_split = _consumer_early_return
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-
-    registered = cls._mamba_block_aligned_split
-    assert registered is not _consumer_early_return
-    assert registered.__wrapped__ is _consumer_early_return  # type: ignore[attr-defined]
-    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
-    assert scheduler._mamba_block_aligned_split("req", 1600) == (
-        "consumer-early-return",
-        1600,
-    )
-    assert scheduler.observed_drop_bits == [False]
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_clears_and_restores_both_drop_attributes():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    scheduler.use_eagle_block_drop = "dedicated-original"
-
-    def _observe_both(self, request, num_new_tokens, nlc=0, nec=0):
-        self.calls.append((self.use_eagle, self.use_eagle_block_drop))
-        return num_new_tokens
-
-    cls._mamba_block_aligned_split = _observe_both
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-
-    assert scheduler._mamba_block_aligned_split("req", 3200) == 3200
-    assert scheduler.calls == [(False, False)]
-    assert scheduler.use_eagle is True
-    assert scheduler.use_eagle_block_drop == "dedicated-original"
-
-
-def test_scheduler_split_patch_handles_producer_without_drop_attribute():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    del scheduler.use_eagle
-
-    def _attribute_free_split(self, request, num_new_tokens, nlc=0, nec=0):
-        self.calls.append((num_new_tokens, nlc, nec))
-        return ("split", num_new_tokens)
-
-    cls._mamba_block_aligned_split = _attribute_free_split
-    mod._install_producer_mamba_block_aligned_split_patch(cls)
-
-    assert scheduler._mamba_block_aligned_split("req", 1600) == ("split", 1600)
-    assert scheduler.observed_drop_bits == []
-    assert scheduler.calls == [(1600, 0, 0)]
-    assert not hasattr(scheduler, "use_eagle")
-    assert not hasattr(scheduler, "use_eagle_block_drop")
-
-
-def test_scheduler_split_patch_noop_without_split_method():
-    class _BareScheduler:
-        pass
-
-    # Must neither bind anything nor raise.
-    mod._install_producer_mamba_block_aligned_split_patch(_BareScheduler)
-    assert not hasattr(_BareScheduler, "_mamba_block_aligned_split")
-
+# NOTE: the scheduler-side EAGLE-backoff suppression (fix ④) now lives
+# directly in patch_mamba_block_aligned_split.py; see its unit tests.
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

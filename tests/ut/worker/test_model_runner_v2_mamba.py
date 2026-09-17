@@ -25,10 +25,8 @@ from vllm_ascend.worker.v2.attn_utils import (
     get_kv_cache_spec,
     unwrap_mamba_kv_cache_groups,
 )
-from vllm_ascend.worker.v2.model_runner import (
-    NPUModelRunner,
-    _copy_kv_cache_blocks_inplace_ascend,
-)
+from vllm_ascend.worker.utils import _copy_kv_cache_blocks_inplace_ascend
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
