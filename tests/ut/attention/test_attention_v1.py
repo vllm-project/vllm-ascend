@@ -11,6 +11,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendC8MXFPAttentionBackendImpl,
     AscendMetadata,
 )
 from vllm_ascend.attention.context_parallel.attention_cp import (
@@ -1007,3 +1008,160 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
         mock_graph_task_update_begin.assert_called_once()
         mock_graph_task_update_end.assert_called_once()
+
+
+class TestC8MXFPQfaQueryPlan(TestBase):
+    """What the two QFA operators are planned against for one step.
+
+    max_seqlen_q is the longest single query, not the batch total: the
+    metadata op seeds querySeqSize with it and then raises it with
+    max(attr, per-request length), so an inflated attr is never walked back.
+    The q scale layout then picks the kernel -- TND compiles the prefill
+    template, N2TGD the decode one -- and both operators must be given the
+    same one.
+    """
+
+    NUM_KV_HEADS = 2
+    GROUP_SIZE = 4
+    NUM_HEADS = NUM_KV_HEADS * GROUP_SIZE
+    D_GROUPS = 2  # head_dim // 64
+
+    def setUp(self):
+        self.impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        self.impl.sliding_window = None
+        self.impl.num_heads = self.NUM_HEADS
+        self.impl.num_kv_heads = self.NUM_KV_HEADS
+
+    def _forward(self, query_start_loc, max_query_len):
+        """Run one step and report what each operator was handed."""
+        num_tokens = int(query_start_loc[-1])
+        # Distinct value per (token, head, group, element) so the N2TGD
+        # permutation can be checked entry by entry.
+        scale = (
+            torch.arange(num_tokens * self.NUM_HEADS * self.D_GROUPS * 2, dtype=torch.int32)
+            .remainder(251)
+            .to(torch.uint8)
+            .view(num_tokens, self.NUM_HEADS, self.D_GROUPS, 2)
+        )
+        attn_metadata = SimpleNamespace(
+            causal=True,
+            query_start_loc_gpu=torch.tensor(query_start_loc, dtype=torch.int32),
+            seq_lens_gpu=torch.ones(len(query_start_loc) - 1, dtype=torch.int32),
+            max_query_len=max_query_len,
+        )
+        seen = {"source_scale": scale}
+
+        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, layout_q_descale):
+            seen["metadata_max_seqlen_q"] = max_seqlen_q
+            seen["metadata_layout"] = layout_q_descale
+            return MagicMock()
+
+        def fake_run(
+            _self,
+            _query,
+            query_scale,
+            _kv_cache,
+            _attn_metadata,
+            *,
+            max_seqlen_q,
+            layout_q_descale,
+            output,
+            **kwargs,
+        ):
+            seen["max_seqlen_q"] = max_seqlen_q
+            seen["layout"] = layout_q_descale
+            seen["scale"] = query_scale
+            return output
+
+        with (
+            patch.object(AscendC8MXFPAttentionBackendImpl, "_get_qfa_metadata", fake_metadata),
+            patch.object(AscendC8MXFPAttentionBackendImpl, "_run_qfa", fake_run),
+        ):
+            self.impl._forward_mxfp8_attention(
+                torch.zeros(num_tokens, self.NUM_HEADS, 8, dtype=torch.uint8),
+                scale,
+                (MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+                attn_metadata,
+                torch.zeros(num_tokens, self.NUM_HEADS, 8),
+            )
+
+        # A plan computed for one kernel must not be fed to the other.
+        self.assertEqual(seen["metadata_max_seqlen_q"], seen["max_seqlen_q"])
+        self.assertEqual(seen["metadata_layout"], seen["layout"])
+        return seen
+
+    # --- max_seqlen_q -----------------------------------------------------
+
+    def test_uniform_decode_does_not_declare_the_batch_total(self):
+        # 4 requests, one query token each: the old code declared 4.
+        self.assertEqual(self._forward([0, 1, 2, 3, 4], max_query_len=1)["max_seqlen_q"], 1)
+
+    def test_mtp_decode_uses_the_draft_query_length(self):
+        # 3 requests x 2 tokens (1 + 1 draft): the old code declared 6.
+        self.assertEqual(self._forward([0, 2, 4, 6], max_query_len=2)["max_seqlen_q"], 2)
+
+    def test_mixed_batch_uses_the_longest_prefill(self):
+        # One 5-token prefill plus 3 decodes; the longest query is the prefill.
+        self.assertEqual(self._forward([0, 5, 6, 7, 8], max_query_len=5)["max_seqlen_q"], 5)
+
+    def test_missing_max_query_len_falls_back_to_the_token_count(self):
+        self.assertEqual(self._forward([0, 1, 2, 3, 4], max_query_len=None)["max_seqlen_q"], 4)
+
+    # --- q scale layout ---------------------------------------------------
+
+    def test_decode_sends_the_scale_as_n2tgd(self):
+        seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
+        self.assertEqual(seen["layout"], "N2TGD")
+        num_tokens = seen["source_scale"].shape[0]
+        self.assertEqual(
+            tuple(seen["scale"].shape),
+            (self.NUM_KV_HEADS, num_tokens, self.GROUP_SIZE, self.D_GROUPS, 2),
+        )
+
+    def test_n2tgd_keeps_every_head_scale_with_its_kv_head(self):
+        seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
+        source, permuted = seen["source_scale"], seen["scale"]
+        for token in range(source.shape[0]):
+            for head in range(self.NUM_HEADS):
+                # Query heads are GQA-contiguous: head n serves kv head n // G.
+                kv_head, group = divmod(head, self.GROUP_SIZE)
+                self.assertTrue(
+                    torch.equal(permuted[kv_head, token, group], source[token, head]),
+                    f"token={token} head={head} lost its scale",
+                )
+
+    def test_prefill_keeps_the_scale_in_tnd_untouched(self):
+        # G=4, so a 21-token query crosses the operator's G*Q_S boundary.
+        seen = self._forward([0, 21], max_query_len=21)
+        self.assertEqual(seen["layout"], "TND")
+        self.assertIs(seen["scale"], seen["source_scale"])
+
+    def test_boundary_value_still_takes_the_decode_layout(self):
+        # G*Q_S == 80 exactly; the operator doc recommends N2TGD at or below.
+        self.assertEqual(self._forward([0, 20], max_query_len=20)["layout"], "N2TGD")
+
+    def test_mtp_verify_queries_take_the_decode_layout(self):
+        # MTP verify steps are SpecDecoding with 1+spec query tokens each;
+        # the layout decision reads the query shape, not the scheduler
+        # state, so the decode kernel applies here too. Regression guard
+        # against keying this on attn_state == DecodeOnly, which never
+        # fires once MTP is enabled.
+        seen = self._forward([0, 4, 8], max_query_len=4)
+        self.assertEqual(seen["layout"], "N2TGD")
+        self.assertEqual(seen["max_seqlen_q"], 4)
+
+    def test_non_divisible_heads_stay_in_tnd(self):
+        # MTP draft layers can run a head count that does not split into
+        # whole kv-head groups; the group reshape would miscount elements
+        # and raise, so the guard falls back to TND instead.
+        self.impl.num_kv_heads = 3  # 8 % 3 != 0
+        seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
+        self.assertEqual(seen["layout"], "TND")
+        self.assertIs(seen["scale"], seen["source_scale"])
+
+    def test_zero_kv_heads_stay_in_tnd(self):
+        # Degenerate layers must not hit a ZeroDivisionError in the guard.
+        self.impl.num_kv_heads = 0
+        seen = self._forward([0, 1, 2, 3, 4], max_query_len=1)
+        self.assertEqual(seen["layout"], "TND")
+        self.assertIs(seen["scale"], seen["source_scale"])
