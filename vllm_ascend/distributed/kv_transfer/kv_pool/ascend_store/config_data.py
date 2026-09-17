@@ -518,6 +518,7 @@ class ChunkedTokenDatabase:
             cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
         cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
         effective_block_size = base_block_size * cache_family_ratio
+        logical_token_len = token_len // cache_family_ratio
         grouped_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
         if not grouped_hashes:
             return
@@ -525,12 +526,13 @@ class ChunkedTokenDatabase:
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         candidate_index = 0
         first_chunk_id = min(cdiv(mask_num, effective_block_size), num_logical_blocks) if mask_num > 0 else 0
+        shard = (
+            (shard_rank, shard_size) if shard_rank is not None and shard_size is not None and shard_size > 1 else None
+        )
 
         for chunk_id in range(first_chunk_id, num_logical_blocks):
-            start_token = chunk_id * effective_block_size
-            end_token = min(start_token + effective_block_size, token_len)
-            start_idx = start_token // cache_family_ratio
-            end_idx = end_token // cache_family_ratio
+            start_idx = chunk_id * base_block_size
+            end_idx = min(start_idx + base_block_size, logical_token_len)
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -543,12 +545,7 @@ class ChunkedTokenDatabase:
                 block_id = block_ids[block_idx]
                 if skip_null_blocks and block_id <= 0:
                     continue
-            shard_allows = (
-                shard_rank is None
-                or shard_size is None
-                or shard_size <= 1
-                or candidate_index % shard_size == shard_rank
-            )
+            shard_allows = shard is None or candidate_index % shard[1] == shard[0]
             candidate_index += 1
             if not shard_allows:
                 continue
@@ -592,7 +589,10 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
+        if not block_hashes:
+            return
         prefix = self.get_key_prefix(kv_cache_group_id)
+        hash_to_str = str if isinstance(block_hashes[0], str) else bytes.hex
         for start, end, hash_val in self.process_token_hashes(
             token_len,
             block_hashes,
@@ -600,7 +600,7 @@ class ChunkedTokenDatabase:
             kv_cache_group_id,
             chunk_filter,
         ):
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val
+            yield start, end, prefix + hash_to_str(hash_val), hash_val
 
     def process_token_hashes(
         self,
@@ -633,7 +633,10 @@ class ChunkedTokenDatabase:
         shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
+        if not block_hashes:
+            return
         prefix = self.get_key_prefix(kv_cache_group_id)
+        hash_to_str = str if isinstance(block_hashes[0], str) else bytes.hex
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
             block_hashes,
@@ -646,7 +649,7 @@ class ChunkedTokenDatabase:
             shard_size=shard_size,
         ):
             assert block_id is not None
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
+            yield start, end, prefix + hash_to_str(hash_val), hash_val, block_id
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:

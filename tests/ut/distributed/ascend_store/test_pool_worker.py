@@ -238,6 +238,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         self.assertEqual(hit, 256)
         worker._expand_lookup_keys_by_rank.assert_called_once_with(["local@"], 0)
+        self.assertIsNone(worker.token_database.process_token_hashes.call_args.kwargs["chunk_filter"])
         worker.m_store.exists.assert_called_once_with(
             ["rank0@" + "aa" * 32, "rank1@" + "aa" * 32, "rank0@" + "bb" * 32, "rank1@" + "bb" * 32]
         )
@@ -713,6 +714,10 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
         worker.token_database.prepare_values = MagicMock(wraps=worker.token_database.prepare_values)
+        worker.token_database.load_mask = MagicMock(return_value=([True],))
+        worker.token_database.process_token_key_strings_with_block_ids = MagicMock(
+            wraps=worker.token_database.process_token_key_strings_with_block_ids
+        )
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
         req = ReqMeta(
@@ -727,6 +732,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
         worker.token_database.prepare_values.assert_called_once_with([0], [16], [0], kv_cache_group_id=0)
+        self.assertIsNone(
+            worker.token_database.process_token_key_strings_with_block_ids.call_args.kwargs["chunk_filter"]
+        )
 
     def test_start_load_kv_sync_uses_tail_block_id(self):
         worker = self._make_worker()

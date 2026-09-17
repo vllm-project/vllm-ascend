@@ -945,9 +945,23 @@ class KVPoolWorker:
                 group_block_size = self.grouped_block_size[group_id]
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+                group_load_mask = (
+                    load_masks[group_id] if load_masks is not None and group_id < len(load_masks) else None
+                )
+                if group_load_mask == []:
+                    continue
+                chunk_filter: Callable[[int], bool] | None = None
+                if group_load_mask is not None and not all(group_load_mask):
 
-                def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
-                    return self.token_database.mask_allows_chunk(load_masks, group_id, start)
+                    def mask_filter(
+                        start: int,
+                        group_load_mask=group_load_mask,
+                        group_block_size=group_block_size,
+                    ) -> bool:
+                        block_idx = start // group_block_size
+                        return block_idx < len(group_load_mask) and group_load_mask[block_idx]
+
+                    chunk_filter = mask_filter
 
                 for (
                     start,
@@ -2332,14 +2346,18 @@ class KVPoolWorker:
                 group_exists_count = local_hit_chunks
             lookup_start = hbm_hit_tokens // effective_block_size * effective_block_size
             lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
+            chunk_filter: Callable[[int], bool] | None = None
+            if lookup_mask is not None:
 
-            def chunk_filter(
-                start: int,
-                base_block_size=base_block_size,
-                lookup_mask=lookup_mask,
-            ) -> bool:
-                chunk_idx = start // base_block_size
-                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
+                def mask_filter(
+                    start: int,
+                    base_block_size=base_block_size,
+                    lookup_mask=lookup_mask,
+                ) -> bool:
+                    chunk_idx = start // base_block_size
+                    return chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx]
+
+                chunk_filter = mask_filter
 
             for _, _, chunk_hash in self.token_database.process_token_hashes(
                 token_len,
