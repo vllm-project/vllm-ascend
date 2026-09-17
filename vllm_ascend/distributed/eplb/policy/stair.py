@@ -360,46 +360,51 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return total
 
 
-def assign_sources(
-    old_placement: np.ndarray,
-    destination_experts: list[set[int]],
-    node_by_rank: tuple[int, ...],
-    pair_cap: int,
-) -> dict[tuple[int, int], tuple[int, int]] | None:
-    """Choose real sources while minimizing cross-node transfers."""
-    old = np.asarray(old_placement, dtype=np.int64)
-    locations: dict[int, list[tuple[int, int]]] = {}
-    for rank, row in enumerate(old):
-        for slot, expert in enumerate(row):
-            locations.setdefault(int(expert), []).append((rank, slot))
-    demands = sorted(
-        (dst, expert) for dst, experts in enumerate(destination_experts) for expert in experts if expert not in old[dst]
-    )
-    owners = {expert: tuple(rank for rank, _ in values) for expert, values in locations.items()}
-    slots = {(expert, rank): slot for expert, values in locations.items() for rank, slot in values}
-    capacity = {(src, dst): pair_cap for src in range(old.shape[0]) for dst in range(old.shape[0]) if src != dst}
-    target = StairEplbPolicy._minimum_source_cost(demands, owners, capacity, node_by_rank)
-    if target is None:
-        return None
-
-    assignment = {}
-    for index, demand in enumerate(demands):
-        dst, expert = demand
-        for src in owners[expert]:
-            pair = (src, dst)
-            if not capacity.get(pair, 0):
-                continue
-            cost = 1 if node_by_rank[src] == node_by_rank[dst] else len(demands) + 1
-            capacity[pair] -= 1
-            future = StairEplbPolicy._minimum_source_cost(demands[index + 1 :], owners, capacity, node_by_rank)
-            if future is not None and cost + future == target:
-                assignment[demand] = (src, slots[(expert, src)])
-                target -= cost
-                break
-            capacity[pair] += 1
-        else:
+    @classmethod
+    def assign_sources(
+        cls,
+        old_placement: np.ndarray,
+        destination_experts: list[set[int]],
+        node_by_rank: tuple[int, ...],
+        pair_cap: int,
+    ) -> dict[tuple[int, int], tuple[int, int]] | None:
+        """Choose real sources while minimizing cross-node transfers."""
+        old = np.asarray(old_placement, dtype=np.int64)
+        locations: dict[int, list[tuple[int, int]]] = {}
+        for rank, row in enumerate(old):
+            for slot, expert in enumerate(row):
+                locations.setdefault(int(expert), []).append((rank, slot))
+        demands = sorted(
+            (dst, expert)
+            for dst, experts in enumerate(destination_experts)
+            for expert in experts
+            if expert not in old[dst]
+        )
+        owners = {expert: tuple(rank for rank, _ in values) for expert, values in locations.items()}
+        slots = {(expert, rank): slot for expert, values in locations.items() for rank, slot in values}
+        capacity = {(src, dst): pair_cap for src in range(old.shape[0]) for dst in range(old.shape[0]) if src != dst}
+        target = cls._minimum_source_cost(demands, owners, capacity, node_by_rank)
+        if target is None:
             return None
-    return assignment
+
+        assignment = {}
+        for index, demand in enumerate(demands):
+            dst, expert = demand
+            for src in owners[expert]:
+                pair = (src, dst)
+                if not capacity.get(pair, 0):
+                    continue
+                cost = 1 if node_by_rank[src] == node_by_rank[dst] else len(demands) + 1
+                capacity[pair] -= 1
+                future = cls._minimum_source_cost(demands[index + 1 :], owners, capacity, node_by_rank)
+                if future is not None and cost + future == target:
+                    assignment[demand] = (src, slots[(expert, src)])
+                    target -= cost
+                    break
+                capacity[pair] += 1
+            else:
+                return None
+        return assignment
 
 
 def align_slots(
@@ -507,7 +512,7 @@ def constrained_lpt(
     def search(index: int) -> dict[tuple[int, int], tuple[int, int]] | None:
         nonlocal backtracks
         if index == len(copies):
-            return assign_sources(old, ranks, node_by_rank, pair_cap)
+            return StairEplbPolicy.assign_sources(old, ranks, node_by_rank, pair_cap)
         expert = copies[index]
         candidates = [
             rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
@@ -517,7 +522,7 @@ def constrained_lpt(
         )
         for rank in candidates:
             ranks[rank].add(expert)
-            feasible = assign_sources(old, ranks, node_by_rank, pair_cap) is not None
+            feasible = StairEplbPolicy.assign_sources(old, ranks, node_by_rank, pair_cap) is not None
             result = search(index + 1) if feasible else None
             if result is not None:
                 return result

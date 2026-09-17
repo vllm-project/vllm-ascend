@@ -10,7 +10,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     StairEplbPolicy,
     StairPlan,
     align_slots,
-    assign_sources,
     constrained_lpt,
     passes_hysteresis,
 )
@@ -108,14 +107,14 @@ def test_flash_tree_candidates_are_bounded_and_deterministic():
 def test_source_assignment_enforces_pair_cap():
     old = np.array([[0, 1], [2, 3]])
 
-    assert assign_sources(old, [{2, 3}, {0, 1}], (0, 0), 1) is None
+    assert StairEplbPolicy.assign_sources(old, [{2, 3}, {0, 1}], (0, 0), 1) is None
 
 
 def test_source_assignment_prefers_same_node_and_aligns_slots():
     old = np.array([[0, 1], [0, 2], [3, 4]])
     desired = [{0, 1}, {0, 2}, {0, 4}]
 
-    sources = assign_sources(old, desired, (0, 1, 1), 1)
+    sources = StairEplbPolicy.assign_sources(old, desired, (0, 1, 1), 1)
     assert sources == {(2, 0): (1, 0)}
     placement, source_rank, source_slot = align_slots(old, desired, sources)
 
