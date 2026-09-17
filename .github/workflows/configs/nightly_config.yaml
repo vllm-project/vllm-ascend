@@ -501,6 +501,9 @@ a5:
       - name: GLM5_1_W4A4_A5
         os: linux-aarch64-a5-8
         config_file_path: GLM5_1_W4A4_A5.yaml
+      - name: GLM5_2_W4A4C8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: GLM5_2_W4A4C8_A5.yaml
       - name: Qwen3_6_27b_A5
         os: linux-aarch64-a5-8
         config_file_path: Qwen3_6_27b_A5.yaml

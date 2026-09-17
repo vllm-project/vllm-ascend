@@ -392,3 +392,10 @@ a3-560t:
         - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
           os: linux-aarch64-a5-8
           config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
+
+a5:
+  single_node:
+    test_config:
+      - name: GLM5_2_W4A4C8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: GLM5_2_W4A4C8_A5.yaml
