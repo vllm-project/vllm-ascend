@@ -11,7 +11,7 @@ Graph-capture contract:
   request count is read on device, so the launch shape is stable across
   ACL-graph replays while the per-step batch size varies.
 * Programs past the last active request reset the padded rows
-  ``[T_active, T_padded)`` to (-1, 0) so a captured graph never replays
+  ``[num_rows, num_rows_padded)`` to (-1, 0) so a captured graph never replays
   stale rows; the eager path leaves those rows untouched.
 * ``indices_output`` / ``lens_output`` accept pre-allocated persistent
   buffers so tensor addresses stay stable across replays.
@@ -39,28 +39,28 @@ if HAS_TRITON:
 
     @triton.jit(
         do_not_specialize=[
-            "B",
-            "R",
-            "T_padded",
-            "T_active",
+            "num_blocks",
+            "num_reqs",
+            "num_rows_padded",
+            "num_rows",
         ]
     )
     def _dspark_swa_indices_kernel(
-        bt_ptr,  # block_table       [R_alloc, B]  i32/i64
+        bt_ptr,  # block_table       [R_alloc, num_blocks]  i32/i64
         stride_bt_r,  # block_table.stride(0): row pitch of a possibly sliced/padded table
         qsl_ptr,  # query_start_loc  [R_alloc + 1]  i32/i64
         seq_lens_ptr,  # seq_lens         [R_alloc]  i32/i64
-        slots_ptr,  # out_slots        [T_padded, 1, INDEX_W]  i32
-        lens_ptr,  # out_lens         [T_padded]  i64
-        B,  # block_table.shape[1]
-        R,  # active request count == block_table.shape[0]
-        T_padded,  # padded row count == R_alloc * num_query_per_req
-        T_active,  # active row count == sum(query_lens)
+        slots_ptr,  # out_slots        [num_rows_padded, 1, INDEX_W]  i32
+        lens_ptr,  # out_lens         [num_rows_padded]  i64
+        num_blocks,  # block_table.shape[1]
+        num_reqs,  # active request count == block_table.shape[0]
+        num_rows_padded,  # padded row count == R_alloc * num_query_per_req
+        num_rows,  # active row count == sum(query_lens)
         WINDOW_SIZE: tl.constexpr,  # sliding window size (model constant)
         BLOCK_SIZE: tl.constexpr,  # DSA block size (power of two)
         INDEX_W: tl.constexpr,  # aligned index width
         BLOCK_W: tl.constexpr,  # column-block width
-        ROW_POW2: tl.constexpr,  # next_pow2(B): UB preload tile shape
+        ROW_POW2: tl.constexpr,  # next_pow2(num_blocks): UB preload tile shape
     ):
         # 1D capacity grid: pid = r * NUM_CB + cb, matching the wrapper's
         # cdiv(W, BLOCK_W). NUM_CB must be ceil: a floor division sends tail
@@ -74,13 +74,13 @@ if HAS_TRITON:
         r = pid // NUM_CB
         cb = pid % NUM_CB
 
-        # The last NUM_CB programs reset [T_active, T_padded) to the contract
+        # The last NUM_CB programs reset [num_rows, num_rows_padded) to the contract
         # values (-1 / 0) so a captured graph never replays stale rows. Must
         # precede every early-return below.
         if pid >= num_progs - NUM_CB:
             pad_offs = tl.arange(0, BLOCK_W)
             pad_mask = (cb * BLOCK_W + pad_offs) < INDEX_W
-            for row in range(T_active, T_padded):
+            for row in range(num_rows, num_rows_padded):
                 base = row * INDEX_W + cb * BLOCK_W
                 tl.store(slots_ptr + base + pad_offs, -1, mask=pad_mask)
                 if cb == 0:
@@ -88,7 +88,7 @@ if HAS_TRITON:
 
         # Guard MTE OOB reads when the caller passes exact-sized tensors
         # instead of the padded capacity extent.
-        if r >= R:
+        if r >= num_reqs:
             return
 
         q0 = tl.load(qsl_ptr + r).to(tl.int32)
@@ -110,12 +110,12 @@ if HAS_TRITON:
         # Clamp to valid block-table columns so gather never reads OOB; the
         # clamped lanes are discarded by the visible mask below.
         blk_f = blk_num.to(tl.float32)
-        safe_num = tl.minimum(tl.maximum(blk_f, 0.0), (B - 1).to(tl.float32)).to(tl.int32)
+        safe_num = tl.minimum(tl.maximum(blk_f, 0.0), (num_blocks - 1).to(tl.float32)).to(tl.int32)
 
         # fp32 roundtrip: tl.gather rejects int32 sources, and fp32 math
         # rides the vector unit (int32 lowers to scalar ops); exact < 2^24.
         r_offs = tl.arange(0, ROW_POW2)
-        bt_row_f32 = tl.load(bt_ptr + r * stride_bt_r + r_offs, mask=r_offs < B, other=0).to(tl.float32)
+        bt_row_f32 = tl.load(bt_ptr + r * stride_bt_r + r_offs, mask=r_offs < num_blocks, other=0).to(tl.float32)
         block_id = tl.gather(bt_row_f32, safe_num, 0).to(tl.int32)
 
         blk_off = pos - blk_num * BLOCK_SIZE
@@ -198,11 +198,11 @@ def build_dspark_swa_indices_triton(
       fresh tensors sized to the active rows are allocated.
     * ``max_num_reqs`` sizes the capacity grid: ``grid=(max_num_reqs * NUM_CB,)``
       is fixed across steps so the launch shape is stable for ACL-graph
-      capture. Rows in ``[T_active, T_padded)`` of the output buffers are
+      capture. Rows in ``[num_rows, num_rows_padded)`` of the output buffers are
       explicitly reset to (-1, 0) — a strict superset of the eager behavior,
       which leaves those rows stale.
     * Pass the FULL ``indices_output`` buffer (``buffer``, not
-      ``buffer[:T_active]``) to keep the pad cleanup armed: the cleanup
+      ``buffer[:num_rows]``) to keep the pad cleanup armed: the cleanup
       extent is clamped to the buffer, so an active-sized slice silences it
       (flagged by a UserWarning under graph intent).
     * ``num_query_per_req`` overrides the capacity-grid row-expansion
@@ -211,11 +211,11 @@ def build_dspark_swa_indices_triton(
       ``num_speculative_tokens`` instead — pass the exact factor when it
       is known.
     * ``num_decode_tokens`` (== ``num_reqs * num_query_per_req`` under the
-      uniform-query contract) supplies the T_active scalar, avoiding any
+      uniform-query contract) supplies the num_rows scalar, avoiding any
       D2H sync.
     """
 
-    R = query_start_loc.shape[0] - 1
+    num_reqs = query_start_loc.shape[0] - 1
     if index_width is None:
         # Same alignment rule as dsa_v1._aligned_dspark_index_width.
         min_width = int(window_size) + int(num_speculative_tokens)
@@ -223,72 +223,72 @@ def build_dspark_swa_indices_triton(
     W = int(index_width)
 
     # num_decode_tokens avoids the only D2H sync on this path
-    # (query_start_loc[R].item()).
+    # (query_start_loc[num_reqs].item()).
     if num_decode_tokens is not None:
-        T_active = int(num_decode_tokens)
+        num_rows = int(num_decode_tokens)
     else:
-        T_active = int(query_start_loc[R].item())
+        num_rows = int(query_start_loc[num_reqs].item())
 
     # The grid must stay fixed across replays: derive it from the
-    # capture-time bound max_num_reqs, never from R.
-    R_alloc = int(max_num_reqs) if max_num_reqs is not None else R
-    if R_alloc < R:
-        R_alloc = R
+    # capture-time bound max_num_reqs, never from num_reqs.
+    R_alloc = int(max_num_reqs) if max_num_reqs is not None else num_reqs
+    if R_alloc < num_reqs:
+        R_alloc = num_reqs
     if num_query_per_req is None:
         num_query_per_req = int(num_speculative_tokens) + 1
     num_query_per_req = int(num_query_per_req)
     if num_query_per_req < 1:
         raise ValueError(f"dspark_swa_indices num_query_per_req must be >= 1, got {num_query_per_req}")
-    T_padded = R_alloc * num_query_per_req
+    num_rows_padded = R_alloc * num_query_per_req
 
     if indices_output is not None:
         if indices_output.dtype != torch.int32:
             raise ValueError(f"dspark_swa_indices indices_output must be int32, got {indices_output.dtype}")
         out_slots = indices_output
-        if out_slots.shape[0] < T_active:
+        if out_slots.shape[0] < num_rows:
             raise ValueError(
                 "dspark_swa_indices indices_output has fewer rows than active tokens: "
-                f"output={out_slots.shape[0]}, active={T_active}"
+                f"output={out_slots.shape[0]}, active={num_rows}"
             )
-        if out_slots.shape[0] < T_padded:
+        if out_slots.shape[0] < num_rows_padded:
             # Clamp the pad cleanup to the buffer extent; warn when the
             # caller signaled graph intent but passed an active-sized slice,
             # which silences the cleanup.
-            if max_num_reqs is not None and R_alloc > R:
+            if max_num_reqs is not None and R_alloc > num_reqs:
                 warnings.warn(
                     "dspark_swa_indices indices_output has fewer rows than the "
                     "capacity grid "
                     f"(output={out_slots.shape[0]}, capacity={R_alloc * num_query_per_req}): "
                     "the pad-row cleanup is disabled. Pass the FULL buffer "
-                    "(indices_output=buffer, not buffer[:T_active]) so captured "
+                    "(indices_output=buffer, not buffer[:num_rows]) so captured "
                     "graphs never replay stale rows.",
                     UserWarning,
                     stacklevel=2,
                 )
-            T_padded = out_slots.shape[0]
+            num_rows_padded = out_slots.shape[0]
     else:
-        # Fresh active-sized allocation: clamp T_padded so the pad cleanup
+        # Fresh active-sized allocation: clamp num_rows_padded so the pad cleanup
         # stays in bounds.
-        out_slots = torch.empty((T_active, 1, W), dtype=torch.int32, device=block_table.device)
-        T_padded = min(T_padded, T_active)
+        out_slots = torch.empty((num_rows, 1, W), dtype=torch.int32, device=block_table.device)
+        num_rows_padded = min(num_rows_padded, num_rows)
 
     if lens_output is not None:
         out_lens = lens_output
-        if out_lens.shape[0] < T_active:
+        if out_lens.shape[0] < num_rows:
             raise ValueError(
                 f"dspark_swa_indices lens_output has fewer rows than active tokens: "
-                f"output={out_lens.shape[0]}, active={T_active}"
+                f"output={out_lens.shape[0]}, active={num_rows}"
             )
-        T_padded = min(T_padded, out_lens.shape[0])
+        num_rows_padded = min(num_rows_padded, out_lens.shape[0])
     elif indices_output is not None:
         # No persistent lens buffer: allocate scratch sized to the cleanup
         # extent.
-        out_lens = torch.empty((max(T_active, T_padded),), dtype=torch.int64, device=block_table.device)
+        out_lens = torch.empty((max(num_rows, num_rows_padded),), dtype=torch.int64, device=block_table.device)
     else:
-        out_lens = torch.empty((T_active,), dtype=torch.int64, device=block_table.device)
+        out_lens = torch.empty((num_rows,), dtype=torch.int64, device=block_table.device)
 
-    B = block_table.shape[1]
-    row_pow2 = triton.next_power_of_2(B)
+    num_blocks = block_table.shape[1]
+    row_pow2 = triton.next_power_of_2(num_blocks)
     eff_block_w = min(block_w, W)  # BLOCK_W > INDEX_W would zero NUM_CB
     num_cb = triton.cdiv(W, eff_block_w)
 
@@ -299,10 +299,10 @@ def build_dspark_swa_indices_triton(
         seq_lens,
         out_slots,
         out_lens,
-        B,
-        R,
-        T_padded,
-        T_active,
+        num_blocks,
+        num_reqs,
+        num_rows_padded,
+        num_rows,
         WINDOW_SIZE=int(window_size),
         BLOCK_SIZE=int(block_size),
         INDEX_W=W,
@@ -311,7 +311,7 @@ def build_dspark_swa_indices_triton(
     )
 
     # Return views sized to the active extent, mirroring the eager function.
-    return out_slots[:T_active], out_lens[:T_active]
+    return out_slots[:num_rows], out_lens[:num_rows]
 
 
 def warmup_dspark_swa_indices_triton(
@@ -329,11 +329,11 @@ def warmup_dspark_swa_indices_triton(
 ) -> None:
     """JIT-warm the kernel for the exact shapes seen at capture time.
 
-    ROW_POW2 derives from block_table.shape[1] and B can change between
-    capture and steady state (physical-page remapping across kernel block
-    sizes). A post-capture JIT would block the replay path, so
-    ``enable_dspark_device_metadata`` should call this once per (B, W)
-    combination, including the pad-cleanup branch (T_padded > T_active).
+    ROW_POW2 derives from block_table.shape[1] and num_blocks can change
+    between capture and steady state (physical-page remapping across kernel
+    block sizes). A post-capture JIT would block the replay path, so
+    ``enable_dspark_device_metadata`` should call this once per (num_blocks, W)
+    combination, including the pad-cleanup branch (num_rows_padded > num_rows).
     """
 
     build_dspark_swa_indices_triton(
