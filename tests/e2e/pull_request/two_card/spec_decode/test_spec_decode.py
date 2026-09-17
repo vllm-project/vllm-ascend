@@ -574,7 +574,12 @@ def test_hang(monkeypatch):
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    monkeypatch,
 ):
+    # After #16726 reverted UpdatableGraph, MRv2 PIECEWISE dummy profile calls
+    # dflash2 candidate_selector without set_forward_context. Keep this
+    # acceptance case on V1; test_dflash2_v2_acceptance covers V2 eager.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

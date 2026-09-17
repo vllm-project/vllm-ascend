@@ -40,7 +40,6 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "GlmMoeDsaForCausalLM",
         "DeepseekV4ForCausalLM",
         "Qwen3_5MoeForCausalLM",
-        "Qwen3_5ForConditionalGeneration",
     }
 )
 

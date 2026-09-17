@@ -74,7 +74,6 @@ class TestIsDefaultV2ModelRunnerModel:
             "GlmMoeDsaForCausalLM",
             "DeepseekV4ForCausalLM",
             "Qwen3_5MoeForCausalLM",
-            "Qwen3_5ForConditionalGeneration",
         ],
     )
     def test_whitelisted_architecture(self, architecture):
@@ -122,7 +121,6 @@ class TestIsDefaultV2ModelRunnerModel:
             "GlmMoeDsaForCausalLM",
             "DeepseekV4ForCausalLM",
             "Qwen3_5MoeForCausalLM",
-            "Qwen3_5ForConditionalGeneration",
         ],
     )
     def test_hybrid_does_not_block_whitelisted_architecture(self, architecture):
@@ -133,6 +131,16 @@ class TestIsDefaultV2ModelRunnerModel:
     def test_hybrid_non_whitelisted_architecture_is_still_excluded(self):
         config = _make_vllm_config(
             model_config=_make_model_config(is_hybrid=True, architectures=["SomeModelForCausalLM"])
+        )
+
+        assert is_default_v2_model_runner_model(config) is False
+
+    def test_qwen3_5_conditional_generation_is_not_whitelisted(self):
+        config = _make_vllm_config(
+            model_config=_make_model_config(
+                is_hybrid=True,
+                architectures=["Qwen3_5ForConditionalGeneration"],
+            )
         )
 
         assert is_default_v2_model_runner_model(config) is False
@@ -341,11 +349,7 @@ class TestUseV2ModelRunner:
 
         assert use_v2_model_runner(config) is False
 
-    @pytest.mark.parametrize(
-        "architecture",
-        [DEFAULT_V2_ARCH, "Qwen3_5ForConditionalGeneration"],
-    )
-    def test_default_enabled_for_hybrid_whitelisted_model(self, monkeypatch, architecture):
+    def test_default_enabled_for_hybrid_whitelisted_model(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
         monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
@@ -353,11 +357,23 @@ class TestUseV2ModelRunner:
         config = _make_vllm_config(
             model_config=_make_model_config(
                 is_hybrid=True,
-                architectures=[architecture],
+                architectures=[DEFAULT_V2_ARCH],
             )
         )
 
         assert use_v2_model_runner(config) is True
+
+    def test_default_disabled_for_qwen3_5_conditional_generation(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+        monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
+        config = _make_vllm_config(
+            model_config=_make_model_config(
+                is_hybrid=True,
+                architectures=["Qwen3_5ForConditionalGeneration"],
+            )
+        )
+
+        assert use_v2_model_runner(config) is False
 
     def test_default_disabled_for_dynamic_speculative_decoding(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
