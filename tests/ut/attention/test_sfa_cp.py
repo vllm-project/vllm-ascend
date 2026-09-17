@@ -105,33 +105,25 @@ def test_sfa_dcp_replicated_slots_exclude_input_padding(num_input_tokens):
     torch.testing.assert_close(slots, expected)
 
 
-@pytest.mark.parametrize("has_indexer,pcp_active", [(False, False), (True, False), (True, True)])
-def test_sfa_dcp_indexer_metadata_uses_replicated_cache_view(has_indexer, pcp_active):
+@pytest.mark.parametrize("has_indexer", [False, True])
+def test_sfa_dcp_indexer_metadata_preserves_independent_cache_view(has_indexer):
     impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     impl.has_indexer = has_indexer
     impl.layer_name = "model.layers.0.self_attn.attn"
     prefix = "model.layers.0.self_attn.indexer.k_cache"
-    impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(prefix=prefix), impl=SimpleNamespace(_pcp_active=pcp_active))
+    impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(prefix=prefix))
     indexer_metadata = SimpleNamespace(slot_mapping=torch.tensor([90]), block_table=torch.tensor([[91]]), block_size=1)
-    attn_metadata = SimpleNamespace(
-        slot_mapping=torch.tensor([10, 11]),
-        pcp_slot_mapping=torch.tensor([11, 10]),
-        block_table=torch.tensor([[20, 21]]),
-        block_size=128,
-        dcp_context=SimpleNamespace(slot_mapping=torch.tensor([-1, 3]), block_table=torch.tensor([[4]])),
-    )
     with patch("vllm_ascend.attention.sfa_v1.get_forward_context") as get_context:
         get_context.return_value.attn_metadata = {prefix: indexer_metadata}
-        result = impl._get_indexer_attn_metadata(attn_metadata)
+        result = impl._get_indexer_attn_metadata()
     if not has_indexer:
         assert result is None
         get_context.assert_not_called()
         return
     assert result is indexer_metadata
-    expected_slots = attn_metadata.pcp_slot_mapping if pcp_active else attn_metadata.slot_mapping
-    torch.testing.assert_close(result.slot_mapping, expected_slots)
-    torch.testing.assert_close(result.block_table, attn_metadata.block_table)
-    assert result.block_size == 128
+    torch.testing.assert_close(result.slot_mapping, torch.tensor([90]))
+    torch.testing.assert_close(result.block_table, torch.tensor([[91]]))
+    assert result.block_size == 1
 
 
 @pytest.mark.parametrize("rank", [0, 1])
@@ -277,7 +269,7 @@ def test_sfa_pcp_dcp_builds_pcp_ordered_indexer_slots_with_receiver_local_blocks
         padded_gather_idx=torch.tensor([2, 0, 1, 0], dtype=torch.int64),
         gathered_kv_write_mask=torch.tensor([True, True, True, False]),
     )
-    global_common = SimpleNamespace(seq_lens=global_batch.seq_lens)
+    global_common = SimpleNamespace(seq_lens=global_batch.seq_lens, block_table_tensor=local_block_table, num_reqs=1)
     common_attn_metadata = SimpleNamespace(
         replace=Mock(return_value=global_common),
     )
@@ -619,7 +611,12 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         gather_full_o_proj=False,
         topk_num_tokens=2,
     )
-    own_metadata = SimpleNamespace()
+    own_query_lengths = torch.tensor([9, 10])
+    own_key_lengths = torch.tensor([11, 12])
+    own_metadata = SimpleNamespace(
+        actual_seq_lengths_query=own_query_lengths,
+        actual_seq_lengths_key=own_key_lengths,
+    )
     forward_context = SimpleNamespace(attn_metadata={"indexer.k_cache": own_metadata} if expect_indexer else {})
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=slots)
     impl._get_parallel_forward_context = MagicMock(return_value=context)
@@ -651,9 +648,10 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
     if expect_indexer:
         indexer.assert_called_once()
         assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
-        assert indexer.call_args.args[4] is hidden_states
-        assert indexer.call_args.args[5] is own_metadata
-        assert own_metadata.actual_seq_lengths_query is lengths
+        assert indexer.call_args.args[2] is hidden_states
+        assert indexer.call_args.args[3] is own_metadata
+        assert own_metadata.actual_seq_lengths_query is own_query_lengths
+        assert own_metadata.actual_seq_lengths_key is own_key_lengths
     else:
         indexer.assert_not_called()
     attention_args = impl._execute_sparse_flash_attention_process.call_args.args

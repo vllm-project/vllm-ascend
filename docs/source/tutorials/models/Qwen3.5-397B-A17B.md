@@ -51,7 +51,7 @@ The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Us
     Start the docker image on your each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -756,7 +756,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
     For example:
@@ -780,7 +780,7 @@ Run a proxy server on the same node as the prefiller service instance. You can g
       --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
       --host 192.xx.xx.1 \
-      --port 8010
+      --port 8000
     ```
 
 Common Issues Tip: If requests reach the proxy but no output is returned, check that the proxy host list includes all healthy prefill and decode endpoints, and verify that the service verification request in Section 6 succeeds through the proxy port.

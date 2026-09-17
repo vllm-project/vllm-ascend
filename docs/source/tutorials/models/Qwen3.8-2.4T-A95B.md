@@ -105,18 +105,12 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
-
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
-
 === "A2 series"
 
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -144,11 +138,17 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
+After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
+```shell
+python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
+
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
+```
 
 ### 4.2 Source Code Installation
 
@@ -496,6 +496,15 @@ Before starting the service:
     Common Issues Tip: If a worker exits immediately, confirm that Node 0 is
     already running, `--data-parallel-address` resolves to Node 0, all nodes
     use the same RPC port, and every worker uses a unique DP start rank.
+
+Wait until the engine finishes loading weights and graph capture. A successful
+startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 ### 5.2 Prefill-Decode Disaggregation
 

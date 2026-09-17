@@ -139,7 +139,7 @@ It is **recommended to use the latest release candidate (rc) version or the late
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
+        -p 8000:8000 \
         -it $IMAGE bash
     ```
 
@@ -308,7 +308,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQs](../../faqs.md).
+    - `--no-enable-prefix-caching` disables prefix caching in the example above. For workloads with long shared prefixes, finer-grained hybrid prefix matching can be enabled with `--enable-prefix-caching --prefix-match-unit 16`. The match unit must divide every KV cache group's block size. A smaller unit can reuse more of a partial physical page, at the cost of additional hash metadata, copy-on-write operations, and an extra prefill split at the final matching boundary.
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
@@ -334,7 +334,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
-            --port 8080 \
+            --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.5 \
             --max-num-seqs 128 \
@@ -363,7 +363,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
-            --port 8080 \
+            --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.6 \
             --max-num-seqs 128 \
@@ -648,7 +648,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
     ```shell
     python load_balance_proxy_server_example.py \
-      --port 1999 \
+      --port 8000 \
       --host 192.xx.xx.1 \
       --prefiller-hosts \
         192.xx.xx.1 \
@@ -679,7 +679,7 @@ Deployment Verification:
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
 
 ```bash
-curl http://<proxy_node0_ip>:1999/v1/chat/completions \
+curl http://<proxy_node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -763,7 +763,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 Here are two accuracy evaluation methods.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -810,7 +810,7 @@ models = [
 |----- | ----- | ----- | ----- | -----|
 | gsm8k | - | accuracy | gen | 96.74 |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `Qwen3.5-27B-w8a8` in online mode.
 
@@ -840,11 +840,11 @@ lm_eval \
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3.5-27B-w8a8` or `Qwen3.6-27B-w8a8` as an example.
 
