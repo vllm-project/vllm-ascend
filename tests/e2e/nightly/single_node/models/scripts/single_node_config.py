@@ -7,6 +7,8 @@ import regex as re
 import yaml
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import KVPoolConfig, parse_kv_pool_config
+
 CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/nightly/single_node/models/configs"
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,9 @@ class SingleNodeConfig:
     service_mode: str = "openai"
     epd_server_cmds: list[list[str]] = field(default_factory=list)
     epd_proxy_args: list[str] = field(default_factory=list)
+    mm_request: dict[str, Any] = field(default_factory=dict)
+    expected_response: dict[str, Any] = field(default_factory=dict)
+    kv_pool: KVPoolConfig | None = None
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -53,7 +58,10 @@ class SingleNodeConfig:
             self.special_dependencies = {}
         if self.test_content is None:
             self.test_content = []
-
+        if self.mm_request is None:
+            self.mm_request = {}
+        if self.expected_response is None:
+            self.expected_response = {}
         self.server_cmd = self._expand_values(self.server_cmd or [], self.envs)
         self.epd_server_cmds = [self._expand_values(cmd, self.envs) for cmd in self.epd_server_cmds]
         self.epd_proxy_args = self._expand_values(self.epd_proxy_args or [], self.envs)
@@ -113,6 +121,9 @@ class SingleNodeConfigLoader:
         "test_content",
         "epd_server_cmds",
         "epd_proxy_args",
+        "expected_response",
+        "mm_request",
+        "kv_pool",
     }
 
     @classmethod
@@ -183,6 +194,9 @@ class SingleNodeConfigLoader:
                     test_content=case.get("test_content", ["completion"]),
                     service_mode=case.get("service_mode", "openai"),
                     extra_config=extra_case_fields,
+                    expected_response=case.get("expected_response", {}),
+                    mm_request=case.get("mm_request", {}),
+                    kv_pool=parse_kv_pool_config(case.get("kv_pool")),
                 )
             )
         return result

@@ -50,22 +50,18 @@ Based on the above content, we present a brief description of the adaptation pro
 
 ### Quantization Algorithm Adaptation
 
-- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, pertensor/perchannel/pergroup).
+- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, Per-Tensor/Per-Channel/Per-Group).
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
-from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme, AscendMoEScheme
-
-@register_scheme("W4A8_DYNAMIC", "linear")
-class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
-    ...
+from vllm_ascend.quantization.methods import register_scheme, AscendMoEScheme
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     ...
 ```
 
-- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8.py`, and implement the method class and logic.
+- **Step 3: Implementation**. Create an algorithm implementation file, such as `vllm_ascend/quantization/methods/w4a8/w4a8.py`, and implement the method class and logic.
 - **Step 4: Testing**. Use your algorithm to generate quantization configurations and verify correctness and performance on target models and hardware.
 
 ### Quantized Model Adaptation
@@ -73,26 +69,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 Adapting a new quantized model requires ensuring the following three points:
 
 - The original model has been successfully adapted in `vLLM Ascend`.
-- **Fused Module Mapping**: Add the model's `model_type` to `packed_modules_model_mapping` in `vllm_ascend/quantization/modelslim_config.py` (e.g., `qkv_proj`, `gate_up_proj`, `experts`) to ensure sharding consistency and correct loading.
-
-```python
-packed_modules_model_mapping = {
-    "qwen3_moe": {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    },
-}
-```
-
+- **Fused Module Mapping**: If the upstream vLLM model's `packed_modules_mapping` does not cover the required fused modules, add the model's `model_type` to `UPDATED_PACKED_MODULES_MAPPING` in `vllm_ascend/quantization/configs/modelslim_config.py`. Expert shard mappings are auto-discovered from the quantization description.
 - All quantization algorithms used by the quantized model have been integrated into the `quantization` module.
 
 ## Currently Supported Quantization Algorithms
@@ -105,10 +82,10 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 | `W8A16`                  | INT8   | FP16/BF16  | Per-Channel        | Per-Tensor             | Static  | 8-bit weight quantization with 16-bit activation precision, balancing accuracy and performance, suitable for linear layers                                         |
 | `W8A8`                   | INT8   | INT8       | Per-Channel        | Per-Tensor             | Static  | Static activation quantization, suitable for scenarios requiring high precision                                                                                    |
 | `W8A8_DYNAMIC`           | INT8   | INT8       | Per-Channel        | Per-Token              | Dynamic | Dynamic activation quantization with per-token scaling factor calculation                                                                                          |
-| `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Group          | Per-Token              | Dynamic | Supports both direct per-channel quantization to 4-bit and two-step quantization (per-channel to 8-bit then per-group to 4-bit)                                    |
+| `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Channel        | Per-Token              | Dynamic | 4-bit per-channel weight quantization with 8-bit dynamic per-token activation, supporting msModelSlim and LLM-Compressor weight formats for MoE layers           |
 | `W4A4_FLATQUANT_DYNAMIC` | INT4   | INT4       | Per-Channel        | Per-Token              | Dynamic | Uses FlatQuant for activation distribution smoothing before 4-bit dynamic quantization, with additional matrix multiplications for precision preservation          |
 | `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | We support two deployment modes: PD Colocation (dynamic quantization for both P and D) and PD Disaggregation (dynamic-quant P and static-quant D) |
 
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 
-**Granularity:** Refers to the scope of scaling factor computation (e.g., per-tensor, per-channel, per-group).
+**Granularity:** Refers to the scope of scaling factor computation (e.g., Per-Tensor, Per-Channel, Per-Group).

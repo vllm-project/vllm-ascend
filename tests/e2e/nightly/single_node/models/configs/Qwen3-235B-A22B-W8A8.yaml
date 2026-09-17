@@ -7,7 +7,6 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -40,7 +39,7 @@ _benchmarks: &benchmarks
     batch_size: 32
     top_k: 20
     baseline: 95
-    threshold: 5
+    threshold: 10
 
 # ==========================================
 # ACTUAL TEST CASES

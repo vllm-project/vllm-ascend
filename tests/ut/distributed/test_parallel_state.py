@@ -5,15 +5,11 @@ import pytest
 from vllm.config import ParallelConfig
 
 from vllm_ascend.distributed.parallel_state import (
-    _FLASHCOMM2_ODP,
-    _FLASHCOMM2_OTP,
     _LMTP,
     _MC2,
     _OTP,
     _P_TP,
     destroy_ascend_model_parallel,
-    get_flashcomm2_odp_group,
-    get_flashcomm2_otp_group,
     get_global_rank,
     get_lmhead_tp_group,
     get_mc2_group,
@@ -39,25 +35,22 @@ def mock_distributed():
         patch("torch.distributed.get_world_size", return_value=16),
         patch("torch.distributed.get_backend", return_value="nccl"),
         patch("vllm_ascend.distributed.parallel_state.get_world_group") as mock_group,
-        patch("vllm_ascend.distributed.parallel_state.get_tp_group") as mock_tp_group,
     ):
         mock_group.return_value.local_rank = 0
         mock_group.return_value.device_group = MagicMock()
-        mock_tp_group.return_value.world_size = 4
         yield
 
 
 def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config = MagicMock()
+    mock_ascend_config.kvpp_config.size = 1
     mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
-    mock_ascend_config.flashcomm2_oproj_tensor_parallel_size = 2
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
-    mock_ascend_config.enable_flashcomm2_parallel_size = 2
     mock_ascend_config.enable_context_parallel = False
     mock_vllm_config = MagicMock()
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
@@ -73,13 +66,9 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         mc2_group = get_mc2_group()
         lmheadtp_group = get_lmhead_tp_group()
         otp_group = get_otp_group()
-        flashcomm2_otp_group = get_flashcomm2_otp_group()
-        flashcomm2_odp_group = get_flashcomm2_odp_group()
         p_tp_group = get_p_tp_group()
         assert mc2_group is not None
         assert otp_group is not None
-        assert flashcomm2_otp_group is not None
-        assert flashcomm2_odp_group is not None
         assert lmheadtp_group is not None
         assert p_tp_group is not None
 
@@ -87,8 +76,6 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
         assert _MC2 is None
         assert _LMTP is None
         assert _OTP is None
-        assert _FLASHCOMM2_OTP is None
-        assert _FLASHCOMM2_ODP is None
         assert _P_TP is None
 
 
@@ -155,3 +142,56 @@ def test_get_global_rank_defaults_to_current_config():
         mock_group.return_value.rank_in_group = 3
         # data_parallel_index(1) * replica_size(4) + 3 == 7
         assert get_global_rank() == 7
+
+
+@pytest.mark.parametrize("size", [1, 4])
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=size),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+        ),
+    )
+    calls, groups = {}, {}
+
+    def init_group(ranks, local_rank, backend, *, group_name):
+        calls[group_name] = (ranks, local_rank, backend)
+        groups[group_name] = MagicMock()
+        return groups[group_name]
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=4, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=4 // pcp_size,
+            pipeline_parallel_size=2,
+            data_parallel_size=1,
+            prefill_context_parallel_size=pcp_size,
+        )
+    )
+    if size == 1:
+        assert "kvpp" not in calls
+        assert parallel_state._KVPP is None
+    else:
+        assert calls["kvpp"] == ([[0, 1, 2, 3], [4, 5, 6, 7]], 4, "hccl")
+        assert parallel_state.get_kvpp_group() is groups["kvpp"]
+        assert groups["kvpp"] is not groups["mc2"]
+    parallel_state.destroy_ascend_model_parallel()
+    if size > 1:
+        groups["kvpp"].destroy.assert_called_once_with()
+    assert parallel_state._KVPP is None

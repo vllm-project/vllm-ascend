@@ -16,13 +16,45 @@
 #
 """Abstract base classes for Ascend quantization schemes."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+import torch_npu
 
+from vllm_ascend.ops.fused_moe.moe_utils import maybe_normalize_mxfp_scale_layout
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchGatherPart,
+    WeightSwitchGatherSpec,
+    WeightSwitchMixin,
+    WeightSwitchRepeatPart,
+    WeightSwitchRepeatSpec,
+    WeightSwitchState,
+)
+
+__all__ = [
+    "AscendAttentionScheme",
+    "AscendLinearScheme",
+    "AscendMoEScheme",
+    "QuantType",
+    "WeightLoadPartition",
+    "WeightSwitchConfig",
+    "WeightSwitchGatherPart",
+    "WeightSwitchGatherSpec",
+    "WeightSwitchRepeatPart",
+    "WeightSwitchRepeatSpec",
+    "WeightSwitchMixin",
+    "WeightSwitchState",
+]
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+    from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 
 
 def get_moe_num_logical_experts(
@@ -39,7 +71,7 @@ def get_moe_num_logical_experts(
     return int(num_experts - global_redundant_expert_num - num_shared_experts)
 
 
-class AscendLinearScheme(ABC):
+class AscendLinearScheme(WeightSwitchMixin, ABC):
     """Base class for all linear quantization schemes.
 
     Subclasses must implement get_weight() and apply() methods.
@@ -196,6 +228,11 @@ class AscendMoEScheme(ABC):
 
     # Default quant type - subclasses should override this
     quant_type: QuantType = QuantType.NONE
+    # Activation quant dtype used by the MLP gmm hooks. Subclasses override it.
+    act_quant_type: torch.dtype | None = None
+    # Activations that this method implements through a fused gmm1+act+quant
+    # path (``apply_gmm1_act_quant``). Stored as activation string values.
+    fused_activations: frozenset[str] = frozenset()
 
     @abstractmethod
     def get_weight(
@@ -236,58 +273,27 @@ class AscendMoEScheme(ABC):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = False,
-        log2phy: torch.Tensor | None = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: Any | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: Any | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         """Forward computation for MoE layer.
 
         Args:
             layer: The MoE layer module.
             x: Input hidden states.
-            router_logits: Router logits for expert selection.
-            top_k: Number of experts to select per token.
-            renormalize: Whether to renormalize expert weights.
-            use_grouped_topk: Whether to use grouped top-k selection.
-            num_experts: Number of experts.
-            expert_map: Mapping from local to global expert indices.
-            topk_group: Group size for grouped top-k.
-            num_expert_group: Number of expert groups.
-            custom_routing_function: Custom routing function.
-            scoring_func: Scoring function name.
-            routed_scaling_factor: Scaling factor for routed experts.
-            e_score_correction_bias: Expert score correction bias.
-            is_prefill: Whether in prefill phase.
-            enable_force_load_balance: Whether to force load balancing.
-            log2phy: Logical to physical expert mapping.
-            global_redundant_expert_num: Number of redundant experts.
-            pertoken_scale: Optional per-token activation scale from prepare stage.
-            activation: Expert MLP activation type.
-            apply_router_weight_on_input: Whether to pre-scale hidden states by router weights.
-            mc2_mask: Optional mask used by MC2 dispatch.
+            topk_weights: Router weights of shape (num_tokens, top_k).
+            topk_ids: Selected expert ids of shape (num_tokens, top_k).
 
         Returns:
             Output tensor after MoE computation.
         """
         ...
+
+    def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
+        """Return expert-first weight views consumed by upstream EPLB."""
+        return []
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Post-loading weight processing for MoE layer.
@@ -296,3 +302,87 @@ class AscendMoEScheme(ABC):
             layer: The MoE layer module.
         """
         return
+
+    def _quant_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        dynamic_scale: torch.Tensor = None,
+    ) -> torch.Tensor:
+        if self.quant_type in [QuantType.W4A16, QuantType.W4A16MXFP]:
+            # A16 quantization doesn't need to quant hidden_states
+            return hidden_states, None
+        # Each quant method knows its own quant type, so the kernel is called
+        # directly instead of going through a device-level wrapper:
+        # MXFP types always quantize with the A5 MX kernel, all others with the
+        # generic dynamic quant kernel.
+        use_mxfp_quant = self.quant_type in (
+            QuantType.W8A8MXFP,
+            QuantType.W4A4MXFP,
+            QuantType.W4A8MXFP,
+            QuantType.W4A16MXFP,
+        )
+        if dynamic_scale is None:
+            # When hidden_states haven't been quanted, we need to quant hidden_states.
+            if use_mxfp_quant:
+                hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                    hidden_states, dst_type=self.act_quant_type
+                )
+                return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
+            return torch_npu.npu_dynamic_quant(hidden_states, dst_type=self.act_quant_type)
+        # When hidden_states have been quanted, we don't need to quant hidden_states.
+        if use_mxfp_quant:
+            return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
+        return hidden_states, dynamic_scale
+
+    def supports_fused_activation(self, activation) -> bool:
+        """Whether this method provides a fused gmm1+act+quant path for
+        ``activation`` (an ``MoEActivation`` member or its string value)."""
+        return getattr(activation, "value", activation) in self.fused_activations
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        """gate/up projection (gmm1), returns the pre-activation output."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_gmm1().")
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Fused gmm1 + activation + output quantization.
+
+        Only called for activations listed in ``fused_activations``. Returns
+        ``(hidden_states, act_out_scale)``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_gmm1_act_quant().")
+
+    def apply_act_quant(
+        self,
+        mlp_compute_input: MoEMlpComputeInput,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """(Re)quantize the activation output. A16 paths return
+        ``(hidden_states, None)``."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_act_quant().")
+
+    def apply_gmm2(
+        self,
+        mlp_compute_input: MoEMlpComputeInput,
+        hidden_states: torch.Tensor,
+        act_out_scale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """down projection (gmm2)."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_gmm2().")
+
+    def get_fused_mc2_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Build the normalized :class:`MoEWeights` payload from ``layer``.
+
+        Used by the FUSED_MC2 communication path, which bypasses the MLP
+        stage and needs the per-expert weight lists assembled per quant
+        method.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement get_fused_mc2_weights().")
+
+    def get_mlp_weights(self, layer: torch.nn.Module) -> MoEWeights:
+        """Build the standard MLP-layout :class:`MoEWeights` payload.
+
+        Used by the quantized MoE LoRA backend, which needs the base-expert
+        weights in the same layout as the MLP gmm hooks (w1/w2 with their
+        scales) now that weights are carried by the routed-expert layer.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement get_mlp_weights().")

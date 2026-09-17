@@ -13,6 +13,7 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_RETRY_ENABLE: "L0:0, L1:0, L2:0"
   DYNAMIC_EPLB: true
+  VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
 disaggregated_prefill:
   enabled: true
@@ -56,7 +57,7 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"weight_nz_mode":1,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
 
   -
     envs:
@@ -94,17 +95,17 @@ deployment:
               }
           }'
           --additional-config
-          '{"enable_prefill_optimizations":true,"enable_weight_nz_layout":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
+          '{"weight_nz_mode":1,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
   -
     envs:
       <<: *env_common
+    # #5533 requires the EPLB keys in the command below to be nested.
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 32
         --data-parallel-size-local 16
-        --data-parallel-start-rank 0
         --data-parallel-address $LOCAL_IP
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 1
@@ -133,7 +134,7 @@ deployment:
             }
         }'
         --additional-config
-        '{"multistream_overlap_shared_expert":true,"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}'
+        '{"multistream_overlap_shared_expert":true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2048,"algorithm_execution_interval":200}}'
   -
     envs:
       <<: *env_common

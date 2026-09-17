@@ -1,0 +1,118 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-25 01:53+0000\n"
+"PO-Revision-Date: 2026-08-25 01:53+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# MS Service Metric"
+msgstr "# MS服务指标"
+
+msgid ""
+"MS Service Metric collects vLLM Ascend runtime metrics through function "
+"hooks and exposes them in Prometheus format. Install `ms_service_metric` "
+"separately before using this integration; vLLM Ascend itself does not "
+"require it to run inference."
+msgstr ""
+"MS服务指标通过函数钩子收集vLLM "
+"Ascend运行时指标，并以Prometheus格式暴露。使用此集成前需单独安装`ms_service_metric`；vLLM "
+"Ascend本身运行推理并不依赖它。"
+
+msgid ""
+"For installation, configuration syntax, and complete usage, see the [MS "
+"Service Metric "
+"documentation](https://gitcode.com/Ascend/msserviceprofiler/blob/master/ms_service_metric/README.md)."
+msgstr ""
+"有关安装、配置语法和完整用法，请参阅[MS服务指标文档](https://gitcode.com/Ascend/msserviceprofiler/blob/master/ms_service_metric/README.md)。"
+
+msgid "## Basic Usage"
+msgstr "## 基本用法"
+
+msgid "Enable metric collection before starting the service:"
+msgstr "在启动服务前启用指标收集："
+
+msgid ""
+"`PROMETHEUS_MULTIPROC_DIR` stores the Prometheus multiprocess metric files. "
+"Use a separate directory for each service instance. Before restarting a "
+"service for validation, remove stale files only after confirming that no "
+"running service is using the directory."
+msgstr ""
+"`PROMETHEUS_MULTIPROC_DIR`存储Prometheus多进程指标文件。每个服务实例应使用独立的目录。在重启服务进行验证前，仅在确认没有运行中的服务使用该目录后，才可删除过期文件。"
+
+msgid "After sending inference requests, query the vLLM metrics endpoint:"
+msgstr "发送推理请求后，查询vLLM指标端点："
+
+msgid ""
+"The output can be scraped by Prometheus and visualized in Grafana. Use `ms-"
+"service-metric off` to disable collection."
+msgstr "输出可由Prometheus抓取并在Grafana中可视化。使用`ms-service-metric off`可禁用收集。"
+
+msgid "## Custom Metric Configuration"
+msgstr "## 自定义指标配置"
+
+msgid ""
+"Set `MS_SERVICE_METRIC_CONFIG_PATH` before starting vLLM. It can point to "
+"either one YAML file or a directory containing multiple YAML files:"
+msgstr ""
+"在启动vLLM前设置`MS_SERVICE_METRIC_CONFIG_PATH`。它可以指向单个YAML文件或包含多个YAML文件的目录："
+
+msgid ""
+"Directory mode loads first-level `.yaml` and `.yml` files in filename order "
+"and does not scan subdirectories recursively. The configured directory is "
+"also the root for external Handler modules referenced by `module:function` "
+"in these YAML files. Users are responsible for maintaining their custom YAML"
+" files and Handler implementations."
+msgstr ""
+"目录模式按文件名顺序加载第一级`.yaml`和`.yml`文件，不递归扫描子目录。配置的目录也是这些YAML文件中`module:function`引用的外部Handler模块的根目录。用户负责维护其自定义YAML文件和Handler实现。"
+
+msgid ""
+"Run `ms-service-metric restart` after changing YAML configuration. Restart "
+"the vLLM service after changing Handler Python code because imported Python "
+"modules are not reloaded dynamically."
+msgstr ""
+"更改YAML配置后运行`ms-service-metric restart`。更改Handler "
+"Python代码后需重启vLLM服务，因为导入的Python模块不会动态重新加载。"
+
+msgid "## Adding a Metric Point"
+msgstr "## 添加指标点"
+
+msgid ""
+"vLLM Ascend-owned metric configurations are stored as YAML files in "
+"`vllm_ascend/observability/config/`. All YAML files in this directory are "
+"loaded automatically."
+msgstr ""
+"vLLM "
+"Ascend自有的指标配置以YAML文件形式存储在`vllm_ascend/observability/config/`中。该目录下的所有YAML文件都会自动加载。"
+
+msgid ""
+"1. Identify the target function and add its fully qualified `module:Class.method` name as `symbol`.\n"
+"2. Reuse a stable handler from `ms_service_metric.provider_handlers` when it provides the required data processing.\n"
+"3. For Ascend-specific processing, add a handler to `vllm_ascend/observability/handlers.py` and reference it as `vllm_ascend.observability.handlers:function_name`.\n"
+"4. Add the metric name and Prometheus type under `metrics`, then update `tests/ut/observability/test_ms_metrics_provider.py`."
+msgstr ""
+"1. 确定目标函数，并将其完全限定的`module:Class.method`名称添加为`symbol`。\n"
+"2. 当`ms_service_metric.provider_handlers`提供所需的数据处理时，复用其中的稳定handler。\n"
+"3. 对于Ascend特有的处理，在`vllm_ascend/observability/handlers.py`中添加handler，并以`vllm_ascend.observability.handlers:function_name`形式引用。\n"
+"4. 在`metrics`下添加指标名称和Prometheus类型，然后更新`tests/ut/observability/test_ms_metrics_provider.py`。"
+
+msgid "Example:"
+msgstr "示例："
+
+msgid ""
+"Keep configurations and handlers aligned with the vLLM Ascend "
+"implementation. A missing symbol disables only the affected metric and must "
+"not affect inference."
+msgstr "保持配置和handler与vLLM Ascend实现一致。缺失的symbol只会禁用受影响的指标，不得影响推理。"

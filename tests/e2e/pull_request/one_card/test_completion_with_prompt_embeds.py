@@ -20,12 +20,12 @@ import os
 import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import ModelName
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["Qwen/Qwen3-0.6B"]
+MODELS = ModelName.QWEN3_06B
 
 
 def get_prompt_embeds(chat, tokenizer, embedding_layer):
@@ -35,12 +35,17 @@ def get_prompt_embeds(chat, tokenizer, embedding_layer):
     return prompt_embeds
 
 
-@pytest.mark.parametrize("model_name", MODELS)
-def test_mixed_prompt_embeds_and_text(model_name):
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODELS,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"enable_prompt_embeds": True},
+)
+def test_mixed_prompt_embeds_and_text(vllm_runner):
     """Test mixed inputs with both prompt embeddings and text prompts."""
     # Prepare prompt embeddings for first request
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    transformers_model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(MODELS)
+    transformers_model = AutoModelForCausalLM.from_pretrained(MODELS)
     embedding_layer = transformers_model.get_input_embeddings()
 
     chat = [{"role": "user", "content": "What is AI?"}]
@@ -49,21 +54,15 @@ def test_mixed_prompt_embeds_and_text(model_name):
     # Prepare text prompt for second request
     text_prompt = "What is machine learning?"
 
-    # Run inference with mixed inputs
-    with VllmRunner(
-        model_name,
-        enable_prompt_embeds=True,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-    ) as vllm_runner:
-        # Test prompt embeddings
-        embeds_output = vllm_runner.model.generate(
-            {
-                "prompt_embeds": prompt_embeds,
-            }
-        )
+    # Test prompt embeddings
+    embeds_output = vllm_runner.model.generate(
+        {
+            "prompt_embeds": prompt_embeds,
+        }
+    )
 
-        # Test text prompt
-        text_output = vllm_runner.model.generate(text_prompt)
+    # Test text prompt
+    text_output = vllm_runner.model.generate(text_prompt)
 
     # Verify both types of inputs work
     assert len(embeds_output) == 1

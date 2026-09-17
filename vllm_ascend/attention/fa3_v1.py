@@ -1,5 +1,4 @@
 import torch
-import vllm.envs as envs_vllm
 from flash_attn_npu_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 
@@ -15,7 +14,7 @@ class AscendFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
+        return "CUSTOM"
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:

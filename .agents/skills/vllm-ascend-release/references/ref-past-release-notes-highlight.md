@@ -36,7 +36,7 @@ This is the first release candidate of v0.14.0 for vLLM Ascend. Please follow th
 
 ### Dependencies
 
-- torch-npu is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
+- TorchNPU is upgraded to 2.9.0 [#6112](https://github.com/vllm-project/vllm-ascend/pull/6112)
 
 ### Deprecation & Breaking Changes
 
@@ -84,7 +84,6 @@ We mainly focus on quality and performance improvement in this release. The spec
 - Adapted SP to eagle3 [#5562](https://github.com/vllm-project/vllm-ascend/pull/5562)
 - Context Parallel(PCP&DCP) support mlapo [#5672](https://github.com/vllm-project/vllm-ascend/pull/5672)
 - GLM4.6 support mtp with fullgraph [#5460](https://github.com/vllm-project/vllm-ascend/pull/5460)
-- Flashcomm2 now works with oshard generalized feature [#4723](https://github.com/vllm-project/vllm-ascend/pull/4723)
 - Support setting tp=1 for the Eagle draft model [#5804](https://github.com/vllm-project/vllm-ascend/pull/5804)
 - Flashcomm1 feature now works with qwen3-vl [#5848](https://github.com/vllm-project/vllm-ascend/pull/5848)
 - Support fine-grained shared expert overlap [#5962](https://github.com/vllm-project/vllm-ascend/pull/5962)
@@ -92,7 +91,7 @@ We mainly focus on quality and performance improvement in this release. The spec
 ### Dependencies
 
 - CANN is upgraded to 8.5.0
-- torch-npu is upgraded to 2.8.0.post1. Please note that the post version will not be installed by default. Please install it by hand from [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/).
+- TorchNPU is upgraded to 2.8.0.post1. Please note that the post version will not be installed by default. Please install it by hand from [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/).
 - triton-ascend is upgraded to 3.2.0
 
 ### Deprecation & Breaking Changes
@@ -130,7 +129,7 @@ Some general performance improvement:
 - Add new pattern for AddRmsnormQuant with SP, which could only take effect in graph mode. [#5077](https://github.com/vllm-project/vllm-ascend/pull/5077)
 - Add async exponential while model executing. [#4501](https://github.com/vllm-project/vllm-ascend/pull/4501)
 - Remove the transpose step after attention and switch to transpose_batchmatmul [#5390](https://github.com/vllm-project/vllm-ascend/pull/5390)
-- To optimize the performance in small batch size scenario, an attention operator with flash decoding function is offered, please refer to item 22 in [FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) to enable it.
+- To optimize the performance in small batch size scenario, an attention operator with flash decoding function is offered, please refer to item 22 in [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) to enable it.
 
 ### Other
 
@@ -187,7 +186,7 @@ We're excited to announce the release of v0.11.0 for vLLM Ascend. This is the of
 
 ### Upgrade notice
 
-- torch-npu is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
+- TorchNPU is upgraded to 2.7.1.post1. Please note that the package is pushed to [pypi mirror](https://mirrors.huaweicloud.com/ascend/repos/pypi/torch-npu/). So it's hard to add it to auto dependence. Please install it by yourself.
 - CANN is upgraded to 8.3.rc2.
 
 ### Known Issues

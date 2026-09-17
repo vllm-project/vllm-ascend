@@ -25,7 +25,7 @@ using namespace AscendC;
 using namespace AscendC::MicroAPI;
 constexpr uint64_t BUFFER_NUM = 1;
 constexpr uint32_t MAX_OUT_BUFFER_NUM = 2;
-constexpr uint64_t MAX_MTP = 8;
+constexpr uint64_t MAX_MTP = 16;
 constexpr uint64_t BF16_NUM_PER_BLOCK = 16;
 constexpr uint64_t FP32_NUM_PER_BLOCK = 8;
 constexpr uint32_t REPEAT_LENTH = 64; // 256Byte for float
@@ -116,7 +116,6 @@ public:
         uint32_t vSize = MAX_MTP * alignV_ * sizeof(float);
         uint32_t kSize = MAX_MTP * alignK_ * sizeof(float);
         uint32_t betaNumAlign = Ceil(MAX_MTP * NV_, BF16_NUM_PER_BLOCK) * BF16_NUM_PER_BLOCK;
-        uint32_t betaUbSize = betaNumAlign * sizeof(float); //  8: 8 * 4 = 32B;
         pipe_->InitBuffer(qInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(kInQueue_, BUFFER_NUM, MAX_MTP * alignK_ * sizeof(inType));
         pipe_->InitBuffer(vInQueue_, BUFFER_NUM, MAX_MTP * alignV_ * sizeof(inType));
@@ -147,8 +146,11 @@ public:
         broadTmpInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(alignK_ * vStep_), buffOffset);
         buffOffset += cubeSize;
         betaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaNumAlign), buffOffset);
-        buffOffset += betaUbSize;
-        gamaInUb = tmpBuff.GetWithOffset<float>(static_cast<uint32_t>(betaNumAlign), buffOffset);
+        // gamaInUb is NOT carved from tmpBuff. It reuses the gamaInQueue_ tensor
+        // directly (see CopyInGamaBeta), matching the generic kernel. Otherwise
+        // the host-side UB accounting (CalcWorkingUbBytes, which reserves beta
+        // but not gama in tmpBuff) under-counts by betaNumAlign floats, and the
+        // shortfall doubles with MAX_MTP -> risk of tmpBuff overflow.
     }
 
     __aicore__ inline void ComputeAvgload()
@@ -197,6 +199,9 @@ public:
                     CopyInGamaBeta(seq0, seq1);
                 }
                 ProcessHead(seq0, seq1, head_i, stateOffset);
+            }
+            if (hasGama_ && copyFlag != 0) {
+                gamaInQueue_.FreeTensor(gamaInUb);
             }
         }
     }
@@ -478,9 +483,11 @@ private:
             DataCopyParams gamaInParams{1, static_cast<uint16_t>(seqLen * NV_ * sizeof(float)), 0, 0};
             DataCopyPad(gamaLocal, gamaGm_[seq0 * NV_], gamaInParams, padParams);
             gamaInQueue_.EnQue<float>(gamaLocal);
-            gamaLocal = gamaInQueue_.DeQue<float>();
-            Exp(gamaInUb, gamaLocal, seqLen * NV_);
-            gamaInQueue_.FreeTensor(gamaLocal);
+            gamaInUb = gamaInQueue_.DeQue<float>();
+            Exp(gamaInUb, gamaInUb, seqLen * NV_);
+            AscendC::PipeBarrier<PIPE_V>();
+            // gamaInUb (the queue tensor) stays live until the batch-boundary
+            // FreeTensor in Process(), mirroring the generic kernel.
         }
     }
 

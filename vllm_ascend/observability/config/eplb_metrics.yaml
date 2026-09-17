@@ -1,0 +1,23 @@
+# EPLB hotness is the first custom handler migrated to vLLM Ascend.
+- symbol: vllm_ascend.eplb.core.eplb_worker:EplbWorker.do_update
+  handler: vllm_ascend.observability.handlers:eplb_do_update_hotness_handler
+
+- symbol: vllm_ascend.eplb.core.eplb_device_transfer_loader:D2DExpertWeightLoader.update_expert_map_and_weight
+  handler: ms_service_metric.provider_handlers:phase_all_handler
+  metrics:
+    - name: eplb:expert_weight_update:duration
+
+- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_expert_map
+  handler: ms_service_metric.provider_handlers:phase_all_handler
+  metrics:
+    - name: eplb:expert_map_update:duration
+
+- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_log2phy_map
+  handler: ms_service_metric.provider_handlers:phase_all_handler
+  metrics:
+    - name: eplb:log2phy_map_update:duration
+
+- symbol: vllm_ascend.eplb.adaptor.vllm_adaptor:VllmEplbAdaptor.do_update_expert_weight
+  handler: ms_service_metric.provider_handlers:phase_all_handler
+  metrics:
+    - name: eplb:expert_weight_replace:duration

@@ -18,16 +18,66 @@
 import json
 from pathlib import Path
 
+import torch
+import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    AscendDeviceType,
-    get_ascend_device_type,
 )
+
+# TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
+# specified for some operators like GMM in Ascend950, while float8_e4m3fn does not. Remove these
+# filterations when operators allow to pass data with these three dtypes directly.
+QUANT_DTYPES = (torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8)
+SCALE_DTYPES = (torch_npu.float8_e8m0fnu,)
+
+
+def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
+    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+
+    return isinstance(layer, (MoERunner, RoutedExperts))
+
+
+def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
+    """Select the MX scale algorithm used by DynamicMxQuantV3.
+
+    ``scale_alg=0`` derives a shared exponent directly from the block's
+    maximum absolute value. ``scale_alg=1`` first maps that maximum to the
+    destination FP8 range, then rounds the E8M0 scale exponent up to avoid
+    quantization overflow. MiniMax M3 checkpoints require the latter.
+    """
+    if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
+        return 0
+
+    if vllm_config is None:
+        from vllm.forward_context import get_forward_context, is_forward_context_available
+
+        if is_forward_context_available():
+            scale_alg = get_forward_context().additional_kwargs.get("dynamic_mx_quant_scale_alg")
+            if scale_alg is not None:
+                return scale_alg
+
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    model_config = vllm_config.model_config
+    architectures = getattr(model_config, "architectures", None) or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_text_config, "model_type", None)
+    if (
+        any(isinstance(architecture, str) and architecture.startswith("MiniMaxM3") for architecture in architectures)
+        or model_type == "minimax_m3"
+    ):
+        return 1
+    return 0
 
 
 def get_model_file(
@@ -109,7 +159,7 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
-    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+    from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME
 
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
@@ -216,7 +266,7 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
-    if not is_kv_consumer and get_ascend_device_type() != AscendDeviceType.A5:
+    if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
     if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
         if layer_name is not None:

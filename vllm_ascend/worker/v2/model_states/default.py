@@ -17,8 +17,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -28,9 +29,17 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.kvpp import KVPPRuntime
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
 
 class AscendModelState(DefaultModelState):
     """Model state for Ascend NPUs."""
+
+    pcp_manager: "AscendPCPManager | None" = None
+    kvpp_runtime: "KVPPRuntime | None" = None
+    kvpp_is_dummy_run: bool = False
 
     def prepare_attn(
         self,
@@ -41,24 +50,58 @@ class AscendModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        # vLLM #50945 adds this contract; Ascend still disables DBO.
+        assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
         else:
-            # For piecewise cudagraphs and eager, use unpadded sizes.
+            # Piecewise cudagraphs and eager use the actual request count.
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+
+        if cudagraph_mode == CUDAGraphMode.FULL or self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # PCP pads each rank to the largest rank-local token count even
+            # during eager prefill, so token-shaped metadata must match the
+            # padded model input.
+            num_input_tokens = input_batch.num_tokens_after_padding
+        else:
+            num_input_tokens = input_batch.num_tokens
+
+        num_actual_reqs = input_batch.num_reqs
+        num_actual_tokens = input_batch.num_tokens
+        if self.kvpp_runtime is not None and self.kvpp_runtime.scheduler is not None:
+            # PCP-local offsets include earlier chunks of this same forward.
+            # Use prior-forward history shared by every PCP x TP group member.
+            history_batch = (
+                self.pcp_manager.global_batch
+                if self.pcp_manager is not None and not self.kvpp_is_dummy_run
+                else input_batch
+            )
+            self.kvpp_runtime.prepare_forward(
+                not self.kvpp_is_dummy_run
+                and bool(np.any(history_batch.num_computed_tokens_np[: history_batch.num_reqs] > 0))
+            )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        pcp_context = (
+            self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+            if self.pcp_manager is not None
+            else None
+        )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
-            num_tokens=num_tokens,
+            num_actual_reqs=num_actual_reqs,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
@@ -72,6 +115,7 @@ class AscendModelState(DefaultModelState):
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
+            pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
         )
         return self.attn_metadata

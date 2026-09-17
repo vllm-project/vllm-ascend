@@ -15,13 +15,17 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 import torch
+import torch_npu
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -32,8 +36,9 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_dsa_cp_with_layer_shard.cache_clear()
-        utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
+        utils.enable_dsa_cp.cache_clear()
+        utils.enable_dsa_cp_full_o_proj.cache_clear()
+        utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
     def test_nd_to_nz_2d(self):
         # can be divided by 16
@@ -131,22 +136,74 @@ class TestUtils(TestBase):
             self.assertEqual(utils.find_hccl_library(), "libhccl.so")
 
     def test_current_stream(self):
-        with mock.patch("torch.npu.current_stream") as mock_current_stream:
-            self.assertEqual(utils.current_stream(), mock_current_stream())
+        utils._CURRENT_STREAM = None
+        mock_stream = mock.MagicMock(name="npu_stream")
+        with mock.patch("vllm_ascend.utils.torch.npu.current_stream", return_value=mock_stream) as mock_current_stream:
+            self.assertIs(utils.current_stream(), mock_stream)
+            # Second call must hit the cached stream, not torch.npu.current_stream again.
+            self.assertIs(utils.current_stream(), mock_stream)
+            mock_current_stream.assert_called_once()
 
-    def test_enable_dsa_cp_with_layer_shard_accepts_kv_producer(self):
+    def test_enable_dsa_cp_full_o_proj_is_independent_of_pcp_switch(self):
         mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
-        )
+        mock_vllm_config.kv_transfer_config = None
 
         with (
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+            mock.patch("vllm_ascend.utils.enable_pcp_o_proj_weight_sharding", return_value=False) as pcp_switch,
         ):
-            self.assertTrue(utils.enable_dsa_cp_with_layer_shard())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
+        pcp_switch.assert_not_called()
 
-    def test_enable_dsa_cp_with_layer_shard_rejects_kv_both(self):
+    def test_enable_sp_uses_upstream_parallel_config(self):
+        # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
+        mock.patch.stopall()
+        sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=True,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertTrue(utils.enable_sp(sequence_parallel_config))
+
+        shared_expert_dp_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=True,
+            )
+        )
+        self.assertFalse(utils.enable_sp(shared_expert_dp_config))
+
+        no_sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+
+    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
+        ascend_config = SimpleNamespace(enable_dsa_cp=True)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+        ):
+            self.assertTrue(utils.enable_dsa_cp())
+
+        mock_enable_sp.assert_not_called()
+
+    def test_enable_dsa_cp_reads_validated_ascend_config(self):
+        ascend_config = mock.MagicMock(enable_dsa_cp=False)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp())
+
+    def test_enable_dsa_cp_full_o_proj_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
@@ -156,45 +213,9 @@ class TestUtils(TestBase):
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
 
-    def test_enable_dsa_cp_with_layer_shard_rejects_missing_kv_transfer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_when_dsa_cp_disabled(self):
-        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
-
-    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
-
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_single_role_pd(self):
+    def test_enable_dsa_cp_full_o_proj_accepts_kv_producer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
@@ -204,11 +225,29 @@ class TestUtils(TestBase):
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
-            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_when_dsa_cp_disabled(self):
+    def test_enable_dsa_cp_full_o_proj_rejects_kv_consumer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
+
+    def test_enable_dsa_cp_full_o_proj_rejects_when_dsa_cp_disabled(self):
         with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
+
+    def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
+        ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)
+
+        with mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config):
+            self.assertTrue(utils.enable_pcp_o_proj_weight_sharding())
 
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
@@ -224,16 +263,29 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
-        # Test caching takes effect
+        with mock.patch("vllm.__version__", "0.1.dev1+g6e448d0ea.empty"):
+            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
+                find_spec.side_effect = lambda name: (
+                    object() if name == "vllm.model_executor.layers.attention.pcp" else None
+                )
+                self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
+                self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
+            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
+                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
+                self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
+        # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
-        utils.vllm_version_is("1.0.0")
-        misses = utils.vllm_version_is.cache_info().misses
-        hits = utils.vllm_version_is.cache_info().hits
-        self.assertEqual(misses, 1)
-        self.assertEqual(hits, 0)
-        utils.vllm_version_is("1.0.0")
-        hits = utils.vllm_version_is.cache_info().hits
-        self.assertEqual(hits, 1)
+        with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
+            utils.vllm_version_is("1.0.0")
+            misses = utils.vllm_version_is.cache_info().misses
+            hits = utils.vllm_version_is.cache_info().hits
+            self.assertEqual(misses, 1)
+            self.assertEqual(hits, 0)
+            utils.vllm_version_is("1.0.0")
+            hits = utils.vllm_version_is.cache_info().hits
+            self.assertEqual(hits, 1)
+        # Later dual-lane UTs must re-read the installed vllm version.
+        utils.vllm_version_is.cache_clear()
 
     def test_get_max_hidden_layers(self):
         from transformers import PretrainedConfig
@@ -324,7 +376,7 @@ class TestUtils(TestBase):
     def test_maybe_trans_nz(self, mock_npu_format_cast):
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
-        mock_npu_format_cast.side_effect = lambda weight, fmt: weight
+        mock_npu_format_cast.side_effect = lambda weight, fmt, **kwargs: weight
 
         def assert_nz_cast(weight):
             mock_npu_format_cast.assert_called_once()
@@ -338,7 +390,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -350,7 +404,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -362,7 +419,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
             result = utils.maybe_trans_nz(weight)
@@ -374,7 +434,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -386,7 +448,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -398,24 +462,164 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: non-310P NZ mode skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 7b: 310P also skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType._310P),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)
             result = utils.maybe_trans_nz(weight)
             self.assertIs(result, weight)
             assert_nz_cast(weight)
+
+        # Test case 8: customize_dtype is passed through to npu_format_cast
+        mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
+            result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_called_once()
+            args, kwargs = mock_npu_format_cast.call_args
+            self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
+            self.assertNotIn("input_dtype", kwargs)
+
+        # Test case 9: input_dtype is passed through to npu_format_cast
+        mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
+            result = utils.maybe_trans_nz(weight, input_dtype=torch_npu.float4_e2m1fn_x2)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_called_once()
+            args, kwargs = mock_npu_format_cast.call_args
+            self.assertEqual(kwargs["input_dtype"], torch_npu.float4_e2m1fn_x2)
+            self.assertNotIn("customize_dtype", kwargs)
+
+        # Test case 10: both customize_dtype and input_dtype passed through
+        mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 2
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
+            result = utils.maybe_trans_nz(
+                weight,
+                customize_dtype=torch.float8_e4m3fn,
+                input_dtype=torch_npu.float4_e2m1fn_x2,
+            )
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_called_once()
+            args, kwargs = mock_npu_format_cast.call_args
+            self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
+            self.assertEqual(kwargs["input_dtype"], torch_npu.float4_e2m1fn_x2)
+
+        # Test case 11: no conversion when _should_trans_nz returns False,
+        # even when customize_dtype is provided
+        mock_npu_format_cast.reset_mock()
+        mock_config.weight_nz_mode = 0
+        with (
+            mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+        ):
+            weight = torch.randn(32, 64, dtype=torch.float16)
+            result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
+            self.assertIs(result, weight)
+            mock_npu_format_cast.assert_not_called()
+
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_maybe_trans_nz_with_scale(self, mock_npu_format_cast):
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz_with_scale
+
+        mock_npu_format_cast.side_effect = lambda weight, fmt, **kwargs: weight
+
+        def run(nz_mode):
+            mock_config = mock.MagicMock()
+            mock_config.weight_nz_mode = nz_mode
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(4, 8, dtype=torch.float16)
+                scale = torch.randn(4, 4, 2, dtype=torch.float16)
+                return maybe_trans_nz_with_scale(
+                    weight,
+                    scale,
+                    transpose_dims=(0, 1),
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                )
+
+        # NZ disabled: keep non-contiguous layout, no cast.
+        w, s = run(0)
+        self.assertEqual(w.shape, (8, 4))
+        self.assertFalse(w.is_contiguous())
+        self.assertFalse(s.is_contiguous())
+        mock_npu_format_cast.assert_not_called()
+
+        # NZ enabled: contiguous + cast with dtype hints.
+        mock_npu_format_cast.reset_mock()
+        w, s = run(2)
+        self.assertTrue(w.is_contiguous())
+        self.assertTrue(s.is_contiguous())
+        mock_npu_format_cast.assert_called_once()
+        args, kwargs = mock_npu_format_cast.call_args
+        self.assertEqual(args[1], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
+        self.assertEqual(kwargs["input_dtype"], torch_npu.float4_e2m1fn_x2)
 
 
 def test_is_pd_decode_recompute_scheduler_enabled_without_config():
@@ -436,9 +640,52 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = True
+    ascend_config.scheduler_config.recompute_scheduler_enable = True
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
+
+
+def test_is_rc_device_returns_false_on_non_310p():
+    utils._IS_RC_DEVICE = None
+    with mock.patch(
+        "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    ):
+        assert utils.is_rc_device() is False
+
+
+def test_is_rc_device_detects_ep_from_lspci():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = "00:00.0 accelerators: Huawei Technologies Co., Ltd."
+        assert utils.is_rc_device() is False
+
+
+def test_is_rc_device_detects_rc_from_lspci():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
+        mock.patch("subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = "00:00.0 PCI bridge: Huawei Technologies Co., Ltd."
+        assert utils.is_rc_device() is True
+
+
+def test_is_rc_device_defaults_to_ep_when_lspci_unavailable():
+    utils._IS_RC_DEVICE = None
+    with (
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
+        mock.patch("subprocess.run", side_effect=FileNotFoundError),
+    ):
+        assert utils.is_rc_device() is False
 
 
 def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
@@ -447,6 +694,82 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = False
+    ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_check_gdn_layer_supports_kimi_linear_config_property():
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                text_config=KimiLinearConfig(
+                    linear_attn_config={
+                        "kda_layers": [2],
+                        "full_attn_layers": [1],
+                    }
+                )
+            )
+        )
+    )
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_nested_layer_types():
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_qwen3_next_config():
+    from transformers import Qwen3NextConfig
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3NextConfig()))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_returns_false_without_linear_attention():
+    from transformers import Qwen3Config
+
+    # Dense Qwen3 configs, including Qwen3-8B, expose only full-attention
+    # layer types and must not be classified as hybrid GDN models.
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
+
+    assert utils.check_gdn_layer(vllm_config) is False
+
+
+class TestIsMtpLayer(TestBase):
+    """``utils.is_mtp_layer`` backs the SFA indexer-ownership decision."""
+
+    def test_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.2.self_attn.attn"))
+
+    def test_last_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.79.self_attn.attn"))
+
+    def test_layer_at_or_past_backbone_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.81.self_attn.attn"))
+
+    def test_explicit_mtp_segment_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "mtp.0.self_attn.attn"))
+
+    def test_missing_layer_info_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "unknown"))
+        self.assertFalse(utils.is_mtp_layer(config, None))
+        self.assertFalse(utils.is_mtp_layer(SimpleNamespace(), "model.layers.0.self_attn.attn"))
+
+    def test_non_integer_num_hidden_layers_is_not_mtp(self):
+        # Mocked/partial hf_configs must not be classified as MTP layers.
+        config = SimpleNamespace(num_hidden_layers="80")
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))

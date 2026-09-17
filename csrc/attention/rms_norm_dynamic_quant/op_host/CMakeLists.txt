@@ -50,7 +50,6 @@ add_ops_compile_options(
         OP_NAME RmsNormDynamicQuant
         OPTIONS --cce-auto-sync=off
                 -Wno-deprecated-declarations
-                -Werror
                 -mllvm -cce-aicore-hoist-movemask=false
                 --op_relocatable_kernel_binary=true
 )

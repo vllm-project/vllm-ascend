@@ -1,0 +1,123 @@
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+
+_server_cmd: &server_cmd
+  - "--max_model_len"
+  - "135000"
+  - "--safetensors-load-strategy"
+  - "prefetch"
+  - "--max-num-batched-tokens"
+  - "4096"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--enable-expert-parallel"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "32"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--block-size"
+  - "128"
+  - "--data-parallel-size"
+  - "1"
+  - "--tensor-parallel-size"
+  - "8"
+  - "--tokenizer-mode"
+  - "deepseek_v4"
+  - "--tool-call-parser"
+  - "deepseek_v4"
+  - "--enable-auto-tool-choice"
+  - "--reasoning-parser"
+  - "deepseek_v4"
+  - "--api_server_count"
+  - "1"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--speculative-config"
+  - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1500
+    batch_size: 32
+    request_rate: 0
+    baseline: 90
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+# =======dsv4-flash: Enable open,MTP=3 test.===============
+test_cases:
+  - name: "deepseekv4-flash-w8a8-enable-open"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--additional-config"
+      - '{"ascend_compilation_config":
+            {
+              "enable_npugraph_ex":true,
+              "enable_static_kernel": false
+            },
+            "enable_cpu_binding": "true",
+            "enable_shared_expert_dp": true,
+            "multistream_overlap_shared_expert":true,
+            "enable_reduce_sample": false,
+            "rejection_sampler_config": {
+              "enable_block_verify": true,
+              "enable_entropy_verify": true,
+              "posterior_threshold": 0.95,
+              "posterior_alpha": 0.4
+            }
+         }'
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: 0.925
+      tolerance: 0.05
+
+# =======dsv4-flash: Enable close,MTP=3 test..===============
+  - name: "deepseekv4-flash-w8a8-enable-close"
+    model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--additional-config"
+      - '{"ascend_compilation_config":
+            {
+              "enable_npugraph_ex":true,
+              "enable_static_kernel": false
+            },
+            "enable_cpu_binding": "false",
+            "enable_shared_expert_dp": true,
+            "multistream_overlap_shared_expert":true,
+            "enable_reduce_sample": false,
+            "rejection_sampler_config": {
+                "enable_block_verify": false,
+                "enable_entropy_verify": false,
+                "posterior_threshold": 0.95,
+                "posterior_alpha": 0.4
+              }
+          }'
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - spec_decode_acceptance
+    acceptance_rate:
+      baseline: 0.925
+      tolerance: 0.05

@@ -123,8 +123,9 @@ def main(
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
 
-    # CUDA_VISIBLE_DEVICES for each DP rank is set automatically inside the
-    # engine processes.
+    import torch
+
+    _dp_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
     # Sample prompts.
     prompts = [
@@ -165,6 +166,7 @@ def main(
         enable_expert_parallel=enable_expert_parallel,
         trust_remote_code=trust_remote_code,
         quantization=quantization,
+        **({} if _dp_device_ids is None else {"device_ids": _dp_device_ids}),
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.

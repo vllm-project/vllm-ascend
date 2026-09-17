@@ -25,6 +25,13 @@
         "ascend :: npu_type :: a3"
       ],
       "skip_plugin_validation": true
+    },
+    {
+      "variant_label": "950",
+      "properties": [
+        "ascend :: npu_type :: 950"
+      ],
+      "skip_plugin_validation": true
     }
   ]
 }

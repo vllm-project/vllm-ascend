@@ -33,6 +33,8 @@ def get_local_seed_key(
     model_deploy_strategy_name: str,
     seed_key_separator: str = "$",
     is_draft_worker: bool = False,
+    pp_rank: int | None = None,
+    ep_rank: int | None = None,
 ) -> str:
     if not model_url or not model_deploy_strategy_name:
         err_msg = (
@@ -46,10 +48,15 @@ def get_local_seed_key(
         raise RuntimeError(err_msg)
 
     seed_key = f"{model_url}{seed_key_separator}{model_deploy_strategy_name}"
-    key_suffix = f"{disaggregation_mode}{seed_key_separator}{node_rank}{seed_key_separator}{tp_rank}"
+    key_parts = [disaggregation_mode, str(node_rank)]
+    if pp_rank is not None:
+        key_parts.append(f"pp{pp_rank}")
+    key_parts.append(str(tp_rank))
+    if ep_rank is not None:
+        key_parts.append(f"ep{ep_rank}")
     if is_draft_worker:
-        key_suffix += f"{seed_key_separator}draft"
-    return f"{seed_key}{seed_key_separator}{key_suffix}"
+        key_parts.append("draft")
+    return f"{seed_key}{seed_key_separator}{seed_key_separator.join(key_parts)}"
 
 
 class RForkSeedProtocol:
@@ -64,10 +71,14 @@ class RForkSeedProtocol:
         model_deploy_strategy_name: str,
         seed_key_separator: str = "$",
         is_draft_worker: bool = False,
+        pp_rank: int | None = None,
+        ep_rank: int | None = None,
     ):
         self.disaggregation_mode = disaggregation_mode
         self.node_rank = node_rank
         self.tp_rank = tp_rank
+        self.pp_rank = pp_rank
+        self.ep_rank = ep_rank
         self.scheduler_url = scheduler_url
         self.model_url = model_url
         self.model_deploy_strategy_name = model_deploy_strategy_name
@@ -82,6 +93,8 @@ class RForkSeedProtocol:
             model_deploy_strategy_name=self.model_deploy_strategy_name,
             seed_key_separator=self.seed_key_separator,
             is_draft_worker=self.is_draft_worker,
+            pp_rank=self.pp_rank,
+            ep_rank=self.ep_rank,
         )
 
     def get_local_seed_key(self) -> str:

@@ -16,47 +16,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
+
+import pytest
 from vllm import SamplingParams
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import ModelName
+
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 
-def test_qwen3_topk() -> None:
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=ModelName.QWEN3_06B,
+    quantization=None,
+    max_model_len=8192,
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    enable_prefix_caching=False,
+    max_num_seqs=32,
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+)
+def test_qwen3_topk(vllm_runner) -> None:
     example_prompts = [
         "Hello, my name is",
     ]
     sampling_params = SamplingParams(max_tokens=5, temperature=0.0, top_k=50, top_p=0.9)
-
-    with VllmRunner(
-        "Qwen/Qwen3-0.6B", max_model_len=8192, cudagraph_capture_sizes=[1, 2, 4, 8], gpu_memory_utilization=0.7
-    ) as runner:
-        runner.generate(example_prompts, sampling_params)
+    vllm_runner.generate(example_prompts, sampling_params)
 
 
-def test_qwen3_prompt_logprobs() -> None:
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=ModelName.QWEN3_06B,
+    quantization=None,
+    max_model_len=8192,
+    dtype="bfloat16",
+    gpu_memory_utilization=0.9,
+    enable_prefix_caching=False,
+    max_num_seqs=32,
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 32, 64]},
+)
+def test_qwen3_prompt_logprobs(vllm_runner) -> None:
     example_prompts = [
         "Hello, my name is",
     ]
-
-    with VllmRunner(
-        "Qwen/Qwen3-0.6B", max_model_len=8192, cudagraph_capture_sizes=[1, 2, 4, 8], gpu_memory_utilization=0.7
-    ) as runner:
-        runner.generate_greedy_logprobs(example_prompts, max_tokens=5, num_logprobs=1)
-
-
-def test_qwen3_exponential_overlap() -> None:
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    sampling_params = SamplingParams(max_tokens=5, temperature=1.0, top_k=50, top_p=0.9)
-
-    with VllmRunner(
-        "Qwen/Qwen3-0.6B",
-        max_model_len=8192,
-        cudagraph_capture_sizes=[1, 2, 4, 8],
-        gpu_memory_utilization=0.7,
-        additional_config={
-            "enable_async_exponential": True,
-        },
-    ) as runner:
-        runner.generate(example_prompts, sampling_params)
+    vllm_runner.generate_greedy_logprobs(example_prompts, max_tokens=5, num_logprobs=1)

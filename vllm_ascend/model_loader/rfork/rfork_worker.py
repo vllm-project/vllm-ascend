@@ -38,12 +38,15 @@ class RForkWorker:
         seed_timeout_sec: float = 30.0,
         seed_key_separator: str = "$",
         is_draft_model: bool = False,
+        pp_rank: int | None = None,
+        ep_rank: int | None = None,
     ):
         self.device_id = device_id
         self.rfork_seed = None
         self.transfer_backend = RForkTransferBackend()
         self.ready_to_start_seed_service = False
         self.seed_service_started = False
+        self._excluded_weight_blocks: list[tuple[int, int]] = []
         self.seed_timeout_sec = seed_timeout_sec
         self.seed_protocol = RForkSeedProtocol(
             disaggregation_mode=disaggregation_mode,
@@ -54,30 +57,42 @@ class RForkWorker:
             model_deploy_strategy_name=model_deploy_strategy_name,
             seed_key_separator=seed_key_separator,
             is_draft_worker=is_draft_model,
+            pp_rank=pp_rank,
+            ep_rank=ep_rank,
         )
 
     def is_seed_available(self) -> bool:
         self.rfork_seed = self.seed_protocol.get_seed()
         return self.rfork_seed is not None
 
-    def pre_transfer(self, model) -> bool:
+    def set_excluded_weight_blocks(self, excluded_blocks: list[tuple[int, int]] | None) -> None:
+        self._excluded_weight_blocks = list(excluded_blocks) if excluded_blocks else []
+
+    def pre_transfer(self, model, processed_layout: bool) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot pre_transfer."
-            result = self.transfer_backend.register_memory_region(model)
+            result = self.transfer_backend.register_memory_region(
+                model,
+                processed_layout,
+                self._excluded_weight_blocks,
+            )
             self.ready_to_start_seed_service = result
             return result
         except AssertionError as e:
             logger.exception("Pre-transfer failed for device_id=%s: %s", self.device_id, e)
             return False
 
-    def reset_transfer_state(self) -> None:
+    def reset_transfer_state(self) -> bool:
+        unregistered = False
         try:
-            self.transfer_backend.unregister_memory_region()
+            unregistered = self.transfer_backend.unregister_memory_region()
         except Exception as e:
             logger.warning("Failed to unregister rfork memory region: %s", e)
+        # Never serve a stale registration after reset.
         self.ready_to_start_seed_service = False
+        return unregistered
 
-    def transfer(self, model) -> bool:
+    def transfer(self, model, processed_layout: bool) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot transfer."
             assert self.rfork_seed is not None, "rfork seed is None, cannot transfer."
@@ -86,6 +101,7 @@ class RForkWorker:
                 seed_instance_ip=self.rfork_seed["seed_ip"],
                 seed_instance_service_port=self.rfork_seed["seed_port"],
                 local_seed_key=self.seed_protocol.get_local_seed_key(),
+                processed_layout=processed_layout,
             )
         except AssertionError as e:
             logger.exception(
@@ -103,13 +119,13 @@ class RForkWorker:
         self.rfork_seed = None
         return True
 
-    def start_seed_service(self, model):
+    def start_seed_service(self, model, processed_layout: bool):
         if self.seed_service_started:
             logger.info("Seed service already started, skipping.")
             return
 
         if not self.ready_to_start_seed_service:
-            if not self.pre_transfer(model):
+            if not self.pre_transfer(model, processed_layout):
                 logger.warning(
                     "start_seed_service aborted for device_id=%s: pre_transfer failed",
                     self.device_id,

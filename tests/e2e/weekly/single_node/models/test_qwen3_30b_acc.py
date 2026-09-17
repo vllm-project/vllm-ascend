@@ -79,18 +79,14 @@ async def test_models(model: str, tp_size: int) -> None:
         "PYTHONHASHSEED": "0",
         "ASCEND_CONNECT_TIMEOUT": "10000",
         "ASCEND_TRANSFER_TIMEOUT": "10000",
-        "ASCEND_BUFFER_POOL": "4:8",
         "VLLM_USE_V1": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "HCCL_BUFFSIZE": "1024",
         "OMP_NUM_THREADS": "1",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_ASCEND_ENABLE_NZ": "2",
         "MOONCAKE_CONFIG_PATH": "mooncake.json",
     }
-    if tp_size != 1:
-        env_dict["VLLM_ASCEND_ENABLE_FLASHCOMM1"] = "1"
     kv_transfer_config = {
         "kv_connector": "AscendStoreConnector",
         "kv_role": "kv_both",

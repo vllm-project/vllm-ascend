@@ -188,7 +188,8 @@ private:
     __aicore__ inline void CopyOut(const int64_t idx)
     {
         AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
-        DataCopy(yOutGm_[maxLoRARank_ * idx], yOutLocal, maxLoRARank_);
+        uint16_t blockLen = static_cast<uint16_t>(maxLoRARank_ * sizeof(Y_T));
+        DataCopyPad(yOutGm_[maxLoRARank_ * idx], yOutLocal, {1, blockLen, 0, 0});
         outQueueY_.FreeTensor(yOutLocal);
     }
 

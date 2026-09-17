@@ -37,6 +37,8 @@ def _penalties_kernel(
     output_bin_counts_ptr,
     output_bin_counts_stride,
     vocab_size,
+    NUM_VOCAB_BLOCKS: tl.constexpr,
+    VOCAB_GRID_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -56,55 +58,60 @@ def _penalties_kernel(
         # Early return to avoid loading logits.
         return
 
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
-    logits = logits.to(tl.float32)
+    vocab_program_idx = tl.program_id(1)
+    for vocab_block_idx in tl.range(
+        vocab_program_idx,
+        NUM_VOCAB_BLOCKS,
+        VOCAB_GRID_SIZE,
+    ):
+        block = vocab_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = block < vocab_size
+        logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
+        logits = logits.to(tl.float32)
 
-    base_output_counts = tl.load(
-        output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
-        mask=mask,
-        other=0,
-    )
-
-    # Accumulate draft token counts from previous positions directly into
-    # output_bin_counts (preserves its native tensor layout, avoiding an
-    # expensive shared-memory layout conversion after the loop).
-    pos = tl.load(expanded_local_pos_ptr + token_idx)
-    start_idx = token_idx - pos
-    output_bin_counts = base_output_counts
-    for prev_pos in tl.range(pos):
-        prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
-        token_match = block == prev_token
-        output_bin_counts = output_bin_counts + token_match.to(tl.int32)
-    output_bin_mask = output_bin_counts != 0
-
-    # Apply repetition penalties.
-    if use_rep_penalty:
-        packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
-        packed_mask = tl.load(
-            prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
-            mask=packed_block < tl.cdiv(vocab_size, 32),
+        base_output_counts = tl.load(
+            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
+            mask=mask,
             other=0,
         )
-        bit_masks = 1 << tl.arange(0, 32)
-        bit_masks_expanded = bit_masks[None, :]
-        packed_expanded = packed_mask[:, None]
-        bits_matrix = (packed_expanded & bit_masks_expanded) != 0
-        prompt_bin_mask = bits_matrix.reshape(BLOCK_SIZE)
 
-        # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-        scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
-        # If logits are positive, divide by penalty, otherwise multiply by penalty.
-        logits *= tl.where(logits > 0, 1.0 / scale, scale)
+        # Accumulate draft token counts from previous positions directly into
+        # output_bin_counts (preserves its native tensor layout, avoiding an
+        # expensive shared-memory layout conversion after the loop).
+        pos = tl.load(expanded_local_pos_ptr + token_idx)
+        start_idx = token_idx - pos
+        output_bin_counts = base_output_counts
+        for prev_pos in tl.range(pos):
+            prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
+            token_match = block == prev_token
+            output_bin_counts = output_bin_counts + token_match.to(tl.int32)
+        output_bin_mask = output_bin_counts != 0
 
-    # Apply frequency penalties.
-    logits -= freq_penalty * output_bin_counts
-    # Apply presence penalties.
-    logits -= pres_penalty * output_bin_mask
-    # Store back to logits.
-    tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
+        # Apply repetition penalties.
+        if use_rep_penalty:
+            packed_block = vocab_block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
+            packed_mask = tl.load(
+                prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
+                mask=packed_block < tl.cdiv(vocab_size, 32),
+                other=0,
+            )
+            bit_masks = 1 << tl.arange(0, 32)
+            bit_masks_expanded = bit_masks[None, :]
+            packed_expanded = packed_mask[:, None]
+            bits_matrix = (packed_expanded & bit_masks_expanded) != 0
+            prompt_bin_mask = bits_matrix.reshape(BLOCK_SIZE)
+
+            # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
+            scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
+            # If logits are positive, divide by penalty, otherwise multiply by penalty.
+            logits *= tl.where(logits > 0, 1.0 / scale, scale)
+
+        # Apply frequency penalties.
+        logits -= freq_penalty * output_bin_counts
+        # Apply presence penalties.
+        logits -= pres_penalty * output_bin_mask
+        # Store back to logits.
+        tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
 def apply_penalties(
@@ -120,8 +127,9 @@ def apply_penalties(
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 4096
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _penalties_kernel[(num_tokens, num_blocks)](
+    num_vocab_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    vocab_grid_size = min(num_vocab_blocks, 65535 // num_tokens)
+    _penalties_kernel[(num_tokens, vocab_grid_size)](
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -135,6 +143,8 @@ def apply_penalties(
         output_bin_counts,
         output_bin_counts.stride(0),
         vocab_size,
+        NUM_VOCAB_BLOCKS=num_vocab_blocks,
+        VOCAB_GRID_SIZE=vocab_grid_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

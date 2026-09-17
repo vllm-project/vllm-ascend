@@ -15,6 +15,12 @@ using namespace Catlass;
 
 // constexpr uint32_t PING_PONG_STAGES = 1;
 constexpr uint32_t PING_PONG_STAGES = 2;
+constexpr uint32_t BYTE_SIZE_16_BIT = 2;
+constexpr uint32_t BYTES_PER_C0 = 32;
+constexpr uint32_t BYTE_SIZE_PER_REPEAT = 256;
+constexpr uint32_t SIZE_16_NUM_PER_C0 = BYTES_PER_C0 / BYTE_SIZE_16_BIT;
+constexpr uint32_t FLOAT_NUM_PER_REPEAT = BYTE_SIZE_PER_REPEAT / sizeof(float);
+constexpr uint32_t NZ_BLOCK_SIZE = 16;
 
 template <typename T>
 CATLASS_DEVICE T AlignUp(T a, T b) {
@@ -40,19 +46,45 @@ struct GDNFwdHOffsets {
     uint32_t wkOffset;
     uint32_t wOffset;
     uint32_t gOffset;
+    uint32_t gkOffset;
     uint32_t hWorkOffset;
     uint32_t vWorkOffset;
+    uint32_t kDecayWorkOffset;
+    uint32_t vBlockOffset;
+    uint32_t vBlockDim;
     uint32_t initialStateOffset;
     uint32_t finalStateOffset;
     bool isInitialState;
     bool isFinalState;
     uint32_t blockTokens;
-    bool isDummyHead;
+    uint32_t streamId;
     // for debug
     uint32_t batchIdx;
     uint32_t headIdx;
     uint32_t chunkIdx;
 
+};
+
+struct GDNFwdHStream {
+    uint32_t batchIdx;
+    uint32_t chunkIdx{0};
+    uint32_t vHeadIdx;
+    uint32_t kHeadIdx;
+    uint32_t shapeBatchIdx;
+    uint32_t tokenBatchIdx;
+
+    uint32_t chunkOffset;
+    uint32_t tokenOffset;
+    uint32_t batchChunks{0};
+    uint32_t batchTokens;
+    uint32_t nextTaskIdx{0};
+    bool active{false};
+
+    GDNFwdHOffsets offset;
+};
+
+struct GDNFwdHRunningQ {
+    GDNFwdHStream streams[PING_PONG_STAGES];
 };
 
 struct BlockSchedulerGdnFwdH {
@@ -63,7 +95,6 @@ struct BlockSchedulerGdnFwdH {
     uint32_t kHeadDim;
     uint32_t vHeadDim;
     uint32_t chunkSize;
-    uint32_t initalStateStride0;
     uint32_t vBlockSize{128};
     uint32_t isVariedLen;
     uint32_t shapeBatch;
@@ -74,48 +105,26 @@ struct BlockSchedulerGdnFwdH {
     uint32_t numChunksWorkspaceOffset;
 
     uint32_t taskIdx;
-    uint32_t taskLoops;
+    uint32_t taskStride;
     uint32_t cubeCoreIdx;
     uint32_t cubeCoreNum;
-    uint32_t vLoops;
     uint32_t taskNum;
     uint32_t headGroups;
     uint32_t totalChunks;
     uint32_t totalTokens;
-    uint32_t headInnerLoop;
 
-    uint32_t iterId {0};
-    bool hasDummyHead;
+    GDNFwdHRunningQ runningQ;
+
     bool isRunning;
-    bool processNewTask {true};
-    bool firstLoop {true};
-    bool lastLoop {false};
-    GDNFwdHOffsets offsets[PING_PONG_STAGES];
-    int32_t currStage{PING_PONG_STAGES - 1};
-
-    uint32_t vIdx;
-    uint32_t batchIdx;
-    uint32_t baseHeadIdx;
-    uint32_t chunkIdx;
-    uint32_t headInnerIdx;
-    uint32_t vHeadIdx;
-    uint32_t kHeadIdx;
-    uint32_t shapeBatchIdx;
-    uint32_t tokenBatchIdx;
-    
-    uint32_t chunkOffset;
-    uint32_t tokenOffset;
-    uint32_t batchChunks;
-    uint32_t batchTokens;
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
 
-    Arch::CrossCoreFlag cube1Done{0};
-    Arch::CrossCoreFlag vec1Done{1};
-    Arch::CrossCoreFlag cube2Done{2};
-    Arch::CrossCoreFlag vec2Done{3};
+    Arch::CrossCoreFlag cube1Done[PING_PONG_STAGES] = {0, 1};
+    Arch::CrossCoreFlag vec1Done[PING_PONG_STAGES] = {2, 3};
+    Arch::CrossCoreFlag cube2Done[PING_PONG_STAGES] = {4, 5};
+    Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {6, 7};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdH() {}
@@ -131,7 +140,6 @@ struct BlockSchedulerGdnFwdH {
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
-        initalStateStride0 = gdnFwdHTilingData->initalStateStride0;
         isVariedLen = gdnFwdHTilingData->isVariedLen;
         shapeBatch = gdnFwdHTilingData->shapeBatch;
         tokenBatch = gdnFwdHTilingData->tokenBatch;
@@ -171,91 +179,134 @@ struct BlockSchedulerGdnFwdH {
 
         cubeCoreIdx = coreIdx;
         cubeCoreNum = coreNum;
-        vLoops = vHeadDim / vBlockSize;
-        taskNum = vLoops * batch * vNumHead;
+        vBlockSize = vHeadDim;
+        taskNum = batch * vNumHead;
         headGroups = vNumHead / kNumHead;
-        hasDummyHead = (taskNum % (PING_PONG_STAGES * cubeCoreNum) <= cubeCoreNum) && (taskNum % (PING_PONG_STAGES * cubeCoreNum) > 0);
-        taskLoops = (taskNum + cubeCoreNum * PING_PONG_STAGES - 1) / (cubeCoreNum * PING_PONG_STAGES);
-        headInnerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
-        taskIdx = cubeCoreIdx * headInnerLoop;
-        isRunning = taskIdx < taskNum;
+        uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        taskStride = cubeCoreNum * maxTaskCntPerLoop;
+        for (uint32_t streamId = 0; streamId < PING_PONG_STAGES; ++streamId) {
+            auto& stream = runningQ.streams[streamId];
+            stream.nextTaskIdx = (streamId < maxTaskCntPerLoop) ? (cubeCoreIdx * maxTaskCntPerLoop + streamId) : taskNum;
+            stream.chunkIdx = 0;
+            stream.batchChunks = 0;
+            stream.active = false;
+        }
+        isRunning = cubeCoreIdx * maxTaskCntPerLoop < taskNum;
 
     }
 
+
     CATLASS_DEVICE
-    void InitTask() {
-        iterId++;
-        currStage = (currStage + 1) % PING_PONG_STAGES;
-        if (processNewTask) {
-            if (taskIdx >= taskNum) {
-                lastLoop = true;
-                isRunning = false;
-                return;
+    void InitNewStream(GDNFwdHStream& newStream) {
+        newStream.batchIdx = taskIdx / vNumHead;
+        newStream.vHeadIdx = taskIdx % vNumHead;
+        newStream.kHeadIdx = newStream.vHeadIdx / headGroups;
+        newStream.shapeBatchIdx = isVariedLen ? 0 : newStream.batchIdx;
+        newStream.tokenBatchIdx = isVariedLen ? newStream.batchIdx : 0;
+        newStream.chunkOffset = isVariedLen ? gmNumChunks.GetValue(newStream.tokenBatchIdx) : 0;
+        newStream.batchChunks = isVariedLen ? (gmNumChunks.GetValue(newStream.tokenBatchIdx + 1) - newStream.chunkOffset) : totalChunks;
+        newStream.tokenOffset = isVariedLen ? gmNumSeq.GetValue(newStream.tokenBatchIdx) : 0;
+        newStream.batchTokens = isVariedLen ? (gmNumSeq.GetValue(newStream.tokenBatchIdx + 1) - newStream.tokenOffset) : totalTokens;
+        newStream.chunkIdx = 0;
+    }
+
+    CATLASS_DEVICE
+    void AssignNextStream(uint32_t streamId) {
+        auto& stream = runningQ.streams[streamId];
+        taskIdx = stream.nextTaskIdx;
+        if (taskIdx >= taskNum) {
+            stream.active = false;
+            stream.batchChunks = 0;
+            return;
+        }
+
+        stream.nextTaskIdx += taskStride;
+        InitNewStream(stream);
+        stream.active = stream.batchChunks > 0;
+        if (stream.active) {
+            UpdateTask(streamId);
+        }
+    }
+
+    CATLASS_DEVICE
+    void UpdateTask(uint32_t streamId) {
+        auto& stream = runningQ.streams[streamId];
+        auto& offset = stream.offset;
+
+        offset.isInitialState = stream.chunkIdx == 0;
+        offset.isFinalState = stream.chunkIdx == (stream.batchChunks - 1);
+        uint32_t vBlockOffset = 0;
+        uint32_t vBlockDim = vBlockSize;
+        offset.initialStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
+        offset.finalStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
+        offset.hSrcOffset = (stream.shapeBatchIdx * vNumHead * totalChunks + stream.vHeadIdx * totalChunks + stream.chunkOffset + stream.chunkIdx) * kHeadDim * vHeadDim + vBlockOffset;
+        offset.hDstOffset = offset.hSrcOffset + kHeadDim * vHeadDim;
+        if (storeFinalState && offset.isFinalState) {
+            offset.hDstOffset = offset.hSrcOffset;
+        }
+        offset.uvOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * vHeadDim + vBlockOffset;
+        offset.wkOffset = (stream.shapeBatchIdx * kNumHead * totalTokens + stream.kHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
+        offset.wOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
+        offset.gOffset = stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize;
+        offset.gkOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
+        offset.hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * kHeadDim * vBlockSize;
+        offset.vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * vBlockSize;
+        offset.kDecayWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * kHeadDim;
+        offset.vBlockOffset = vBlockOffset;
+        offset.vBlockDim = vBlockDim;
+        offset.blockTokens = offset.isFinalState ? (stream.batchTokens - stream.chunkIdx * chunkSize) : chunkSize;
+        offset.streamId = streamId;
+        offset.batchIdx = stream.batchIdx;
+        offset.headIdx = stream.vHeadIdx;
+        offset.chunkIdx = stream.chunkIdx;
+    }
+
+    CATLASS_DEVICE
+    void InitTasks() {
+        isRunning = false;
+        for (uint32_t streamId = 0; streamId < PING_PONG_STAGES; ++streamId) {
+            auto& stream = runningQ.streams[streamId];
+            if (stream.active) {
+                stream.chunkIdx += 1;
+                if (stream.chunkIdx >= stream.batchChunks) {
+                    stream.active = false;
+                    stream.batchChunks = 0;
+                }
             }
-            vIdx = taskIdx / (batch * vNumHead);
-            batchIdx = (taskIdx - vIdx * batch * vNumHead) / vNumHead;
-            baseHeadIdx = taskIdx % vNumHead;
-            shapeBatchIdx = isVariedLen ? 0 : batchIdx;
-            tokenBatchIdx = isVariedLen ? batchIdx : 0;
-            chunkOffset = isVariedLen ? gmNumChunks.GetValue(tokenBatchIdx) : 0;
-            batchChunks = isVariedLen ? (gmNumChunks.GetValue(tokenBatchIdx + 1) - chunkOffset) : totalChunks;
-            tokenOffset = isVariedLen ? gmNumSeq.GetValue(tokenBatchIdx) : 0;
-            batchTokens = isVariedLen ? (gmNumSeq.GetValue(tokenBatchIdx + 1) - tokenOffset) : totalTokens;
-            chunkIdx = 0;
-            headInnerIdx = 0;
-        } else {
-            chunkIdx = headInnerIdx == PING_PONG_STAGES - 1 ? chunkIdx + 1 : chunkIdx;
-            headInnerIdx = (headInnerIdx + 1) % PING_PONG_STAGES;
-        }
-        
-        vHeadIdx = baseHeadIdx + headInnerIdx;
-        kHeadIdx = vHeadIdx / headGroups;
-        offsets[currStage].isInitialState = chunkIdx == 0; 
-        offsets[currStage].isFinalState = chunkIdx == (batchChunks - 1);
-        offsets[currStage].initialStateOffset = (batchIdx * vNumHead + vHeadIdx) * kHeadDim * initalStateStride0;
-        offsets[currStage].finalStateOffset = (batchIdx * vNumHead + vHeadIdx) * kHeadDim * vHeadDim;  
-        offsets[currStage].hSrcOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset + chunkIdx) * kHeadDim * vHeadDim;
-        offsets[currStage].hDstOffset = offsets[currStage].hSrcOffset + kHeadDim * vHeadDim;
-        offsets[currStage].uvOffset = (shapeBatchIdx * vNumHead * totalTokens + vHeadIdx * totalTokens + tokenOffset + chunkIdx * chunkSize) * vHeadDim;
-        offsets[currStage].wkOffset = (shapeBatchIdx * kNumHead * totalTokens + kHeadIdx * totalTokens + tokenOffset + chunkIdx * chunkSize) * kHeadDim;
-        offsets[currStage].wOffset = (shapeBatchIdx * vNumHead * totalTokens + vHeadIdx * totalTokens + tokenOffset + chunkIdx * chunkSize) * kHeadDim;
-        offsets[currStage].gOffset = shapeBatchIdx * vNumHead * totalTokens + vHeadIdx * totalTokens + tokenOffset + chunkIdx * chunkSize;
-        offsets[currStage].hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * kHeadDim * vHeadDim;
-        offsets[currStage].vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * vHeadDim;
-        offsets[currStage].blockTokens = offsets[currStage].isFinalState ? (batchTokens - chunkIdx * chunkSize) : chunkSize;
-        offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop; 
-        offsets[currStage].batchIdx = batchIdx; 
-        offsets[currStage].headIdx = vHeadIdx; 
-        offsets[currStage].chunkIdx = chunkIdx; 
-
-        processNewTask = chunkIdx == batchChunks - 1 && headInnerIdx == PING_PONG_STAGES - 1;
-        if (processNewTask) {
-            uint32_t currLoopIdx = taskIdx / (PING_PONG_STAGES * cubeCoreNum);
-            headInnerLoop = ((currLoopIdx + 2 == taskLoops) && hasDummyHead) ? 1 : PING_PONG_STAGES;
-            taskIdx = (currLoopIdx + 1) * PING_PONG_STAGES * cubeCoreNum + headInnerLoop * cubeCoreIdx;
+            if (!stream.active) {
+                AssignNextStream(streamId);
+            } else {
+                UpdateTask(streamId);
+            }
+            if (stream.active) {
+                isRunning = true;
+            }
         }
     }
 
     CATLASS_DEVICE
-    GDNFwdHOffsets& GetStage1Offsets() {
-        return offsets[currStage];
-    }
-    
-    CATLASS_DEVICE
-    bool NeedProcessStage1() {
-        GDNFwdHOffsets& stage1Offsets = GetStage1Offsets();
-        return !(lastLoop || stage1Offsets.isDummyHead);
+    const GDNFwdHStream& GetStream(uint32_t i) const {
+        return runningQ.streams[i];
     }
 
     CATLASS_DEVICE
-    GDNFwdHOffsets& GetStage2Offsets() {
-        return offsets[(currStage - 1) % PING_PONG_STAGES];
+    uint32_t GetStreamId(uint32_t i) const {
+        return i;
     }
 
     CATLASS_DEVICE
-    bool NeedProcessStage2() {
-        GDNFwdHOffsets& stage2Offsets = GetStage2Offsets();
-        return !(iterId == 1 || (!storeFinalState && stage2Offsets.isFinalState) || stage2Offsets.isDummyHead);
+    const GDNFwdHOffsets& GetCurTaskOffsets(const GDNFwdHStream& stream) const {
+        return stream.offset;
+    }
+
+    CATLASS_DEVICE
+    bool StreamIsDone(const GDNFwdHStream& stream) const {
+        return !stream.active;
+    }
+
+    CATLASS_DEVICE
+    bool NeedProcessStage2(const GDNFwdHStream& stream) {
+        return storeFinalState || !stream.offset.isFinalState;
     }
 };
 
@@ -276,7 +327,10 @@ struct BlockSchedulerGdnFwdHVec : public BlockSchedulerGdnFwdH {
 
     CATLASS_DEVICE
     void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user) {
-        BlockSchedulerGdnFwdH::Init(cu_seqlens, chunk_indices, tiling, user, AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(), AscendC::GetBlockNum());
+        BlockSchedulerGdnFwdH::Init(
+            cu_seqlens, chunk_indices, tiling, user,
+            AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(),
+            AscendC::GetBlockNum());
     }
 
 };

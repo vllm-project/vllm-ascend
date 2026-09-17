@@ -38,7 +38,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
+from vllm_ascend.distributed.parallel_state import (
+    GroupCoordinator,
+    get_embed_tp_group,
+    get_lmhead_tp_group,
+    get_replicated_group,
+)
 from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
 
@@ -58,10 +63,29 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
+        self.disable_tp = disable_tp
+
+        # A disable_tp layer is pinned to the world_size=1 ReplicatedGroup:
+        # every rank holds the full table, tp_size==1 makes shard_indices
+        # cover the full vocab, and forward / logits skip all TP
+        # communication. The DSpark Markov head reaches this through the
+        # upstream interface — vllm's DSparkMarkovHead constructs the markov
+        # lm_head with disable_tp=True (vllm#49731; its markov_w1 is a plain
+        # nn.Embedding) — so Ascend needs no prefix heuristic of its own.
+        # disable_tp must be matched before the lmhead prefix: the markov
+        # prefix ("layers.N.markov_head.markov_w2") also contains "head" and
+        # would otherwise be routed to the lmhead_tp group. The
+        # ReplicatedGroup is a pure stand-in (no hcclCommInitRootInfoConfig)
+        # exposing the attributes read below, so tp_size / tp_rank always
+        # derive from the group — no None special case.
+        if disable_tp:
+            self.comm_group = get_replicated_group()
+        elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
@@ -134,7 +158,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             weight_loader=self.weight_loader,
         )
 
-    def _get_masked_input_and_mask(
+        self.update_param_tp_status()
+
+    def _mask_input_for_vocab_range(
         self,
         input_: torch.Tensor,
         org_vocab_start_index: int,
@@ -164,8 +190,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
     def forward(self, input_):
         if self.forward_type == "embed_tp":
             return self._forward_embed_tp(input_)
-        else:
-            return self._forward_origin(input_)
+        return self._forward_origin(input_)
 
     def _forward_embed_tp(self, input_):
         num_tokens = input_.shape[0]
@@ -207,7 +232,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         # Masking unchanged; padding rows map to OOB and get masked to 0
         # via masked_fill_ below (token_id=0 stays in-range after shift).
-        masked_input, input_mask = self._get_masked_input_and_mask(
+        masked_input, input_mask = self._mask_input_for_vocab_range(
             complete_input,
             self.shard_indices.org_vocab_start_index,
             self.shard_indices.org_vocab_end_index,
@@ -229,7 +254,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
     def _forward_origin(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            masked_input, input_mask = self._get_masked_input_and_mask(
+            masked_input, input_mask = self._mask_input_for_vocab_range(
                 input_,
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
@@ -244,9 +269,20 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        else:
+            return output_parallel
+
         # Reduce across all the model parallel GPUs.
-        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
-        return output
+        tp_group = get_tp_group()
+        if tp_group.world_size == 1:
+            return output_parallel
+        # vLLM 0.26 model forwards expect the first decoder layer to receive
+        # the complete token sequence. Sequence parallelism starts only after
+        # that layer's attention output, so reducing-scattering the embedding
+        # here would feed each TP rank only a token shard. The dedicated
+        # embedding-TP path above owns its complete gather/scatter protocol;
+        # the regular TP embedding path must keep upstream all-reduce semantics.
+        return torch.ops.vllm.all_reduce(output_parallel, tp_group.unique_name)
 
 
 class AscendParallelLMHead(ParallelLMHead):
@@ -263,11 +299,20 @@ class AscendParallelLMHead(ParallelLMHead):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         AscendVocabParallelEmbedding.__init__(
-            self, num_embeddings, embedding_dim, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
+            self,
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+            disable_tp=disable_tp,
         )
-
         self.quant_config = quant_config
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
@@ -282,19 +327,79 @@ class AscendParallelLMHead(ParallelLMHead):
             self.register_parameter("bias", None)
 
 
+def lmhead_all_to_all(
+    logits: torch.Tensor,
+    comm_group: GroupCoordinator,
+) -> torch.Tensor:
+    """All-to-all for lm-head TP: redistribute `[N, V/P]` (all tokens, partial
+    vocab) into `[N/P, V]` (partial tokens, full vocab).
+
+    Uses ``all_to_all_single`` on the P axis made explicit by a ``view``: the
+    input is reshaped to ``[P, N/P, V/P]`` so that dim 0 carries the per-rank
+    token shard. After the single collective, ``permute(1, 0, 2)`` interleaves
+    the vocab shards of each token, and a final ``view`` flattens back to
+    ``[N/P, V]``. This is mathematically equivalent to the list-based
+    ``tensor_split(dim=0) + all_to_all(list) + cat(dim=-1)`` but keeps a single
+    contiguous buffer for better HCCL fusion, and avoids the Python list of
+    per-rank tensors.
+
+    The vocab shard ``V/P`` is identical on every rank because
+    ``pad_vocab_size`` + ``divide`` align it at build time. The token count
+    ``N`` must be divisible by ``world_size`` so ``all_to_all_single`` can
+    redistribute dim 0 equally; this is checked explicitly to give a clear
+    error instead of the cryptic ``view`` shape failure.
+    """
+    world_size = comm_group.world_size
+    if world_size == 1:
+        return logits
+    # all_to_all_single in SPMD mode requires equal split along dim 0:
+    # the view [P, N/P, V/P] below needs N divisible by P.
+    if logits.shape[0] % world_size != 0:
+        raise ValueError(
+            f"logits.shape[0] ({logits.shape[0]}) must be divisible by world_size ({world_size}) for lmhead_all_to_all."
+        )
+    vocab_per_partition = logits.shape[-1]
+    # [N, V/P] -> [P, N/P, V/P]. The `.contiguous()` is a no-op on the live
+    # lm-head path (fresh matmul output), but load-bearing for the spec-decode
+    # reduce-sample callers, whose input is a vocab-truncated last-dim slice
+    # (non-contiguous whenever the vocab shard is padded): view() would fail.
+    input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
+    output = torch.empty_like(input_)
+    dist.all_to_all_single(output, input_, group=comm_group.device_group)
+    # [P, N/P, V/P] -> [N/P, P, V/P] -> [N/P, V]
+    return output.permute(1, 0, 2).contiguous().view(-1, world_size * vocab_per_partition)
+
+
 class AscendLogitsProcessor(LogitsProcessor):
     """
     Register LogitsProcessor as a custom op for Ascend.
     Added the feature of lmheadTP in pure dp scenario
     """
 
+    def _apply_head(
+        self,
+        lm_head: AscendParallelLMHead,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return super()._apply_head(lm_head, hidden_states, embedding_bias)
+
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
-        if lmhead_tp_enable():
+        # vLLM #50465 added skip_gather; when set, upstream returns the
+        # untruncated apply_head result for spec-decode/top-k callers.
+        if skip_gather:
+            return self._apply_head(lm_head, hidden_states, embedding_bias)
+        # A replicated head (tp_size==1, e.g. the DSpark markov lm_head)
+        # must take the normal path: the lmhead_tp path gathers hidden
+        # states / scatters logits across the finegrained group, which a
+        # replicated head must not participate in.
+        if lmhead_tp_enable() and lm_head.tp_size > 1:
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
@@ -307,10 +412,10 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
-        logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
+        logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
         if not get_ascend_config().enable_reduce_sample:
-            logits = get_lmhead_tp_group().all_to_all(logits)
+            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
 
         # Remove paddings in vocab (if any)
         if logits is not None:
@@ -326,9 +431,12 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
-        # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        # Gather logits for tensor parallel. _gather_logits uses the global TP
+        # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
+        # each rank already holds the full vocab logits locally and no
+        # all-gather is needed.
+        if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
