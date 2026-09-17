@@ -178,6 +178,22 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
 
+    def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
+        if mixed_qkv is None:
+            return None, None, None
+
+        q_dim = self.key_dim // self.tp_size
+        k_dim = q_dim
+        v_dim = self.value_dim // self.tp_size
+        num_tokens = mixed_qkv.shape[0]
+        packed_qkv = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)
+        query, key, value = packed_qkv.split([num_tokens * q_dim, num_tokens * k_dim, num_tokens * v_dim])
+        return (
+            query.view(1, num_tokens, q_dim // self.head_k_dim, self.head_k_dim),
+            key.view(1, num_tokens, k_dim // self.head_k_dim, self.head_k_dim),
+            value.view(1, num_tokens, v_dim // self.head_v_dim, self.head_v_dim),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
