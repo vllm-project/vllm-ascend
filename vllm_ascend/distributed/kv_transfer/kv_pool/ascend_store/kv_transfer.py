@@ -694,6 +694,22 @@ class KVTransferThread(threading.Thread):
         if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == row_count):
             raise ValueError("Mooncake range metadata must contain one buffer/size/offset row per key")
 
+        # Default configuration (both limits unset) means one batch holding every
+        # key and no per-segment splitting, so every row passes through as-is
+        # unless it carries an empty or negative segment. Detect that case and
+        # hand back the caller's own lists: this runs once per key, per layer,
+        # per group, and rebuilding them element-wise was the receive thread's
+        # largest single block of exposed time.
+        if max_transfer_blocks <= 0 and max_transfer_bytes <= 0:
+            for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
+                if not (len(buffers) == len(sizes) == len(offsets)):
+                    raise ValueError("Mooncake range rows must align buffers, sizes, and offsets")
+                if sizes and min(sizes) >= 0 and 0 not in sizes:
+                    continue
+                break
+            else:
+                return [(keys, all_buffers, all_sizes, all_offsets)]
+
         normalized_buffers: list[list[int]] = []
         normalized_sizes: list[list[int]] = []
         normalized_offsets: list[list[int]] = []
@@ -1920,10 +1936,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if self._active_load_indices is None or layer_id == 0:
             self._active_load_indices = set(range(len(req_meta.keys)))
         assert self._active_load_indices is not None
+        # Read the abort flag once: this comprehension covers every key of the
+        # layer, so an is_set() per key is pure overhead in the receive thread.
+        aborted = self._load_abort_event.is_set()
         active_indices = [
-            index
-            for index in range(len(req_meta.keys))
-            if not self._load_abort_event.is_set() and index in self._active_load_indices
+            index for index in range(len(req_meta.keys)) if not aborted and index in self._active_load_indices
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:

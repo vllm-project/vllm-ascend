@@ -11,6 +11,10 @@ from copy import copy
 from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING
 
+from vllm.logger import logger
+from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -21,14 +25,45 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
+def group_cache_spec_signature(group) -> tuple[str, ...]:
+    """Per-group cache schemas, independent of how the spec is packaged.
+
+    The scheduler and a worker can hold the *same* group in two different
+    shapes: one merged spec versus a ``UniformTypeKVCacheSpecs`` mapping every
+    layer name to its own spec. Reduce either shape to the set of its member
+    schemas so equivalent layouts agree without discarding dtype or geometry.
+    """
+    spec = group.kv_cache_spec
+    specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+    signatures = set()
+    for sub in specs:
+        fields = asdict(sub) if is_dataclass(sub) else vars(sub)
+        signatures.add(json.dumps((type(sub).__name__, fields), sort_keys=True, default=str))
+    return tuple(sorted(signatures))
+
+
 def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
-    """Stable across processes; isolates group order, layer membership and specs."""
+    """Namespace every pool key, and must agree across processes.
+
+    Only representation-independent fields participate. Hashing the spec
+    objects does *not* work: the scheduler holds one merged spec per group
+    while a worker holds the per-layer ``UniformTypeKVCacheSpecs`` for the same
+    group, so ``asdict`` yields different JSON on each side. That produced two
+    disjoint key spaces — writes landed under one prefix and the hit check
+    queried another, so the pool never reported a hit, silently and with no
+    error anywhere.
+
+    Layer membership, group order and normalized member schemas are identical
+    in both representations. Keeping the member type and fields also isolates
+    incompatible dtypes and cache geometries.
+    """
     groups = []
     for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        fields = asdict(spec) if is_dataclass(spec) else vars(spec)
-        groups.append((sorted(group.layer_names), type(spec).__name__, fields))
-    encoded = json.dumps((tp_size, groups), sort_keys=True, default=str).encode()
+        groups.append((sorted(group.layer_names), group_cache_spec_signature(group)))
+    # No default= fallback on purpose: anything non-serializable here would have
+    # to come from a repr that can differ per process, which is exactly the bug
+    # this hash must never reacquire. Fail loudly instead.
+    encoded = json.dumps((tp_size, groups), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -36,6 +71,41 @@ def hybrid_block_key(
     model: str, layout: str, group: int, family: str, block_size: int, block_hash: str, head: int
 ) -> str:
     return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@family:{family}@block:{block_size}@{block_hash}@{head}"
+
+
+def layerwise_fence_drains_recv() -> bool:
+    """Whether the attention-window fence also quiesces the LOAD queue.
+
+    Off by default: the load queue carries the prefetch that layerwise exists
+    to overlap, and per-layer completion is already enforced by
+    ``wait_for_layer_load``. Set ``VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV=1`` to
+    restore the old whole-queue fence when diagnosing interconnect contention
+    between loads and collectives.
+    """
+    return bool(envs.VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV)
+
+
+def layerwise_send_fence_backlog() -> int:
+    """How many queued layer saves may stay outstanding at an attention boundary.
+
+    The attention-window fence used to drain the SAVE queue to zero after every
+    layer. The send thread is single-threaded, so a zero backlog means the put
+    for layer L must be entirely on the wire before layer L+1's collectives may
+    launch: the transfer is serialized against compute instead of overlapping
+    it, which is the opposite of what layerwise exists to do. Measured on the
+    prefill node this pinned ~26 ms per layer (~1.2 s per 44-layer step).
+
+    Bounding the backlog instead lets the send thread work on layer L-N -- whose
+    ``sync_save_events`` have long since completed -- while the compute stream is
+    already several layers ahead. Ordering is unaffected because the thread still
+    consumes the queue strictly in submission order, and only one ranged put is
+    ever in flight. Complete publication is still guaranteed: ``save_kv_layer``
+    waits for the final layer's save event at the end of every step, which
+    implies every earlier layer has committed.
+
+    0 restores the old drain-to-zero fence; a larger value allows more overlap.
+    """
+    return max(0, int(envs.VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG))
 
 
 def selected(mask, index: int) -> bool:
@@ -143,15 +213,53 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             with worker._put_started_keys_lock:
                 started = set(names) & worker._put_started_keys
             new = [name for name in names if name not in started]
+            # A block that is already readable in the pool must never be re-put.
+            # Mooncake refuses to write into a committed object
+            # (MMC_UNMATCHED_KEY) and the aborted session leaves that object
+            # unusable for every reader. `_put_started_keys` only covers writers
+            # still in flight, and it is cleared once a session commits, so
+            # every later request sharing the prefix — and every concurrent
+            # prefill rank, whose keys carry no DP component — would otherwise
+            # re-open a session over the same committed blocks forever.
+            # The non-layerwise path filters through
+            # Backend.requires_exists_before_put; the hybrid path must too.
+            if new:
+                missing = worker._filter_pool_existing_keys(new)
+                if len(missing) != len(new):
+                    logger.debug(
+                        "Mooncake hybrid: req=%s group=%d skipping %d/%d blocks already pooled",
+                        request.req_id,
+                        group,
+                        len(new) - len(missing),
+                        len(new),
+                    )
+                new = missing
             if new:
                 try:
                     codes = worker._start_mooncake_put_keys(new, sum(worker.group_block_len[group]))
                 except Exception:
                     worker._queue_layerwise_revoke_keys(new)
                     raise
-                started.update(name for name, code in zip(new, codes, strict=True) if code == 0)
-                with worker._put_started_keys_lock:
-                    worker._put_started_keys.update(started)
+                started_now = {name for name, code in zip(new, codes, strict=True) if code == 0}
+                rejected = [name for name, code in zip(new, codes, strict=True) if code != 0]
+                if rejected:
+                    # Non-zero means the session was never opened, so this rank
+                    # owns nothing to revoke — and revoking a key another rank
+                    # committed would discard its object. Report instead of
+                    # acting: this used to be dropped in silence, which is how a
+                    # permanently unhittable pool went unnoticed.
+                    logger.warning(
+                        "Mooncake hybrid put_start rejected %d/%d keys for group %d (codes=%s); "
+                        "those blocks stay unsaved this step.",
+                        len(rejected),
+                        len(new),
+                        group,
+                        [code for code in codes if code != 0][:4],
+                    )
+                started.update(started_now)
+                if started_now:
+                    with worker._put_started_keys_lock:
+                        worker._put_started_keys.update(started_now)
             for name, index in key_indices:
                 if name in started:
                     view.save_block_keys[index - start] = name

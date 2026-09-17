@@ -12,7 +12,12 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from tests.ut.distributed.ascend_store import test_pool_scheduler as scheduler_tests
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
@@ -246,6 +251,20 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(block_size=16, dtype="float16")
         self.assertNotEqual(original, hybrid_layout_id(config))
 
+    def test_layout_fingerprint_normalizes_uniform_wrapper(self):
+        spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
+        layer_names = ["model.layers.0.kv", "model.layers.1.kv"]
+        scheduler_config = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)])
+        worker_config = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names,
+                    UniformTypeKVCacheSpecs.from_specs({name: spec for name in layer_names}),
+                )
+            ]
+        )
+        self.assertEqual(hybrid_layout_id(scheduler_config), hybrid_layout_id(worker_config))
+
     def test_attention_window_drains_before_communication_and_on_exception(self):
         for fail in (False, True):
             events = []
@@ -419,7 +438,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         worker.kv_recv_thread.request_queue.put(object())
         worker.kv_recv_thread._fatal_error = RuntimeError("receiver died")
         with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer"):
-            worker._drain_attention_transfers()
+            worker._drain_attention_transfers(full=True)
         worker.kv_recv_thread.request_queue.get_nowait()
         worker.kv_recv_thread.request_queue.task_done()
         # Also cover failure before a new attention gate has been configured.

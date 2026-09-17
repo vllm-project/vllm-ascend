@@ -90,6 +90,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid import (
     hybrid_layout_id,
+    layerwise_fence_drains_recv,
+    layerwise_send_fence_backlog,
     prepare_group_sessions,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
@@ -1885,6 +1887,52 @@ class KVPoolWorker:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
         return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]
 
+    def _filter_pool_existing_keys(self, keys: list[str]) -> list[str]:
+        """Drop keys whose block is already readable in the pool.
+
+        Mooncake refuses to overwrite a committed object (MMC_UNMATCHED_KEY):
+        the put session start fails for that key, nothing is committed, and a
+        following put range write into the readable blob can render the object
+        unusable for readers. The hybrid layerwise save path must therefore
+        never open a session over a key that is already complete.
+
+        This mirrors ``KVCacheStoreSendingThread._get_missing_indices``, which
+        is what keeps the non-layerwise path immune to both repeat requests
+        sharing a prefix and concurrent prefill ranks writing the same keys.
+
+        Returns the subset of ``keys`` that is safe to start a session for.
+        Failing open (treat as missing) is intentional: an unreadable pool costs
+        hits, while a bogus skip would cost the blocks themselves.
+        """
+        if not keys:
+            return []
+        if not getattr(self.m_store, "requires_exists_before_put", True):
+            return keys
+        exists = getattr(self.m_store, "exists", None)
+        if not callable(exists):
+            exists = getattr(self.m_store, "batch_is_exist", None)
+        if not callable(exists):
+            return keys
+
+        missing: list[str] = []
+        for key_batch in self._mooncake_key_batches(keys):
+            try:
+                states = exists(key_batch)
+                if len(states) != len(key_batch):
+                    raise RuntimeError(
+                        "Mooncake hybrid pool existence check returned unexpected number of states: "
+                        f"expected={len(key_batch)}, actual={len(states)}"
+                    )
+                missing.extend(key for key, state in zip(key_batch, states, strict=True) if int(state) != 1)
+            except Exception as exc:
+                logger.error(
+                    "Mooncake hybrid pool existence check failed keys=%d error=%s; treating all as missing",
+                    len(key_batch),
+                    exc,
+                )
+                missing.extend(key_batch)
+        return missing
+
     def _start_mooncake_put_keys(self, keys: list[str], object_size: int) -> list[int]:
         results: list[int] = []
         for key_batch in self._mooncake_key_batches(keys):
@@ -2355,18 +2403,55 @@ class KVPoolWorker:
             self._finish_current_mooncake_load_sessions()
             raise
 
-    def _drain_attention_transfers(self) -> None:
-        """Do not enqueue output-projection/MoE communication before I/O ends."""
-        for thread in (self.kv_recv_thread, self.kv_send_thread):
+    def _drain_attention_transfers(self, drain_recv: bool | None = None, full: bool = False) -> None:
+        """Apply the configured transfer policy at an attention boundary.
+
+        The LOAD queue is deliberately left running. Every load this rank needs
+        is already guaranteed complete by ``wait_for_layer_load`` before the
+        layer consumes it, and the rest of that queue is exactly the prefetch
+        issued for layers L+1..L+P to overlap with the compute currently in
+        flight. Draining it here therefore waited, on every single layer, for
+        transfers that were scheduled early on purpose, which is what pinned the
+        fence at ~900 ms per layer and made layerwise slower than the
+        non-layerwise bulk path. This matches the MemCache layerwise path, which
+        gates the *start* of transfers to the attention boundary and never
+        quiesces the load queue.
+
+        The SAVE queue is bounded rather than drained. A committed Mooncake
+        object is unreadable until ``batch_put_session_end``, so a put that is
+        still open while the next collective launches cannot expose a partial
+        block to any reader; the cost of waiting for it here is purely that the
+        transfer stops overlapping compute. Letting the send thread run a bounded
+        number of layers behind the compute stream keeps the ranged puts off the
+        critical path, and ordering is preserved because that thread still
+        consumes the queue in submission order. ``save_kv_layer`` waits for the
+        final layer's save at the end of every step, which implies every earlier
+        layer committed, so publication is still complete before the step ends.
+
+        ``full`` drains both queues to zero and is the right mode for teardown
+        paths, where the transfer threads must be quiescent before sessions are
+        released.
+        """
+        if full:
+            drain_recv = True
+        elif drain_recv is None:
+            drain_recv = layerwise_fence_drains_recv()
+        channels = [("send", self.kv_send_thread)]
+        if drain_recv:
+            channels.insert(0, ("recv", self.kv_recv_thread))
+        for channel, thread in channels:
             if thread is None:
                 continue
+            backlog_limit = 0 if (full or channel != "send") else layerwise_send_fence_backlog()
             queue = thread.request_queue
             with queue.all_tasks_done:
-                while queue.unfinished_tasks:
+                while queue.unfinished_tasks > backlog_limit:
                     thread.raise_if_failed()
                     queue.all_tasks_done.wait(timeout=0.1)
             thread.raise_if_failed()
-        self._check_hybrid_load_errors()
+        if drain_recv and self.kv_recv_thread is not None:
+            # Errors are still surfaced per layer by wait_for_layer_load.
+            self._check_hybrid_load_errors()
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
@@ -2436,7 +2521,7 @@ class KVPoolWorker:
                 gate.cancel()
                 # Range calls must finish before releasing their get sessions.
                 with suppress(Exception):
-                    self._drain_attention_transfers()
+                    self._drain_attention_transfers(full=True)
             if getattr(self, "backend_name", None) == "mooncake" and getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_mooncake_load_sessions()
             raise
@@ -2477,6 +2562,8 @@ class KVPoolWorker:
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
         if self.current_layer in getattr(self, "_attention_saved_layers", set()):
+            if self.current_layer == num_local - 1:
+                self._wait_for_final_layer_save(num_local, send_thread)
             self.current_layer += 1
             return
         self.sync_save_events[self.current_layer].record()
@@ -2488,18 +2575,22 @@ class KVPoolWorker:
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == num_local - 1:
-            while not self.layer_save_finished_events[num_local - 1].wait(timeout=10):
-                send_thread.raise_if_failed()
-                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
-            send_thread.raise_if_failed()
-            reuse_source_layers = set(self.prefetch_layer_map.values())
-            for layer_id in range(num_local):
-                if layer_id in reuse_source_layers:
-                    continue
-                if self.layer_save_finished_events[layer_id].is_set():
-                    self.layer_save_finished_events[layer_id].clear()
+            self._wait_for_final_layer_save(num_local, send_thread)
 
         self.current_layer = self.current_layer + 1
+
+    def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
+        """Keep layerwise source buffers alive until the step's last PUT commits."""
+        while not self.layer_save_finished_events[num_local - 1].wait(timeout=10):
+            send_thread.raise_if_failed()
+            logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
+        send_thread.raise_if_failed()
+        reuse_source_layers = set(self.prefetch_layer_map.values())
+        for layer_id in range(num_local):
+            if layer_id in reuse_source_layers:
+                continue
+            if self.layer_save_finished_events[layer_id].is_set():
+                self.layer_save_finished_events[layer_id].clear()
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None

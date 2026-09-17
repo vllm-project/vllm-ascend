@@ -105,12 +105,11 @@ def record_attention_compute_start() -> None:
 
 @contextmanager
 def attention_transfer_window():
-    """Finish opted-in range transfers before subsequent communication launches.
+    """Run the configured transfer completion policy after attention submission.
 
     The event is recorded after cache writes and any preceding collectives. The
-    host submits the attention kernel, then drains synchronous Mooncake range
-    calls while that kernel can execute. A slow transfer delays communication
-    rather than competing with it.
+    host then submits the attention kernel. The registered connector callback
+    decides whether to drain, bound, or retain its asynchronous transfer work.
     """
     with _lock:
         gate = _attention_compute_start_gate

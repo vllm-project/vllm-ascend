@@ -82,6 +82,18 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
+    # Restore the old attention-window fence that also quiesced the LOAD queue.
+    # Default: 0 (leave future-layer prefetch running; SAVE policy is separate).
+    # Valid values: 0 or 1. This configuration is not sensitive.
+    "VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV"),
+    # How many queued layer saves may stay outstanding when an attention window
+    # closes, on the Mooncake hybrid layerwise save path. 0 drains the SAVE
+    # queue to zero after every layer, which serializes each ranged put against
+    # the next layer's collectives; a positive value lets the send thread run
+    # behind the compute stream so the transfer overlaps compute. Publication is
+    # unaffected: the final layer of every step still waits for its save.
+    # Default: 8 layers of slack. Valid values: >= 0. Not sensitive.
+    "VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG": lambda: int(os.getenv("VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG", 8)),
     # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
     # 0 (default): auto-detect from device properties, falling back to 192 KB
     # (safe for Ascend 910B/A3). Set to a positive value to override when

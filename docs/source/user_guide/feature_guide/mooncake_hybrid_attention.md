@@ -88,7 +88,7 @@ can still commit. A preparation exception revokes the objects opened earlier in
 that preparation. A failed get stops the forward path before incomplete hybrid
 KV/state is used. Get sessions are released after in-flight reads finish.
 
-## Transfer timing: overlap attention, fence communication
+## Transfer timing: configurable asynchronous pipeline
 
 The heavy payload operations use a per-layer attention compute window:
 
@@ -102,16 +102,24 @@ previous collectives / cache updates
  current attention kernel     put current-layer ranges
                               get future-layer ranges
      |                              |
-     +---------- transfer drain ----+
+     +------- policy checkpoint ----+
                          |
-              output projection / MoE communication
+         output projection / MoE communication
+              || bounded transfers
 ```
 
 At attention entry, an NPU event protects cache writes and preceding work on the
 compute stream. Prefetched gets wait for that event. The worker records the save
 event and submits current-layer puts at the same boundary. The host then launches
-the attention kernel and waits for queued payload transfers before returning to
-the following output projection or MoE communication.
+the attention kernel and applies the configured queue policy before returning
+to the following output projection or MoE communication.
+
+By default, future-layer gets remain queued and up to eight send tasks may stay
+unfinished. This removes whole-queue drains from each layer's critical path,
+but it also means transfer can overlap subsequent output-projection or MoE
+communication. Set `VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV=1` and
+`VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG=0` to restore the strict local policy
+that drains both queues at each attention boundary.
 
 In DSA this boundary is after the compressor/indexer/cache updates and before
 the sparse-attention operator. In SFA it surrounds the sparse-attention operator;
@@ -120,13 +128,14 @@ transformer layer.
 
 Consequences:
 
-- If transfer time exceeds attention compute time, the remaining transfer time
-  delays subsequent communication. It is not hidden by launching HCCL concurrently.
+- Under the default policy, a transfer tail can compete with subsequent HCCL or
+  expert-parallel communication. Use device traces to choose an appropriate
+  send backlog for the target deployment.
 - An initial, unprefetched demand load has no preceding attention window. It
   waits for earlier compute-stream work, then completes before attention starts.
 - Session allocation, existence queries, and other metadata RPCs are not payload
   DMA and can occur outside the window.
-- This is a local execution-order fence, not a cluster-wide bandwidth scheduler.
+- This is a local queue policy, not a cluster-wide bandwidth scheduler.
   Unrelated workers and independent communication streams are not globally
   serialized. Validate multistream and multi-rank behavior using device traces.
 - No latency or throughput improvement is claimed without hardware measurements.
