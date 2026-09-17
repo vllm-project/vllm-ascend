@@ -963,9 +963,93 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             caches[draft][2].fill_(3)
             assert (caches[target][1] == 2).all()
             assert (caches[draft][0] == 0).all()
+    def test_sfa_parent_allocation_main_and_legacy(self):
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+        from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
+
+        for legacy, connector in (
+            (False, None),
+            (True, None),
+            (False, "SfaRemoteD2HConnector"),
+            (False, "MultiConnector"),
+        ):
+            with self.subTest(legacy=legacy, connector=connector):
+                runner = self._build_runner()
+                runner.use_sparse = True
+                runner._get_attention_kv_cache_dims = lambda *a: (8, 4)
+                runner.vllm_config.kv_transfer_config = (
+                    None
+                    if connector is None
+                    else SimpleNamespace(kv_connector=connector, kv_connector_module_path=None, is_kv_consumer=False)
+                )
+                names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
+                spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+                config = KVCacheConfig(
+                    num_blocks=3,
+                    kv_cache_tensors=[],
+                    kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+                )
+                config.kv_cache_tensors = [
+                    SimpleNamespace(size=3 * spec.page_size_bytes * (1 if legacy else 2), layers=names, shared_by=names)
+                ]
+                layers = {n: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for n in names}
+                runner._kv_cache_spec_attn_group_iterator = lambda spec=spec, names=names: iter(
+                    [SimpleNamespace(kv_cache_spec=spec, backend=AscendSFABackend, layer_names=names)]
+                )
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
+                    patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=legacy),
+                    patch("vllm_ascend.worker.model_runner_v1.get_kv_cache_tensor_layers", return_value=names),
+                ):
+                    raw = runner._allocate_kv_cache_tensors(config)
+                    if connector != "MultiConnector":
+                        self.assertIsInstance(raw[names[0]], torch.Tensor)
+                        self.assertEqual(raw[names[0]].numel(), 3 * spec.page_size_bytes)
+                        self.assertEqual(raw[names[0]] is raw[names[1]], legacy)
+                    caches = runner._reshape_kv_cache_tensors(config, raw)
+                if connector == "MultiConnector":
+                    self.assertTrue(all(t.is_contiguous() for n in names for t in caches[n]))
+                    with self.assertRaises(ValueError):
+                        get_sfa_kv_parent(*caches[names[0]])
+                    continue
+                p0, p1 = [get_sfa_kv_parent(*caches[n]) for n in names]
+                self.assertEqual(p0.shape, (3, 4, 1, 12))
+                caches[names[0]][0][1, 2, 0, 0] = 7
+                self.assertEqual(p0[1, 2, 0, 0], 7)
+                self.assertEqual((p1[1, 2, 0, 0] == 7).item(), legacy)
+
+    def test_sfa_parent_requires_actual_main_layer_backend(self):
+        from dataclasses import replace
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        runner = self._build_runner()
+        runner.use_sparse = True
+        spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+        gqa = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+        cases = [
+            ("L0", spec, AscendSFABackend, True, False, True),
+            ("L2", spec, AscendSFABackend, True, False, True),
+            ("L4", spec, AscendSFABackend, False, True, True),
+            ("skip_topk_with_indexer", spec, AscendSFABackend, True, True, True),
+            ("C8", replace(spec, cache_sparse_sfa_c8=True), AscendSFABackend, True, False, False),
+            ("draft_GQA", gqa, AscendSFABackend, False, False, False),
+            ("MLA_V3", spec, AscendMLABackend, False, False, False),
+            ("cache_only_layers.0", spec, AscendSFABackend, False, False, False),
+        ]
+        for name, layer_spec, backend, has_indexer, skip_topk, expected in cases:
+            with self.subTest(name=name):
+                layer = SimpleNamespace(
+                    get_attn_backend=lambda backend=backend: backend, has_indexer=has_indexer, skip_topk=skip_topk
+                )
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value={name: layer}
+                ):
+                    self.assertEqual(runner._uses_sfa_kv_parent(name, layer_spec), expected)
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
+        runner.use_sparse = True
         runner.sparse_kv_offload_enabled = False
         kv_cache_spec = FullAttentionSpec(
             block_size=16,
@@ -1454,6 +1538,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
+        runner.use_sparse = True
         runner.sparse_kv_offload_enabled = False
         kv_cache_spec = FullAttentionSpec(
             block_size=16,
@@ -1668,6 +1753,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers,
         _mock_has_ec_transfer,
     ):
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
         runner = self._build_runner()
         runner.use_sparse = True
         runner.block_size = 16
@@ -1691,6 +1778,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
+        attn_module.attn_backend = AscendSFABackend
         layer_name = "model.layers.1.self_attn.attn"
         mock_get_layers.return_value = {layer_name: attn_module}
 
@@ -1718,10 +1806,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
-        raw_k_cache, raw_v_cache = raw_caches[layer_name]
+        raw_parent = raw_caches[layer_name]
 
-        self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
-        self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+        self.assertEqual(raw_parent.numel(), 2 * 16 * (512 + 64) * 2)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
@@ -1730,6 +1817,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         mock_get_layers,
         _mock_has_ec_transfer,
     ):
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
         runner = self._build_runner()
         runner.use_sparse = True
         runner.block_size = 16
@@ -1756,6 +1845,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
+        attn_module.attn_backend = AscendSFABackend
         indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
         torch.nn.Module.__init__(indexer_module)
         attn_layer_name = "model.layers.1.self_attn.attn"
@@ -1797,11 +1887,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
-        raw_k_cache, raw_v_cache = raw_caches[attn_layer_name]
+        raw_parent = raw_caches[attn_layer_name]
         (raw_indexer_cache,) = raw_caches[indexer_layer_name]
 
-        self.assertEqual(raw_k_cache.numel(), 2 * 16 * 512 * 2)
-        self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
+        self.assertEqual(raw_parent.numel(), 2 * 16 * (512 + 64) * 2)
         self.assertEqual(raw_indexer_cache.numel(), 2 * 2 * 16 * 128 * 2)
 
         backend = MagicMock()
