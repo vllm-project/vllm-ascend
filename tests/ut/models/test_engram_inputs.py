@@ -11,7 +11,7 @@ from vllm_ascend.models.deepseek_v41 import model as implementation
 
 @pytest.fixture
 def model(monkeypatch):
-    monkeypatch.setattr(implementation, "get_ascend_config", lambda: SimpleNamespace(enable_engram=True))
+    monkeypatch.setattr(implementation, "engram_enabled", lambda config: True)
     cls = implementation.DeepseekV41Model
     shell = SimpleNamespace(
         config=SimpleNamespace(engram_layer_ids=[1, 14], engram_max_ngram_size=4, engram_n_heads=8),
@@ -46,7 +46,7 @@ def test_capture_first_reuses_storage_and_refreshes_only_runtime_rows(model):
 
 
 def test_disabled_engram_capture_and_replay_do_not_access_layers(model, monkeypatch):
-    monkeypatch.setattr(implementation, "get_ascend_config", lambda: SimpleNamespace(enable_engram=False))
+    monkeypatch.setattr(implementation, "engram_enabled", lambda config: False)
     model.layers = [SimpleNamespace(engram=None) for _ in range(15)]
     for result in (model.prepare_engram_graph_inputs(4), model.prepare_engram_inputs(None, torch.arange(4), 4)):
         assert result["engram_lookups"] == {}

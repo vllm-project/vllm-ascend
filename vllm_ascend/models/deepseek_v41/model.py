@@ -78,6 +78,7 @@ from .compressor import DeepseekV41Compressor
 from .engram_gate import engram_gate
 from .engram_hash import PagedNgramHistory
 from .engram_hbm import EngramQueryGroup, NodeShardedEngram
+from .engram_host_uva import eng_cpu_offload, engram_enabled
 from .indexer import DeepseekV41Indexer
 
 
@@ -817,8 +818,8 @@ class DeepseekV41DecoderLayer(nn.Module):
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
             self.self_attn.wo_b.reduce_results = False
-        engram_enabled = get_ascend_config().enable_engram
-        if engram_enabled and not is_draft_layer and self.layer_idx in config.engram_layer_ids:
+        has_engram = engram_enabled(config)
+        if has_engram and not is_draft_layer and self.layer_idx in config.engram_layer_ids:
             self.engram = torch.nn.Module()
             self.engram.wkv = torch.nn.Linear(
                 (config.engram_max_ngram_size - 1) * config.engram_n_heads * config.engram_head_dim,
@@ -996,8 +997,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         # Read the storage choice after AscendConfig validation.
         ascend_config = get_ascend_config()
         self.engram_weight_root = self.engram_root
-        storage_format = ascend_config.engram_storage
-        if ascend_config.enable_engram:
+        storage_format = "int8"
+        if engram_enabled(config):
             query_group = EngramQueryGroup.from_vllm(vllm_config.parallel_config)
             for layer_id, rows in zip(config.engram_layer_ids, config.engram_num_embeddings):
                 self.layers[layer_id].engram.embed = NodeShardedEngram(
@@ -1005,7 +1006,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     config.engram_head_dim,
                     query_group,
                     storage_format=storage_format,
-                    cpu_offload=ascend_config.enable_engram_ple_offload,
+                    cpu_offload=eng_cpu_offload(vllm_config),
                 )
         self.engram_history = None
         self._engram_input_buffers = None
@@ -1014,7 +1015,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         )
         self.register_buffer("engram_rotation", torch.eye(32), persistent=False)
-        if ascend_config.enable_engram and vllm_config.load_config.load_format != "dummy":
+        if engram_enabled(config) and vllm_config.load_config.load_format != "dummy":
             with torch.device("cpu"):
                 tokenizer = AutoTokenizer.from_pretrained(self.engram_root)
                 self.engram_history = PagedNgramHistory(config, tokenizer)
@@ -1041,7 +1042,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         Dummy runs pass None and participate with empty hashes.
         """
         config = self.config
-        if not get_ascend_config().enable_engram:
+        if not engram_enabled(config):
             return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
         columns = (config.engram_max_ngram_size - 1) * config.engram_n_heads
         hashes = torch.empty((0, len(config.engram_layer_ids), columns), dtype=torch.int64, device="cpu")
@@ -1088,7 +1089,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         """Capture fixed-address buffers without CPU history or routing work."""
-        if not get_ascend_config().enable_engram:
+        if not engram_enabled(self.config):
             return {"engram_lookups": {}, "engram_mask": self.engram_rotation.new_empty(0, dtype=torch.bool)}
         if self._engram_input_buffers is None:
             capacity = self._engram_max_tokens
@@ -1118,7 +1119,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         if engram_lookups is None:
-            assert not get_ascend_config().enable_engram, "Runner must prepare Engram inputs before model forward"
+            assert not engram_enabled(self.config), "Runner must prepare Engram inputs before model forward"
             lookups, token_mask = self.prepare_engram(input_ids, positions)
         else:
             lookups, token_mask = engram_lookups, engram_mask
@@ -1249,7 +1250,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        if not get_ascend_config().enable_engram:
+        if not engram_enabled(self.model.config):
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         engram_loaded: set[str] = set()
 
@@ -1562,6 +1563,6 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
     @property
     def engram_cache_layer_name(self) -> str | None:
-        if not get_ascend_config().enable_engram:
+        if not engram_enabled(self.model.config):
             return None
         return self.model.layers[0].self_attn.dsa_attn.swa_cache_layer.prefix

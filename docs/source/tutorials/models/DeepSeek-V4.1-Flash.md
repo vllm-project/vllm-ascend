@@ -235,7 +235,7 @@ every other node is a headless worker.
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
-      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
@@ -296,7 +296,7 @@ every other node is a headless worker.
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
-      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
@@ -351,22 +351,23 @@ The response must contain a model entry whose `id` is `deepseek-v41`.
 
 ### 5.3 Single A3 with Engram Host Offload
 
-Rebuild the native extension after updating the source: INT8 host offload
-requires the `engram_int8_lookup_cpu` CPU operator. Keep the Engram weights
-and their scale tensors available in the checkpoint. `--safetensors-load-strategy lazy`
+Rebuild the native extension after updating the source. Keep the INT8 Engram
+weights and their scale tensors available in the checkpoint. `--safetensors-load-strategy lazy`
 is required to avoid eagerly materializing the entire table on each rank.
 
 For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
 DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
 Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
-Use INT8 Engram tables and merge these fields into `--additional-config`:
+Use INT8 Engram tables and turn the offload on through vLLM's Engram config:
 
-```json
-{
-  "enable_engram": true,
-  "enable_engram_ple_offload": true
-}
+```bash
+--engram-config '{"cpu_offload": true}'
 ```
+
+With `cpu_offload` the shard stays in host memory, is registered with
+`aclrtHostRegisterV2`, and the NPU gather kernel reads it through the device
+address `aclrtHostGetDevicePointer` returns, so the offloaded table needs
+neither an H2D copy nor a host-side gather.
 
 Start with 4 sequences per DP replica, 512 batched tokens, 131072 model
 length, and 1 GiB of KV cache per rank, with prefix caching disabled.

@@ -49,14 +49,7 @@ def _cpu_offload_runtime():
             pinned_allocations.append(tensor.data_ptr())
         return tensor
 
-    def lookup(weight, scale, ids, output):
-        output.copy_(hbm.dequantize_engram_rows(weight.index_select(0, ids), scale.index_select(0, ids)))
-
-    with (
-        patch.dict(sys.modules, {"vllm_ascend.vllm_ascend_C": ModuleType("vllm_ascend_C")}),
-        patch.object(torch.ops._C_ascend, "engram_int8_lookup_cpu", lookup, create=True),
-        patch.object(torch, "empty", allocate),
-    ):
+    with patch.object(torch, "empty", allocate):
         yield pinned_allocations
 
 

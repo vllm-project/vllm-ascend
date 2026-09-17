@@ -12,6 +12,8 @@ import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
 
+from .engram_host_uva import HostUvaBuffer, gather_dequantize_host_uva
+
 _OFFLOAD_BUFFER_CACHE_SIZE = 8
 _OFFLOAD_BUFFER_BYTES_LIMIT = 512 * 1024 * 1024
 _BF16_BYTES = 2
@@ -119,8 +121,21 @@ class NodeShardedEngram(nn.Module):
         # Reuse fixed-size HCCL metadata buffers across requests.
         self._metadata_device_buffers = {}
         self._empty_metadata = torch.zeros(query_group.size + 1, dtype=torch.int64, device="cpu")
+        # Host offload: the shard stays in host memory, but the device reads it
+        # directly, so the lookup runs next to the backbone instead of on host
+        # threads.  Everything else (routing, collectives, loaders) is unchanged.
+        self._host_uva = None
+        if cpu_offload and storage_format == "int8" and torch.npu.is_available():
+            device = torch.device("npu", torch.npu.current_device())
+            self._host_uva = (
+                HostUvaBuffer((self.end - self.start, width), torch.int8, device),
+                HostUvaBuffer((self.end - self.start, width // 32), torch.float32, device),
+            )
+        codes = self._host_uva[0].tensor if self._host_uva is not None else None
         self.weight = nn.Parameter(
-            torch.empty(
+            codes
+            if codes is not None
+            else torch.empty(
                 self.end - self.start,
                 width,
                 dtype=(
@@ -136,7 +151,11 @@ class NodeShardedEngram(nn.Module):
         if storage_format == "int8":
             self.register_buffer(
                 "weight_scale",
-                torch.empty(self.end - self.start, width // 32, dtype=torch.float32, device=storage_device),
+                (
+                    self._host_uva[1].tensor
+                    if self._host_uva is not None
+                    else torch.empty(self.end - self.start, width // 32, dtype=torch.float32, device=storage_device)
+                ),
             )
         elif storage_format in ("fp8", "mxfp8"):
             self.register_buffer(
@@ -160,6 +179,13 @@ class NodeShardedEngram(nn.Module):
         else:
             self.weight.data[start:end].copy_(rows)
 
+    def close(self):
+        """Release the host registration; the worker is done with the table."""
+        if self._host_uva is not None:
+            for buffer in self._host_uva:
+                buffer.close()
+            self._host_uva = None
+
     def lookup_local(self, ids, *, pin_output=False):
         # Idle DP replicas still enter routing collectives, but must not launch
         # gather/dequant kernels for an empty owner request.
@@ -167,6 +193,13 @@ class NodeShardedEngram(nn.Module):
             return torch.empty((*ids.shape, self.width), dtype=torch.bfloat16, device=self.weight.device)
         original_shape = ids.shape
         flat_ids = ids.reshape(-1)
+        if self._host_uva is not None:
+            # The routing path hands local ids as CPU tensors: the registered
+            # table is device-readable, so move them and gather on device.
+            device = self._host_uva[0].ptrs.device
+            return gather_dequantize_host_uva(self._host_uva[0], self._host_uva[1], flat_ids.to(device)).reshape(
+                *original_shape, self.width
+            )
         if self.storage_format == "int8" and not self.offload_pinned:
             if (
                 self.use_triton_int8
@@ -229,10 +262,11 @@ class NodeShardedEngram(nn.Module):
                 # previous expression materialized a separate BF16 tensor
                 # before this copy, doubling the temporary decoded allocation.
                 if self.storage_format == "int8":
-                    from vllm_ascend import vllm_ascend_C  # noqa: F401
-
-                    torch.ops._C_ascend.engram_int8_lookup_cpu(
-                        self.weight, self.weight_scale, flat_ids.contiguous(), decoded_slot
+                    decoded_slot.copy_(
+                        dequantize_engram_rows(
+                            torch.index_select(self.weight, 0, flat_ids),
+                            torch.index_select(self.weight_scale, 0, flat_ids),
+                        )
                     )
                 elif self.storage_format == "bf16":
                     torch.index_select(self.weight, 0, flat_ids, out=decoded_slot)
@@ -241,11 +275,9 @@ class NodeShardedEngram(nn.Module):
                 rows = decoded_slot
             else:
                 if self.storage_format == "int8":
-                    from vllm_ascend import vllm_ascend_C  # noqa: F401
-
-                    rows = torch.empty((flat_ids.numel(), self.width), dtype=torch.bfloat16, device="cpu")
-                    torch.ops._C_ascend.engram_int8_lookup_cpu(
-                        self.weight, self.weight_scale, flat_ids.contiguous(), rows
+                    rows = dequantize_engram_rows(
+                        torch.index_select(self.weight, 0, flat_ids),
+                        torch.index_select(self.weight_scale, 0, flat_ids),
                     )
                 elif self.storage_format == "bf16":
                     rows = torch.index_select(self.weight, 0, flat_ids)
