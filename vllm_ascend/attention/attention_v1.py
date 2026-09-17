@@ -282,6 +282,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        # TODO: Remove this fallback once Gemma4's 512-dim global attention heads
+        #  are supported by the large-head FIA path inside the full ACL graph.
+        #  Capturing those layers together with the rest of the decode graph
+        #  triggers MTE out-of-range faults (507011) at high concurrency.
+        if getattr(kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+            return AttentionCGSupport.NEVER
         return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
