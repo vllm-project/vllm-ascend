@@ -54,6 +54,11 @@ The following table lists additional configuration options available in vLLM Asc
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
+| `runtime_config_path`               | str  | `None`  | Path to Runtime Guard JSON config. Default: `<cwd>/runtime/config/runtime_config.json`. See [Runtime Guard](../feature_guide/runtime_guard.md). |
+| `runtime_config_reload_interval`    | float| `0`     | Hot-reload period in seconds for `runtime_config.json`. `0` disables hot-reload (static after startup). |
+| `runtime_config`                    | dict | `None`  | Startup overlay merged into runtime config defaults (detectors, dump quota, report flags). |
+| `runtime_report_dir`                | str  | `None`  | Override report root directory. Default: `<cwd>/runtime/report`. |
+| `runtime_dump_dir`                 | str  | `None`  | Seed KV dump root (`dump.dump_dir`). Default derived from report root. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
@@ -84,6 +89,36 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+<span id="runtime_guard"></span>**runtime_guard**
+
+Runtime Guard provides online anomaly detection, structured incident reports, and optional native KV cache dump. See the [Runtime Guard feature guide](../feature_guide/runtime_guard.md) for usage and the [runtime_config reference](./runtime_config.md) for JSON fields.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `runtime_config_path` | str | `None` | Path to `runtime_config.json`. When omitted, vLLM-Ascend uses `<cwd>/runtime/config/runtime_config.json` (created with defaults on first start). |
+| `runtime_config_reload_interval` | float | `0` | Poll interval in seconds for hot-reload. `0` = static config after startup. |
+| `runtime_config` | dict | `None` | Startup overlay: `defaults ← runtime_config`. Bootstrap overwrites the JSON file with this effective config. Hot-reload re-reads the JSON file only. |
+| `runtime_report_dir` | str | `None` | Report and KV dump root. Default `<cwd>/runtime/report`. |
+| `runtime_dump_dir` | str | `None` | Seed `dump.dump_dir` at startup; JSON hot-reload of `dump.dump_dir` wins afterwards. |
+
+Example (online):
+
+```bash
+vllm serve Qwen/Qwen3-8B --additional-config '{
+  "runtime_config_path": "/data/runtime/config/runtime_config.json",
+  "runtime_config_reload_interval": 5,
+  "runtime_config": {
+    "detector": {
+      "token_repeat": { "enabled": true, "on_trigger": ["report", "dump_kv"] }
+    },
+    "dump": { "auto_max_times": 3 }
+  }
+}'
+```
+
+Design (Chinese): [runtime_guard_design.md](../../../zh/design/runtime_guard_design.md).  
+Operations (Chinese): [runtime_guard_ops.md](../../../zh/design/runtime_guard_ops.md).
 
 **xlite_graph_config**
 

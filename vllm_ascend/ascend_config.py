@@ -484,6 +484,10 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    runtime_config_path: str | None = None
+    runtime_config_reload_interval: float = 0.0
+    # Runtime object constructed in init_ascend_config (not from additional_config dict).
+    runtime_config: Any = None
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -1587,6 +1591,51 @@ def init_ascend_config(vllm_config):
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
+    raw_runtime_path = (
+        additional_config.get("runtime_config_path")
+        or additional_config.get("runtime-config")
+    )
+    if raw_runtime_path is not None and not isinstance(raw_runtime_path, str):
+        raise ValueError(
+            f"additional_config.runtime_config_path must be a string, got {type(raw_runtime_path).__name__}."
+        )
+    raw_reload = additional_config.get("runtime_config_reload_interval")
+    if raw_reload is None:
+        raw_reload = 0
+    try:
+        runtime_config_reload_interval = float(raw_reload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "additional_config.runtime_config_reload_interval must be a number of seconds "
+            f"(0 disables hot-reload; default 0), got {raw_reload!r}."
+        ) from exc
+    if runtime_config_reload_interval < 0:
+        raise ValueError(
+            f"additional_config.runtime_config_reload_interval must be >= 0, got {runtime_config_reload_interval}."
+        )
+    raw_runtime_overlay = additional_config.get("runtime_config")
+    if raw_runtime_overlay is not None and not isinstance(raw_runtime_overlay, dict):
+        raise ValueError(
+            f"additional_config.runtime_config must be a dict, got {type(raw_runtime_overlay).__name__}."
+        )
+    raw_runtime_dump_dir = additional_config.get("runtime_dump_dir")
+    if raw_runtime_dump_dir is not None and not isinstance(raw_runtime_dump_dir, str):
+        raise ValueError(
+            f"additional_config.runtime_dump_dir must be a string, got {type(raw_runtime_dump_dir).__name__}."
+        )
+    from vllm_ascend.runtime_config.config import RuntimeConfig
+
+    runtime_cfg = RuntimeConfig(
+        raw_runtime_path,
+        report_dir=additional_config.get("runtime_report_dir"),
+        reload_interval_seconds=runtime_config_reload_interval,
+        ensure_file=False,
+        dump_dir=raw_runtime_dump_dir,
+        startup_overlay=raw_runtime_overlay,
+    )
+    runtime_cfg.apply_ascend_log_level()
+    runtime_cfg.start_non_worker_background_reload()
+
     # Keys that must NOT flow from additional_config into AscendConfig.
     # These are stripped so that only user-configurable keys reach pydantic,
     # where extra="forbid" can reject unknown options.
@@ -1613,6 +1662,12 @@ def init_ascend_config(vllm_config):
         # replaced with the validated dump_config_path field below.
         "dump_config",
         "dump_config_path",
+        "runtime_config",
+        "runtime_config_path",
+        "runtime-config",
+        "runtime_config_reload_interval",
+        "runtime_report_dir",
+        "runtime_dump_dir",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
         # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8
         # are NOT here — they are user-input fields that derive_and_validate
@@ -1652,6 +1707,9 @@ def init_ascend_config(vllm_config):
         sparse_kv_offload_config=sparse_kv,
         kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
+        runtime_config_path=raw_runtime_path,
+        runtime_config_reload_interval=runtime_config_reload_interval,
+        runtime_config=runtime_cfg,
         **kwargs,
     )
     # Business validation (Plan B): pydantic did type/range/enum checks during

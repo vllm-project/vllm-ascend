@@ -14,8 +14,10 @@ import logging
 import os
 import sys
 from datetime import datetime
+from types import MethodType
 
 from vllm import envs
+from vllm.logger import _METHODS_TO_PATCH
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
@@ -23,6 +25,141 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
 _LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def init_logger_ascend(name: str) -> logging.Logger:
+    """Return a stdlib logger for Ascend / runtime_guard modules.
+
+    Uses ``logging.getLogger`` directly (plus vLLM's once-method patching)
+    instead of delegating to ``vllm.logger.init_logger``. The Ascend logging
+    framework (UCM) monkey-patches ``vllm.logger.init_logger`` to return a UCM
+    logger whose level/format live in a C extension and bypass Python
+    ``setLevel``/``Formatter``. Bypassing that patch keeps Ascend loggers on
+    the stdlib tree, so they stay controllable via ``setLevel`` and
+    ``VLLM_LOGGING_LEVEL``.
+    """
+    logger = logging.getLogger(name)
+    for method_name, method in _METHODS_TO_PATCH.items():
+        setattr(logger, method_name, MethodType(method, logger))
+    return logger
+
+
+def _resolve_log_level(level: str) -> int:
+    return getattr(logging, str(level).upper(), logging.INFO)
+
+
+def _normalize_module_logger(entry: str) -> str:
+    name = str(entry).strip().strip(".")
+    if not name:
+        return ""
+    if name == "vllm_ascend" or name.startswith("vllm_ascend.") or name.startswith("vllm."):
+        return name
+    return f"vllm_ascend.{name}"
+
+
+def _iter_logger_names(prefix: str | None = None) -> list[str]:
+    names: list[str] = []
+    for name in list(logging.Logger.manager.loggerDict):
+        if not isinstance(name, str):
+            continue
+        if prefix is None:
+            names.append(name)
+            continue
+        if name == prefix or name.startswith(prefix + "."):
+            names.append(name)
+    return names
+
+
+def _set_logger_tree_level(prefix: str, level: int) -> None:
+    logging.getLogger(prefix).setLevel(level)
+    dotted = prefix + "."
+    for name in _iter_logger_names():
+        if name == prefix or name.startswith(dotted):
+            logging.getLogger(name).setLevel(level)
+
+
+def _merge_module_level_overrides(
+    debug_modules: list[str] | None,
+    module_levels: dict[str, str] | None,
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for entry in debug_modules or ():
+        prefix = _normalize_module_logger(entry)
+        if prefix:
+            merged[prefix] = "DEBUG"
+    for raw_name, raw_level in (module_levels or {}).items():
+        prefix = _normalize_module_logger(str(raw_name))
+        if prefix:
+            merged[prefix] = str(raw_level).strip().upper()
+    return merged
+
+
+_last_applied_ascend_log: tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]] | None = None
+
+
+def apply_ascend_log_level(
+    level: str = "INFO",
+    debug_modules: list[str] | None = None,
+    module_levels: dict[str, str] | None = None,
+) -> None:
+    """Apply default level and optional per-module overrides for hot-reload / actions."""
+    global _last_applied_ascend_log
+
+    if logging.root.manager.disable:
+        stuck_at = logging.getLevelName(logging.root.manager.disable)
+        logging.disable(logging.NOTSET)
+        logging.getLogger("vllm_ascend.logger").warning(
+            "[ascend_log] cleared a stuck global logging.disable(%s)",
+            stuck_at,
+        )
+
+    configure_ascend_logging()
+    default_level = _resolve_log_level(level)
+    debug_list = list(debug_modules or ())
+    overrides = _merge_module_level_overrides(debug_list, module_levels)
+    level_key = str(level).upper()
+    debug_key = tuple(debug_list)
+    modules_key = tuple(sorted(overrides.items()))
+    needs_debug = default_level <= logging.DEBUG or any(
+        _resolve_log_level(lvl) <= logging.DEBUG for lvl in overrides.values()
+    )
+    announce = _last_applied_ascend_log != (level_key, debug_key, modules_key)
+
+    logging.root.setLevel(default_level)
+    ascend = logging.getLogger("vllm_ascend")
+    ascend.setLevel(default_level)
+    ascend.propagate = False
+    for h in ascend.handlers:
+        if h.level > logging.DEBUG:
+            h.setLevel(logging.DEBUG)
+
+    vllm_logger = logging.getLogger("vllm")
+    vllm_logger.setLevel(default_level)
+    for name in _iter_logger_names("vllm_ascend"):
+        logging.getLogger(name).setLevel(default_level)
+    for name in _iter_logger_names("vllm"):
+        if name != "vllm":
+            logging.getLogger(name).setLevel(default_level)
+
+    for prefix, level_name in overrides.items():
+        _set_logger_tree_level(prefix, _resolve_log_level(level_name))
+
+    if needs_debug:
+        for h in logging.root.handlers:
+            if h.level > logging.DEBUG:
+                h.setLevel(logging.DEBUG)
+        for h in vllm_logger.handlers:
+            if h.level > logging.DEBUG:
+                h.setLevel(logging.DEBUG)
+
+    _last_applied_ascend_log = (level_key, debug_key, modules_key)
+    if announce:
+        logging.getLogger("vllm_ascend.logger").info(
+            "[ascend_log] applied level=%s debug=%s modules=%s",
+            level_key,
+            debug_list,
+            dict(overrides),
+        )
 
 
 def _use_color() -> bool:
