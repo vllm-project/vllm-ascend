@@ -20,6 +20,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.spec_utils import expand_idx_mapping_cpu
+from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -439,13 +440,19 @@ def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     idx_mapping_np = np.array([1, 0], dtype=np.int32)
     query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    total_len = Ascend310PStagedWriteTensor(
+        2, dtype=torch.int32, device=torch.device("cpu")
+    )
+    num_computed_tokens = Ascend310PStagedWriteTensor(
+        2, dtype=torch.int32, device=torch.device("cpu")
+    )
     req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(cpu=torch.zeros((2, 8), dtype=torch.int32)),
         last_sampled_tokens_cpu=torch.zeros((2, 1), dtype=torch.int64),
-        total_len=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
+        total_len=total_len,
         num_computed_tokens_np=np.zeros(2, dtype=np.int32),
         num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
-        num_computed_tokens=SimpleNamespace(cpu=torch.zeros(2, dtype=torch.int32)),
+        num_computed_tokens=num_computed_tokens,
     )
     sampled_tokens = torch.tensor([[10, 11], [20, -1]], dtype=torch.int32)
     num_sampled = torch.tensor([2, 1], dtype=torch.int32)
@@ -467,6 +474,15 @@ def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     torch.testing.assert_close(
         req_states.all_token_ids.cpu[1, :2],
         torch.tensor([10, 11], dtype=torch.int32),
+    )
+    req_states.total_len.apply_write()
+    req_states.num_computed_tokens.apply_write()
+    torch.testing.assert_close(
+        req_states.total_len.gpu, torch.tensor([1, 2], dtype=torch.int32)
+    )
+    torch.testing.assert_close(
+        req_states.num_computed_tokens.gpu,
+        torch.tensor([1, 2], dtype=torch.int32),
     )
 
 
