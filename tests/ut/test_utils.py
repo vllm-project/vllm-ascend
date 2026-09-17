@@ -745,8 +745,8 @@ class TestIsMtpLayer(TestBase):
         self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
 
 
-class TestIsLiveWeightReloadEnabled(TestBase):
-    """In-place weight updates arrive through either deployment switch.
+class TestIsRlWeightUpdateEnabled(TestBase):
+    """RL weight updates arrive through either deployment switch.
 
     Both the Ascend RL defaults and the upstream weight transfer service must
     be recognized on their own: missing either one makes weight owners keep or
@@ -763,17 +763,17 @@ class TestIsLiveWeightReloadEnabled(TestBase):
 
     def test_disabled_without_any_switch(self):
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
-            self.assertFalse(utils.is_live_weight_reload_enabled(self._vllm_config(None)))
+            self.assertFalse(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
 
     def test_enabled_by_rl_config(self):
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
-            self.assertTrue(utils.is_live_weight_reload_enabled(self._vllm_config(None)))
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
 
     def test_enabled_by_weight_transfer_config(self):
         """`--weight-transfer-config` alone marks a weight update deployment."""
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
-            self.assertTrue(utils.is_live_weight_reload_enabled(self._vllm_config(SimpleNamespace(backend="hccl"))))
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="hccl"))))
 
     def test_enabled_by_both_switches(self):
         with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
-            self.assertTrue(utils.is_live_weight_reload_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))

@@ -1103,7 +1103,7 @@ class TestAscendSFAImpl(TestBase):
         layer = self._setup_kv_b_proj()
         mock_format_cast.return_value = layer.weight
         mock_maybe_trans_nz.side_effect = lambda x: x
-        self.impl.live_weight_reload_enabled = True
+        self.impl.rl_weight_update_enabled = True
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
@@ -1146,7 +1146,7 @@ class TestAscendSFAImpl(TestBase):
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
 
-    def _run_prolog_v3_kv_consumer_dispose_test(self, live_weight_reload_enabled: bool):
+    def _run_prolog_v3_kv_consumer_dispose_test(self, rl_weight_update_enabled: bool):
         """Exercise the kv-consumer dispose branch of the PROLOG_V3 path."""
         mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
         mock_format_cast.start()
@@ -1161,19 +1161,19 @@ class TestAscendSFAImpl(TestBase):
         self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
         self.impl.q_lora_rank = 32
         self.impl.is_kv_consumer = True
-        self.impl.live_weight_reload_enabled = live_weight_reload_enabled
+        self.impl.rl_weight_update_enabled = rl_weight_update_enabled
 
         with patch("vllm_ascend.attention.sfa_v1.dispose_layer") as mock_dispose:
             self.impl._process_weights_for_fused_prolog_v3()
         return mock_dispose
 
     def test_prolog_v3_disposes_sources_without_rl(self):
-        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(live_weight_reload_enabled=False)
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=False)
 
         self.assertEqual(mock_dispose.call_count, 2)
 
     def test_prolog_v3_keeps_sources_for_rl(self):
-        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(live_weight_reload_enabled=True)
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=True)
 
         mock_dispose.assert_not_called()
         self.assertTrue(hasattr(self.impl, "weight_dq"))

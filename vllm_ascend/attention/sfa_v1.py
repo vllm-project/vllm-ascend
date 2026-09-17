@@ -58,8 +58,8 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
-    is_live_weight_reload_enabled,
     is_mtp_layer,
+    is_rl_weight_update_enabled,
     maybe_trans_nz,
 )
 
@@ -699,9 +699,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
-        # updates that live weight reload performs, so those sources must
-        # survive whenever such updates are possible.
-        self.live_weight_reload_enabled = is_live_weight_reload_enabled(self.vllm_config)
+        # updates that RL pushes through vLLM's layerwise reload, so those
+        # sources must survive whenever such updates are possible.
+        self.rl_weight_update_enabled = is_rl_weight_update_enabled(self.vllm_config)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
@@ -844,7 +844,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
         # loadable (#15463).
-        if not self.live_weight_reload_enabled:
+        if not self.rl_weight_update_enabled:
             dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
@@ -978,7 +978,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Same reasoning as kv_b_proj: once the fused projections are consumed by
         # PROLOG_V3 they are pure load sources, but discarding their storage
         # breaks the next layerwise reload, so RL keeps them.
-        if self.is_kv_consumer and not self.live_weight_reload_enabled:
+        if self.is_kv_consumer and not self.rl_weight_update_enabled:
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()

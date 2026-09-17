@@ -1332,8 +1332,8 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
-def is_live_weight_reload_enabled(vllm_config: VllmConfig) -> bool:
-    """Whether in-place weight updates may be pushed into the live model.
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
 
     RL rollout workers receive weights through vLLM's layerwise reload, which
     writes every checkpoint parameter back into the storage that exists when
