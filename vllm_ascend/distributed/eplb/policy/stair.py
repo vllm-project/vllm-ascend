@@ -466,7 +466,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         z_score: float,
     ) -> float:
         selected = sorted((*experts, candidate))
-        counts = replicas[selected].astype(np.float64)
+        counts: np.ndarray = replicas[selected].astype(np.float64)
         rank_mean = float(np.sum(mean[selected] / counts, dtype=np.float64))
         if moments.ndim == 1:
             variance = float(np.sum(moments[selected] / counts**2, dtype=np.float64))
