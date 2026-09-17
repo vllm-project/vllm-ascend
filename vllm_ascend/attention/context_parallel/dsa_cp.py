@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
@@ -15,7 +16,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.dsa_common import restore_tp_heads
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -62,6 +62,23 @@ if TYPE_CHECKING:
 # =============================================================================
 # Legacy DSA-CP implementation (TP/SP group)
 # =============================================================================
+
+
+def restore_tp_heads(output, tp_group):
+    """Exchange [local tokens, all heads] for [all tokens, local heads]."""
+    if tp_group.world_size == 1:
+        return output
+    tokens, heads, width = output.shape
+    local_heads = heads // tp_group.world_size
+    send = (
+        output.view(tokens, tp_group.world_size, local_heads, width)
+        .permute(1, 0, 2, 3)
+        .contiguous()
+        .view(-1, local_heads, width)
+    )
+    recv = torch.empty_like(send)
+    dist.all_to_all_single(recv, send, group=tp_group.device_group)
+    return recv
 
 
 def hadamard_transform_ref(
