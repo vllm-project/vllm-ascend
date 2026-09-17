@@ -15,7 +15,7 @@ import torch
 def mixin_node():
     root = Path(__file__).resolve().parents[3] / "vllm_ascend"
     tree = ast.parse((root / "worker/v2/spec_decode/dcp_utils.py").read_text())
-    return next(node for node in tree.body if isinstance(node, ast.ClassDef))
+    return next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DCPDraftReplicatedMixin")
 
 
 def test_mrv2_pd_config_isolates_recompute_and_preserves_target():
@@ -125,6 +125,7 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
         enable_dcp=enable_dcp,
         set_current_vllm_config=set_config,
         AttentionLayerBase=object,
+        ReplicatedDraftAttentionBackend=object,
         get_layers_from_vllm_config=lambda *args: {"target": target_layer, "draft": layer},
     )
     exec(compile("from __future__ import annotations\n" + ast.unparse(cls), "mixin", "exec"), scope)
@@ -144,6 +145,9 @@ def test_mixin_load_delegation_and_dcp_context_restore(replicated, fail):
     assert current[0] is target and enable_dcp()
     assert getattr(layer, "_ascend_dcp_replicated_draft", False) == (replicated and not fail)
     assert not hasattr(target_layer, "_ascend_dcp_replicated_draft")
+    assert not hasattr(target_layer, "attn_backend")
+    if replicated and not fail:
+        assert layer.attn_backend is object
 
 
 @pytest.mark.parametrize("use_v2", [False, True])
@@ -300,3 +304,31 @@ def test_propose_keeps_draft_dcp_context_through_graph_replay(fail):
     else:
         assert host.propose(batch, *([None] * 11)) == "draft"
     assert calls and not active[0]
+
+
+def test_replicated_backend_stays_local_under_target_dcp():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/dcp_utils.py"
+    cls = next(
+        n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "ReplicatedDraftAttentionBackend"
+    )
+    local_builder = type("LocalBuilder", (), {})
+    local_impl = type("LocalImpl", (), {})
+
+    class TargetBackend:
+        @staticmethod
+        def get_builder_cls():
+            raise AssertionError("Target DCP builder must not be used for replicated draft")
+
+        @staticmethod
+        def get_impl_cls():
+            raise AssertionError("Target DCP implementation must not be used for replicated draft")
+
+    scope = dict(
+        AscendAttentionBackend=TargetBackend,
+        AscendAttentionMetadataBuilder=local_builder,
+        AscendAttentionBackendImpl=local_impl,
+    )
+    exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), scope)
+    backend = scope[cls.name]
+    assert backend.get_builder_cls() is local_builder
+    assert backend.get_impl_cls() is local_impl

@@ -11,6 +11,11 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionBackendImpl,
+    AscendAttentionMetadataBuilder,
+)
 from vllm_ascend.attention.utils import enable_dcp
 
 if TYPE_CHECKING:
@@ -58,6 +63,18 @@ def draft_additional_config(additional_config: dict | None) -> dict:
     return result
 
 
+class ReplicatedDraftAttentionBackend(AscendAttentionBackend):
+    """Keep replicated draft groups local when target DCP builds metadata."""
+
+    @staticmethod
+    def get_impl_cls() -> type[AscendAttentionBackendImpl]:
+        return AscendAttentionBackendImpl
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendAttentionMetadataBuilder]:
+        return AscendAttentionMetadataBuilder
+
+
 class DCPDraftReplicatedMixin:
     """Add local GQA draft KV replication before the upstream speculator in the MRO.
 
@@ -96,6 +113,7 @@ class DCPDraftReplicatedMixin:
             for name, layer in layers.items():
                 if name not in target_attn_layer_names:
                     layer._ascend_dcp_replicated_draft = True
+                    layer.attn_backend = ReplicatedDraftAttentionBackend
         return model
 
     def set_attn(
