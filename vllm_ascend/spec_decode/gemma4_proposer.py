@@ -24,13 +24,39 @@ metadata, and FIA speculative-decoding attention state.
 """
 
 import copy
+from collections.abc import Sequence
+from typing import Any
 
 from vllm.config import get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.compilation.updatable_graph import ParamProvider, Params
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import use_updatable_graph
+
+
+class _LayerResolvedSource:
+    def __init__(self, multi_steps_attn_metadata: Sequence[dict[str, Any]]) -> None:
+        self.multi_steps_attn_metadata = multi_steps_attn_metadata
+
+    def get(self, provider: ParamProvider) -> Sequence[Params]:
+        layer_name = getattr(provider, "layer_name", None)
+        params: list[Params] = []
+        for step_metadata in self.multi_steps_attn_metadata:
+            if layer_name is not None and layer_name in step_metadata:
+                params.append(provider.resolve(step_metadata))
+            else:
+                metadata = next(iter(step_metadata.values()))
+                params.append(
+                    {
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
+        return tuple(params)
 
 
 class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):
@@ -52,6 +78,13 @@ class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):
         # multimodal embeddings.
         self.supports_mm_inputs = False
         self._sync_kv_sharing_target_to_impl()
+
+    def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata) -> None:
+        if use_updatable_graph(att_backend):
+            self._runnable.update_draft_model_metadata(  # type: ignore[arg-type]
+                _LayerResolvedSource(multi_steps_attn_metadata)
+            )
+            self._runnable.set_attn_backend(att_backend)  # type: ignore[attr-defined]
 
     def _sync_kv_sharing_target_to_impl(self) -> None:
         """Propagate late-bound KV-sharing targets to Ascend backends.

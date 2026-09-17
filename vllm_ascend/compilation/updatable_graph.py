@@ -4,7 +4,7 @@
 from collections.abc import Callable, Hashable, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 import torch_npu
@@ -19,6 +19,7 @@ class ParamProvider(Protocol):
     def resolve(self, context) -> Params: ...
 
 
+@runtime_checkable
 class ParamSource(Protocol):
     def get(
         self,
@@ -39,12 +40,14 @@ class ContextSource:
 
 @dataclass(frozen=True, slots=True)
 class SharedSource:
-    params: Sequence[Params]
+    params: Sequence[Params] | ParamSource
 
     def get(
         self,
-        _provider: ParamProvider,
+        provider: ParamProvider,
     ) -> Sequence[Params]:
+        if isinstance(self.params, ParamSource):
+            return self.params.get(provider)
         return self.params
 
 
