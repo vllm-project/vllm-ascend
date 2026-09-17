@@ -81,6 +81,7 @@ jobs:
       csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
       missing_targets: ${{ steps.misses.outputs.missing_targets }}
       has_missing: ${{ steps.misses.outputs.has_missing }}
+      has_write_credentials: ${{ steps.writer-credentials.outputs.present }}
     steps:
       - name: Install csrc cache dependencies
         run: |
@@ -166,6 +167,18 @@ jobs:
         run: |
           python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
             --target-ids "$TARGET_IDS"
+
+      - name: Detect OBS writer credentials
+        id: writer-credentials
+        env:
+          HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+          HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
+        run: |
+          if [ -n "$HW_OBS_AK" ] && [ -n "$HW_OBS_SK" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # This coordinator only needs to know whether a cache exists; downloading
       # large artifacts here would add latency before the actual consumer jobs.
@@ -279,7 +292,9 @@ jobs:
   build-missing-caches:
     name: Build csrc cache (${{ matrix.target.id }})
     needs: prepare-cache-checks
-    if: needs.prepare-cache-checks.outputs.has_missing == 'true'
+    if: >-
+      needs.prepare-cache-checks.outputs.has_missing == 'true' &&
+      needs.prepare-cache-checks.outputs.has_write_credentials == 'true'
     strategy:
       fail-fast: false
       matrix:
