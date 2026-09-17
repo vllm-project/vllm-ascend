@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+    MooncakeBackend,
     MooncakeStoreConfig,
     _convert_to_bytes,
     _parse_global_segment_size,
@@ -343,8 +344,6 @@ class TestYuanrongHelper(unittest.TestCase):
 # =========================================================================
 class TestMooncakeBackendMethods(unittest.TestCase):
     def _make_backend(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
-
         with (
             patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}),
             patch.object(MooncakeBackend, "__init__", lambda self, pc: None),
@@ -354,11 +353,69 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend.config = MagicMock()
             backend.local_seg = "127.0.0.1:1234"
             backend._lazy_init = False
+            backend._lookup_only = False
             backend._store_initialized = True
             backend._use_fabric_mem = False
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
             return backend
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te")
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+        return_value="10.0.0.1",
+    )
+    def test_lookup_only_setup_uses_rpc_protocol(self, _mock_get_ip, mock_global_te):
+        backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.config = _make_mooncake_store_config(
+            metadata_server="meta:2379",
+            master_server_address="master:50051",
+        )
+        backend._lookup_only = True
+
+        with patch("mooncake.store.MooncakeDistributedStore") as store_cls:
+            store_cls.return_value.setup.return_value = 0
+            result = backend._setup_store()
+
+        self.assertIs(result, store_cls.return_value)
+        store_cls.return_value.setup.assert_called_once_with(
+            local_hostname="10.0.0.1",
+            metadata_server="meta:2379",
+            global_segment_size=0,
+            local_buffer_size=0,
+            protocol="rpc_only",
+            rdma_devices="",
+            master_server_addr="master:50051",
+        )
+        mock_global_te.get_transfer_engine.assert_not_called()
+
+    def test_lookup_only_setup_failure_is_fatal(self):
+        backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.config = _make_mooncake_store_config()
+        backend._lookup_only = True
+
+        with (
+            patch("mooncake.store.MooncakeDistributedStore") as store_cls,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+                return_value="10.0.0.1",
+            ),
+        ):
+            store_cls.return_value.setup.return_value = -1
+            with self.assertRaisesRegex(RuntimeError, "lookup client failed"):
+                backend._setup_store()
+
+    def test_create_scheduler_client_is_lookup_only(self):
+        parallel_config = MagicMock()
+        with patch.object(MooncakeBackend, "__init__", return_value=None) as mock_init:
+            client = MooncakeBackend.create_scheduler_client(parallel_config)
+
+        self.assertIsInstance(client, MooncakeBackend)
+        mock_init.assert_called_once_with(
+            parallel_config,
+            contribute_memory=False,
+            lookup_only=True,
+        )
 
     def test_exists(self):
         b = self._make_backend()
