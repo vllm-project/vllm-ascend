@@ -10,10 +10,14 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
+    _BounceLease,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
+    _AcquiredTransferWave,
+    _flatten_transfer_wave,
     _resolve_bounce_arena_size,
+    _TransferFragmentPlan,
 )
 
 
@@ -28,6 +32,154 @@ def _make_bounce_config(
         {} if extra_config is None else extra_config
     )
     return config
+
+
+def test_flatten_transfer_wave_preserves_unified_fragment_order():
+    direct = MagicMock(prefix_nbytes=0, direct_address=100, direct_nbytes=10)
+    mixed = MagicMock(prefix_nbytes=3, direct_address=200, direct_nbytes=7)
+    bounced = MagicMock(prefix_nbytes=5, direct_address=None, direct_nbytes=0)
+    wave = MagicMock()
+    wave.sources = (
+        MagicMock(source=direct, bounce_offset=None),
+        MagicMock(source=mixed, bounce_offset=0),
+        MagicMock(source=bounced, bounce_offset=3),
+    )
+
+    assert _flatten_transfer_wave(wave, 1000) == [
+        _TransferFragmentPlan(0, 100, 0, 10),
+        _TransferFragmentPlan(1, 1000, 0, 3),
+        _TransferFragmentPlan(1, 200, 3, 7),
+        _TransferFragmentPlan(2, 1003, 0, 5),
+    ]
+
+
+def test_flatten_transfer_wave_allows_zero_bounce_wave():
+    direct = MagicMock(prefix_nbytes=0, direct_address=100, direct_nbytes=10)
+    wave = MagicMock()
+    wave.sources = (MagicMock(source=direct, bounce_offset=None),)
+
+    assert _flatten_transfer_wave(wave, None) == [
+        _TransferFragmentPlan(0, 100, 0, 10),
+    ]
+
+
+def test_acquire_transfer_wave_bypasses_bounce_for_direct_sources():
+    worker = object.__new__(AscendECMooncakeWorker)
+    producer_memory = MagicMock()
+    producer_memory.acquire_bounce.return_value = None
+    transfer = MagicMock()
+    transfer.acquire_registration_ranges.return_value = [64]
+    worker._producer_memory = producer_memory
+    worker._transfer = transfer
+
+    source = MagicMock(prefix_nbytes=0, direct_address=100, direct_nbytes=10)
+    registration_ranges = (MagicMock(),)
+    wave = MagicMock(
+        bounce_nbytes=0,
+        sources=(MagicMock(source=source, bounce_offset=None),),
+        registration_ranges=registration_ranges,
+    )
+
+    acquired = worker._acquire_transfer_wave(wave)
+
+    producer_memory.acquire_bounce.assert_called_once_with(0)
+    producer_memory.copy_to_bounce.assert_not_called()
+    transfer.acquire_registration_ranges.assert_called_once_with(registration_ranges)
+    assert acquired == _AcquiredTransferWave(
+        fragments=[_TransferFragmentPlan(0, 100, 0, 10)],
+        registration_addresses=[64],
+        bounce_lease=None,
+    )
+
+
+def test_acquire_transfer_wave_returns_fragments_and_resources():
+    worker = object.__new__(AscendECMooncakeWorker)
+    producer_memory = MagicMock()
+    lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
+    producer_memory.acquire_bounce.return_value = lease
+    producer_memory.copy_to_bounce.return_value = 1000
+    transfer = MagicMock()
+    transfer.acquire_registration_ranges.return_value = [128]
+    worker._producer_memory = producer_memory
+    worker._transfer = transfer
+
+    owner = MagicMock()
+    source = MagicMock(
+        owner=owner,
+        prefix_nbytes=3,
+        direct_address=200,
+        direct_nbytes=7,
+    )
+    registration_ranges = (MagicMock(),)
+    wave = MagicMock(
+        bounce_nbytes=3,
+        sources=(MagicMock(source=source, bounce_offset=0),),
+        registration_ranges=registration_ranges,
+    )
+
+    acquired = worker._acquire_transfer_wave(wave)
+
+    producer_memory.acquire_bounce.assert_called_once_with(3)
+    producer_memory.copy_to_bounce.assert_called_once_with(
+        lease,
+        [(owner, 0, 3)],
+    )
+    transfer.acquire_registration_ranges.assert_called_once_with(registration_ranges)
+    assert acquired == _AcquiredTransferWave(
+        fragments=[
+            _TransferFragmentPlan(0, 1000, 0, 3),
+            _TransferFragmentPlan(0, 200, 3, 7),
+        ],
+        registration_addresses=[128],
+        bounce_lease=lease,
+    )
+
+
+def test_acquire_transfer_wave_releases_bounce_on_registration_failure():
+    worker = object.__new__(AscendECMooncakeWorker)
+    producer_memory = MagicMock()
+    lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
+    producer_memory.acquire_bounce.return_value = lease
+    producer_memory.copy_to_bounce.return_value = 1000
+    transfer = MagicMock()
+    transfer.acquire_registration_ranges.side_effect = RuntimeError("registration failed")
+    worker._producer_memory = producer_memory
+    worker._transfer = transfer
+
+    source = MagicMock(
+        owner=MagicMock(),
+        prefix_nbytes=3,
+        direct_address=None,
+        direct_nbytes=0,
+    )
+    wave = MagicMock(
+        bounce_nbytes=3,
+        sources=(MagicMock(source=source, bounce_offset=0),),
+        registration_ranges=(MagicMock(),),
+    )
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        worker._acquire_transfer_wave(wave)
+
+    transfer.release_registration_ranges.assert_not_called()
+    producer_memory.release_bounce.assert_called_once_with(lease)
+
+
+def test_release_transfer_wave_releases_bounce_when_registration_release_raises():
+    worker = object.__new__(AscendECMooncakeWorker)
+    producer_memory = MagicMock()
+    transfer = MagicMock()
+    transfer.release_registration_ranges.side_effect = RuntimeError("release failed")
+    worker._producer_memory = producer_memory
+    worker._transfer = transfer
+    lease = _BounceLease(offset=256, nbytes=3, allocated_nbytes=256)
+    acquired = _AcquiredTransferWave([], [128], lease)
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        worker._release_transfer_wave(acquired)
+
+    transfer.release_registration_ranges.assert_called_once_with([128])
+    producer_memory.release_bounce.assert_called_once_with(lease)
 
 
 def test_make_config_maps_upstream_defaults_to_ascend():

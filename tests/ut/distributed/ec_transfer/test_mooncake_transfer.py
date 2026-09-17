@@ -1,5 +1,6 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
+import pytest
 import torch
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
@@ -10,6 +11,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     _plan_registration_ranges,
     _plan_source,
     _plan_transfer_waves,
+    _RegistrationRangePlan,
 )
 
 _MIB = 1024 * 1024
@@ -332,6 +334,138 @@ def test_plan_transfer_waves_all_bounce_has_no_registration_ranges():
     assert waves[0].bounce_nbytes == _MIB // 4
     assert waves[0].registration_ranges == ()
     assert waves[0].sources[0].bounce_offset == 0
+
+
+def test_acquire_registration_ranges_registers_individually_and_reuses():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    owner_a = MagicMock()
+    owner_b = MagicMock()
+    ranges = (
+        _RegistrationRangePlan(4 * _MIB, 2 * _MIB, (owner_a,)),
+        _RegistrationRangePlan(8 * _MIB, _MIB, (owner_b,)),
+    )
+
+    with patch.object(transfer, "_ensure_engine", return_value=engine):
+        first = transfer.acquire_registration_ranges(ranges)
+        second = transfer.acquire_registration_ranges(ranges)
+
+    assert first == [4 * _MIB, 8 * _MIB]
+    assert second == first
+    assert engine.batch_register_memory.call_args_list == [
+        call([4 * _MIB], [2 * _MIB]),
+        call([8 * _MIB], [_MIB]),
+    ]
+    assert transfer._direct_registrations[4 * _MIB].users == 2
+    assert transfer._direct_registrations[8 * _MIB].users == 2
+    assert transfer._direct_registrations[4 * _MIB].owners == (owner_a,)
+    assert transfer._direct_registrations[8 * _MIB].owners == (owner_b,)
+
+
+def test_acquire_registration_ranges_rolls_back_new_ranges_in_reverse():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.side_effect = [0, 0, 7]
+    engine.unregister_memory.return_value = 0
+    ranges = tuple(
+        _RegistrationRangePlan(address, _MIB, (MagicMock(),))
+        for address in (4 * _MIB, 8 * _MIB, 12 * _MIB)
+    )
+
+    with (
+        patch.object(transfer, "_ensure_engine", return_value=engine),
+        pytest.raises(RuntimeError, match="status 7"),
+    ):
+        transfer.acquire_registration_ranges(ranges)
+
+    assert engine.batch_register_memory.call_args_list == [
+        call([4 * _MIB], [_MIB]),
+        call([8 * _MIB], [_MIB]),
+        call([12 * _MIB], [_MIB]),
+    ]
+    assert engine.unregister_memory.call_args_list == [
+        call(8 * _MIB),
+        call(4 * _MIB),
+    ]
+    assert transfer._direct_registrations == {}
+
+
+def test_release_registration_ranges_waits_for_last_user():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    engine.unregister_memory.return_value = 0
+    ranges = (
+        _RegistrationRangePlan(4 * _MIB, 2 * _MIB, (MagicMock(),)),
+    )
+
+    with patch.object(transfer, "_ensure_engine", return_value=engine):
+        first = transfer.acquire_registration_ranges(ranges)
+        second = transfer.acquire_registration_ranges(ranges)
+
+        assert transfer.release_registration_ranges(first)
+        engine.unregister_memory.assert_not_called()
+        assert transfer._direct_registrations[4 * _MIB].users == 1
+
+        assert transfer.release_registration_ranges(second)
+
+    engine.unregister_memory.assert_called_once_with(4 * _MIB)
+    assert transfer._direct_registrations == {}
+
+
+def test_release_registration_ranges_retains_owner_on_failure():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    engine.unregister_memory.return_value = 7
+    owner = MagicMock()
+    ranges = (
+        _RegistrationRangePlan(4 * _MIB, 2 * _MIB, (owner,)),
+    )
+
+    with patch.object(transfer, "_ensure_engine", return_value=engine):
+        addresses = transfer.acquire_registration_ranges(ranges)
+        assert not transfer.release_registration_ranges(addresses)
+
+    entry = transfer._direct_registrations[4 * _MIB]
+    assert entry.users == 0
+    assert entry.owners == (owner,)
+
+
+def test_close_retries_failed_direct_unregistration():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    engine.unregister_memory.side_effect = [7, 0]
+    transfer._engine = engine
+    ranges = (_RegistrationRangePlan(4 * _MIB, _MIB, (MagicMock(),)),)
+
+    addresses = transfer.acquire_registration_ranges(ranges)
+    assert not transfer.release_registration_ranges(addresses)
+    transfer.close()
+
+    assert engine.unregister_memory.call_args_list == [
+        call(4 * _MIB),
+        call(4 * _MIB),
+    ]
+    assert transfer._direct_registrations == {}
+
+
+def test_close_retains_owner_when_direct_unregistration_fails():
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    engine = MagicMock()
+    engine.batch_register_memory.return_value = 0
+    engine.unregister_memory.return_value = 7
+    transfer._engine = engine
+    owner = MagicMock()
+    ranges = (_RegistrationRangePlan(4 * _MIB, _MIB, (owner,)),)
+
+    transfer.acquire_registration_ranges(ranges)
+    transfer.close()
+
+    engine.unregister_memory.assert_called_once_with(4 * _MIB)
+    assert transfer._direct_registrations[4 * _MIB].owners == (owner,)
 
 
 def test_acquire_sources_merges_views_into_aligned_storage_region():
