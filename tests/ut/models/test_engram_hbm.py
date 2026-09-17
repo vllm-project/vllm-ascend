@@ -397,6 +397,7 @@ def test_hash_reads_pages_this_replica_never_wrote(tokens):
     h.pages = {}
     # Position 4 owns page 11; its look-back reaches page 10, never written here.
     block_table = torch.arange(10, 26).reshape(1, -1)
-    values, mask = h.update(torch.arange(tokens) % 50, torch.arange(4, 4 + tokens),
-                            torch.zeros(tokens, dtype=torch.long), block_table, 4)
+    values, mask = h.update(
+        torch.arange(tokens) % 50, torch.arange(4, 4 + tokens), torch.zeros(tokens, dtype=torch.long), block_table, 4
+    )
     assert values.shape == (tokens, 1, 2) and mask.all()
