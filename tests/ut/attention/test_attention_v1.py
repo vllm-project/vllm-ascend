@@ -236,6 +236,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     impl.kv_sharing_target_layer_name = None
     impl.is_kv_producer = True
     impl.use_bnsd_kv_cache = False
+    impl.pcp_enabled = True
 
     query = torch.empty((4, 2, 1))
     output = torch.empty((4, 2, 1))
@@ -284,6 +285,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     torch.testing.assert_close(cache_args["key"], gathered_key)
     torch.testing.assert_close(cache_args["value"], gathered_value)
     torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
+    assert cache_args["use_scatter"] is True
     assert metadata.slot_mapping is slot_mapping
     assert metadata.num_actual_tokens == 3
     assert result[0] is query

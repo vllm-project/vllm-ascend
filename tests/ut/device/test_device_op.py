@@ -34,6 +34,35 @@ def test_reshape_and_cache_uses_legacy_reshape_op():
     assert call_kwargs["value_cache"] is value_cache
 
 
+def test_reshape_and_cache_uses_scatter_when_requested():
+    key = torch.randn(2, 3, 4).transpose(0, 1)
+    value = torch.randn(2, 3, 4).transpose(0, 1)
+    slot_mapping = torch.arange(8, dtype=torch.int32)[::2]
+    key_cache = object()
+    value_cache = object()
+
+    with (
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_scatter,
+        mock.patch("vllm_ascend.device.device_op.torch_npu._npu_reshape_and_cache") as mock_reshape,
+    ):
+        BaseDeviceAdaptor.reshape_and_cache(
+            key, value, key_cache, value_cache, slot_mapping, use_scatter=True
+        )
+
+    mock_reshape.assert_not_called()
+    mock_scatter.assert_called_once()
+    call_kwargs = mock_scatter.call_args.kwargs
+    assert call_kwargs["key"].is_contiguous()
+    assert call_kwargs["value"].is_contiguous()
+    assert call_kwargs["slot_mapping"].is_contiguous()
+    torch.testing.assert_close(call_kwargs["key"], key)
+    torch.testing.assert_close(call_kwargs["value"], value)
+    torch.testing.assert_close(call_kwargs["slot_mapping"], slot_mapping)
+    assert call_kwargs["key_cache"] is key_cache
+    assert call_kwargs["value_cache"] is value_cache
+    assert call_kwargs["cache_mode"] == "Norm"
+
+
 def test_base_reshape_and_cache_uses_custom_scatter_for_bnsd():
     key = torch.randn(2, 8, 64)
     value = torch.randn_like(key)
