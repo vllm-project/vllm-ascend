@@ -52,6 +52,9 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    _global_batch_slot_mappings: torch.Tensor | None
+    _gathered_kv_slot_mappings: torch.Tensor | None
+    _pad_slot_id: torch.Tensor
 
     def __init__(
         self,
