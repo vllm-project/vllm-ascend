@@ -13,6 +13,8 @@ from vllm.model_executor.models.utils import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_QUAROT_ROTATION_PATH = Path("optional/quarot.safetensors")
+
 
 def get_embedding_tensor(directory_path):
     """
@@ -43,14 +45,57 @@ def get_rotation_path(target_vllm_config):
     """
     Gets the path of the rotation matrix, returns None if the target model is not a quarot model.
     """
-    target_model_path = target_vllm_config.model_config.model
-    try:
-        quant_description = target_vllm_config.quant_config.quant_description
-        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    target_model_path = Path(target_vllm_config.model_config.model)
+    quant_config = getattr(target_vllm_config, "quant_config", None)
+    quant_description = getattr(quant_config, "quant_description", None)
+    if not isinstance(quant_description, dict):
         return None
 
-    return Path(target_model_path) / rotation_relative_path
+    optional = quant_description.get("optional", {})
+    if optional is None:
+        optional = {}
+    if not isinstance(optional, dict):
+        raise ValueError("QuaRot metadata field 'optional' must be a dictionary.")
+    has_quarot_metadata = "quarot" in optional
+    quarot = optional.get("quarot", {})
+    if quarot is None:
+        quarot = {}
+    if not isinstance(quarot, dict):
+        raise ValueError("QuaRot metadata field 'optional.quarot' must be a dictionary.")
+    rotation_map = quarot.get("rotation_map", {})
+    if rotation_map is None:
+        rotation_map = {}
+    if not isinstance(rotation_map, dict):
+        raise ValueError("QuaRot metadata field 'optional.quarot.rotation_map' must be a dictionary.")
+    rotation_relative_path = rotation_map.get("global_rotation")
+
+    if rotation_relative_path is None or rotation_relative_path == "":
+        # Older ModelSlim descriptions may omit the optional QuaRot mapping
+        # even though the rotation is packaged at the conventional location.
+        # Use the same fallback for every DSpark/QuaRot loading path so FC and
+        # shared embed/lm_head weights cannot end up in different bases.
+        rotation_path = target_model_path / DEFAULT_QUAROT_ROTATION_PATH
+        if rotation_path.is_file():
+            logger.info(
+                "QuaRot rotation mapping is missing; using the default file at %s.",
+                rotation_path,
+            )
+            return rotation_path
+        if has_quarot_metadata:
+            raise FileNotFoundError(
+                "QuaRot metadata is present, but no global rotation file was configured "
+                f"and the default file does not exist: {rotation_path}"
+            )
+        return None
+
+    if not isinstance(rotation_relative_path, (str, os.PathLike)):
+        raise ValueError("QuaRot global_rotation must be a filesystem path.")
+    rotation_path = Path(rotation_relative_path)
+    if not rotation_path.is_absolute():
+        rotation_path = target_model_path / rotation_path
+    if not rotation_path.is_file():
+        raise FileNotFoundError(f"Configured QuaRot rotation file does not exist: {rotation_path}")
+    return rotation_path
 
 
 def get_rotataion_matrix(rotation_path):
@@ -64,7 +109,7 @@ def get_rotataion_matrix(rotation_path):
         return Q
     except Exception as e:
         logger.error(
-            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
+            "Failed to load QuaRot rotation weight from '%s'. Check the target and draft model configuration.",
             rotation_path,
         )
         raise e
