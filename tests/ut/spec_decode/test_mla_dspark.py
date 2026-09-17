@@ -197,47 +197,42 @@ def test_empty_metadata_is_a_noop(architecture):
 
 
 @pytest.mark.parametrize("architecture", [None, "MLA"])
-@pytest.mark.parametrize("dcp", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
-def test_capture_uses_shared_factory_and_restores(monkeypatch, architecture, dcp, fail):
+def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
     manager.speculator = SimpleNamespace(attn_architecture=architecture)
-    buffers = SimpleNamespace(positions=torch.arange(20))
-    original = MagicMock()
-    builder = MagicMock()
-    monkeypatch.setattr(graph.dflash_cudagraph, "build_attn_metadata", original)
-    monkeypatch.setattr(attn_utils, "build_attn_metadata", builder)
-    monkeypatch.setattr(graph, "communicator_switch", nullcontext)
-    monkeypatch.setattr(graph, "model_capture_wrapper", lambda *args: nullcontext())
+    events = []
 
-    def capture(*args):
-        graph.dflash_cudagraph.build_attn_metadata(
-            num_tokens=10,
-            num_reqs=2,
-            causal=False,
-            for_cudagraph_capture=True,
-            dcp_local_seq_lens=torch.ones(2) if dcp else None,
-        )
+    @contextmanager
+    def context(name):
+        events.append(f"enter {name}")
+        try:
+            yield
+        finally:
+            events.append(f"exit {name}")
+
+    monkeypatch.setattr(graph, "communicator_switch", lambda: context("communicator"))
+
+    def model_context(speculator, is_prefill):
+        assert speculator is manager.speculator
+        assert is_prefill is False
+        return context("model")
+
+    monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
+    args = (MagicMock(), SimpleNamespace(positions=torch.arange(20)), object(), [], object(), 128, False, "capture")
+
+    def capture(self, *received):
+        assert self is manager
+        assert received == args
+        assert events == ["enter communicator", "enter model"]
+        events.append("capture")
         if fail:
             raise RuntimeError("capture failed")
 
     monkeypatch.setattr(graph.DFlashCudaGraphManager, "capture", capture)
     with pytest.raises(RuntimeError, match="capture failed") if fail else nullcontext():
-        manager.capture(None, buffers, None, [], None, 128)
-    assert graph.dflash_cudagraph.build_attn_metadata is original
-    if architecture == "MLA":
-        kwargs = builder.call_args.kwargs
-        torch.testing.assert_close(kwargs["positions"], torch.arange(10))
-        assert kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill
-        assert kwargs["causal"] is False
-        if dcp:
-            assert kwargs["is_prefilling"].tolist() == [False, False]
-        else:
-            assert "is_prefilling" not in kwargs
-        original.assert_not_called()
-    else:
-        original.assert_called_once()
-        builder.assert_not_called()
+        manager.capture(*args)
+    assert events == ["enter communicator", "enter model", "capture", "exit model", "exit communicator"]
 
 
 @pytest.mark.parametrize("architecture", [None, "MLA"])
