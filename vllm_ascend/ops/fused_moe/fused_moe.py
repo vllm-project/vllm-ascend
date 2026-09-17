@@ -78,7 +78,7 @@ class FusedMoEResult:
 
 @dataclass
 class FusedMoEEvents:
-    before_routed_experts: torch.npu.Event
+    before_routed_experts: torch.npu.Event | None = field(default=None)
     after_routed_experts: torch.npu.Event | None = field(default=None)
     shared_input_ready: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
@@ -971,6 +971,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_experts_input: torch.Tensor | None = None,
     ):
         shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
+        # Recording NPU events costs host time and the events are consumed
+        # only by the shared-expert side stream, which runs only when
+        # multistream overlap is enabled.
+        overlap = self.multistream_overlap_shared_expert
         if self.is_internal_router:
             gate = self.gate
             assert gate is not None
@@ -979,11 +983,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
             hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
-            before_routed_experts = torch.npu.current_stream().record_event()
+            before_routed_experts = torch.npu.current_stream().record_event() if overlap else None
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-            after_routed_experts = torch.npu.current_stream().record_event()
+            after_routed_experts = torch.npu.current_stream().record_event() if overlap else None
         else:
-            before_routed_experts = torch.npu.current_stream().record_event()
+            before_routed_experts = torch.npu.current_stream().record_event() if overlap else None
             after_routed_experts = None
 
         # FlashComm1 + TP-sharded shared experts (sed_dp=false): gather the
