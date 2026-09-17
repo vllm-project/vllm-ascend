@@ -75,6 +75,12 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 
 
 class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
+    """DeepSeek V4.1 DSpark draft SWA cache layer.
+
+    ``DeepseekV41DraftSWASpec`` exists only to identify the draft cache.
+    """
+
+    # TODO: Extract DeepseekV41DraftSWASpec construction from this cache subclass.
     def get_kv_cache_spec(self, vllm_config):
         spec = super().get_kv_cache_spec(vllm_config)
         return DeepseekV41DraftSWASpec(
@@ -92,6 +98,8 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
 
 
 class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
+    """DeepSeek V4.1 DSpark draft attention layer."""
+
     swa_cache_cls = DeepseekV41DSparkSWACache
 
     def __init__(self, *args, **kwargs):
@@ -99,6 +107,7 @@ class DeepseekV41DSparkAttention(DeepseekV41SWAAttention):
         self.softmax_scale = self.scale
         self.shared_state = None
         prefix = kwargs["prefix"]
+        # Returns (metadata_builder_cls, impl_cls); select the CP-aware implementation.
         self.v41_impl = get_v41_cp_classes()[1](
             prefix=prefix,
             role=DeepseekV41LayerRole(
@@ -145,7 +154,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         self.target_layer_ids = list(config.dspark_target_layer_ids)
         self.num_dspark_layers = _get_dspark_num_mtp_layers(config)
         self.mtp_start_layer_idx = config.num_hidden_layers
-        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -165,10 +173,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             }
         )
 
-        self.needs_moe_input_ids = any(
-            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None for layer in self.layers.values()
-        )
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
+        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
@@ -199,6 +205,10 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         last_layer = self.layers[str(last_layer_idx)]
         last_layer.norm = self.norm
         last_layer.markov_head = self.markov_head
+
+        self.needs_moe_input_ids = any(
+            layer.mlp.gate.tid2eid is not None or layer.mlp.gate.bias_vl is not None for layer in self.layers.values()
+        )
 
     def _store_standard_swa_kv(self, shared_kv, slot_mapping, attn=None):
         if slot_mapping is None or slot_mapping.numel() == 0:
