@@ -189,25 +189,25 @@ class StairEplbPolicy(AbstractEplbPolicy):
             return mean, (moments + moments.T) * 0.5
         return mean, np.sum(centered**2 * counts[:, None], axis=0, dtype=np.float64) / (total - 1)
 
-
-def placement_score(samples: np.ndarray, weights: np.ndarray, placement: np.ndarray) -> BalanceScore:
-    values = np.asarray(samples, dtype=np.float64)
-    layout = np.asarray(placement, dtype=np.int64)
-    counts = StairEplbPolicy.replica_counts(layout, values.shape[1])
-    loads = np.stack([np.sum(values[:, row] / counts[row], axis=1) for row in layout], axis=1)
-    totals = loads.sum(axis=1)
-    imbalance = np.ones(values.shape[0], dtype=np.float64)
-    active = totals > 0
-    imbalance[active] = loads[active].max(axis=1) / (totals[active] / layout.shape[0])
-    sample_weights = np.asarray(weights, dtype=np.int64)
-    if sample_weights.shape != imbalance.shape or np.any(sample_weights <= 0):
-        raise ValueError("STAIR score weights must match the samples")
-    order = np.argsort(imbalance, kind="stable")
-    cumulative = np.cumsum(sample_weights[order])
-    nearest_rank = max(1, int(np.ceil(0.95 * int(cumulative[-1]))))
-    p95 = imbalance[order[np.searchsorted(cumulative, nearest_rank, side="left")]]
-    mean = np.sum(imbalance * sample_weights, dtype=np.float64) / sample_weights.sum()
-    return BalanceScore(float(mean), float(p95))
+    @classmethod
+    def placement_score(cls, samples: np.ndarray, weights: np.ndarray, placement: np.ndarray) -> BalanceScore:
+        values = np.asarray(samples, dtype=np.float64)
+        layout = np.asarray(placement, dtype=np.int64)
+        counts = cls.replica_counts(layout, values.shape[1])
+        loads = np.stack([np.sum(values[:, row] / counts[row], axis=1) for row in layout], axis=1)
+        totals = loads.sum(axis=1)
+        imbalance = np.ones(values.shape[0], dtype=np.float64)
+        active = totals > 0
+        imbalance[active] = loads[active].max(axis=1) / (totals[active] / layout.shape[0])
+        sample_weights = np.asarray(weights, dtype=np.int64)
+        if sample_weights.shape != imbalance.shape or np.any(sample_weights <= 0):
+            raise ValueError("STAIR score weights must match the samples")
+        order = np.argsort(imbalance, kind="stable")
+        cumulative = np.cumsum(sample_weights[order])
+        nearest_rank = max(1, int(np.ceil(0.95 * int(cumulative[-1]))))
+        p95 = imbalance[order[np.searchsorted(cumulative, nearest_rank, side="left")]]
+        mean = np.sum(imbalance * sample_weights, dtype=np.float64) / sample_weights.sum()
+        return BalanceScore(float(mean), float(p95))
 
 
 def capped_min_max(
@@ -556,7 +556,7 @@ def _plan_layer(
     node_by_rank: tuple[int, ...],
     config: StairConfig,
 ) -> LayerPlan | None:
-    current = placement_score(samples, weights, old)
+    current = StairEplbPolicy.placement_score(samples, weights, old)
     mean, moments = StairEplbPolicy.weighted_moments(samples, weights, covariance=config.use_covariance)
     diagonal = np.diag(moments) if moments.ndim == 2 else moments
     risk = mean + config.z_score * np.sqrt(np.maximum(diagonal, 0.0))
@@ -566,7 +566,7 @@ def _plan_layer(
             placement = unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
         except ValueError:
             return float("inf")
-        return placement_score(samples, weights, placement).mean
+        return StairEplbPolicy.placement_score(samples, weights, placement).mean
 
     candidates = []
     for replicas in replica_candidates(
@@ -591,7 +591,7 @@ def _plan_layer(
         if result is None:
             continue
         placement, source_rank, source_slot, cross_node, same_node = result
-        score = placement_score(samples, weights, placement)
+        score = StairEplbPolicy.placement_score(samples, weights, placement)
         if score.mean <= current.mean and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance):
             key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
             candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
@@ -635,7 +635,7 @@ def _plan_rebalance(
         StairEplbPolicy.replica_counts(old[layer], samples.shape[2])
         if np.sum(samples[:, layer], dtype=np.float64) == 0:
             continue
-        current = placement_score(samples[:, layer], weights, old[layer])
+        current = StairEplbPolicy.placement_score(samples[:, layer], weights, old[layer])
         if current.mean > config.imbalance_threshold and passes_hysteresis(current.mean, anchors[layer], config):
             deterioration = 0.0 if np.isnan(anchors[layer]) else current.mean / anchors[layer] - 1.0
             eligible.append((-current.mean, -deterioration, layer))

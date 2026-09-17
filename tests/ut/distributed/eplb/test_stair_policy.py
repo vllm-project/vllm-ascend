@@ -15,7 +15,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     compress_samples,
     constrained_lpt,
     passes_hysteresis,
-    placement_score,
     replica_candidates,
 )
 
@@ -27,7 +26,7 @@ from vllm_ascend.distributed.eplb.policy.stair import (
 def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, accepted):
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(mean, p95)])
-    monkeypatch.setattr(stair, "placement_score", lambda *_: next(scores))
+    monkeypatch.setattr(StairEplbPolicy, "placement_score", classmethod(lambda cls, *_: next(scores)))
     monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)])
     monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: (old, old, old, 0, 0))
 
@@ -40,7 +39,7 @@ def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, a
 def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, difference, expected_cross_node):
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(1.1, 1.2), BalanceScore(1.1 + difference, 1.2)])
-    monkeypatch.setattr(stair, "placement_score", lambda *_: next(scores))
+    monkeypatch.setattr(StairEplbPolicy, "placement_score", classmethod(lambda cls, *_: next(scores)))
     monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)] * 2)
     placements = [old[::-1].copy(), old.copy()]
     results = iter([(placements[0], old, old, 1, 0), (placements[1], old, old, 0, 0)])
@@ -78,7 +77,7 @@ def test_score_uses_mean_and_weighted_nearest_rank_p95():
     weights = np.array([1, 19])
     placement = np.array([[0], [1]])
 
-    score = placement_score(samples, weights, placement)
+    score = StairEplbPolicy.placement_score(samples, weights, placement)
 
     assert score.mean == 1.05
     assert score.p95 == 1.0
@@ -207,7 +206,7 @@ def test_plan_rebalance_swaps_experts_without_redundancy():
 
     assert not np.array_equal(plan.placement, old)
     np.testing.assert_array_equal(np.bincount(plan.placement.ravel()), np.ones(4, dtype=int))
-    assert plan.accepted_scores[0] < placement_score(load[:, 0], np.ones(1), old[0]).mean
+    assert plan.accepted_scores[0] < StairEplbPolicy.placement_score(load[:, 0], np.ones(1), old[0]).mean
     StairEplbPolicy.validate_plan(old, plan, num_experts=4, pair_cap=1)
 
 
