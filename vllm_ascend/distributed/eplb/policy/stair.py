@@ -23,7 +23,7 @@ class BalanceScore:
 
 
 @dataclass(frozen=True)
-class LayerPlan:
+class _LayerPlan:
     placement: np.ndarray
     source_rank: np.ndarray
     source_slot: np.ndarray
@@ -317,8 +317,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     if full is not None:
                         expanded.append((partial, remaining - budget, full))
             unique = {
-                partial.astype("<i4").tobytes(): (partial, remaining, full)
-                for partial, remaining, full in expanded
+                partial.astype("<i4").tobytes(): (partial, remaining, full) for partial, remaining, full in expanded
             }
             ranked = sorted(unique.values(), key=lambda item: (score(item[2]), tuple(item[2]), tuple(item[0])))
             beam = [(partial, remaining) for partial, remaining, _ in ranked[:limit]]
@@ -329,7 +328,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
             if candidate is not None:
                 complete[candidate.astype("<i4").tobytes()] = candidate
         return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
-
 
     @staticmethod
     def _minimum_source_cost(
@@ -389,7 +387,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 node = previous
         return total
 
-
     @classmethod
     def assign_sources(
         cls,
@@ -436,7 +433,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 return None
         return assignment
 
-
     @staticmethod
     def align_slots(
         old_placement: np.ndarray,
@@ -459,7 +455,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 new[rank, slot] = expert
                 source_rank[rank, slot], source_slot[rank, slot] = sources[(rank, expert)]
         return new, source_rank, source_slot
-
 
     @staticmethod
     def _post_insert_risk(
@@ -494,7 +489,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
         copies.sort(key=lambda item: (-item[0], item[1], item[2]))
         return [expert for _, expert, _ in copies]
 
-
     @classmethod
     def unconstrained_lpt(
         cls,
@@ -512,9 +506,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         ranks: list[set[int]] = [set() for _ in range(num_ranks)]
         for expert in cls._ordered_copies(mean, moments, replicas, z_score):
             candidates = [
-                rank
-                for rank in range(num_ranks)
-                if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
+                rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
             ]
             if not candidates:
                 raise ValueError("STAIR replica vector has no duplicate-free placement")
@@ -524,7 +516,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
             )
             ranks[rank].add(expert)
         return np.asarray([sorted(row) for row in ranks], dtype=np.int64)
-
 
     @classmethod
     def constrained_lpt(
@@ -553,9 +544,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 return cls.assign_sources(old, ranks, node_by_rank, pair_cap)
             expert = copies[index]
             candidates = [
-                rank
-                for rank in range(old.shape[0])
-                if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
+                rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
             ]
             candidates.sort(
                 key=lambda rank: (cls._post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score), rank)
@@ -587,7 +576,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
                         cross_node += 1
         return placement, source_rank, source_slot, cross_node, same_node
 
-
     @staticmethod
     def passes_hysteresis(current_score: float, accepted_score: float, config: StairConfig) -> bool:
         if not config.hysteresis_enabled or np.isnan(accepted_score):
@@ -599,7 +587,6 @@ class StairEplbPolicy(AbstractEplbPolicy):
             or current_balance <= config.hysteresis_absolute
         )
 
-
     @classmethod
     def _plan_layer(
         cls,
@@ -608,7 +595,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         old: np.ndarray,
         node_by_rank: tuple[int, ...],
         config: StairConfig,
-    ) -> LayerPlan | None:
+    ) -> _LayerPlan | None:
         current = cls.placement_score(samples, weights, old)
         mean, moments = cls.weighted_moments(samples, weights, covariance=config.use_covariance)
         diagonal = np.diag(moments) if moments.ndim == 2 else moments
@@ -647,7 +634,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             score = cls.placement_score(samples, weights, placement)
             if score.mean <= current.mean and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance):
                 key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
-                candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
+                candidates.append((score.mean, key, _LayerPlan(placement, source_rank, source_slot, score)))
         if not candidates:
             return None
         minimum = min(score for score, _, _ in candidates)
