@@ -496,65 +496,66 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return np.asarray([sorted(row) for row in ranks], dtype=np.int64)
 
 
-def constrained_lpt(
-    mean: np.ndarray,
-    moments: np.ndarray,
-    replicas: np.ndarray,
-    old_placement: np.ndarray,
-    node_by_rank: tuple[int, ...],
-    *,
-    z_score: float,
-    pair_cap: int,
-    max_backtracks: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int] | None:
-    """Place replicas using LPT while preserving feasible source pairs."""
-    old = np.asarray(old_placement, dtype=np.int64)
-    if int(np.sum(replicas)) != old.size or len(node_by_rank) != old.shape[0]:
-        raise ValueError("STAIR replica, placement, and topology sizes disagree")
-    ranks: list[set[int]] = [set() for _ in range(old.shape[0])]
-    copies = StairEplbPolicy._ordered_copies(mean, moments, replicas, z_score)
-    backtracks = 0
+    @classmethod
+    def constrained_lpt(
+        cls,
+        mean: np.ndarray,
+        moments: np.ndarray,
+        replicas: np.ndarray,
+        old_placement: np.ndarray,
+        node_by_rank: tuple[int, ...],
+        *,
+        z_score: float,
+        pair_cap: int,
+        max_backtracks: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int] | None:
+        """Place replicas using LPT while preserving feasible source pairs."""
+        old = np.asarray(old_placement, dtype=np.int64)
+        if int(np.sum(replicas)) != old.size or len(node_by_rank) != old.shape[0]:
+            raise ValueError("STAIR replica, placement, and topology sizes disagree")
+        ranks: list[set[int]] = [set() for _ in range(old.shape[0])]
+        copies = cls._ordered_copies(mean, moments, replicas, z_score)
+        backtracks = 0
 
-    def search(index: int) -> dict[tuple[int, int], tuple[int, int]] | None:
-        nonlocal backtracks
-        if index == len(copies):
-            return StairEplbPolicy.assign_sources(old, ranks, node_by_rank, pair_cap)
-        expert = copies[index]
-        candidates = [
-            rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
-        ]
-        candidates.sort(
-            key=lambda rank: (
-                StairEplbPolicy._post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score),
-                rank,
+        def search(index: int) -> dict[tuple[int, int], tuple[int, int]] | None:
+            nonlocal backtracks
+            if index == len(copies):
+                return cls.assign_sources(old, ranks, node_by_rank, pair_cap)
+            expert = copies[index]
+            candidates = [
+                rank
+                for rank in range(old.shape[0])
+                if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
+            ]
+            candidates.sort(
+                key=lambda rank: (cls._post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score), rank)
             )
-        )
-        for rank in candidates:
-            ranks[rank].add(expert)
-            feasible = StairEplbPolicy.assign_sources(old, ranks, node_by_rank, pair_cap) is not None
-            result = search(index + 1) if feasible else None
-            if result is not None:
-                return result
-            ranks[rank].remove(expert)
-            if feasible:
-                backtracks += 1
-                if backtracks > max_backtracks:
-                    return None
-        return None
+            for rank in candidates:
+                ranks[rank].add(expert)
+                feasible = cls.assign_sources(old, ranks, node_by_rank, pair_cap) is not None
+                result = search(index + 1) if feasible else None
+                if result is not None:
+                    return result
+                ranks[rank].remove(expert)
+                if feasible:
+                    backtracks += 1
+                    if backtracks > max_backtracks:
+                        return None
+            return None
 
-    sources = search(0)
-    if sources is None:
-        return None
-    placement, source_rank, source_slot = StairEplbPolicy.align_slots(old, ranks, sources)
-    cross_node = same_node = 0
-    for dst, row in enumerate(source_rank):
-        for src in row:
-            if src != dst:
-                if node_by_rank[int(src)] == node_by_rank[dst]:
-                    same_node += 1
-                else:
-                    cross_node += 1
-    return placement, source_rank, source_slot, cross_node, same_node
+        sources = search(0)
+        if sources is None:
+            return None
+        placement, source_rank, source_slot = cls.align_slots(old, ranks, sources)
+        cross_node = same_node = 0
+        for dst, row in enumerate(source_rank):
+            for src in row:
+                if src != dst:
+                    if node_by_rank[int(src)] == node_by_rank[dst]:
+                        same_node += 1
+                    else:
+                        cross_node += 1
+        return placement, source_rank, source_slot, cross_node, same_node
 
 
 def passes_hysteresis(current_score: float, accepted_score: float, config: StairConfig) -> bool:
@@ -597,7 +598,7 @@ def _plan_layer(
         limit=config.max_candidates_per_layer,
         score=screening,
     ):
-        result = constrained_lpt(
+        result = StairEplbPolicy.constrained_lpt(
             mean,
             moments,
             replicas,

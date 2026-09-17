@@ -9,7 +9,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     BalanceScore,
     StairEplbPolicy,
     StairPlan,
-    constrained_lpt,
     passes_hysteresis,
 )
 
@@ -27,7 +26,11 @@ def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, a
         "replica_candidates",
         classmethod(lambda cls, *_, **__: [np.ones(2, dtype=int)]),
     )
-    monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: (old, old, old, 0, 0))
+    monkeypatch.setattr(
+        StairEplbPolicy,
+        "constrained_lpt",
+        classmethod(lambda cls, *_, **__: (old, old, old, 0, 0)),
+    )
 
     result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
 
@@ -46,7 +49,11 @@ def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, diff
     )
     placements = [old[::-1].copy(), old.copy()]
     results = iter([(placements[0], old, old, 1, 0), (placements[1], old, old, 0, 0)])
-    monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: next(results))
+    monkeypatch.setattr(
+        StairEplbPolicy,
+        "constrained_lpt",
+        classmethod(lambda cls, *_, **__: next(results)),
+    )
 
     result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 1), StairConfig())
 
@@ -139,7 +146,7 @@ def test_constrained_lpt_obeys_placement_and_pair_invariants():
     mean = np.array([12.0, 8.0, 3.0, 1.0])
     variance = np.zeros(4)
 
-    result = constrained_lpt(
+    result = StairEplbPolicy.constrained_lpt(
         mean,
         variance,
         np.array([2, 2, 1, 1]),
