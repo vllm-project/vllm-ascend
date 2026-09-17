@@ -242,6 +242,5 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             padded[: output.shape[0]] = output
         exchanged = restore_tp_heads(padded, get_tp_group())
         # The inherited V4 module owns quantized weights and TP projection logic.
-        local_output = attn.dsa_attn.dsa_attn.impl._forward_o_proj(exchanged)
-        projected.copy_(local_output[: hidden_states.shape[0]])
+        attn.dsa_attn.dsa_attn.impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
         return projected

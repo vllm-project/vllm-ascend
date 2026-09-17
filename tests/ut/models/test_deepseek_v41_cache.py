@@ -1277,7 +1277,8 @@ def test_v41_cp_builds_device_controls_only_on_consuming_side(runtime, monkeypat
 
 
 @pytest.mark.parametrize("local_tokens", [0, 1, 2])
-def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens):
+@pytest.mark.parametrize("num_tokens", [3, 4])
+def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_tokens, num_tokens):
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
 
     impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
@@ -1289,14 +1290,20 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
         return torch.ones((4, 2, 3))
 
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
-    projection = SimpleNamespace(_forward_o_proj=lambda tensor: tensor.flatten(1))
+
+    def project(tensor, output):
+        assert output is destination
+        assert tensor.shape == (num_tokens, 2, 3)
+        output.copy_(tensor.flatten(1))
+
+    projection = SimpleNamespace(_forward_o_proj=project)
     attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
-    destination = torch.empty((3, 6))
+    destination = torch.empty((num_tokens, 6))
     local_output = torch.ones((local_tokens, 4, 3))
     output = impl._project_output(
         attn,
         local_output,
-        torch.empty((3, 6)),
+        torch.empty((num_tokens, 6)),
         SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
         projected=destination,
     )
@@ -1306,7 +1313,8 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
     assert (calls[0] is local_output) == (local_tokens == 2)
     torch.testing.assert_close(calls[0][:local_tokens], local_output)
     assert torch.count_nonzero(calls[0][local_tokens:]) == 0
-    assert output.shape == (3, 6)
+    assert output.shape == (num_tokens, 6)
+    torch.testing.assert_close(output, torch.ones_like(destination))
 
 
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
