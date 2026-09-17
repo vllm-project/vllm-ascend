@@ -84,13 +84,9 @@ class AscendPCPManager(PCPManager):
         if block_tables is not None:
             slot_dtype = block_tables.slot_mappings.dtype
             if self._global_batch_slot_mappings is not None:
-                self._global_batch_slot_mappings = torch.empty_like(
-                    self._global_batch_slot_mappings, dtype=slot_dtype
-                )
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
             if self._gathered_kv_slot_mappings is not None:
-                self._gathered_kv_slot_mappings = torch.empty_like(
-                    self._gathered_kv_slot_mappings, dtype=slot_dtype
-                )
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
             self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
