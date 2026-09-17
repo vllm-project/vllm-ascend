@@ -35,103 +35,103 @@ For multi-node deployment, verify the communication environment by following [Ve
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-- Step 1: Download the latest Docker image
+**Step 1:** Download the latest Docker image
 
-  ```bash
-  docker pull quay.io/ascend/vllm-ascend:{tag}
-  ```
+```bash
+docker pull quay.io/ascend/vllm-ascend:{tag}
+```
 
-- Step 2: Start Docker container
+**Step 2:** Start Docker container
 
-  Select the `docker run` command for your hardware platform:
+Select the `docker run` command for your hardware platform:
 
-  === "A3 series"
+=== "A3 series"
 
-      ```bash
-      # Set the vLLM Ascend image name.
-      export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-      export NAME=minimax-m3-dev
+    ```bash
+    # Set the vLLM Ascend image name.
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export NAME=minimax-m3-dev
 
-      # Start the container with the variables defined above.
-      docker run --rm \
-      --name $NAME \
-      --net=host \
-      --shm-size=100g \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      --device /dev/davinci8 \
-      --device /dev/davinci9 \
-      --device /dev/davinci10 \
-      --device /dev/davinci11 \
-      --device /dev/davinci12 \
-      --device /dev/davinci13 \
-      --device /dev/davinci14 \
-      --device /dev/davinci15 \
-      --device /dev/davinci_manager \
-      --device /dev/devmm_svm \
-      --device /dev/hisi_hdc \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /root/.cache:/root/.cache \
-      -it $IMAGE bash
-      ```
-  
-  === "950DT products"
+    # Start the container with the variables defined above.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=100g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
-      ```bash
-      # Set the vLLM Ascend image name.
-      export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-      export NAME=minimax-m3-dev
+=== "950DT products"
 
-      # 950DT products have 8 NPUs and use Device UB.
-      docker run --rm \
-      --name $NAME \
-      --net=host \
-      --privileged=true \
-      --shm-size=60g \
-      --device /dev/davinci_manager \
-      --device /dev/hisi_hdc \
-      --device /dev/ummu \
-      --device /dev/uburma \
-      --device /dev/davinci0 \
-      --device /dev/davinci1 \
-      --device /dev/davinci2 \
-      --device /dev/davinci3 \
-      --device /dev/davinci4 \
-      --device /dev/davinci5 \
-      --device /dev/davinci6 \
-      --device /dev/davinci7 \
-      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-      -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
-      -v /usr/local/dcmi:/usr/local/dcmi \
-      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-      -v /etc/ascend_install.info:/etc/ascend_install.info \
-      -v /etc/hixlep:/etc/hixlep \
-      -v /etc/hccn.conf:/etc/hccn.conf \
-      -v /var/log/npu/:/usr/slog \
-      -v /root/.cache:/root/.cache \
-      -it $IMAGE bash
-      ```
+    ```bash
+    # Set the vLLM Ascend image name.
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export NAME=minimax-m3-dev
 
-  Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
+    # 950DT products have 8 NPUs and use Device UB.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --privileged=true \
+    --shm-size=60g \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hixlep:/etc/hixlep \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /var/log/npu/:/usr/slog \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
-  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
 
-  ```bash
-  pip show vllm-ascend
-  ```
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
 
-  Expected result: The version information is displayed, matching the pulled image version.
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
