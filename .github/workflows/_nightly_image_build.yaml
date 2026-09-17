@@ -138,8 +138,8 @@ jobs:
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
-            SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
-            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
+            SWR_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-daily"
+            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-daily-temp"
             TAG_PREFIX="daily"
             BASE_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
           else
@@ -285,8 +285,8 @@ jobs:
         run: |
           # Registry and tag are recomputed here (not from matrix outputs) so merge still
           # works even when the last-completed matrix instance failed to push.
-          MAIN_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
-          TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
+          MAIN_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-daily"
+          TEMP_REGISTRY="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend-daily-temp"
 
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
