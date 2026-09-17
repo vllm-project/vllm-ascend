@@ -56,32 +56,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     quant_type = QuantType.NONE
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        intermediate_size_per_partition: int,
-        hidden_sizes: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        """Empty placeholder gate for BigTensorLoader v2.
-
-        BigTensorLoader's snapshot save path calls ``create_weights`` on a
-        freshly-initialised model and expects the owning module back.  The
-        upstream ``UnquantizedFusedMoEMethod.create_weights`` returns
-        ``None``; this override delegates to it and returns ``layer``.
-        """
-        super().create_weights(
-            layer,
-            num_experts,
-            intermediate_size_per_partition,
-            hidden_sizes,
-            params_dtype,
-            **extra_weight_attrs,
-        )
-        return layer
-
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
