@@ -126,11 +126,54 @@ jobs:
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
 
+      - name: Get Python version and architecture
+        id: get_pyver
+        run: |
+          echo "pyver=py$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')" >> "$GITHUB_OUTPUT"
+          echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore vllm empty wheel cache
+        id: vllm-wheel-cache
+        # Cache the BUILT wheel, not the download cache: `inputs.vllm` is the
+        # pinned commit from .github/vllm-main-verified.commit, so it only
+        # changes when maintainers bump the pin. Every shard currently
+        # rebuilds the identical wheel from source (~2-7 min each); with the
+        # cache, that build happens once per pin bump and every later run of
+        # every PR installs the prebuilt wheel in seconds. Python version and
+        # arch are part of the key so a non-pure wheel can never be restored
+        # into a mismatched environment.
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /root/vllm-empty-wheel
+          key: vllm-empty-wheel-v1-${{ inputs.vllm }}-${{ steps.get_pyver.outputs.pyver }}-${{ steps.get_pyver.outputs.arch }}
+          fail-on-cache-miss: false
+
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
-          VLLM_TARGET_DEVICE=empty uv pip install .
+          if compgen -G '/root/vllm-empty-wheel/*.whl' > /dev/null; then
+            echo "vllm empty wheel cache hit: install prebuilt wheel"
+            uv pip install /root/vllm-empty-wheel/*.whl
+          else
+            echo "vllm empty wheel cache miss: build wheel from source"
+            VLLM_TARGET_DEVICE=empty uv build --wheel --out-dir /root/vllm-empty-wheel
+            uv pip install /root/vllm-empty-wheel/*.whl
+          fi
           pip uninstall -y triton
+
+      - name: Save vllm empty wheel cache
+        # Only the first shards after a pin bump reach this step. Concurrent
+        # shards may race to write the same key; that is safe because the
+        # payload is identical. timeout-minutes + continue-on-error keep a
+        # degraded save from blocking the test run (best-effort, same as the
+        # upload steps below).
+        if: steps.vllm-wheel-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        continue-on-error: true
+        uses: runs-on/cache/save@v5
+        with:
+          path: /root/vllm-empty-wheel
+          key: vllm-empty-wheel-v1-${{ inputs.vllm }}-${{ steps.get_pyver.outputs.pyver }}-${{ steps.get_pyver.outputs.arch }}
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
@@ -229,17 +272,20 @@ jobs:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+          # `time` instrumentation: surfaces which sub-command dominates this
+          # step in the logs, so future install optimizations target the
+          # actual bottleneck instead of guessing.
+          time pip install uc-manager
+          time uv pip install -r requirements-dev.txt
+          time uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
           # Preserve CI availability during the transition by compiling on the
           # NPU only when the new CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
             echo "csrc cache hit: skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+            time env COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
             echo "csrc cache miss: compile kernels on the NPU runner"
-            uv pip install -e . --no-build-isolation
+            time uv pip install -e . --no-build-isolation
           fi
 
       - name: Verify required AscendC custom ops are registered (310p)
@@ -264,9 +310,9 @@ jobs:
           SOC_VERSION: ascend910b1
           COMPILE_CUSTOM_KERNELS: 0
         run: |
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          time pip install uc-manager
+          time uv pip install -r requirements-dev.txt
+          time uv pip install -e .
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
