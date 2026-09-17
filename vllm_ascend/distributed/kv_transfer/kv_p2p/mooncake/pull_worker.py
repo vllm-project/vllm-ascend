@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -310,7 +310,7 @@ class MooncakePullRecvingThread(threading.Thread):
             return self._get_mamba_remote_tp_rank_groups(remote_tp_size)
 
         fixed_total_num_kv_heads = None
-        if isinstance(spec, (AscendSFAIndexerCacheSpec, SlidingWindowMLASpec)):
+        if isinstance(spec, (AscendSFAIndexerCacheSpec, AscendIndexerKPoolTailSpec, SlidingWindowMLASpec)):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
@@ -995,6 +995,8 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_inner_offset: int = 0,
     ) -> None:
         """Append addresses from block groups prepared for one request."""
+        if transfer_len <= 0:
+            return
         for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
             src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
             dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
@@ -1058,7 +1060,7 @@ class MooncakePullRecvingThread(threading.Thread):
         remote_tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
         transfer_whole_block = isinstance(
             spec,
-            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
+            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec, AscendIndexerKPoolTailSpec),
         )
         if transfer_whole_block:
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():
