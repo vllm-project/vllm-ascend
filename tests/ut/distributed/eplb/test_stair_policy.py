@@ -13,7 +13,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     assign_sources,
     constrained_lpt,
     passes_hysteresis,
-    replica_candidates,
 )
 
 
@@ -25,7 +24,11 @@ def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, a
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(mean, p95)])
     monkeypatch.setattr(StairEplbPolicy, "placement_score", classmethod(lambda cls, *_: next(scores)))
-    monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)])
+    monkeypatch.setattr(
+        StairEplbPolicy,
+        "replica_candidates",
+        classmethod(lambda cls, *_, **__: [np.ones(2, dtype=int)]),
+    )
     monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: (old, old, old, 0, 0))
 
     result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
@@ -38,7 +41,11 @@ def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, diff
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(1.1, 1.2), BalanceScore(1.1 + difference, 1.2)])
     monkeypatch.setattr(StairEplbPolicy, "placement_score", classmethod(lambda cls, *_: next(scores)))
-    monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)] * 2)
+    monkeypatch.setattr(
+        StairEplbPolicy,
+        "replica_candidates",
+        classmethod(lambda cls, *_, **__: [np.ones(2, dtype=int)] * 2),
+    )
     placements = [old[::-1].copy(), old.copy()]
     results = iter([(placements[0], old, old, 1, 0), (placements[1], old, old, 0, 0)])
     monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: next(results))
@@ -90,8 +97,8 @@ def test_capped_min_max_respects_one_copy_per_rank():
 def test_flash_tree_candidates_are_bounded_and_deterministic():
     kwargs = dict(depth=3, width=2, limit=4, score=lambda value: float(np.square(value - 2).sum()))
 
-    first = replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
-    second = replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
+    first = StairEplbPolicy.replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
+    second = StairEplbPolicy.replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
 
     assert len(first) <= 4
     assert [item.tolist() for item in first] == [item.tolist() for item in second]

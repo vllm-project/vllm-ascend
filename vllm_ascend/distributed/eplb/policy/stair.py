@@ -246,55 +246,59 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     values.append(value)
         return values
 
+    @classmethod
+    def replica_candidates(
+        cls,
+        risk: np.ndarray,
+        total_slots: int,
+        num_ranks: int,
+        *,
+        depth: int,
+        width: int,
+        limit: int,
+        score: Callable[[np.ndarray], float],
+    ) -> list[np.ndarray]:
+        """Return a bounded FlashTree-style replica-vector beam."""
+        weights = np.asarray(risk, dtype=np.float64)
+        num_experts = weights.size
+        if num_experts == 0 or total_slots < num_experts or total_slots > num_experts * num_ranks:
+            raise ValueError("STAIR requires E <= physical slots <= E * ranks")
+        order = sorted(range(num_experts), key=lambda expert: (-weights[expert], expert))
+        group_size = (num_experts + min(depth, num_experts) - 1) // min(depth, num_experts)
+        groups = [tuple(order[start : start + group_size]) for start in range(0, num_experts, group_size)]
+        beam = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
 
-def replica_candidates(
-    risk: np.ndarray,
-    total_slots: int,
-    num_ranks: int,
-    *,
-    depth: int,
-    width: int,
-    limit: int,
-    score: Callable[[np.ndarray], float],
-) -> list[np.ndarray]:
-    """Return a bounded FlashTree-style replica-vector beam."""
-    weights = np.asarray(risk, dtype=np.float64)
-    num_experts = weights.size
-    if num_experts == 0 or total_slots < num_experts or total_slots > num_experts * num_ranks:
-        raise ValueError("STAIR requires E <= physical slots <= E * ranks")
-    order = sorted(range(num_experts), key=lambda expert: (-weights[expert], expert))
-    group_size = (num_experts + min(depth, num_experts) - 1) // min(depth, num_experts)
-    groups = [tuple(order[start : start + group_size]) for start in range(0, num_experts, group_size)]
-    beam = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
-
-    for group_index, group in enumerate(groups[:-1]):
-        later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
-        expanded = []
-        for replicas, remaining in beam:
-            baseline = StairEplbPolicy.capped_min_max(weights, replicas, remaining, num_ranks, (*group, *later))
-            if baseline is None:
-                continue
-            center = int(np.sum(baseline[list(group)] - replicas[list(group)]))
-            current_capacity = sum(num_ranks - replicas[expert] for expert in group)
-            later_capacity = sum(num_ranks - replicas[expert] for expert in later)
-            lower, upper = max(0, remaining - later_capacity), min(remaining, current_capacity)
-            for budget in StairEplbPolicy._nearby_budgets(center, lower, upper, width):
-                partial = StairEplbPolicy.capped_min_max(weights, replicas, budget, num_ranks, group)
-                if partial is None:
+        for group_index, group in enumerate(groups[:-1]):
+            later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
+            expanded = []
+            for replicas, remaining in beam:
+                baseline = cls.capped_min_max(weights, replicas, remaining, num_ranks, (*group, *later))
+                if baseline is None:
                     continue
-                full = StairEplbPolicy.capped_min_max(weights, partial, remaining - budget, num_ranks, later)
-                if full is not None:
-                    expanded.append((partial, remaining - budget, full))
-        unique = {partial.astype("<i4").tobytes(): (partial, remaining, full) for partial, remaining, full in expanded}
-        ranked = sorted(unique.values(), key=lambda item: (score(item[2]), tuple(item[2]), tuple(item[0])))
-        beam = [(partial, remaining) for partial, remaining, _ in ranked[:limit]]
+                center = int(np.sum(baseline[list(group)] - replicas[list(group)]))
+                current_capacity = sum(num_ranks - replicas[expert] for expert in group)
+                later_capacity = sum(num_ranks - replicas[expert] for expert in later)
+                lower, upper = max(0, remaining - later_capacity), min(remaining, current_capacity)
+                for budget in cls._nearby_budgets(center, lower, upper, width):
+                    partial = cls.capped_min_max(weights, replicas, budget, num_ranks, group)
+                    if partial is None:
+                        continue
+                    full = cls.capped_min_max(weights, partial, remaining - budget, num_ranks, later)
+                    if full is not None:
+                        expanded.append((partial, remaining - budget, full))
+            unique = {
+                partial.astype("<i4").tobytes(): (partial, remaining, full)
+                for partial, remaining, full in expanded
+            }
+            ranked = sorted(unique.values(), key=lambda item: (score(item[2]), tuple(item[2]), tuple(item[0])))
+            beam = [(partial, remaining) for partial, remaining, _ in ranked[:limit]]
 
-    complete = {}
-    for replicas, remaining in beam:
-        candidate = StairEplbPolicy.capped_min_max(weights, replicas, remaining, num_ranks, groups[-1])
-        if candidate is not None:
-            complete[candidate.astype("<i4").tobytes()] = candidate
-    return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
+        complete = {}
+        for replicas, remaining in beam:
+            candidate = cls.capped_min_max(weights, replicas, remaining, num_ranks, groups[-1])
+            if candidate is not None:
+                complete[candidate.astype("<i4").tobytes()] = candidate
+        return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
 
 
 def _minimum_source_cost(
@@ -569,7 +573,7 @@ def _plan_layer(
         return StairEplbPolicy.placement_score(samples, weights, placement).mean
 
     candidates = []
-    for replicas in replica_candidates(
+    for replicas in StairEplbPolicy.replica_candidates(
         risk,
         old.size,
         old.shape[0],
