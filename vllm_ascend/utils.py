@@ -44,7 +44,6 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
     get_ascend_device_type,
-    is_310p,
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile

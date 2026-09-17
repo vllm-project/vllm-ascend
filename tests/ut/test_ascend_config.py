@@ -564,7 +564,7 @@ class TestAscendConfig(TestBase):
     )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_disable_npugraph_ex_on_310p(
-        self, mock_fix_incompatible_config, mock_is_310p, mock_warning
+        self, mock_fix_incompatible_config, mock_hardware_profile, mock_warning
     ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
