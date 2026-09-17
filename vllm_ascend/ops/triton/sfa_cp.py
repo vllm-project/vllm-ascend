@@ -315,15 +315,16 @@ def pack_sfa_dcp_output_lse(
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Batch the measured A5 DCP8 region; retain the scalar path elsewhere.
+    # Keep enough row tiles to occupy the A5 vector cores. Strided feature
+    # loads can regress with batching, especially for large head dimensions.
     batched = (
         get_device_config().sfa_dcp_row_batch_size == 8
         and sfa_output.dtype == torch.bfloat16
         and dcp_size == 8
         and scatter_dim == 1
-        and num_heads == 96
-        and head_dim == 512
-        and 8 <= num_tokens <= 256
+        and head_dim <= 2048
+        and total_rows >= 8 * vector_cores
+        and sfa_output.stride(-1) == 1
     )
     if batched:
         _pack_sfa_dcp_output_lse_batched_kernel[(grid_size,)](
@@ -418,15 +419,15 @@ def fused_sfa_dcp_lse_combine(
     init_device_properties_triton()
     vector_cores = get_vectorcore_num()
     grid_size = total_rows if total_rows < vector_cores else vector_cores
-    # Small combine shapes need more independent programs than batching allows.
+    # A5 measurements favor batching from four rows per vector core.
+    # Larger feature tiles fail compiler memory planning with eight-row batches.
     batched = (
         get_device_config().sfa_dcp_row_batch_size == 8
         and recv.dtype == torch.bfloat16
         and dcp_size == 8
         and scatter_dim == 1
-        and num_heads == 12
-        and head_dim == 512
-        and 32 <= num_tokens <= 256
+        and head_dim <= 512
+        and total_rows >= 4 * vector_cores
         and local_output is not None
         and not return_lse
     )
