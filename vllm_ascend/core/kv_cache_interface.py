@@ -23,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -175,24 +175,19 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     return torch.as_strided(nope, shape, strides, storage_offset=nope.storage_offset())
 
 
-def should_use_sfa_kv_parent_layout(kv_transfer_config: object | None) -> bool:
-    """Decide whether the configured KV transfer route can serve the
-    token-concatenated parent layout for unquantized SFA main KV.
+def should_use_sfa_kv_parent_layout(vllm_config: VllmConfig) -> bool:
+    """Decide whether unquantized SFA main KV may use the token-concatenated
+    parent layout in this process, from the two environment facts it depends
+    on: the configured KV transfer route must understand the layout (today:
+    no KV transfer configured -- the native SFA PD connector's parent-page
+    protocol is being developed on a separate branch), and the current device
+    must have token-strided cache operators (adapted on Ascend 950 / A5 only).
 
-    This answers only the transport-policy half of the decision; callers
-    combine it with the remaining gate conditions (A5 device, spec, backend)
-    before enabling the parent layout.
-
-    The parent layout changes where KV bytes sit in memory, so a transfer
-    route must understand it to address pages correctly. Today exactly one
-    configuration qualifies: local inference with no KV transfer configured
-    (``kv_transfer_config is None``). Any configured connector keeps the
-    legacy separate NoPE/RoPE buffers -- including the native
-    ``SfaRemoteD2HConnector``, whose parent-page wire protocol is being
-    developed on a separate branch and has not been exercised on device.
-    When that work lands and is validated, relax this to admit it.
+    Callers combine this with their runner-specific conditions (spec, backend,
+    runner modes) before enabling the parent layout. When A3 adaptation or the
+    deferred connector work lands, relax the corresponding check here.
     """
-    return kv_transfer_config is None
+    return vllm_config.kv_transfer_config is None and get_ascend_device_type() == AscendDeviceType.A5
 
 
 @dataclass(frozen=True, kw_only=True)

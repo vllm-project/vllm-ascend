@@ -4726,10 +4726,9 @@ class NPUModelRunner(GPUModelRunner):
         # above and is mutually exclusive with this layout.
         if (
             not self.use_sparse
-            or not should_use_sfa_kv_parent_layout(self.vllm_config.kv_transfer_config)
+            or not should_use_sfa_kv_parent_layout(self.vllm_config)
             or self.use_compress
             or self._uses_page_strided_kv_layout(spec)
-            or get_ascend_device_type() != AscendDeviceType.A5
             or self.hybrid_with_attn_and_mamba
             or self.sparse_kv_offload_enabled
             or not isinstance(spec, AscendMLAAttentionSpec)
