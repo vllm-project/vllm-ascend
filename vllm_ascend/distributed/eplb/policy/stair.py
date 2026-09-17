@@ -38,6 +38,75 @@ class StairPlan:
     accepted_scores: np.ndarray
 
 
+class StairEplbPolicy(AbstractEplbPolicy):
+    """STAIR placement policy with an upstream-compatible entry point."""
+
+    @classmethod
+    def rebalance_experts(
+        cls,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Plan a placement through the upstream policy contract.
+
+        The generic contract has no committed-score or explicit-source output,
+        so this entry point uses STAIR defaults and returns only the placement.
+        The Ascend runtime calls :meth:`plan_rebalance` for the complete plan.
+        """
+        del num_groups
+        if old_global_expert_indices is None:
+            raise ValueError("STAIR requires the current expert placement")
+        old_map = old_global_expert_indices.cpu()
+        if (
+            old_map.ndim != 2
+            or num_ranks < 1
+            or num_nodes < 1
+            or num_ranks % num_nodes
+            or old_map.shape[1] != num_replicas
+            or num_replicas % num_ranks
+        ):
+            raise ValueError("STAIR received an invalid placement topology")
+        samples = weight.float().cpu().numpy()
+        if samples.ndim == 2:
+            samples = samples[None, ...]
+        old = old_map.numpy().reshape(old_map.shape[0], num_ranks, num_replicas // num_ranks)
+        ranks_per_node = num_ranks // num_nodes
+        node_by_rank = tuple(rank // ranks_per_node for rank in range(num_ranks))
+        plan = cls.plan_rebalance(
+            samples,
+            old,
+            np.full(old.shape[0], np.nan),
+            node_by_rank,
+            StairConfig(),
+        )
+        return torch.from_numpy(plan.placement.reshape(old_map.shape)).to(dtype=old_map.dtype)
+
+    @classmethod
+    def plan_rebalance(
+        cls,
+        logical_load: np.ndarray,
+        old_placement: np.ndarray,
+        accepted_scores: np.ndarray,
+        node_by_rank: tuple[int, ...],
+        config: StairConfig,
+        *,
+        sample_weights: np.ndarray | None = None,
+    ) -> StairPlan:
+        """Build the placement, explicit-source, and admission plan."""
+        return _plan_rebalance(
+            logical_load,
+            old_placement,
+            accepted_scores,
+            node_by_rank,
+            config,
+            sample_weights=sample_weights,
+        )
+
+
 def validate_plan(old_placement: np.ndarray, plan: StairPlan, num_experts: int, pair_cap: int) -> None:
     """Validate placement, explicit sources, and directed pair capacity."""
     old = np.asarray(old_placement, dtype=np.int64)
@@ -575,72 +644,3 @@ def _plan_rebalance(
             source_slot[layer] = result.source_slot
             new_scores[layer] = result.score.mean
     return StairPlan(placement, source_rank, source_slot, new_scores)
-
-
-class StairEplbPolicy(AbstractEplbPolicy):
-    """STAIR placement policy with an upstream-compatible entry point."""
-
-    @classmethod
-    def rebalance_experts(
-        cls,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
-        old_global_expert_indices: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Plan a placement through the upstream policy contract.
-
-        The generic contract has no committed-score or explicit-source output,
-        so this entry point uses STAIR defaults and returns only the placement.
-        The Ascend runtime calls :meth:`plan_rebalance` for the complete plan.
-        """
-        del num_groups
-        if old_global_expert_indices is None:
-            raise ValueError("STAIR requires the current expert placement")
-        old_map = old_global_expert_indices.cpu()
-        if (
-            old_map.ndim != 2
-            or num_ranks < 1
-            or num_nodes < 1
-            or num_ranks % num_nodes
-            or old_map.shape[1] != num_replicas
-            or num_replicas % num_ranks
-        ):
-            raise ValueError("STAIR received an invalid placement topology")
-        samples = weight.float().cpu().numpy()
-        if samples.ndim == 2:
-            samples = samples[None, ...]
-        old = old_map.numpy().reshape(old_map.shape[0], num_ranks, num_replicas // num_ranks)
-        ranks_per_node = num_ranks // num_nodes
-        node_by_rank = tuple(rank // ranks_per_node for rank in range(num_ranks))
-        plan = cls.plan_rebalance(
-            samples,
-            old,
-            np.full(old.shape[0], np.nan),
-            node_by_rank,
-            StairConfig(),
-        )
-        return torch.from_numpy(plan.placement.reshape(old_map.shape)).to(dtype=old_map.dtype)
-
-    @classmethod
-    def plan_rebalance(
-        cls,
-        logical_load: np.ndarray,
-        old_placement: np.ndarray,
-        accepted_scores: np.ndarray,
-        node_by_rank: tuple[int, ...],
-        config: StairConfig,
-        *,
-        sample_weights: np.ndarray | None = None,
-    ) -> StairPlan:
-        """Build the placement, explicit-source, and admission plan."""
-        return _plan_rebalance(
-            logical_load,
-            old_placement,
-            accepted_scores,
-            node_by_rank,
-            config,
-            sample_weights=sample_weights,
-        )
