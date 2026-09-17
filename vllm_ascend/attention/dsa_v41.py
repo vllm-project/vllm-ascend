@@ -269,19 +269,6 @@ class AscendDSAV41Impl:
         )
 
     @staticmethod
-    def _project_q(attn, hidden_states, cos, sin):
-        qr = attn.q_norm(attn.wq_a(hidden_states))
-        q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[attn.nope_head_dim, attn.head_dim],
-        )
-        return q.to(hidden_states.dtype), qr
-
-    @staticmethod
     def _project_kv(attn, hidden_states, cos, sin):
         kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -309,9 +296,7 @@ class AscendDSAV41Impl:
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        v1_impl = attn.dsa_attn.dsa_attn.impl
-        preprocess = self.multistream_preprocess if v1_impl.multistream_dsv4_dsa_overlap else self.preprocess
-        q, qr = preprocess(attn, hidden_states, cos, sin, metadata.swa)
+        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
         if self.role.is_kv_source:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
         return q, qr
@@ -323,17 +308,6 @@ class AscendDSAV41Impl:
             padded[: output.shape[0]] = output
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
-
-    def preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
-        """Project Q/KV and populate this layer's SWA cache on the current stream."""
-        q, qr = self._project_q(attn, hidden_states, cos, sin)
-        kv = self._project_kv(attn, hidden_states, cos, sin)
-        scatter_cache_sk(
-            attn.dsa_attn.swa_cache_layer.kv_cache[0],
-            swa_metadata.slot_mapping,
-            kv,
-        )
-        return q, qr
 
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.

@@ -141,11 +141,12 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
     start = num_tokens // 2 if cp else 0
     local_hidden, local_cos, local_sin = hidden[start:], cos[start:], sin[start:]
     impl = object.__new__(dsa_v41_cp.AscendDSAV41CPImpl if cp else dsa_v41.AscendDSAV41Impl)
-    if cp:
-        expected_q, expected_qr = impl._project_q(attn, local_hidden, local_cos, local_sin)
-        scatter(cache, slots, impl._project_kv(attn, hidden, cos, sin))
-    else:
-        expected_q, expected_qr = impl.preprocess(attn, hidden, cos, sin, metadata)
+    expected_qr = attn.q_norm(attn.wq_a(local_hidden))
+    expected_q = attn.wq_b(expected_qr).unflatten(-1, (attn.n_heads, attn.head_dim))
+    rope(expected_q.unsqueeze(1), local_cos, local_sin, partial_slice=[attn.nope_head_dim, attn.head_dim])
+    expected_kv = attn.kv_norm(attn.wkv(hidden)).view(-1, 1, attn.head_dim)
+    rope(expected_kv.unsqueeze(1), cos, sin, partial_slice=[attn.nope_head_dim, attn.head_dim])
+    scatter(cache, slots, expected_kv.squeeze(1))
     expected_cache = cache.clone()
     cache.zero_()
     trace.clear()
@@ -182,7 +183,7 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_forward_selects_preprocess_from_v1_switch(monkeypatch, enabled):
+def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
     impl = object.__new__(dsa_v41.AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=False)
     hidden = torch.zeros(1, 8)
@@ -191,7 +192,6 @@ def test_forward_selects_preprocess_from_v1_switch(monkeypatch, enabled):
         positions=torch.zeros(1), swa=SimpleNamespace(num_actual_tokens=1), rope=lambda *args: (None, None)
     )
     impl._get_layer_metadata = Mock(return_value=metadata)
-    impl.preprocess = Mock(return_value=(q, qr))
     impl.multistream_preprocess = Mock(return_value=(q, qr))
     impl._select_sparse_indices = Mock(return_value=None)
     impl._forward_attention = Mock(return_value=q)
@@ -210,17 +210,15 @@ def test_forward_selects_preprocess_from_v1_switch(monkeypatch, enabled):
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     output = torch.full_like(hidden, 1)
     result = impl.forward(attn, None, hidden, output)
-    selected = impl.multistream_preprocess if enabled else impl.preprocess
-    unused = impl.preprocess if enabled else impl.multistream_preprocess
-    selected.assert_called_once()
-    unused.assert_not_called()
+    impl.multistream_preprocess.assert_called_once()
     assert result is output
     assert torch.count_nonzero(output) == 0
 
 
 @pytest.mark.parametrize("local_tokens", [0, 2])
 @pytest.mark.parametrize("is_source", [False, True])
-def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_tokens, is_source):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_tokens, is_source, enabled):
     impl = object.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
     impl.role = SimpleNamespace(is_kv_source=is_source)
     hidden = torch.arange(40, dtype=torch.float32).reshape(5, 8)
@@ -251,7 +249,7 @@ def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_
         enable_dsa_cp=True,
         head_dim=4,
         nope_head_dim=2,
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=enabled))),
     )
     monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
@@ -278,15 +276,3 @@ def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_
         assert args[2] is global_metadata
         impl._write_compressed_source.assert_not_called()
         impl._forward_attention.assert_not_called()
-
-
-def test_cp_disabled_overlap_delegates_to_serial_forward(monkeypatch):
-    impl = object.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
-    serial = Mock(return_value=object())
-    monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "forward", serial)
-    attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=False)))
-    )
-    hidden, output = torch.zeros(2, 8), torch.empty(2, 8)
-    assert impl.forward(attn, None, hidden, output) is serial.return_value
-    serial.assert_called_once_with(attn, None, hidden, output)

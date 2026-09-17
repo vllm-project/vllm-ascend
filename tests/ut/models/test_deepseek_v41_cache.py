@@ -1388,14 +1388,13 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_keeps_mainline_preprocess(overlap):
+def test_v41_query_preparation_uses_multistream(overlap):
     from unittest.mock import Mock
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
-    impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
@@ -1403,21 +1402,17 @@ def test_v41_query_preparation_keeps_mainline_preprocess(overlap):
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    selected = impl.multistream_preprocess if overlap else impl.preprocess
-    other = impl.preprocess if overlap else impl.multistream_preprocess
-    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
-    other.assert_not_called()
+    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
     impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_cp_query_preparation_uses_full_inputs_only_for_overlap(overlap):
+def test_v41_cp_query_preparation_uses_full_inputs(overlap):
     from unittest.mock import Mock
 
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
 
     impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    impl._project_q = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
@@ -1425,12 +1420,7 @@ def test_v41_cp_query_preparation_uses_full_inputs_only_for_overlap(overlap):
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=2, cp_token_range=(2, 4, 2, 6)))
     assert impl._prepare_queries(attn, "abcdef", "positions", "cos", "sin", metadata) == ("q", "qr")
-    if overlap:
-        impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
-        impl._project_q.assert_not_called()
-    else:
-        impl._project_q.assert_called_once_with(attn, "cd", "cos", "sin")
-        impl.multistream_preprocess.assert_not_called()
+    impl.multistream_preprocess.assert_called_once_with(attn, "abcdef", "cos", "sin", metadata.swa)
     impl._write_compressed_source.assert_not_called()
 
 
@@ -1451,7 +1441,7 @@ def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens
     )
     metadata = SimpleNamespace(swa=SimpleNamespace(cp_token_range=(3, 6, 3, 6), num_actual_tokens=local_tokens))
     assert impl._prepare_inputs_and_caches(attn, full, metadata, {}) is None
-    if not overlap or local_tokens == 0:
+    if local_tokens == 0:
         impl._update_caches.assert_called_once()
         assert torch.equal(impl._update_caches.call_args.args[1], full[:5])
         assert impl._update_caches.call_args.args[2] is global_metadata
