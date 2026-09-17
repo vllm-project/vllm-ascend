@@ -2,7 +2,6 @@
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
 """Ascend Direct initialization for an ECMooncake TransferEngine."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
 )
+from vllm.logger import logger
 from vllm.utils.math_utils import round_down, round_up
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
@@ -37,6 +37,13 @@ class _RegistrationRangePlan:
     address: int
     nbytes: int
     owners: tuple[torch.Tensor, ...]
+
+
+@dataclass
+class _DirectRegistration:
+    nbytes: int
+    owners: tuple[torch.Tensor, ...]
+    users: int = 1
 
 
 @dataclass(frozen=True)
@@ -197,10 +204,112 @@ class AscendMooncakeTransfer(MooncakeTransfer):
     def __init__(self, hostname: str, device_index: int) -> None:
         super().__init__(hostname, "ascend")
         self._device_index = device_index
+        self._direct_registrations: dict[int, _DirectRegistration] = {}
 
     def _initialize_engine(self, engine: TransferEngine) -> int:
         torch.npu.set_device(self._device_index)
         return super()._initialize_engine(engine)
+
+    def acquire_registration_ranges(
+        self,
+        ranges: tuple[_RegistrationRangePlan, ...],
+    ) -> list[int]:
+        engine = self._ensure_engine()
+        acquired: list[int] = []
+
+        with self._registration_lock:
+            try:
+                for item in ranges:
+                    entry = self._direct_registrations.get(item.address)
+
+                    if entry is not None:
+                        if entry.nbytes != item.nbytes:
+                            raise RuntimeError(
+                                "Mooncake direct registration range changed size"
+                            )
+                        entry.users += 1
+                        acquired.append(item.address)
+                        continue
+
+                    status = engine.batch_register_memory(
+                        [item.address],
+                        [item.nbytes],
+                    )
+                    if status != 0:
+                        raise RuntimeError(
+                            "Mooncake direct registration failed for "
+                            f"address {item.address} with status {status}"
+                        )
+
+                    self._direct_registrations[item.address] = (
+                        _DirectRegistration(
+                            nbytes=item.nbytes,
+                            owners=item.owners,
+                        )
+                    )
+                    acquired.append(item.address)
+
+            except Exception:
+                for address in reversed(acquired):
+                    entry = self._direct_registrations[address]
+                    entry.users -= 1
+
+                    if entry.users != 0:
+                        continue
+
+                    status = engine.unregister_memory(address)
+                    if status == 0:
+                        del self._direct_registrations[address]
+
+                raise
+
+        return acquired
+
+    def release_registration_ranges(self, addresses: list[int]) -> bool:
+        if not addresses:
+            return True
+
+        engine = self._ensure_engine()
+        released = True
+
+        with self._registration_lock:
+            for address in addresses:
+                entry = self._direct_registrations.get(address)
+                if entry is None:
+                    continue
+
+                entry.users -= 1
+                if entry.users > 0:
+                    continue
+
+                status = engine.unregister_memory(address)
+                if status != 0:
+                    released = False
+                    continue
+                del self._direct_registrations[address]
+        return released
+
+    def close(self) -> None:
+        if self._closed:
+            return
+
+        super().close()
+        engine = self._engine
+        if engine is None:
+            return
+
+        with self._registration_lock:
+            for address in list(self._direct_registrations):
+                status = engine.unregister_memory(address)
+                if status != 0:
+                    logger.error(
+                        "Mooncake direct registration cleanup failed for "
+                        "address %d with status %d",
+                        address,
+                        status,
+                    )
+                    continue
+                del self._direct_registrations[address]
 
     def acquire_sources(self, tensors: list[torch.Tensor]) -> list[int]:
         regions: dict[int, torch.UntypedStorage] = {}

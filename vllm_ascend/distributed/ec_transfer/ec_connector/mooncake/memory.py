@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import threading
+from collections import deque
+from dataclasses import dataclass
+
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
@@ -17,6 +21,81 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
 from vllm.utils.math_utils import round_up
 
 ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2 MiB
+
+
+@dataclass(frozen=True)
+class _BounceLease:
+    offset: int
+    nbytes: int
+    allocated_nbytes: int
+
+
+class _BounceLeaseManager:
+    """Manage complete wave leases over one existing bounce arena."""
+
+    def __init__(self, capacity: int, alignment: int = 256) -> None:
+        self.capacity = capacity
+        self.alignment = alignment
+        self._regions = ContiguousAllocator(capacity, alignment)
+        self._condition = threading.Condition()
+        self._waiters: deque[object] = deque()
+        self._active: dict[int, int] = {}
+
+    def acquire(self, nbytes: int) -> _BounceLease | None:
+        if nbytes == 0:
+            return None
+
+        allocated_nbytes = round_up(nbytes, self.alignment)
+        if allocated_nbytes > self.capacity:
+            raise ValueError(
+                f"bounce lease requires {allocated_nbytes} bytes but arena capacity is {self.capacity} bytes"
+            )
+
+        waiter = object()
+
+        with self._condition:
+            self._waiters.append(waiter)
+            queued = True
+
+            try:
+                while True:
+                    if self._waiters[0] is waiter:
+                        region = self._regions.allocate(nbytes)
+
+                        if region is not None:
+                            offset, size = region
+                            self._waiters.popleft()
+                            queued = False
+                            self._active[offset] = size
+                            self._condition.notify_all()
+
+                            return _BounceLease(
+                                offset=offset,
+                                nbytes=nbytes,
+                                allocated_nbytes=size,
+                            )
+                    self._condition.wait()
+            finally:
+                if queued:
+                    self._waiters.remove(waiter)
+                    self._condition.notify_all()
+
+    def release(self, lease: _BounceLease | None) -> None:
+        if lease is None:
+            return
+
+        with self._condition:
+            allocated_nbytes = self._active.get(lease.offset)
+
+            if allocated_nbytes != lease.allocated_nbytes:
+                raise ValueError("bounce lease is not active")
+
+            del self._active[lease.offset]
+            self._regions.free(
+                lease.offset,
+                lease.allocated_nbytes,
+            )
+            self._condition.notify_all()
 
 
 class AscendContiguousAllocator(ContiguousAllocator):
@@ -61,11 +140,7 @@ class AscendProducerAllocator(AscendContiguousAllocator):
 
     @property
     def raw_allocation_size(self) -> int:
-        return (
-            self.registered_capacity
-            + ASCEND_DIRECT_MEMORY_ALIGNMENT
-            - 1
-        )
+        return self.registered_capacity + ASCEND_DIRECT_MEMORY_ALIGNMENT - 1
 
     @property
     def bounce_tensor(self) -> torch.Tensor | None:
@@ -117,6 +192,26 @@ class AscendConsumerMemoryPool(ConsumerMemoryPool):
 class AscendProducerMemoryPool(ProducerMemoryPool):
     """Copy producer tensors into registered memory on an NPU stream."""
 
+    def __init__(
+        self,
+        capacity: int,
+        transfer: MooncakeTransfer,
+        allocator: AscendProducerAllocator,
+    ) -> None:
+        super().__init__(capacity, transfer, allocator)
+        self._producer_allocator = allocator
+        self._bounce_lease_manager = _BounceLeaseManager(allocator.bounce_capacity)
+
+    @property
+    def bounce_tensor(self) -> torch.Tensor | None:
+        return self._producer_allocator.bounce_tensor
+
+    def acquire_bounce(self, nbytes: int) -> _BounceLease | None:
+        return self._bounce_lease_manager.acquire(nbytes)
+
+    def release_bounce(self, lease: _BounceLease | None) -> None:
+        self._bounce_lease_manager.release(lease)
+
     def _copy_to_staging(
         self,
         pool: torch.Tensor,
@@ -136,3 +231,42 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 destination.copy_(source, non_blocking=True)
 
         stream.synchronize()
+
+    def copy_to_bounce(
+        self,
+        lease: _BounceLease,
+        copies: list[tuple[torch.Tensor, int, int]],
+    ) -> int:
+        """Pack prefixes into a bounce lease and return its base address.
+
+        Each copy is ``(source, offset within the lease, nbytes)``.
+        """
+        bounce = self.bounce_tensor
+        if bounce is None:
+            raise RuntimeError("Mooncake bounce arena is not prepared")
+        assert copies
+
+        stream = getattr(self._local, "stream", None)
+        if stream is None:
+            stream = torch.npu.Stream(device=bounce.device)
+            self._local.stream = stream
+
+        with torch.npu.stream(stream):
+            for source, bounce_offset, nbytes in copies:
+                assert bounce_offset >= 0
+                assert 0 < nbytes <= source.nbytes
+                assert bounce_offset + nbytes <= lease.nbytes
+
+                source_prefix = (
+                    source.view(torch.uint8).view(-1).narrow(0, 0, nbytes)
+                )
+                destination = bounce.narrow(
+                    0,
+                    lease.offset + bounce_offset,
+                    nbytes,
+                )
+                destination.copy_(source_prefix, non_blocking=True)
+
+        stream.synchronize()
+
+        return bounce.data_ptr() + lease.offset
