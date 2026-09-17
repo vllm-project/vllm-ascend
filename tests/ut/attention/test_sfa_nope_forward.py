@@ -15,8 +15,9 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
 @pytest.fixture(autouse=True)
 def mock_scatter_nd_update(monkeypatch):
     def scatter(cache, indices, updates):
-        valid = ((indices >= 0) & (indices < torch.tensor(cache.shape[:2]))).all(dim=-1)
-        cache[indices[valid, 0], indices[valid, 1]] = updates[valid]
+        slots = indices[:, 0]
+        valid = (slots >= 0) & (slots < cache.shape[0])
+        cache[slots[valid]] = updates[valid]
         return cache
 
     monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
@@ -27,15 +28,16 @@ def mock_scatter_nd_update(monkeypatch):
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
 def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, slot_dtype):
     dim = 512
-    backing = torch.randn(3, block_size + 7, 1, dim, dtype=dtype)
-    cache = backing[:, :block_size]
+    backing = torch.randn(5, block_size, 1, dim, dtype=dtype)
+    cache = backing[1:-1]
     before = backing.clone()
-    slots = torch.tensor([0, block_size + 1, -1, -1], dtype=slot_dtype)
+    slots = torch.tensor([0, block_size - 1, block_size, block_size + 1, 3 * block_size - 1, -1], dtype=slot_dtype)
     values = torch.randn(slots.numel(), dim, dtype=dtype)
     values[0, :4] = torch.tensor([-0.0, float("nan"), float("inf"), -float("inf")], dtype=dtype)
     expected = before.clone()
-    expected[0, 0, 0] = values[0]
-    expected[1, 1, 0] = values[1]
+    for slot, value in zip(slots.tolist(), values):
+        if slot >= 0:
+            expected[1 + slot // block_size, slot % block_size, 0] = value
     impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x)
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
     with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
@@ -44,6 +46,8 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
     scatter.assert_called_once()
     indices = scatter.call_args.args[1]
     assert indices.dtype == slot_dtype
+    assert torch.equal(indices, slots.view(-1, 1))
+    assert scatter.call_args.args[0].data_ptr() == cache.data_ptr()
     assert torch.equal(backing.view(torch.uint8), expected.view(torch.uint8))
 
 
@@ -57,6 +61,22 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
     expected[0, 1, 0] = values[0].to(cache.dtype)
     expected[1, 0, 0] = values[1].to(cache.dtype)
     assert torch.equal(cache, expected)
+
+
+def test_nope_exec_kv_rejects_unmergeable_pages():
+    backing = torch.randn(3, 5, 1, 8)
+    cache = backing[:, :4]
+    before = backing.clone()
+    values = torch.randn(1, 8)
+    slots = torch.tensor([4], dtype=torch.int32)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    with (
+        patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
+        pytest.raises(RuntimeError, match="view size is not compatible"),
+    ):
+        AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    scatter.assert_not_called()
+    assert torch.equal(backing, before)
 
 
 class _Linear:
