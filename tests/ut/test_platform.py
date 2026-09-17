@@ -1733,6 +1733,13 @@ class TestNPUPlatform(TestBase):
         )
         assert parallel.prefill_context_parallel_size == 2
         assert parallel.data_parallel_size == 2
+        from vllm.config import VllmConfig
+
+        # Exercise nested Pydantic validation without initializing model/runtime
+        # configuration in this CPU test.
+        with patch.object(VllmConfig, "__post_init__", return_value=None):
+            config = VllmConfig(parallel_config=parallel)
+        assert config.parallel_config is parallel
         with pytest.raises(ValueError, match="valid DCP sizes"):
             ParallelConfig(
                 tensor_parallel_size=1,

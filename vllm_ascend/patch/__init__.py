@@ -1378,8 +1378,10 @@
 #       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
 #       except for the PCP+DP rejection, without changing parameter values or
 #       bypassing other validation. Update the class method and Pydantic
-#       model-validator registration, then rebuild ParallelConfig and VllmConfig
-#       so nested validation also uses the replacement.
+#       model-validator registration, then rebuild ParallelConfig,
+#       SpeculativeConfig, and VllmConfig in dependency order. SpeculativeConfig
+#       retains shared ParallelConfig schemas even through SkipValidation;
+#       rebuilding only the outer VllmConfig can restore the stale validator.
 #       Read parallel.current_platform dynamically to preserve the Ascend EPLB
 #       platform proxy installed by platform/patch_eplb.py.
 #    Related PR (if no, explain why):
