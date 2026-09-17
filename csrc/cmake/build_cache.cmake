@@ -113,90 +113,90 @@ function(vllm_ascend_build_cache_command OUT_VAR)
 
     set(
         _cache_command
-        ${HI_PYTHON}
-        ${VLLM_ASCEND_BUILD_CACHE_SCRIPT}
+        "${HI_PYTHON}"
+        "${VLLM_ASCEND_BUILD_CACHE_SCRIPT}"
         run
         --cache-root
-        ${VLLM_ASCEND_BUILD_CACHE_DIR}
+        "${VLLM_ASCEND_BUILD_CACHE_DIR}"
         --domain
-        ${CACHE_DOMAIN}
+        "${CACHE_DOMAIN}"
         --unit
-        ${CACHE_UNIT}
+        "${CACHE_UNIT}"
         --output-dir
-        ${CACHE_OUTPUT_DIR}
+        "${CACHE_OUTPUT_DIR}"
         --environment-profile
-        ${CACHE_ENVIRONMENT_PROFILE}
+        "${CACHE_ENVIRONMENT_PROFILE}"
     )
 
     if(CACHE_PUBLISH_DIR)
-        list(APPEND _cache_command --publish-dir ${CACHE_PUBLISH_DIR})
+        list(APPEND _cache_command --publish-dir "${CACHE_PUBLISH_DIR}")
     endif()
 
     if(CACHE_PUBLISH_STATE_DIR)
-        list(APPEND _cache_command --publish-state-dir ${CACHE_PUBLISH_STATE_DIR})
+        list(APPEND _cache_command --publish-state-dir "${CACHE_PUBLISH_STATE_DIR}")
     endif()
 
     if(CACHE_SOC)
-        list(APPEND _cache_command --soc ${CACHE_SOC})
+        list(APPEND _cache_command --soc "${CACHE_SOC}")
     endif()
 
     if(CACHE_OPERATOR)
-        list(APPEND _cache_command --operator ${CACHE_OPERATOR})
+        list(APPEND _cache_command --operator "${CACHE_OPERATOR}")
     endif()
 
     if(CACHE_ACTION)
-        list(APPEND _cache_command --action ${CACHE_ACTION})
+        list(APPEND _cache_command --action "${CACHE_ACTION}")
     endif()
 
     if(CACHE_OPERATOR_SOURCE)
-        list(APPEND _cache_command --operator-source ${CACHE_OPERATOR_SOURCE})
+        list(APPEND _cache_command --operator-source "${CACHE_OPERATOR_SOURCE}")
     endif()
 
     if(CACHE_REPO_ROOT)
-        list(APPEND _cache_command --repo-root ${CACHE_REPO_ROOT})
+        list(APPEND _cache_command --repo-root "${CACHE_REPO_ROOT}")
     elseif(CACHE_DOMAIN STREQUAL "custom_operator")
-        list(APPEND _cache_command --repo-root ${CMAKE_SOURCE_DIR})
+        list(APPEND _cache_command --repo-root "${CMAKE_SOURCE_DIR}")
     endif()
 
-    foreach(value ${CACHE_PREPARED_INPUT})
-        list(APPEND _cache_command --prepared-input ${value})
+    foreach(value IN LISTS CACHE_PREPARED_INPUT)
+        list(APPEND _cache_command --prepared-input "${value}")
     endforeach()
 
-    foreach(value ${CACHE_RECIPE_FILE})
-        list(APPEND _cache_command --recipe-file ${value})
+    foreach(value IN LISTS CACHE_RECIPE_FILE)
+        list(APPEND _cache_command --recipe-file "${value}")
     endforeach()
 
-    foreach(value ${CACHE_RECIPE_VALUE})
+    foreach(value IN LISTS CACHE_RECIPE_VALUE)
         list(APPEND _cache_command --recipe-value "${value}")
     endforeach()
 
-    foreach(value ${CACHE_ENVIRONMENT_FILE})
-        list(APPEND _cache_command --environment-file ${value})
+    foreach(value IN LISTS CACHE_ENVIRONMENT_FILE)
+        list(APPEND _cache_command --environment-file "${value}")
     endforeach()
 
-    foreach(value ${CACHE_ENVIRONMENT_VALUE})
+    foreach(value IN LISTS CACHE_ENVIRONMENT_VALUE)
         list(APPEND _cache_command --environment-value "${value}")
     endforeach()
 
-    foreach(value ${CACHE_ENVIRONMENT_TOOL})
-        list(APPEND _cache_command --environment-tool ${value})
+    foreach(value IN LISTS CACHE_ENVIRONMENT_TOOL)
+        list(APPEND _cache_command --environment-tool "${value}")
     endforeach()
 
-    list(APPEND _cache_command --normalize-path ${CMAKE_SOURCE_DIR})
-    list(APPEND _cache_command --normalize-path ${CMAKE_BINARY_DIR})
-    foreach(value ${CACHE_NORMALIZE_PATH})
-        list(APPEND _cache_command --normalize-path ${value})
+    list(APPEND _cache_command --normalize-path "${CMAKE_SOURCE_DIR}")
+    list(APPEND _cache_command --normalize-path "${CMAKE_BINARY_DIR}")
+    foreach(value IN LISTS CACHE_NORMALIZE_PATH)
+        list(APPEND _cache_command --normalize-path "${value}")
     endforeach()
 
-    foreach(value ${CACHE_ARTIFACT_INCLUDE})
+    foreach(value IN LISTS CACHE_ARTIFACT_INCLUDE)
         list(APPEND _cache_command --artifact-include "${value}")
     endforeach()
 
-    foreach(value ${CACHE_EXCLUDE})
+    foreach(value IN LISTS CACHE_EXCLUDE)
         list(APPEND _cache_command --exclude "${value}")
     endforeach()
 
-    foreach(value ${CACHE_SET_ENV})
+    foreach(value IN LISTS CACHE_SET_ENV)
         list(APPEND _cache_command --set-env "${value}")
     endforeach()
 

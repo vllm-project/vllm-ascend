@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import regex as re
 
-from .build_cache_test_utils import ENGINE, build_cache_command, run_command
+from .build_cache_test_utils import ENGINE, REPO_ROOT, build_cache_command, run_command
 
 _KEY_RE = re.compile(r"\bkey=([0-9a-f]{64})\b")
 
@@ -1437,3 +1437,172 @@ def test_save_entry_rolls_back_old_entry_if_publish_replace_fails(
 
     assert marker.read_text(encoding="utf-8") == "old entry survives"
     assert not list(entry.parent.glob(f".{entry.name}.old-*"))
+
+
+def test_nested_prepared_symlink_tracks_target_content(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    nested_target = tmp_path / "generated.py"
+    nested_target.write_text("VALUE = 1\n", encoding="utf-8")
+    (prepared / "nested.py").symlink_to(nested_target)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    first = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(first)
+    first_key = _extract_key(first)
+
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+
+    nested_target.write_text("VALUE = 2\n", encoding="utf-8")
+    _fresh_dir(output)
+    changed = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(changed)
+    assert "[build-cache] MISS" in changed.stdout
+    assert _extract_key(changed) != first_key
+
+
+def test_cache_path_components_reject_dot_segments():
+    engine = _load_engine("build_cache_engine_safe_component_test")
+    with pytest.raises(ValueError, match="invalid cache path component"):
+        engine._safe_component(".")
+    with pytest.raises(ValueError, match="invalid cache path component"):
+        engine._safe_component("..")
+
+
+def test_explicit_environment_metadata_cannot_be_silently_dropped(tmp_path: Path):
+    engine = _load_engine("build_cache_engine_environment_metadata_test")
+    missing = tmp_path / "missing-toolchain.info"
+    with pytest.raises(FileNotFoundError, match="compiler environment metadata"):
+        engine._hash_compiler_environment(
+            "host-cxx",
+            [missing],
+            [],
+            [sys.executable],
+        )
+
+
+def test_snapshot_compatibility_aliases_share_identity(monkeypatch):
+    engine = _load_engine("build_cache_engine_snapshot_key_test")
+    original_is_file = engine.Path.is_file
+
+    def hide_cann_metadata(path):
+        if path.name == "ascend_toolkit_install.info":
+            return False
+        return original_is_file(path)
+
+    monkeypatch.setattr(engine.Path, "is_file", hide_cann_metadata)
+    image = "quay.io/ascend/manylinux:9.1.0-910b"
+    canonical = engine._snapshot_compatibility("arm64", "ascend910b1", image)
+    aliases = engine._snapshot_compatibility("aarch64", "a2", image)
+    different_image = engine._snapshot_compatibility("arm64", "ascend910b1", f"{image}-new")
+    assert canonical == aliases
+    assert different_image != canonical
+
+
+def test_update_marker_only_records_successful_entry_save(tmp_path: Path):
+    source, prepared = _make_operator_inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    cache_root = tmp_path / "cache"
+    counter = tmp_path / "counter"
+    builder = _write_builder(tmp_path)
+
+    cold = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(cold)
+    marker = cache_root / ".updated"
+    assert marker.is_file()
+
+    marker.unlink()
+    _fresh_dir(output)
+    warm = _run_cache(
+        cache_root=cache_root,
+        prepared_inputs=[prepared],
+        operator_source=source,
+        output_dir=output,
+        builder=builder,
+        counter=counter,
+    )
+    _assert_success(warm)
+    assert "[build-cache] HIT" in warm.stdout
+    assert not marker.exists()
+
+
+def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        pytest.skip("cmake is unavailable")
+
+    cache_root = tmp_path / "cache root"
+    output_dir = tmp_path / "output dir"
+    prepared = tmp_path / "prepared input"
+    result = tmp_path / "command.txt"
+    script = tmp_path / "verify.cmake"
+    adapter = REPO_ROOT / "csrc" / "cmake" / "build_cache.cmake"
+    script.write_text(
+        f'''set(HI_PYTHON "/python with space")
+set(VLLM_ASCEND_BUILD_CACHE_DIR "{cache_root}")
+set(VLLM_ASCEND_BUILD_CACHE_SCRIPT "{ENGINE}")
+include("{adapter}")
+vllm_ascend_build_cache_command(
+    CACHE_COMMAND
+    DOMAIN third_party
+    UNIT "unit with space"
+    OUTPUT_DIR "{output_dir}"
+    ENVIRONMENT_PROFILE host-cxx
+    PREPARED_INPUT "{prepared}"
+    COMMAND "/builder with space" "--value=argument with space"
+)
+list(JOIN CACHE_COMMAND "\n" RENDERED)
+file(WRITE "{result}" "${{RENDERED}}\n")
+''',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [cmake, "-P", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    _assert_success(proc)
+    arguments = result.read_text(encoding="utf-8").splitlines()
+    assert str(cache_root) in arguments
+    assert "unit with space" in arguments
+    assert str(output_dir) in arguments
+    assert str(prepared) in arguments
+    assert "/builder with space" in arguments
+    assert "--value=argument with space" in arguments

@@ -376,6 +376,32 @@ def _hash_prepared_inputs(
                 target = os.readlink(child)
                 records.append((logical_path, f"symlink:{target}"))
                 manifest.append({"path": logical_path, "kind": "symlink", "target": target})
+                resolved = child.resolve(strict=True)
+                content_path = f"{logical_path}/content"
+                if resolved.is_file():
+                    content_hash = _hash_prepared_file(resolved, normalize_paths)
+                    records.append((content_path, content_hash))
+                    manifest.append(
+                        {
+                            "path": content_path,
+                            "kind": "file",
+                            "sha256": content_hash,
+                        }
+                    )
+                elif resolved.is_dir():
+                    content_hash, _ = _hash_prepared_inputs(
+                        [resolved],
+                        excludes,
+                        normalize_paths,
+                    )
+                    records.append((content_path, content_hash))
+                    manifest.append(
+                        {
+                            "path": content_path,
+                            "kind": "directory",
+                            "sha256": content_hash,
+                        }
+                    )
             elif child.is_file():
                 file_hash = _hash_prepared_file(child, normalize_paths)
                 records.append((logical_path, file_hash))
@@ -414,7 +440,7 @@ def _hash_prepared_file(path: Path, normalize_paths: Sequence[Path]) -> str:
 def _git_tracked_files(source_dir: Path, repo_root: Path) -> list[Path] | None:
     try:
         relative = source_dir.resolve().relative_to(repo_root.resolve())
-    except ValueError:
+    except (OSError, ValueError):
         return None
 
     try:
@@ -634,6 +660,7 @@ def _hash_compiler_environment(
     environment_values: Sequence[str],
     environment_tools: Sequence[str],
 ) -> tuple[str, list[dict]]:
+    required_environment_files = {path.expanduser() for path in environment_files}
     records: list[tuple[str, str]] = [
         ("profile", profile),
         ("system", platform.system()),
@@ -659,7 +686,10 @@ def _hash_compiler_environment(
         resolved = _resolve_tool(tool)
         if resolved is None:
             continue
-        canonical = str(Path(resolved).resolve())
+        try:
+            canonical = str(Path(resolved).resolve())
+        except OSError:
+            canonical = str(Path(resolved).absolute())
         if canonical in seen_tools:
             continue
         seen_tools.add(canonical)
@@ -684,8 +714,13 @@ def _hash_compiler_environment(
     for raw_path in environment_files:
         path = raw_path.expanduser()
         if not path.is_file():
+            if path in required_environment_files:
+                raise FileNotFoundError(f"compiler environment metadata does not exist: {path}")
             continue
-        digest = _sha256_file(path)
+        try:
+            digest = _sha256_file(path)
+        except OSError as exc:
+            raise RuntimeError(f"cannot hash compiler environment metadata: {path}") from exc
         identity = path.name
         dedupe_key = f"{identity}:{digest}"
         if dedupe_key in seen_files:
@@ -806,8 +841,8 @@ def _collect_artifacts(
 
 def _safe_component(value: str) -> str:
     safe = "".join(character if character.isalnum() or character in "._-" else "_" for character in value)
-    if not safe:
-        raise ValueError(f"invalid empty cache path component from {value!r}")
+    if not safe or safe in {".", ".."}:
+        raise ValueError(f"invalid cache path component from {value!r}")
     return safe
 
 
