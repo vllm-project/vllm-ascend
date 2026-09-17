@@ -59,6 +59,7 @@ class AscendDeepseekV41ForCausalLM(
         del i
         if modality == "image":
             return IMAGE_PLACEHOLDER
+        return None
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
@@ -118,6 +119,7 @@ class AscendDeepseekV41ForCausalLM(
         n_vit_h: int,
         n_vit_w: int,
     ) -> torch.Tensor:
+        assert self.vision is not None and self.aligner is not None, "Image encoding requires an enabled vision tower"
         return self.aligner(
             self.vision(patches, n_vit_h, n_vit_w),
             n_vit_h,
@@ -129,6 +131,7 @@ class AscendDeepseekV41ForCausalLM(
         image_embeds: torch.Tensor,
         types: torch.Tensor,
     ) -> torch.Tensor:
+        assert self.image_start is not None and self.image_end is not None and self.image_newline is not None
         types = types.to(image_embeds.device)
         span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
         dtype = image_embeds.dtype
@@ -145,6 +148,7 @@ class AscendDeepseekV41ForCausalLM(
         llm_grid: torch.Tensor,
         types: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
+        assert self.aligner is not None, "Image processing requires an enabled vision tower"
         patches = patches.to(self.aligner.w1.weight.dtype)
         embeds: list[torch.Tensor] = []
         vit_offset = 0

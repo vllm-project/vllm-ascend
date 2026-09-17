@@ -621,6 +621,7 @@ class NPUModelRunner310(NPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        is_dummy_run: bool = False,
         **model_kwargs: dict[str, Any],
     ):
         if self.uses_mrope:

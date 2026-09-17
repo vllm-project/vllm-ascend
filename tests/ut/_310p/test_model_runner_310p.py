@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -53,7 +54,8 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self.input_batch.num_accepted_tokens_cpu[" not in source
 
 
-def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
+@pytest.mark.parametrize("is_dummy_run", [False, True])
+def test_model_forward_updates_mtp_full_graph_params_before_replay(is_dummy_run) -> None:
     runner = object.__new__(NPUModelRunner310)
     runner.uses_mrope = False
     runner.enable_enpu = False
@@ -67,6 +69,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         calls.append("update")
 
     def fake_model(**kwargs):
+        assert "is_dummy_run" not in kwargs
         calls.append("model")
         return torch.ones(1)
 
@@ -85,6 +88,7 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
             8,
             input_ids=torch.tensor([1]),
             positions=torch.tensor([0]),
+            is_dummy_run=is_dummy_run,
         )
 
     assert calls == ["update", "model"]

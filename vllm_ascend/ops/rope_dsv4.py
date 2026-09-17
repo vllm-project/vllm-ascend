@@ -185,6 +185,8 @@ def get_full_cos_and_sin_dsa_for_layer(
     metadata path tied to the exact table used by its source attention layer.
     """
     info = _ROPE_STATE.layer_info.get(layer_name)
+    if info is None:
+        raise KeyError(f"RoPE layer {layer_name!r} is not registered")
     config_key, _ = info
     return _ROPE_STATE.full_rope_cache[config_key]
 

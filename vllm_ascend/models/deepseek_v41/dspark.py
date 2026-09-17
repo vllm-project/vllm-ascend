@@ -240,6 +240,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 llama_4_scaling=None,
                 input_ids=moe_input_ids,
             )
+        assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]

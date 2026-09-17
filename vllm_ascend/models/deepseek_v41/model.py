@@ -1077,7 +1077,8 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         num_tokens = positions.shape[0]
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
         lookups, mask = self.prepare_engram(input_ids, positions, history_inputs)
-        buffers, mask_buffer = self._engram_input_buffers
+        buffers = graph_inputs["engram_lookups"]
+        mask_buffer = graph_inputs["engram_mask"]
         mask_buffer[: mask.numel()].copy_(mask)
         mask_buffer[mask.numel() : output_tokens].zero_()
         for layer, values in lookups.items():
@@ -1172,6 +1173,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     self.config.rms_norm_eps,
                 )
             hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
+        assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]

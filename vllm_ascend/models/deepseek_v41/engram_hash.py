@@ -157,6 +157,7 @@ class PagedNgramHistory:
 
     def __init__(self, config, tokenizer):
         layout = EngramLayout.from_args(config)
+        assert layout is not None, "Paged history requires at least one Engram layer"
         token_map, vocab_size = build_compressed_token_map(tokenizer)
         self.token_map = torch.tensor(token_map, dtype=torch.int64)
         self.pad_id = token_map[config.engram_pad_token_id]

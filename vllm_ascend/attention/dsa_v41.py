@@ -937,6 +937,9 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             ring_meta = self._c2_ring_metadata[: 5 * num_reqs].view(5, num_reqs)
             input_positions = positions
             if self._supports_device_ops:
+                assert self._c2_full_source_rope is not None, (
+                    "Enable device metadata before building compressor metadata"
+                )
                 full_source_cos, full_source_sin = self._c2_full_source_rope
             else:
                 full_source_cos = full_source_sin = None
