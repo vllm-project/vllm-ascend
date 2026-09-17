@@ -115,9 +115,17 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const testCases = '${{ inputs.test_cases }}'.trim();
-
+            let testCases = '${{ inputs.test_cases }}'.trim();
             core.setOutput('ref', context.sha || 'unknown');
+            
+            // 仅新增：pull_request时读取 /weekly 标签，无标签则testCases保持原样
+            if (eventName === 'pull_request' && !testCases) {
+              const labels = context.payload.pull_request?.labels || [];
+              const weeklyLabel = labels.find(l => l.name.startsWith('/weekly '));
+              if (weeklyLabel) {
+                testCases = weeklyLabel.name.replace(/^\/weekly\s+/, '').trim();
+              }
+            }
 
             if (testCases) {
               core.setOutput('run', 'true');
