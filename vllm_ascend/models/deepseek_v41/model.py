@@ -1040,7 +1040,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def prepare_engram(self, input_ids, positions, history_inputs=None):
         """Route every DP using Runner's (CPU boundaries, pages, block size).
 
-        Dummy runs pass None and participate with empty hashes.
+        Calls without attention metadata pass None and participate with empty hashes.
         """
         config = self.config
         if not engram_enabled(config):
@@ -1120,7 +1120,6 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         if engram_lookups is None:
-            assert not engram_enabled(self.config), "Runner must prepare Engram inputs before model forward"
             lookups, token_mask = self.prepare_engram(input_ids, positions)
         else:
             lookups, token_mask = engram_lookups, engram_mask

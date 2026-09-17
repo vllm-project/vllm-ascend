@@ -297,3 +297,55 @@ def test_disabled_engram_capture_skips_layers(engram_model, monkeypatch):
         engram_model.prepare_engram_inputs(None, torch.arange(4), 4),
     ):
         assert result["engram_lookups"] == {} and result["engram_mask"].numel() == 0
+
+
+@pytest.mark.parametrize("num_reqs", [0, 2])
+def test_runner_history_inputs_use_full_swa_requests(monkeypatch, num_reqs):
+    from vllm_ascend.worker import model_runner_v1 as runner_module
+
+    pages = torch.tensor([[7, 8, 9], [12, 13, 14], [99, 99, 99]], dtype=torch.int32)
+    boundaries = torch.tensor([0, 3, 9, 99], dtype=torch.int32)
+    groups = [
+        SimpleNamespace(layer_names=["long_kv"], kv_cache_spec=object()),
+        SimpleNamespace(layer_names=["swa"], kv_cache_spec=object()),
+    ]
+    monkeypatch.setattr(runner_module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    monkeypatch.setattr(
+        runner_module, "get_storage_block_size", lambda spec: 4 if spec is groups[1].kv_cache_spec else 8
+    )
+    runner = SimpleNamespace(
+        model=SimpleNamespace(engram_cache_layer_name="swa"),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        query_start_loc=SimpleNamespace(cpu=boundaries),
+        input_batch=SimpleNamespace(
+            num_reqs=num_reqs,
+            block_table=[None, SimpleNamespace(get_cpu_tensor=lambda: pages)],
+        ),
+    )
+    actual_boundaries, actual_pages, block_size = runner_module.NPUModelRunner._get_engram_history_inputs(runner)
+    torch.testing.assert_close(actual_boundaries, boundaries[: num_reqs + 1])
+    torch.testing.assert_close(actual_pages, pages[:num_reqs])
+    assert actual_boundaries.data_ptr() == boundaries.data_ptr()
+    if num_reqs:
+        assert actual_pages.data_ptr() == pages.data_ptr()
+    assert block_size == 4
+
+
+def test_runner_history_without_attention_metadata_routes_empty_inputs(monkeypatch):
+    from unittest.mock import Mock
+
+    from vllm_ascend.worker import model_runner_v1 as runner_module
+
+    model = Mock(return_value=42)
+    model.prepare_engram_inputs.return_value = {}
+    model.engram_cache_layer_name = "swa"
+    runner = SimpleNamespace(model=model, enable_enpu=False, _update_full_graph_params_if_needed=lambda *args: None)
+    runner._get_engram_history_inputs = runner_module.NPUModelRunner._get_engram_history_inputs.__get__(runner)
+    monkeypatch.setattr(
+        runner_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=runner_module.CUDAGraphMode.NONE, attn_metadata=None),
+    )
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    assert runner_module.NPUModelRunner._model_forward(runner, 4) == 42
+    model.prepare_engram_inputs.assert_called_once_with(None, None, 4, None)

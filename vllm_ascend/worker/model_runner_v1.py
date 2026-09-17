@@ -3076,7 +3076,7 @@ class NPUModelRunner(GPUModelRunner):
     def _get_engram_history_inputs(self) -> tuple[torch.Tensor, torch.Tensor, int] | None:
         """Read full-request host pages before any attention CP slicing."""
         layer_name = self.model.engram_cache_layer_name
-        if layer_name is None:
+        if layer_name is None or get_forward_context().attn_metadata is None:
             return None
         group_id, group = next(
             (group_id, group)
@@ -3097,7 +3097,6 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        is_dummy_run: bool = False,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3121,7 +3120,7 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
             else:
-                history_inputs = None if is_dummy_run else self._get_engram_history_inputs()
+                history_inputs = self._get_engram_history_inputs()
                 model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded, history_inputs))
         run_model = partial(self.model, **model_inputs)
 
@@ -4100,7 +4099,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, is_dummy_run=True
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
             if active_device_metadata_executor is not None and active_device_metadata_executor.submission_in_flight:
                 active_device_metadata_executor.release()
