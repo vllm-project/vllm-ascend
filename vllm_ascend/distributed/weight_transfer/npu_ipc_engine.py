@@ -156,12 +156,18 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -219,7 +225,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
-            self.model.load_weights(weights)
+        self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass
