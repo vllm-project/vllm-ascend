@@ -33,8 +33,16 @@ def load_module(module_name, path):
 
 
 ENGRAM = ROOT / "vllm_ascend/models/deepseek_v41/engram"
-common = load_module("engram_common", ENGRAM / "common.py")
 npu = load_module("engram_npu", ENGRAM / "npu.py")
+try:
+    common = load_module("engram_common", ENGRAM / "common.py")
+except ImportError as error:  # the hashing itself comes from upstream's V4.1 module
+    common = None
+    _missing_upstream = str(error)
+
+requires_upstream_hash = pytest.mark.skipif(
+    common is None, reason=f"engram hashing needs vLLM with DeepSeek V4.1: {_missing_upstream}"
+)
 
 
 def test_engram_config_patch_keeps_the_checkpoint_contract(monkeypatch):
@@ -92,6 +100,7 @@ def _history():
     return h
 
 
+@requires_upstream_hash
 @pytest.mark.parametrize("barrier_token", [98, 99])
 def test_hash_stops_at_image_and_unwritten_pages(barrier_token):
     """A masked image token and a page this replica never wrote both end the n-gram."""
@@ -120,6 +129,7 @@ def test_hash_stops_at_image_and_unwritten_pages(barrier_token):
     assert values.shape == (32, 1, 2) and mask.all()
 
 
+@requires_upstream_hash
 def test_gate_preserves_masked_rows():
     torch.manual_seed(7)
     hidden = torch.randn(3, 4, 32).bfloat16()
