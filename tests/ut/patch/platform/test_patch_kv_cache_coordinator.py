@@ -16,14 +16,16 @@ The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
 3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
    keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
    RecomputeScheduler / DyntraLB / BalanceScheduler.
-4. ``Scheduler._mamba_block_aligned_split`` is wrapped unconditionally (see
-   ``patch_mamba_block_aligned_split``); on a pure producer or a standalone
+4. The producer/standalone EAGLE block-drop suppression is applied inline
+   inside ``Scheduler._mamba_block_aligned_split`` (see
+   ``patch_mamba_block_aligned_split``): on a pure producer or a standalone
    instance the EAGLE block-drop bit (``use_eagle`` on vLLM 0.28.x,
    ``use_eagle_block_drop`` on newer revisions) is cleared for the duration
    of the original call. Otherwise the scheduler's one-page backoff
    suppresses the final full mamba-align chunk split and the boundary state
    is never materialized. Consumers / kv_both instances pass through
-   unchanged.
+   unchanged. The scheduler-side behavior itself is exercised in
+   ``test_patch_mamba_block_aligned_split``.
 
 These exercises run CPU-only: the heavy ``__init__`` is exercised with a
 lightweight BlockPool/manager factory, lookup tests build the coordinator
@@ -46,9 +48,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
-)
-from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
-    _install_producer_mamba_block_aligned_split_patch,
 )
 
 HASH_BLOCK_SIZE = 128
@@ -389,229 +388,6 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
-
-
-# ---------------------------------------------------------------------------
-# Fix ④: producer scheduler companion patch - the EAGLE one-page backoff in
-# _mamba_block_aligned_split must be suppressed on the producer, otherwise the
-# final full mamba-align state page is never materialized across a chunk
-# boundary and hybrid hits stay one page (1536 tokens) short.
-# ---------------------------------------------------------------------------
-
-
-class _RecordingSplitScheduler:
-    """Minimal scheduler double: records the drop bit seen by the original
-    split implementation and echoes its arguments."""
-
-    def __init__(
-        self,
-        *,
-        drop_attr: str = "use_eagle",
-        drop_value: bool = True,
-        raise_in_split: bool = False,
-        is_kv_producer: bool = False,
-        is_kv_consumer: bool = False,
-        kv_transfer_config_present: bool = True,
-        vllm_config_present: bool = True,
-    ):
-        # Explicitly do NOT carry the other-era attribute: the wrapper must
-        # pick the knob the running vLLM revision actually exposes.
-        setattr(self, drop_attr, drop_value)
-        self.raise_in_split = raise_in_split
-        self.observed_drop_bits: list[bool] = []
-        self.calls: list[tuple] = []
-        if vllm_config_present:
-            vllm_config = SimpleNamespace(model_config=SimpleNamespace())
-            if kv_transfer_config_present:
-                vllm_config.kv_transfer_config = SimpleNamespace(
-                    is_kv_producer=is_kv_producer,
-                    is_kv_consumer=is_kv_consumer,
-                )
-            else:
-                vllm_config.kv_transfer_config = None
-            self.vllm_config = vllm_config
-
-
-def _split_observed_bit(scheduler) -> bool:
-    if hasattr(scheduler, "use_eagle_block_drop"):
-        return scheduler.use_eagle_block_drop
-    return scheduler.use_eagle
-
-
-def _fresh_split_scheduler(**kwargs):
-    # One-off subclass so binding/replacing the method never pollutes the
-    # shared base class used by the other cases.
-    cls = type("_IsolatedSplitScheduler", (_RecordingSplitScheduler,), {})
-
-    def _record(self, request, num_new_tokens, nlc=0, nec=0):
-        self.observed_drop_bits.append(_split_observed_bit(self))
-        self.calls.append((num_new_tokens, nlc, nec))
-        if self.raise_in_split:
-            raise RuntimeError("boom")
-        return ("split", num_new_tokens)
-
-    cls._mamba_block_aligned_split = _record  # type: ignore[attr-defined]
-    return cls, cls(**kwargs)
-
-
-def test_scheduler_split_patch_clears_use_eagle_for_producer():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    result = scheduler._mamba_block_aligned_split("req", 1600)
-    # The original implementation observes the drop as disabled...
-    assert scheduler.observed_drop_bits == [False]
-    assert result == ("split", 1600)
-    # ...and the scheduler's own bit is restored afterwards.
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_clears_use_eagle_block_drop_on_newer_vllm():
-    cls, scheduler = _fresh_split_scheduler(
-        drop_attr="use_eagle_block_drop",
-        drop_value=True,
-        is_kv_producer=True,
-    )
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    scheduler._mamba_block_aligned_split("req", 3200, 1536, 0)
-    assert scheduler.observed_drop_bits == [False]
-    assert scheduler.calls == [(3200, 1536, 0)]
-    assert scheduler.use_eagle_block_drop is True
-    assert not hasattr(scheduler, "use_eagle")
-
-
-def test_scheduler_split_patch_restores_bit_on_exception():
-    cls, scheduler = _fresh_split_scheduler(
-        drop_value=True,
-        raise_in_split=True,
-        is_kv_producer=True,
-    )
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    with pytest.raises(RuntimeError, match="boom"):
-        scheduler._mamba_block_aligned_split("req", 1600)
-    assert scheduler.use_eagle is True
-
-
-@pytest.mark.parametrize(
-    "scheduler_kwargs",
-    [
-        # Pure decode consumer.
-        {"is_kv_producer": False, "is_kv_consumer": True},
-        # kv_both serves both roles: keep upstream drop behavior.
-        {"is_kv_producer": True, "is_kv_consumer": True},
-        # Connector configured but neither PD role: not a standalone, so the
-        # drop stays on upstream behavior.
-        {"is_kv_producer": False, "is_kv_consumer": False},
-    ],
-)
-def test_scheduler_split_patch_passes_through_non_producer(scheduler_kwargs):
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, **scheduler_kwargs)
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    result = scheduler._mamba_block_aligned_split("req", 1600)
-    # The original sees the untouched bit and runs exactly once.
-    assert scheduler.observed_drop_bits == [True]
-    assert result == ("split", 1600)
-    assert scheduler.use_eagle is True
-
-
-@pytest.mark.parametrize(
-    "scheduler_kwargs",
-    [
-        # Connector configured but kv_transfer_config None: standalone.
-        {"kv_transfer_config_present": False},
-        # No vllm_config at all: also reads as standalone.
-        {"vllm_config_present": False},
-    ],
-)
-def test_scheduler_split_patch_suppresses_drop_on_standalone(scheduler_kwargs):
-    # A standalone instance has no connector: matched blocks are always
-    # verified local prompt blocks, so the EAGLE backoff is suppressed (the
-    # single-instance counterpart of the producer case) and the scheduler's
-    # own bit is restored afterwards.
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, **scheduler_kwargs)
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    result = scheduler._mamba_block_aligned_split("req", 1600)
-    assert scheduler.observed_drop_bits == [False]
-    assert result == ("split", 1600)
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_is_idempotent():
-    cls, _ = _fresh_split_scheduler()
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    wrapped_once = cls._mamba_block_aligned_split
-    _install_producer_mamba_block_aligned_split_patch(cls)
-    assert cls._mamba_block_aligned_split is wrapped_once
-
-
-def test_scheduler_split_patch_wraps_consumer_early_return_path():
-    # Model the neighboring consumer/sparse-index wrapper's early return: it
-    # consults use_eagle but deliberately never calls its saved original.
-    # The producer wrapper must be outermost for this path to see False.
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    inner = cls._mamba_block_aligned_split
-
-    def _consumer_early_return(self, request, num_new_tokens, nlc=0, nec=0):
-        self.observed_drop_bits.append(self.use_eagle)
-        return ("consumer-early-return", num_new_tokens)
-
-    _consumer_early_return.__wrapped__ = inner  # type: ignore[attr-defined]
-    cls._mamba_block_aligned_split = _consumer_early_return
-    _install_producer_mamba_block_aligned_split_patch(cls)
-
-    registered = cls._mamba_block_aligned_split
-    assert registered is not _consumer_early_return
-    assert registered.__wrapped__ is _consumer_early_return  # type: ignore[attr-defined]
-    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
-    assert scheduler._mamba_block_aligned_split("req", 1600) == (
-        "consumer-early-return",
-        1600,
-    )
-    assert scheduler.observed_drop_bits == [False]
-    assert scheduler.use_eagle is True
-
-
-def test_scheduler_split_patch_clears_and_restores_both_drop_attributes():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    scheduler.use_eagle_block_drop = "dedicated-original"
-
-    def _observe_both(self, request, num_new_tokens, nlc=0, nec=0):
-        self.calls.append((self.use_eagle, self.use_eagle_block_drop))
-        return num_new_tokens
-
-    cls._mamba_block_aligned_split = _observe_both
-    _install_producer_mamba_block_aligned_split_patch(cls)
-
-    assert scheduler._mamba_block_aligned_split("req", 3200) == 3200
-    assert scheduler.calls == [(False, False)]
-    assert scheduler.use_eagle is True
-    assert scheduler.use_eagle_block_drop == "dedicated-original"
-
-
-def test_scheduler_split_patch_handles_producer_without_drop_attribute():
-    cls, scheduler = _fresh_split_scheduler(drop_value=True, is_kv_producer=True)
-    del scheduler.use_eagle
-
-    def _attribute_free_split(self, request, num_new_tokens, nlc=0, nec=0):
-        self.calls.append((num_new_tokens, nlc, nec))
-        return ("split", num_new_tokens)
-
-    cls._mamba_block_aligned_split = _attribute_free_split
-    _install_producer_mamba_block_aligned_split_patch(cls)
-
-    assert scheduler._mamba_block_aligned_split("req", 1600) == ("split", 1600)
-    assert scheduler.observed_drop_bits == []
-    assert scheduler.calls == [(1600, 0, 0)]
-    assert not hasattr(scheduler, "use_eagle")
-    assert not hasattr(scheduler, "use_eagle_block_drop")
-
-
-def test_scheduler_split_patch_noop_without_split_method():
-    class _BareScheduler:
-        pass
-
-    # Must neither bind anything nor raise.
-    _install_producer_mamba_block_aligned_split_patch(_BareScheduler)
-    assert not hasattr(_BareScheduler, "_mamba_block_aligned_split")
 
 
 if __name__ == "__main__":
