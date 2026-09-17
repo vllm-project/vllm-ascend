@@ -81,6 +81,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -155,7 +156,10 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    KV_CACHE_TENSOR_ALIGNMENT,
+    RawCacheComponent,
     apply_layerwise_kv_cache_plan,
+    get_raw_cache_components,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -4272,7 +4276,10 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
+        apply_layerwise_kv_cache_plan(
+            kv_cache_config,
+            self.vllm_config,
+        )
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
@@ -4538,6 +4545,35 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
+    def _allocate_raw_cache_components(
+        self,
+        kv_cache_tensor: KVCacheTensor,
+        components: list[RawCacheComponent],
+        alignment: int,
+    ) -> dict[str, tuple[torch.Tensor, ...]]:
+        """Allocate and bind components that share one normalized lane key."""
+        expected_size = max(component.size_bytes for component in components)
+        use_legacy_shared_by_layout = vllm_version_is("0.28.0")
+        # New KVCacheTensor.size is the backing allocation size, not the
+        # per-lane size. On main, divide by layer count to compare against
+        # the per-lane expected size.
+        actual_size = (
+            kv_cache_tensor.size
+            if use_legacy_shared_by_layout
+            else kv_cache_tensor.size // len(get_kv_cache_tensor_layers(kv_cache_tensor))
+        )
+        if actual_size != expected_size:
+            raise ValueError(
+                "Shared component descriptor has an unexpected size: "
+                f"expected {expected_size}, got {actual_size}."
+            )
+        raw_buffer = self._allocate_int8_cache_tensor(actual_size, alignment)
+
+        raw_caches: dict[str, tuple[torch.Tensor, ...]] = {}
+        for component in components:
+            raw_caches[component.layer_name] = component.bind(raw_buffer)
+        return raw_caches
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -4560,7 +4596,7 @@ class NPUModelRunner(GPUModelRunner):
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
-        alignment = 2 * 1024 * 1024
+        alignment = KV_CACHE_TENSOR_ALIGNMENT
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         # v0.28.0 keeps the legacy ``shared_by`` contract: one allocation per
         # descriptor, shared by every listed layer. Main uses #51718's
@@ -4731,6 +4767,31 @@ class NPUModelRunner(GPUModelRunner):
                     use_mamba = True
                 if self._uses_page_strided_kv_layout(layer_kv_cache_spec[layer_name]):
                     use_compressed_cache = True
+                if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
+                    use_attn = True
+            self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
+            shared_specs = [layer_kv_cache_spec[layer_name] for layer_name in shared_layers]
+            shared_components = [
+                get_raw_cache_components(
+                    layer_name,
+                    spec,
+                    kv_cache_config.num_blocks,
+                )[0]
+                for layer_name, spec in zip(shared_layers, shared_specs, strict=True)
+            ]
+            if (
+                len(shared_specs) > 1
+                and any(spec != shared_specs[0] for spec in shared_specs[1:])
+                and len({component.reuse_key for component in shared_components}) == 1
+            ):
+                kv_cache_raw_tensors.update(
+                    self._allocate_raw_cache_components(
+                        kv_cache_tensor,
+                        shared_components,
+                        alignment,
+                    )
+                )
+                continue
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
@@ -4804,14 +4865,19 @@ class NPUModelRunner(GPUModelRunner):
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif use_compressed_cache and layer_name not in kv_cache_raw_tensors:
+                    compress_size = (
+                        kv_cache_tensor.size
+                        if use_legacy_shared_by_layout
+                        else kv_cache_tensor.size // len(shared_layers)
+                    )
                     if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size,
+                        tensor = torch.zeros(compress_size,
                                                 dtype=torch.int8,
                                                 device=self.device)
                     else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        cache_size_aligned = compress_size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                        tensor = self._align_memory(tensor, alignment)[: compress_size]
                     for layer_name_inner in shared_layers:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
@@ -4820,7 +4886,12 @@ class NPUModelRunner(GPUModelRunner):
                     and layer_name not in kv_cache_raw_tensors
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
+                    sfa_size = (
+                        kv_cache_tensor.size
+                        if use_legacy_shared_by_layout
+                        else kv_cache_tensor.size // len(shared_layers)
+                    )
+                    num_blocks = sfa_size // current_kv_cache_spec.page_size_bytes
                     if not use_legacy_shared_by_layout:
                         # vLLM #51718 packs all group layers into one tensor;
                         # kv_cache_config.num_blocks is the per-layer block count.
