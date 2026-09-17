@@ -28,8 +28,8 @@ PAIRED_SELECTION_COPY_MARKER = 0x5A56
 def planner_helper():
     if sys.platform != "linux":
         pytest.skip("Ascend planner extension test requires Linux")
-    if shutil.which("clang++") is None:
-        pytest.skip("Ascend planner extension test requires clang++")
+    if shutil.which("g++") is None:
+        pytest.skip("Ascend planner extension test requires g++")
     ascend_home = Path(
         os.environ.get(
             "ASCEND_HOME_PATH",
@@ -50,8 +50,8 @@ def planner_helper():
         / "sparse_kv_offload"
         / "sparse_kv_offload.cpp"
     )
-    os.environ["CC"] = "clang"
-    os.environ["CXX"] = "clang++"
+    os.environ["CC"] = "gcc"
+    os.environ["CXX"] = "g++"
     return cpp_extension.load(
         name="sparse_kv_offload_planner_ut",
         sources=[str(source)],
