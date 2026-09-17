@@ -117,6 +117,19 @@ def test_prepare_inputs_dummy_runs_route_too(monkeypatch):
     assert "engram_lookups" in result
 
 
+def test_prepare_inputs_profile_dummy_without_attn_metadata(monkeypatch):
+    """Profile dummies (skip_attn) never build metadata; the hook must not AttributeError."""
+    monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda self, batch, reqs: {})
+    model = _v41_model()
+    state = _state(model, kvpp_is_dummy_run=True)
+    del state.attn_metadata  # prepare_attn never ran for skip_attn profile dummies.
+
+    state.prepare_inputs(_batch(num_tokens=8), req_states=None)
+
+    model.prepare_engram_inputs.assert_called_once()
+    assert model.prepare_engram_inputs.call_args.kwargs == {"metadata": None}
+
+
 def test_prepare_dummy_inputs_binds_capture_buffers(monkeypatch):
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda self, num_reqs, num_tokens: {})
     model = _v41_model()

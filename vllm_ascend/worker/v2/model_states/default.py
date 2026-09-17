@@ -78,9 +78,10 @@ class AscendModelState(DefaultModelState):
         # it on idle ranks leaves the busy ranks spinning inside route_many's
         # all_gather. History pollution is guarded inside
         # _get_engram_history_inputs: dummy runs (kvpp_is_dummy_run /
-        # ring_state_update_skipped from execute_dummy_batch) feed
-        # history_inputs=None, which prepare_engram honors before touching
-        # the n-gram store.
+        # ring_state_update_skipped from execute_dummy_batch) and profile
+        # dummies (skip_attn, which never run prepare_attn and therefore
+        # have no kv_cache_config) feed history_inputs=None, which
+        # prepare_engram honors before touching the n-gram store.
         model_inputs.update(
             prepare_engram_inputs(
                 input_batch.input_ids[:num_tokens],
