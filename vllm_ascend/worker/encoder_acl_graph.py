@@ -28,8 +28,6 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import weak_ref_tensors
-
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
 # ---------------------------------------------------------------------------
@@ -270,8 +268,6 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         super().capture(graph_pool=encoder_graph_pool)
 
-        weak_ref_workspaces()
-
     def _capture_budget_graph(self, token_budget: int, path: str = "default", axis_keys: tuple[Hashable, ...] = ()):
         if axis_keys:
             raise NotImplementedError("Encoder ACL graphs with capture axes are not supported.")
@@ -301,7 +297,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         with (
             set_encoder_forward_context(token_budget, True),
             torch.inference_mode(),
-            torch.npu.graph(graph, self.graph_pool),
+            torch.npu.graph(graph, self.graph_pool, capture_error_mode="relaxed"),
         ):
             output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer.copy_(output)
@@ -312,7 +308,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             max_frames_per_batch=self.max_frames_per_batch,
             graph=graph,
             input_buffers=values,
-            output_buffer=weak_ref_tensors(output_buffer),
+            output_buffer=output_buffer,
         )
         graph_set = self._get_graph_set(path)
         graph_set[token_budget] = graph_meta
@@ -370,13 +366,3 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
 
         self.graph_hits += num_items
         return graph_meta.output_buffer
-
-
-def weak_ref_workspaces() -> None:
-    params = get_encoder_graph_params()
-    if params is None:
-        return
-    for budget, ws in list(params.workspaces.items()):
-        if ws is None:
-            continue
-        params.workspaces[budget] = weak_ref_tensors(ws)
