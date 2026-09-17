@@ -61,15 +61,9 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 
-# Apply the DP=1 SP property in worker processes too (platform-side module;
-# loaded in engine-core processes via vllm_ascend.patch.platform).
-import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
 from vllm_ascend.device.device_op import DeviceOperator
 
 
-# ---------------------------------------------------------------------------
-# Part 1: Step3p5Attention.forward (fused qkv-rmsnorm-rope).
-# ---------------------------------------------------------------------------
 def _patched_attention_forward(
     self,
     positions: torch.Tensor,
@@ -113,9 +107,6 @@ def _patched_attention_forward(
     return output
 
 
-# ---------------------------------------------------------------------------
-# Part 2: SP-for-MoE.
-# ---------------------------------------------------------------------------
 # FusedMoEBlock.__init__: replicate upstream + thread `is_sequence_parallel`
 # into FusedMoEFactory. This flag selects the SP path inside the MoE runner /
 # shared experts (skip final TP all-reduce, gather/reduce-scatter SP input).
@@ -285,7 +276,10 @@ def _patched_decoder_layer_init(
     is_moe_layer = layer_idx in moe_layers_idx
     # SP-for-MoE (mirrors DeepseekV2DecoderLayer.use_sequence_parallel_moe).
     self.use_sequence_parallel_moe = (
-        parallel_config.use_sequence_parallel_moe and parallel_config.pipeline_parallel_size == 1 and is_moe_layer
+        parallel_config.pipeline_parallel_size == 1
+        and parallel_config.tensor_parallel_size > 1
+        and parallel_config.enable_expert_parallel
+        and is_moe_layer
     )
     # On SP layers, keep the attention output as a partial sum (skip the
     # o_proj TP all-reduce) so it can be reduce_scattered to per-rank token
@@ -390,9 +384,6 @@ def _patched_step3p5_model_forward(
     return hidden_states
 
 
-# ---------------------------------------------------------------------------
-# Install the patches (importing this module applies them).
-# ---------------------------------------------------------------------------
 Step3p5Attention.forward = _patched_attention_forward
 FusedMoEBlock.__init__ = _patched_fused_moe_block_init
 Step3p5DecoderLayer.__init__ = _patched_decoder_layer_init
