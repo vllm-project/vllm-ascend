@@ -110,14 +110,9 @@ def _mamba_block_aligned_split(
         return num_new_tokens
 
     # Pure PD prefill producer or standalone instance: suppress the EAGLE
-    # one-block backoff (see the docstring). The check is placed before both
-    # split paths so the sparse index-kpool early-return path below observes
-    # it too (it previously ran under a temporary bit clear from the outer
-    # producer wrapper).
-    skip_eagle_drop = _skips_eagle_block_drop(
-        getattr(self.vllm_config, "kv_transfer_config", None)
-    )
-
+    # one-block backoff (see the docstring). The sparse index-kpool
+    # early-return path below must observe it too (it previously ran under
+    # a temporary bit clear from the outer producer wrapper).
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
         num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
@@ -126,7 +121,7 @@ def _mamba_block_aligned_split(
         ):
             block_size = self.block_size
             last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle and not skip_eagle_drop:
+            if self.use_eagle and not _skips_eagle_block_drop(kv_transfer_config):
                 last_cache_position = max(last_cache_position - block_size, 0)
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:
@@ -137,7 +132,7 @@ def _mamba_block_aligned_split(
                 num_new_tokens = last_cache_position - num_computed_tokens
         return num_new_tokens
 
-    if not skip_eagle_drop:
+    if not _skips_eagle_block_drop(kv_transfer_config):
         return _original_mamba_block_aligned_split(
             self,
             request,
