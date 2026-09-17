@@ -6,7 +6,7 @@ This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified,
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`(for Ascend950DT, the model is supported from `vllm-ascend:v0.23.0rc1`), and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`), and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -27,7 +27,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 | `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
 | `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
 |`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
-|`GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized)| The weights have been verified on Ascend 950DT and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
+|`GLM-5.1-w4a4`(950DT Products mxfp4 Quantized)| The weights have been verified on 950DT Products and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -43,7 +43,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 You can use our official docker image to run GLM-5/5.1 directly.
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     Start the docker image on each node.
 
@@ -175,9 +175,9 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-Node Online Deployment
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
-    - Quantized model `glm-5-w4a4` can be deployed on 1 Ascend950DT (96GB × 8) .
+    - Quantized model `glm-5-w4a4` can be deployed on 1 950DT Product (96GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -559,7 +559,7 @@ We'd like to show the deployment guide of `GLM-5` on multi-node environment with
 
 In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
 
-#### 5.3.1 Prefill-Decode Disaggregation (Ascend950DT series)
+#### 5.3.1 Prefill-Decode Disaggregation (950DT Products)
 
 Before you start, please
 
@@ -1309,7 +1309,7 @@ Once the preparation is done, you can start the server with the following comman
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
-**Ascend950DT series:**
+**950DT Products:**
 
 ```shell
 unset http_proxy
@@ -1393,8 +1393,8 @@ In addition to the single-node and multi-node parameters described above, the fo
 **Decode node-specific configurations:**
 
 - `--additional-config '{"enable_mlapo": true}'`: Enables MLA preprocess operation fusion on decode nodes to significantly improve decode performance. Consumes more NPU memory. In PD scenarios, enable MLAPO only on decode nodes.
-- On decode nodes, keep `--max-num-batched-tokens` close to `--max-num-seqs` — decode processes one token per sequence per step (`164` in the A3 scenario, `240` in the Ascend950DT scenario, see the scripts above).
-- `--additional-config '{"recompute_scheduler_enable": true}'`: Enables the recomputation scheduler. When decode node KV cache is insufficient, requests are sent back to prefill nodes for KV cache recomputation. In this deployment: `true` on decode nodes; on prefill nodes `true` in the Ascend950DT scenario and `false` in the A3 scenario (see the scripts above).
+- On decode nodes, keep `--max-num-batched-tokens` close to `--max-num-seqs` — decode processes one token per sequence per step (`164` in the A3 scenario, `240` in the 950DT Products scenario, see the scripts above).
+- `--additional-config '{"recompute_scheduler_enable": true}'`: Enables the recomputation scheduler. When decode node KV cache is insufficient, requests are sent back to prefill nodes for KV cache recomputation. In this deployment: `true` on decode nodes; on prefill nodes `true` in the 950DT Products scenario and `false` in the A3 scenario (see the scripts above).
 
 **Common PD environment variables:**
 
@@ -1458,13 +1458,13 @@ The tables below provide recommended parameter configurations for the `GLM-5.1-w
 - **Dual-Node Co-Located 198K High Throughput**: `DP8 TP4`, see [Multi-node Deployment](#52-multi-node-deployment).
 - **Dual-Node Co-Located 198K Low Latency**: `DP2 TP16`, see [Multi-node Deployment](#52-multi-node-deployment).
 - **Prefill-Decode Disaggregation 198K (PP2)**: prefill `PP2 TP16` + decode `DP8 TP4`, see [Prefill-Decode Disaggregation (A3 series)](#532-prefill-decode-disaggregation-a3-series).
-- **Prefill-Decode Disaggregation 198K (Ascend950DT)**: prefill `TP8` (DSA CP 8) + decode `DP16 TP1`, see [Prefill-Decode Disaggregation (Ascend950DT series)](#531-prefill-decode-disaggregation-ascend950dt-series).
+- **Prefill-Decode Disaggregation 198K (950DT Products)**: prefill `TP8` (DSA CP 8) + decode `DP16 TP1`, see [Prefill-Decode Disaggregation (950DT Products)](#531-prefill-decode-disaggregation-950dt-products).
 
 Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tokens and 1K output tokens; `@50%/90%` marks the prefix cache hit rate. When the prefix cache hit rate is > 0, add `--enable-prefix-caching`; when the hit rate is 0, add `--no-enable-prefix-caching` instead (for the PD scenario, this applies to the prefill nodes).
 
 #### 9.1.1 Table 1: Detailed Node Configuration
 
-> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs; an Ascend950DT node hosting 8 cards). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All A3 scenarios use the `GLM-5.1-w8a8c8` weights; the Ascend950DT scenarios use the `GLM-5.1-w4a4` weights.
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a co-located node hosting 4 DP ranks of TP4 uses 16 NPUs; a PD prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a PD decode node hosting 4 DP ranks of TP4 uses 16 NPUs; a 950DT Product node hosting 8 cards). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All A3 scenarios use the `GLM-5.1-w8a8c8` weights; the 950DT Products scenarios use the `GLM-5.1-w4a4` weights.
 >
 > When testing with a prefix cache hit rate > 0, keep `--enable-prefix-caching` (as in the deployment scripts); when the hit rate is 0, replace it with `--no-enable-prefix-caching`.
 
@@ -1474,10 +1474,10 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|16|1|16|4096|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2)|16|16|1|64|16384|202752|1|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|4|32|164|202752|3|
-|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
-|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
-|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
-|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
+|PD 198K High Throughput (950DT Products)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
+|PD 198K High Throughput (950DT Products)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
+|PD 198K Low Latency (950DT Products)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
+|PD 198K Low Latency (950DT Products)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement
 

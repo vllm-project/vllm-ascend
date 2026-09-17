@@ -11,7 +11,7 @@
 各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。
 底层算子名为 **MlaPrologV3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
 
-本文描述 A5（Ascend950）上 vllm-ascend 自定义算子包的支持范围。当前支持非量化 BF16 和 MXFP8，具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
+本文描述 Ascend 950PR&950DT 系列产品上 vllm-ascend 自定义算子包的支持范围。当前支持非量化 BF16 和 MXFP8，具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
 
 ## 2. 公共参数与约束
 
@@ -85,7 +85,7 @@
 
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
-`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；除首轴外的其余轴必须连续。
+`kv_cache` / `kr_cache` 在 Ascend 950PR&950DT 系列产品 上支持首轴非连续；除首轴外的其余轴必须连续。
 
 #### A5 自定义算子的合法联合配置
 
@@ -193,7 +193,7 @@ query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
 )
 ```
 
-仅在 Ascend950 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。
+仅在 Ascend 950PR&950DT 系列产品 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。
 `rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空。
 `token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。
 `kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。
