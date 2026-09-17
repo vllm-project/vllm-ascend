@@ -330,6 +330,7 @@ class AscendConfig:
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
+            "qwen3_preprocess_offload_stage": 0,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -465,6 +466,9 @@ class AscendConfig:
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
+    # Qwen3 image preprocessing offload: 0=disabled, 1=patchify+dtype,
+    # 2=+rescale/normalize, 3=+resize.
+    qwen3_preprocess_offload_stage: int = 0
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -535,6 +539,11 @@ class AscendConfig:
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        if self.qwen3_preprocess_offload_stage not in (0, 1, 2, 3):
+            raise ValueError(
+                "qwen3_preprocess_offload_stage must be one of 0, 1, 2, or 3; "
+                f"got {self.qwen3_preprocess_offload_stage}"
+            )
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
         if self.enable_mc2_hierarchy_comm:
             self.mc2_comm_alg = "hierarchy"

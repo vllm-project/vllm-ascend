@@ -586,6 +586,28 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 17a. File: platform/patch_qwen3_preprocess.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `transformers.models.qwen2_vl.Qwen2VLImageProcessor._preprocess`
+#   2. `vllm.model_executor.models.qwen3_vl.Qwen3VLMultiModalProcessor`
+#   3. `vllm.multimodal.processing.context.InputProcessingContext._postprocess_output`
+#    Why:
+#       Qwen3-VL and Qwen3.5 image preprocessing performs resize,
+#       rescale/normalize, patchification, and runtime dtype conversion on CPU.
+#       Multi-image requests spend substantial frontend time on these
+#       memory-intensive tensor transformations before the vision encoder starts.
+#    How:
+#       Add an opt-in, three-stage flat-image transport contract. Stage 1 keeps
+#       normalized pixels in FP32 for worker-side patchification and dtype
+#       conversion. Stage 2 transports resized UINT8 pixels. Stage 3 transports
+#       original UINT8 pixels plus source and target image geometry. Unsupported
+#       models and video requests continue to use the upstream contract.
+#    Related PR (if no, explain why):
+#       No, the implementation is specific to Ascend NPU execution.
+#    Future Plan:
+#       Replace this patch when vLLM exposes a backend-owned multimodal
+#       preprocessing interface that can preserve and transport raw image tensors.
+#
 # ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
@@ -983,6 +1005,24 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#
+# ** 15a. File: worker/patch_qwen3_preprocess.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration`
+#    Why:
+#       The worker must consume the frontend's staged flat-image contract and
+#       execute the selected preprocessing operations on NPU before the vision
+#       encoder receives its normal patch matrix.
+#    How:
+#       Validate the flat image metadata, batch equal-sized images, optionally
+#       run bicubic resize and rescale/normalize, reproduce the Hugging Face
+#       patch layout, and then delegate to the upstream image-input path for
+#       model-selected dtype conversion and vision execution.
+#    Related PR (if no, explain why):
+#       No, the implementation is specific to Ascend NPU execution.
+#    Future Plan:
+#       Replace this patch when vLLM supports device-side image preprocessing
+#       through a stable backend extension point.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
