@@ -597,7 +597,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
         --trust-remote-code \
-        --gpu-memory-utilization 0.92 \
+        --gpu-memory-utilization 0.85 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
