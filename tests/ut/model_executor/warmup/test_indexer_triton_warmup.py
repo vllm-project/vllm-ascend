@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.model_executor.warmup import deepseek_v41_triton_warmup as warmup
+from vllm_ascend.model_executor.warmup import indexer_triton_warmup as warmup
 
 
 @pytest.mark.parametrize(
@@ -45,7 +45,7 @@ def test_warmup_covers_tiles_and_active_compression_ratios(monkeypatch, model_ty
     monkeypatch.setattr(warmup, "get_vectorcore_num", lambda: 40)
     monkeypatch.setattr(warmup, "quantize_indexer_query", quantize)
     monkeypatch.setattr(warmup, "prepare_indexer_indices", prepare)
-    warmup.deepseek_v41_triton_warmup(worker)
+    warmup.indexer_triton_warmup(worker)
     query = quantize.call_args.args[0]
     assert query.shape == (1, 64, 128)
     assert query.dtype == torch.bfloat16
@@ -71,6 +71,6 @@ def test_warmup_skips_unused_indexer(monkeypatch, has_triton, model_type, ratios
     monkeypatch.setattr(warmup, "HAS_TRITON", has_triton)
     monkeypatch.setattr(warmup, "quantize_indexer_query", quantize)
     monkeypatch.setattr(warmup, "prepare_indexer_indices", prepare)
-    warmup.deepseek_v41_triton_warmup(worker)
+    warmup.indexer_triton_warmup(worker)
     quantize.assert_not_called()
     prepare.assert_not_called()

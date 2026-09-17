@@ -1682,50 +1682,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             common_attn_metadata,
             skip_all_to_all=full_gather_wo_a_enabled,
         )
-        num_tokens = o_proj_input.shape[0]
-
         # Keep gathered projection weights alive until all asynchronous NPU
         # consumers, including reduce-scatter and the output copy, are queued.
         # V4.1 calls _forward_o_proj only without temporary gathered weights.
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight()
-        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-            if use_a5_quant_o_proj:
-                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
-                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
-                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
-                else:
-                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                    o = torch_npu.npu_transpose_quant_batchmatmul(
-                        o,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        dtype=torch.bfloat16,
-                        bias=None,
-                        group_sizes=(0, 0, 32),
-                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                    )
-                o_proj_input = o.reshape(num_tokens, -1)
-            else:
-                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self._get_batched_wo_a_weight(o_proj_groups),
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled)
             if need_gather_q_kv and not full_gather_wo_a_enabled:
                 projected_output = sp_reduce_scatter(projected_output)
             output[...] = projected_output
@@ -1738,54 +1701,45 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         return output
 
     def _forward_o_proj(self, o_proj_input, full_gather_wo_a_enabled=False):
-        """Project CP attention output with TP or temporarily gathered weights."""
+        """Project with the active weights; the caller owns their lifetime."""
         num_tokens = o_proj_input.shape[0]
-        # o
-        if full_gather_wo_a_enabled:
-            self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
-        try:
-            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-            if use_a5_quant_o_proj:
-                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
-                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
-                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
-                else:
-                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                    o = torch_npu.npu_transpose_quant_batchmatmul(
-                        o,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        dtype=torch.bfloat16,
-                        bias=None,
-                        group_sizes=(0, 0, 32),
-                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                    )
-                o_proj_input = o.reshape(num_tokens, -1)
+        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+        if use_a5_quant_o_proj:
+            o = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+            if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
+                o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
             else:
-                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
                     self._get_batched_wo_a_weight(o_proj_groups),
+                    dtype=torch.bfloat16,
                     bias=None,
-                    scale=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
                     perm_x1=(1, 0, 2),
                     perm_x2=(0, 1, 2),
                     perm_y=(1, 0, 2),
-                    batch_split_factor=1,
                 )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            return self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
-        finally:
-            if full_gather_wo_a_enabled:
-                self._switch_o_proj_to_local_weight()
+            o_proj_input = o.reshape(num_tokens, -1)
+        else:
+            o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self._get_batched_wo_a_weight(o_proj_groups),
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+        return self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
 
     def _forward(
         self,

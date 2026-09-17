@@ -35,7 +35,7 @@ def collect_indexer_warmup_token_counts(topk: int, num_cores: int, max_tokens: i
 
 
 @torch.inference_mode()
-def deepseek_v41_triton_warmup(worker: NPUWorker) -> None:
+def indexer_triton_warmup(worker: NPUWorker) -> None:
     """Precompile indexer tiles before serving arbitrary eager token counts."""
     if not HAS_TRITON:
         return

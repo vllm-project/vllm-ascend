@@ -13,13 +13,13 @@ kw = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
 @patch.object(kw, "triton_rms_warmup")
 @patch.object(kw, "penalties_triton_warmup")
 @patch.object(kw, "rejection_sampler_triton_warmup")
-@patch.object(kw, "deepseek_v41_triton_warmup")
+@patch.object(kw, "indexer_triton_warmup")
 @patch.object(kw, "HAS_TRITON", True)
-def test_kernel_warmup(mock_ds_v41, mock_rej, mock_pen, mock_rms, mock_logger):
+def test_kernel_warmup(mock_indexer, mock_rej, mock_pen, mock_rms, mock_logger):
     worker = make_mock_worker()
     kw.kernel_warmup(worker)
 
     mock_rej.assert_called_once_with(worker)
     mock_pen.assert_called_once_with(worker)
     mock_rms.assert_called_once_with(worker)
-    mock_ds_v41.assert_called_once_with(worker)
+    mock_indexer.assert_called_once_with(worker)
