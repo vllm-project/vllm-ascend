@@ -8,6 +8,7 @@ parameter of the layer-reduced model. Names and shapes come from a meta-device
 HF model; values are fixed-random BF16 and require no checkpoint weights. The
 test proves dummy inference in FULL_DECODE_ONLY mode before comparing a complete
 baseline with an exact full-payload reload across a pause/resume boundary.
+Both unpacked and packed HCCL broadcasts exercise the same transaction.
 """
 
 import math
@@ -78,7 +79,7 @@ def _collect_weight_metadata(source: FixedRandomWeightSource):
     )
 
 
-def _send_update(server, source, model_update_group) -> None:
+def _send_update(server, source, model_update_group, *, packed: bool) -> None:
     from vllm_ascend.distributed.weight_transfer.hccl_engine import (
         HCCLTrainerSendWeightsArgs,
         HCCLWeightTransferEngine,
@@ -96,7 +97,7 @@ def _send_update(server, source, model_update_group) -> None:
                 "names": names,
                 "dtype_names": dtype_names,
                 "shapes": shapes,
-                "packed": True,
+                "packed": packed,
                 "packed_buffer_size_bytes": packed_buffer_size_bytes,
             }
         },
@@ -107,7 +108,7 @@ def _send_update(server, source, model_update_group) -> None:
         iterator=iter(source),
         trainer_args=HCCLTrainerSendWeightsArgs(
             group=model_update_group,
-            packed=True,
+            packed=packed,
             packed_buffer_size_bytes=packed_buffer_size_bytes,
         ),
     )
@@ -122,7 +123,8 @@ def _send_update(server, source, model_update_group) -> None:
     reason="HCCL weight transfer e2e test requires at least 2 NPUs.",
 )
 @pytest.mark.parametrize("case", pytest_model_cases())
-def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase):
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     port = get_open_port()
     server_args = [
         "--load-format",
@@ -196,8 +198,11 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase):
 
         signatures = []
         for update_round in range(2):
-            _log(f"{case.id}: sending complete fixed-random update round={update_round + 1}")
-            _send_update(server, source, model_update_group)
+            _log(
+                f"{case.id}: sending {('packed' if packed else 'unpacked')} "
+                f"fixed-random update round={update_round + 1}"
+            )
+            _send_update(server, source, model_update_group, packed=packed)
             signatures.append(generation_signature(client, case.model))
 
     assert_dummy_then_fixed_reload(dummy_signature, signatures[0], signatures[1], case)
