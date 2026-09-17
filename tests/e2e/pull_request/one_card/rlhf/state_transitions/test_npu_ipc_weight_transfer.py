@@ -25,6 +25,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     WeightUpdateModelCase,
     assert_dummy_then_fixed_reload,
     generation_signature,
+    packed_buffer_size_for,
     pytest_model_cases,
 )
 
@@ -36,6 +37,26 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     response = requests.post(server.url_for(route), json=json, timeout=timeout)
     response.raise_for_status()
     return response
+
+
+_ENGINES_REGISTERED = False
+
+
+def _register_engines_once() -> None:
+    """Register the Ascend weight transfer engines exactly once per process.
+
+    ``register_engine()`` is not idempotent: it registers ``hccl`` and
+    ``npu_ipc`` and the underlying factory raises ``ValueError: Weight transfer
+    engine 'hccl' is already registered`` on a second call. Registering inside
+    the test body therefore fails every parametrisation after the first.
+    """
+    global _ENGINES_REGISTERED
+    if _ENGINES_REGISTERED:
+        return
+    from vllm_ascend.distributed.weight_transfer import register_engine
+
+    register_engine()
+    _ENGINES_REGISTERED = True
 
 
 @pytest.mark.skipif(
@@ -92,12 +113,15 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
-        from vllm_ascend.distributed.weight_transfer import register_engine
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
-        register_engine()
+        _register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
-            NPUIPCTrainerInitInfo(rank=0, packed=packed),
+            NPUIPCTrainerInitInfo(
+                rank=0,
+                packed=packed,
+                packed_buffer_size_bytes=packed_buffer_size_for(source),
+            ),
             client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
             source=source,
         )
