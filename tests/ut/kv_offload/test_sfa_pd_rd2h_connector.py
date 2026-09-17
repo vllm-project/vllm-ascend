@@ -34,9 +34,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     READ_READY_BATCH,
     SFAPD_PROTOCOL_VERSION,
     LayerMetadata,
+    NanoTailDest,
     SendTask,
     SfaPDProducerReqMeta,
+    get_external_request_id,
     infer_sfa_component_group_ids,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (  # noqa: E402
+    NanoTopkSlotAllocator,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
@@ -1445,3 +1450,144 @@ def test_pp_producer_requires_structured_mf_meta_ack():
     thread._send_mf_meta("tcp://d:1", dealer, msgspec.msgpack.Encoder())
 
     assert "tcp://d:1" in thread._mf_meta_sent_paths
+
+
+def test_consumer_scheduler_binds_nano_tail_at_alloc():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler.main_group_idx = 0
+    scheduler.indexer_group_idx = 1
+    scheduler.engine_id = "decode-engine"
+    scheduler.side_channel_host = "decode-host"
+    scheduler.side_channel_port = 1234
+    scheduler.block_size = [128, 128]
+    scheduler.main_block_size = 128
+    scheduler.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        )
+    )
+    scheduler._request_trackers = {}
+    scheduler._reqs_need_recv = set()
+    scheduler._nano_bindings = {}
+    scheduler._nano_slot_allocator = NanoTopkSlotAllocator(4)
+    scheduler._metaserver_lock = threading.Lock()
+    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_futures = {}
+    scheduler._metaserver_retry_timers = {}
+    scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
+    params = {"do_remote_prefill": True, "metaserver": "http://metaserver"}
+    request = SimpleNamespace(
+        request_id="req-tail",
+        kv_transfer_params=params,
+        num_computed_tokens=0,
+        prompt_token_ids=list(range(10367)),
+    )
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([1, 2], [3])
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=10367)
+    meta = scheduler.build_connector_meta(MagicMock())
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.pool_slot == 0
+    assert req_meta.tail_tokens == 127
+    assert req_meta.tail_block_index == 80
+    assert req_meta.kv_tokens == 10367
+
+    scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    assert scheduler._nano_slot_allocator.get("req-tail") is None
+
+
+def test_consumer_worker_records_nano_slot_for_runner():
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.request_map = {}
+    worker._dest_blocks_by_req = {}
+    worker._cpu_blocks_by_req = {}
+    worker.nano_slots_by_req = {}
+    worker._nano_tail_by_req = {}
+    metadata = SimpleNamespace(
+        requests=[
+            SimpleNamespace(
+                req_id="req-tail-internal",
+                main_block_ids=[1],
+                indexer_block_ids=[2],
+                pool_slot=3,
+                tail_tokens=7,
+                tail_block_index=4,
+            )
+        ]
+    )
+
+    worker.start_load_kv(metadata)
+
+    assert worker.nano_slots_by_req["req-tail-internal"] == 3
+    dest = worker._nano_tail_by_req[get_external_request_id("req-tail-internal")]
+    assert dest.pool_slot == 3
+    assert dest.tail_tokens == 7
+    assert dest.tail_block_index == 4
+
+
+def test_connector_exposes_nano_slot_bindings():
+    connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
+    connector.connector_worker = SimpleNamespace(nano_slots_by_req={"req-a": 2})
+    assert connector.get_nano_slot_bindings() == {"req-a": 2}
+
+
+def _make_tail_read_thread(*, tp_rank: int = 0, tp_size: int = 1) -> MembPullReadThread:
+    thread = _make_read_thread()
+    thread.tp_rank = tp_rank
+    thread._state.tp_size = tp_size
+    thread._state.dest_blocks_by_req["req-0"] = ([9], [])
+    thread._state.nano_tail_by_req["req-0"] = NanoTailDest(pool_slot=1, tail_tokens=3, tail_block_index=0)
+    thread._state.topk_k_bases = [100_000]
+    thread._state.topk_v_bases = [200_000]
+    thread._state.topk_row_tokens = 256
+    thread._state.topk_hot_tokens = 128
+    thread._state.block_size = 128
+    return thread
+
+
+def test_nano_tail_d2d_appends_to_every_decode_rank():
+    layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
+    layer["p_k_len"] = 1280
+    layer["p_v_len"] = 2560
+    thread = _make_tail_read_thread()
+
+    local, peer, lengths, _ = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[5],
+        p_indexer_block_ids=[],
+        want_info=False,
+    )
+
+    # dst_token = slot 1 * 256 + 128 + 0 = 384
+    assert local == [100_000 + 384 * 10, 200_000 + 384 * 20]
+    assert peer == [1000 + 5 * 1280, 2000 + 5 * 2560]
+    assert lengths == [3 * 10, 3 * 20]
+
+
+def test_nano_tail_d2d_skips_when_last_block_is_not_in_chunk():
+    layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
+    layer["p_k_len"] = 1280
+    layer["p_v_len"] = 2560
+    thread = _make_tail_read_thread()
+    thread._state.nano_tail_by_req["req-0"] = NanoTailDest(pool_slot=1, tail_tokens=3, tail_block_index=8)
+    thread._state.dest_blocks_by_req["req-0"] = ([0], [])
+
+    local, peer, lengths, _ = thread._build_req_descriptors(
+        layer,
+        "req-0",
+        p_main_block_ids=[1],
+        p_indexer_block_ids=[],
+        want_info=False,
+        main_start_block=0,
+    )
+
+    assert local == [3000, 4000]
+    assert peer == [1000 + 1280, 2000 + 2560]
+    assert lengths == [1280, 2560]
+

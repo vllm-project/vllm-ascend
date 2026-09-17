@@ -382,6 +382,10 @@ class AscendSFAMetadata:
     nano_copy_dst_offsets: torch.Tensor | None = None
     nano_copy_lengths: torch.Tensor | None = None
     nano_copy_count: torch.Tensor | None = None
+    # PD consumer: connector already D2D'd the prefill tail. Graph replay must
+    # not re-issue that H2D. Eager restore on prefix rollback uses the same
+    # copy descriptors outside the captured path.
+    nano_skip_tail_restore: bool = False
     positions: torch.Tensor | None = None
     query_start_loc: torch.Tensor | None = None
     max_query_len: int = 0
