@@ -56,13 +56,19 @@ def test_prepare_inputs_routes_real_steps_with_history_inputs(monkeypatch):
 
     result = state.prepare_inputs(batch, req_states=None)
 
+    # Tensor args cannot go through assert_called_once_with: tensor __eq__
+    # returns a tensor, which mock comparison misreads as inequality.
     # SimpleNamespace carries no engram_cache_layer_name, so the history
     # mirror yields None and engram routing runs with lookups only.
-    model.prepare_engram_inputs.assert_called_once_with(
-        batch.input_ids[:8], batch.positions[:8], 8, history_inputs=None
-    )
+    model.prepare_engram_inputs.assert_called_once()
+    args, kwargs = model.prepare_engram_inputs.call_args
+    torch.testing.assert_close(args[0], batch.input_ids[:8])
+    torch.testing.assert_close(args[1], batch.positions[:8])
+    assert args[2] == 8
+    assert kwargs == {"history_inputs": None}
     model.prepare_engram_graph_inputs.assert_not_called()
-    assert result == {"engram_lookups": {}, "engram_mask": torch.empty(0)}
+    assert result["engram_lookups"] == {}
+    assert result["engram_mask"] is model.prepare_engram_inputs.return_value["engram_mask"]
 
 
 def test_get_engram_history_inputs_mirrors_device_block_table():

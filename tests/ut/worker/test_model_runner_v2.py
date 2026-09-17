@@ -32,6 +32,9 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    # Empty groups keep prepare_dummy_attn's V4.1 ring-state prep a no-op;
+    # these tests focus on buffer refresh / upstream passthrough only.
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
     return runner
 
 
@@ -295,7 +298,8 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
 def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
+    # num_reqs feeds the V4.1 ring-state prep that runs after the upstream call.
+    dummy = SimpleNamespace(num_reqs=0)
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     if vllm_version_is("0.28.0"):
