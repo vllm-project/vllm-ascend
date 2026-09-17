@@ -1,3 +1,5 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,9 +14,21 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
+    _BounceLease,
+    _BounceLeaseManager,
 )
 
 _MIB = 1024 * 1024
+
+
+def _wait_for_waiters(manager: _BounceLeaseManager, count: int) -> None:
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with manager._condition:
+            if len(manager._waiters) == count:
+                return
+        time.sleep(0.001)
+    raise AssertionError(f"expected {count} bounce waiters")
 
 
 def test_allocate_tensor_returns_2_mib_aligned_tensor():
@@ -189,3 +203,159 @@ def test_producer_allocator_registration_failure_is_fatal():
         allocator.prepare(torch.device("cpu"), transfer)
 
     assert allocator.tensor is None
+
+
+def test_bounce_lease_manager_zero_size_bypasses_queue():
+    manager = _BounceLeaseManager(0)
+
+    assert manager.acquire(0) is None
+
+
+def test_copy_to_bounce_packs_bytes_within_lease():
+    allocator = AscendProducerAllocator(staging_capacity=0, bounce_capacity=16)
+    allocator.tensor = torch.zeros(16, dtype=torch.uint8)
+    pool = AscendProducerMemoryPool(0, MagicMock(), allocator)
+    lease = _BounceLease(offset=4, nbytes=5, allocated_nbytes=8)
+    source_a = torch.tensor([1, 2, 3], dtype=torch.uint8)
+    source_b = torch.tensor([4, 5, 6], dtype=torch.uint8)
+
+    with (
+        patch(
+            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.Stream"
+        ) as stream_cls,
+        patch(
+            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.stream"
+        ) as stream_context,
+    ):
+        stream = stream_cls.return_value
+        address = pool.copy_to_bounce(
+            lease,
+            [(source_a, 0, 2), (source_b, 2, 3)],
+        )
+
+    bounce = pool.bounce_tensor
+    assert bounce is not None
+    assert address == bounce.data_ptr() + lease.offset
+    assert bounce.tolist() == [0, 0, 0, 0, 1, 2, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0]
+    stream_cls.assert_called_once_with(device=bounce.device)
+    stream_context.assert_called_once_with(stream)
+    stream.synchronize.assert_called_once_with()
+
+
+def test_bounce_lease_manager_aligns_one_whole_wave_lease():
+    manager = _BounceLeaseManager(2048, alignment=256)
+
+    lease = manager.acquire(800)
+
+    assert lease is not None
+    assert lease.offset == 0
+    assert lease.nbytes == 800
+    assert lease.allocated_nbytes == 1024
+
+    manager.release(lease)
+    assert manager._regions._free == [(0, 2048)]
+
+
+def test_bounce_lease_manager_rejects_oversized_lease():
+    manager = _BounceLeaseManager(2 * _MIB)
+
+    with pytest.raises(ValueError, match="arena capacity"):
+        manager.acquire(2 * _MIB + 1)
+
+
+def test_bounce_lease_manager_waiters_do_not_bypass_fifo_head():
+    manager = _BounceLeaseManager(8, alignment=1)
+    held = manager.acquire(6)
+    assert held is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(manager.acquire, 4)
+        _wait_for_waiters(manager, 1)
+        second = executor.submit(manager.acquire, 2)
+        _wait_for_waiters(manager, 2)
+
+        try:
+            assert not first.done()
+            assert not second.done()
+        finally:
+            manager.release(held)
+
+        first_lease = first.result(timeout=1)
+        second_lease = second.result(timeout=1)
+
+    assert first_lease is not None
+    assert second_lease is not None
+    assert first_lease.offset == 0
+    assert second_lease.offset == 4
+
+    manager.release(first_lease)
+    manager.release(second_lease)
+
+
+def test_bounce_lease_manager_released_batch_tail_rejoins_fifo():
+    manager = _BounceLeaseManager(8, alignment=1)
+    first_wave = manager.acquire(8)
+    assert first_wave is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        other_batch = executor.submit(manager.acquire, 8)
+        _wait_for_waiters(manager, 1)
+
+        manager.release(first_wave)
+        next_wave = executor.submit(manager.acquire, 8)
+
+        other_lease = other_batch.result(timeout=1)
+        assert other_lease is not None
+        _wait_for_waiters(manager, 1)
+        assert not next_wave.done()
+
+        manager.release(other_lease)
+        next_lease = next_wave.result(timeout=1)
+
+    assert next_lease is not None
+    manager.release(next_lease)
+
+
+def test_bounce_lease_manager_coalesces_released_variable_size_leases():
+    manager = _BounceLeaseManager(1024, alignment=1)
+    first = manager.acquire(256)
+    second = manager.acquire(256)
+    tail = manager.acquire(512)
+    assert first is not None
+    assert second is not None
+    assert tail is not None
+
+    manager.release(second)
+    manager.release(first)
+
+    combined = manager.acquire(512)
+    assert combined is not None
+    assert combined.offset == 0
+
+    manager.release(combined)
+    manager.release(tail)
+
+
+def test_producer_pool_shares_one_bounce_arena():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    pool = AscendProducerMemoryPool(
+        3 * _MIB,
+        MagicMock(),
+        allocator,
+    )
+
+    assert pool.bounce_tensor is None
+
+    first = pool.acquire_bounce(300)
+    second = pool.acquire_bounce(500)
+
+    assert first is not None
+    assert second is not None
+    assert first.offset == 0
+    assert second.offset == 512
+
+    pool.release_bounce(first)
+    pool.release_bounce(second)

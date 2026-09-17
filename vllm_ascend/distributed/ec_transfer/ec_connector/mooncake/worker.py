@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, cast
 
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
@@ -30,9 +30,11 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendContiguousAllocator,
     AscendProducerAllocator,
     AscendProducerMemoryPool,
+    _BounceLease,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
+    _TransferWavePlan,
 )
 
 if TYPE_CHECKING:
@@ -66,6 +68,60 @@ def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
         )
 
     return round_up(value, ASCEND_DIRECT_MEMORY_ALIGNMENT)
+
+
+@dataclass(frozen=True)
+class _TransferFragmentPlan:
+    """One physical Mooncake write fragment of a logical source."""
+
+    source_index: int
+    source_address: int
+    destination_offset: int
+    nbytes: int
+
+
+@dataclass(frozen=True)
+class _AcquiredTransferWave:
+    fragments: list[_TransferFragmentPlan]
+    registration_addresses: list[int]
+    bounce_lease: _BounceLease | None
+
+
+def _flatten_transfer_wave(
+    wave: _TransferWavePlan,
+    bounce_address: int | None,
+) -> list[_TransferFragmentPlan]:
+    fragments: list[_TransferFragmentPlan] = []
+
+    for source_index, wave_source in enumerate(wave.sources):
+        source = wave_source.source
+
+        if source.prefix_nbytes > 0:
+            assert bounce_address is not None
+            assert wave_source.bounce_offset is not None
+
+            fragments.append(
+                _TransferFragmentPlan(
+                    source_index=source_index,
+                    source_address=bounce_address + wave_source.bounce_offset,
+                    destination_offset=0,
+                    nbytes=source.prefix_nbytes,
+                )
+            )
+
+        if source.direct_nbytes > 0:
+            assert source.direct_address is not None
+
+            fragments.append(
+                _TransferFragmentPlan(
+                    source_index=source_index,
+                    source_address=source.direct_address,
+                    destination_offset=source.prefix_nbytes,
+                    nbytes=source.direct_nbytes,
+                )
+            )
+
+    return fragments
 
 
 class AscendECMooncakeWorker(ECMooncakeWorker):
@@ -133,6 +189,60 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 bounce_capacity=self._bounce_arena_size,
             ),
         )
+
+    def _acquire_transfer_wave(
+        self,
+        wave: _TransferWavePlan,
+    ) -> _AcquiredTransferWave:
+        producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
+        transfer = cast(AscendMooncakeTransfer, self._transfer)
+        lease = producer_memory.acquire_bounce(wave.bounce_nbytes)
+        registration_addresses: list[int] = []
+
+        try:
+            bounce_address: int | None = None
+            if lease is not None:
+                copies: list[tuple[torch.Tensor, int, int]] = []
+                for wave_source in wave.sources:
+                    source = wave_source.source
+                    if source.prefix_nbytes == 0:
+                        continue
+                    assert wave_source.bounce_offset is not None
+                    copies.append(
+                        (
+                            source.owner,
+                            wave_source.bounce_offset,
+                            source.prefix_nbytes,
+                        )
+                    )
+
+                bounce_address = producer_memory.copy_to_bounce(lease, copies)
+
+            fragments = _flatten_transfer_wave(wave, bounce_address)
+            registration_addresses = transfer.acquire_registration_ranges(
+                wave.registration_ranges
+            )
+            return _AcquiredTransferWave(
+                fragments=fragments,
+                registration_addresses=registration_addresses,
+                bounce_lease=lease,
+            )
+        except Exception:
+            if registration_addresses:
+                transfer.release_registration_ranges(registration_addresses)
+            producer_memory.release_bounce(lease)
+            raise
+
+    def _release_transfer_wave(self, acquired: _AcquiredTransferWave) -> None:
+        producer_memory = cast(AscendProducerMemoryPool, self._producer_memory)
+        transfer = cast(AscendMooncakeTransfer, self._transfer)
+
+        try:
+            transfer.release_registration_ranges(
+                acquired.registration_addresses
+            )
+        finally:
+            producer_memory.release_bounce(acquired.bounce_lease)
 
     def _record_source_ready_event(self, tensor: torch.Tensor) -> torch.Event | None:
         if tensor.device.type != "npu":
