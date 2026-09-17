@@ -20,6 +20,8 @@ from types import SimpleNamespace
 import pytest
 
 import vllm_ascend.mrv2_utils as mrv2_utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.mrv2_utils import (
     _v2_model_runner_environment_ready,
     is_default_v2_model_runner_model,
@@ -28,6 +30,10 @@ from vllm_ascend.mrv2_utils import (
 )
 
 DEFAULT_V2_ARCH = "Qwen3ForCausalLM"
+
+# Hardware profiles used to drive the V2 model runner capability gates.
+_NON_310P_PROFILE = get_hardware_profile(AscendDeviceType.A2)
+_310P_PROFILE = get_hardware_profile(AscendDeviceType._310P)
 
 
 def _make_model_config(**kwargs) -> SimpleNamespace:
@@ -271,7 +277,7 @@ class TestV2ModelRunnerEnvironmentReady:
         assert _v2_model_runner_environment_ready(config) is False
 
     def test_without_triton_on_non_310p(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", False)
         warning_calls = []
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: warning_calls.append(args))
@@ -281,7 +287,7 @@ class TestV2ModelRunnerEnvironmentReady:
         assert len(warning_calls) == 1
 
     def test_with_triton_on_non_310p(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         config = _make_vllm_config(speculative_config=None)
 
@@ -290,7 +296,7 @@ class TestV2ModelRunnerEnvironmentReady:
     @pytest.mark.parametrize("has_triton", [True, False])
     def test_310p_excluded_regardless_of_triton(self, monkeypatch, has_triton):
         # 310P does not support the V2 model runner.
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: True)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", has_triton)
         config = _make_vllm_config(speculative_config=None)
 
@@ -339,7 +345,7 @@ class TestUseV2ModelRunner:
 
     def test_default_disabled_for_lora(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
         config = _make_vllm_config(
@@ -351,7 +357,7 @@ class TestUseV2ModelRunner:
 
     def test_default_enabled_for_hybrid_whitelisted_model(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(
@@ -377,7 +383,7 @@ class TestUseV2ModelRunner:
 
     def test_default_disabled_for_dynamic_speculative_decoding(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
@@ -393,7 +399,7 @@ class TestUseV2ModelRunner:
 
     def test_default_disabled_for_dspark_sliding_window(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         monkeypatch.setattr(mrv2_utils.logger, "warning_once", lambda *args: None)
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
@@ -407,7 +413,7 @@ class TestUseV2ModelRunner:
 
     def test_default_enabled_for_deepseek_v4_mtp_draft(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
-        monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
+        monkeypatch.setattr(mrv2_utils, "get_current_hardware_profile", lambda: _NON_310P_PROFILE)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(
