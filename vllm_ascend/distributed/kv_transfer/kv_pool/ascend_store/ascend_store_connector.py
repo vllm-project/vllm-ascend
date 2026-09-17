@@ -226,6 +226,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
+        # This hook runs before both target-model and deferred MTP forward.
+        # Only CPU-side key/exists/address preparation is submitted here; the
+        # NPU data dependency is recorded and released by wait_for_save.
+        self.connector_worker.prepare_save(metadata)
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -240,6 +244,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             ],
         )
         self.connector_worker.start_load_kv(metadata)
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        assert self.connector_worker is not None
+        preempted_req_ids = getattr(kv_connector_metadata, "preempted_req_ids", set())
+        self.connector_worker.wait_for_preempted_saves(preempted_req_ids)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
