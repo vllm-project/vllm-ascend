@@ -155,7 +155,7 @@ class HostUvaBuffer:
         self.tensor = None
         self.buffer = None
         self.lib.aclrtFreeHost(self.pointer)
-        self.pointer = None
+        self.pointer = ctypes.c_void_p()
 
 
 @triton.jit

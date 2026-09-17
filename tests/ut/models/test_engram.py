@@ -34,11 +34,11 @@ def load_module(module_name, path):
 
 ENGRAM = ROOT / "vllm_ascend/models/deepseek_v41/engram"
 npu = load_module("engram_npu", ENGRAM / "npu.py")
-common = None
 _missing_upstream = ""
 try:
     common = load_module("engram_common", ENGRAM / "common.py")
 except ImportError as error:  # the hashing itself comes from upstream's V4.1 module
+    common = None
     _missing_upstream = str(error)
 
 requires_upstream_hash = pytest.mark.skipif(
@@ -53,8 +53,11 @@ def test_engram_config_patch_keeps_the_checkpoint_contract(monkeypatch):
         dp_shared_memory = False
         embedding_across_dp = False
 
+        def verify_model_config(self, model_config):
+            raise AssertionError("Engram config patch was not applied")
+
     fake = ModuleType("vllm.config.engram")
-    fake.EngramConfig = EngramConfig
+    monkeypatch.setattr(fake, "EngramConfig", EngramConfig, raising=False)
     fake.__spec__ = importlib.util.spec_from_loader("vllm.config.engram", loader=None)
     monkeypatch.setitem(sys.modules, "vllm.config.engram", fake)
     load_module("engram_config_patch", ROOT / "vllm_ascend/patch/platform/patch_engram_config.py")
@@ -229,6 +232,8 @@ def test_host_uva_address_table_steps_by_chunk(monkeypatch):
     assert table.tensor.shape == (rows, width)
     assert table.ptrs.tolist() == [device_offset + host_address + start * width for start in range(0, rows, chunk)]
     table.close()
+    assert isinstance(table.pointer, ctypes.c_void_p)
+    assert table.pointer.value is None
 
 
 @requires_npu

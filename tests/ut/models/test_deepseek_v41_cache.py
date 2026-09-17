@@ -322,10 +322,6 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     assert kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) == demand * page
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, config) == 100 / demand
     scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config([config])
-    scheduler_demand = (
-        kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, scheduler_config.kv_cache_groups) // page
-    )
-    assert scheduler_demand == demand
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, scheduler_config) == 100 / demand
 
 

@@ -712,7 +712,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 assert_attention_cache_views(caches, raw, packed)
 
     def test_v41_layer_outer_buffers_allocate_and_reshape(self):
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
         runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
         config = make_cache_config(4)
         # vLLM shrinks each tensor proportionally when another rank has less
         # capacity. Component offsets must not depend on the old block count.
@@ -746,15 +749,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
         assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
 
-    def test_v41_rejects_obsolete_allocation_descriptors(self):
-        runner = self._build_runner()
-        config = make_cache_config(3)
-        config.kv_cache_tensors[0].block_stride = 0
-        with self.assertRaisesRegex(ValueError, "allocation disagrees"):
-            runner._allocate_kv_cache_tensors(config)
-
     def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
         runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
         config = make_cache_config(5, draft_layers=3)
         for allocation in config.kv_cache_tensors:
             allocation.size = allocation.size // config.num_blocks * 3

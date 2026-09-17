@@ -24,7 +24,7 @@ STATE_RING_ROWS = 32
 
 def is_deepseek_v41_cache(specs_or_groups):
     if isinstance(specs_or_groups, dict):
-        specs = specs_or_groups.values()
+        specs = list(specs_or_groups.values())
     else:
         specs = []
         for item in specs_or_groups:
