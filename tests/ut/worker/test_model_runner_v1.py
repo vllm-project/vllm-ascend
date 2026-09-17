@@ -1548,7 +1548,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 block_stride=0,
                 offset=0,
             )
-        
+
         shared_config = KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[_shared_tensor],
@@ -1577,6 +1577,42 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(caches[c8_name][0].shape, (2, 16, 1, 128))
         self.assertEqual(caches[c8_name][1].dtype, torch.float16)
         self.assertEqual(caches[c8_name][1].shape, (2, 16, 1, 1))
+
+    def test_pure_mamba_tensor_group_binds_use_attn_flag(self):
+        """A mamba-only tensor group must not raise NameError.
+
+        Regression: the per-tensor ``use_attn`` flag was only assigned
+        when the group contained an AttentionSpec layer and was never
+        initialized per group. The first mamba-only group processed (as
+        for models whose first KV cache group is a mamba layer, and for
+        all pure-Mamba models) hit ``use_mamba and use_attn`` with
+        ``use_attn`` unbound and raised NameError; later mamba groups
+        silently read the stale value from the previous group.
+        """
+        runner = self._build_runner()
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((128,),),
+            dtypes=(torch.float32,),
+        )
+        layer_name = "model.layers.0.linear_attn"
+        group_spec = UniformTypeKVCacheSpecs(
+            block_size=8,
+            kv_cache_specs={layer_name: mamba_spec},
+        )
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=mamba_spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=mamba_spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=group_spec)],
+        )
+        raw_caches = runner._allocate_kv_cache_tensors(config)
+        self.assertEqual(set(raw_caches.keys()), {layer_name})
 
     def test_sparse_sfa_and_li_c8_allocate_and_reshape_independently(self):
         runner = self._build_runner()

@@ -4762,6 +4762,7 @@ class NPUModelRunner(GPUModelRunner):
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
             use_mamba = False
             use_compressed_cache = False
+            use_attn = False
             for layer_name in shared_layers:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
