@@ -25,6 +25,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Sequence

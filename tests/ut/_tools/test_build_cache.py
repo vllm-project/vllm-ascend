@@ -1652,7 +1652,7 @@ def test_cmake_adapter_preserves_arguments_with_spaces(tmp_path: Path):
     script.write_text(
         f'''set(HI_PYTHON "/python with space")
 set(VLLM_ASCEND_BUILD_CACHE_DIR "{cache_root}")
-set(VLLM_ASCEND_BUILD_CACHE_SCRIPT "{ENGINE}")
+set(VLLM_ASCEND_BUILD_CACHE_SCRIPT "{ENGINE}" CACHE FILEPATH "" FORCE)
 include("{adapter}")
 vllm_ascend_build_cache_command(
     CACHE_COMMAND
