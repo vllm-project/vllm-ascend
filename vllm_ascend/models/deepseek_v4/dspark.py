@@ -184,7 +184,7 @@ class DeepseekV4DSparkModel(nn.Module):
         # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
         # can run in-place on the rope-segment view of kv; the previous
         # split -> rope -> cat -> contiguous round-trip was a redundant copy.
-        k_pe = kv[:, attn.nope_head_dim:]
+        k_pe = kv[:, attn.nope_head_dim :]
         _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1))
         return kv.view(-1, 1, attn.head_dim)
 
