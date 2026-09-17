@@ -4,7 +4,6 @@ import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy import stair
 from vllm_ascend.distributed.eplb.policy.stair import (
     BalanceScore,
     StairEplbPolicy,
@@ -31,7 +30,7 @@ def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, a
         classmethod(lambda cls, *_, **__: (old, old, old, 0, 0)),
     )
 
-    result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
+    result = StairEplbPolicy._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
 
     assert (result is not None) == accepted
 
@@ -54,7 +53,7 @@ def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, diff
         classmethod(lambda cls, *_, **__: next(results)),
     )
 
-    result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 1), StairConfig())
+    result = StairEplbPolicy._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 1), StairConfig())
 
     assert result is not None
     np.testing.assert_array_equal(result.placement, placements[1 - expected_cross_node])

@@ -570,57 +570,59 @@ class StairEplbPolicy(AbstractEplbPolicy):
         )
 
 
-def _plan_layer(
-    samples: np.ndarray,
-    weights: np.ndarray,
-    old: np.ndarray,
-    node_by_rank: tuple[int, ...],
-    config: StairConfig,
-) -> LayerPlan | None:
-    current = StairEplbPolicy.placement_score(samples, weights, old)
-    mean, moments = StairEplbPolicy.weighted_moments(samples, weights, covariance=config.use_covariance)
-    diagonal = np.diag(moments) if moments.ndim == 2 else moments
-    risk = mean + config.z_score * np.sqrt(np.maximum(diagonal, 0.0))
+    @classmethod
+    def _plan_layer(
+        cls,
+        samples: np.ndarray,
+        weights: np.ndarray,
+        old: np.ndarray,
+        node_by_rank: tuple[int, ...],
+        config: StairConfig,
+    ) -> LayerPlan | None:
+        current = cls.placement_score(samples, weights, old)
+        mean, moments = cls.weighted_moments(samples, weights, covariance=config.use_covariance)
+        diagonal = np.diag(moments) if moments.ndim == 2 else moments
+        risk = mean + config.z_score * np.sqrt(np.maximum(diagonal, 0.0))
 
-    def screening(replicas: np.ndarray) -> float:
-        try:
-            placement = StairEplbPolicy.unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
-        except ValueError:
-            return float("inf")
-        return StairEplbPolicy.placement_score(samples, weights, placement).mean
+        def screening(replicas: np.ndarray) -> float:
+            try:
+                placement = cls.unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
+            except ValueError:
+                return float("inf")
+            return cls.placement_score(samples, weights, placement).mean
 
-    candidates = []
-    for replicas in StairEplbPolicy.replica_candidates(
-        risk,
-        old.size,
-        old.shape[0],
-        depth=config.flash_tree_depth,
-        width=config.flash_tree_width,
-        limit=config.max_candidates_per_layer,
-        score=screening,
-    ):
-        result = StairEplbPolicy.constrained_lpt(
-            mean,
-            moments,
-            replicas,
-            old,
-            node_by_rank,
-            z_score=config.z_score,
-            pair_cap=config.max_expert_transfers_per_rank_pair,
-            max_backtracks=config.lpt_max_backtracks,
-        )
-        if result is None:
-            continue
-        placement, source_rank, source_slot, cross_node, same_node = result
-        score = StairEplbPolicy.placement_score(samples, weights, placement)
-        if score.mean <= current.mean and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance):
-            key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
-            candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
-    if not candidates:
-        return None
-    minimum = min(score for score, _, _ in candidates)
-    tied = [item for item in candidates if item[0] <= minimum + _SCORE_TIE_TOLERANCE]
-    return min(tied, key=lambda item: item[1])[2]
+        candidates = []
+        for replicas in cls.replica_candidates(
+            risk,
+            old.size,
+            old.shape[0],
+            depth=config.flash_tree_depth,
+            width=config.flash_tree_width,
+            limit=config.max_candidates_per_layer,
+            score=screening,
+        ):
+            result = cls.constrained_lpt(
+                mean,
+                moments,
+                replicas,
+                old,
+                node_by_rank,
+                z_score=config.z_score,
+                pair_cap=config.max_expert_transfers_per_rank_pair,
+                max_backtracks=config.lpt_max_backtracks,
+            )
+            if result is None:
+                continue
+            placement, source_rank, source_slot, cross_node, same_node = result
+            score = cls.placement_score(samples, weights, placement)
+            if score.mean <= current.mean and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance):
+                key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
+                candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
+        if not candidates:
+            return None
+        minimum = min(score for score, _, _ in candidates)
+        tied = [item for item in candidates if item[0] <= minimum + _SCORE_TIE_TOLERANCE]
+        return min(tied, key=lambda item: item[1])[2]
 
 
 def _plan_rebalance(
@@ -664,7 +666,7 @@ def _plan_rebalance(
             eligible.append((-current.mean, -deterioration, layer))
 
     for _, _, layer in sorted(eligible):
-        result = _plan_layer(samples[:, layer], weights, old[layer], node_by_rank, config)
+        result = StairEplbPolicy._plan_layer(samples[:, layer], weights, old[layer], node_by_rank, config)
         if result is not None:
             placement[layer] = result.placement
             source_rank[layer] = result.source_rank
