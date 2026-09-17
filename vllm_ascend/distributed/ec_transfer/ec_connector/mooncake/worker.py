@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
@@ -16,12 +20,17 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
     ProducerMemoryPool,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.producer import (
+    ProducerPushRecord,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
+    _RESERVATION_REFRESH_SECONDS,
     ECMooncakeWorker,
 )
+from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
@@ -34,6 +43,7 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
+    _plan_transfer_waves,
     _TransferWavePlan,
 )
 
@@ -43,6 +53,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_BOUNCE_LIMIT = 128
 _BOUNCE_ARENA_CONFIG_KEY = "ascend_mooncake_bounce_arena_size"
+logger = init_logger(__name__)
 
 
 def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
@@ -243,6 +254,209 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             )
         finally:
             producer_memory.release_bounce(acquired.bounce_lease)
+
+    def _write_transfer_wave(
+        self,
+        pushes: list[ProducerPushRecord],
+        ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
+        acquired: _AcquiredTransferWave,
+    ) -> None:
+        source_index = {
+            push.spec.transfer_id: index
+            for index, push in enumerate(pushes)
+        }
+        fragments_by_source: list[list[_TransferFragmentPlan]] = [
+            [] for _ in pushes
+        ]
+        for fragment in acquired.fragments:
+            fragments_by_source[fragment.source_index].append(fragment)
+
+        by_session: dict[
+            str,
+            list[tuple[_TransferFragmentPlan, int]],
+        ] = {}
+        session_records: dict[str, dict[str, ProducerPushRecord]] = {}
+        for push, shard in ready:
+            index = source_index.get(push.spec.transfer_id)
+            if index is None:
+                continue
+
+            session = str(shard["dst_session"])
+            destination = int(shard["dst_ptr"])
+            for fragment in fragments_by_source[index]:
+                by_session.setdefault(session, []).append(
+                    (fragment, destination)
+                )
+            session_records.setdefault(session, {})[
+                push.spec.transfer_id
+            ] = push
+
+        def write(
+            session: str,
+            items: list[tuple[_TransferFragmentPlan, int]],
+        ) -> None:
+            self._transfer.write(
+                session,
+                [fragment.source_address for fragment, _ in items],
+                [
+                    destination + fragment.destination_offset
+                    for fragment, destination in items
+                ],
+                [fragment.nbytes for fragment, _ in items],
+            )
+
+        sessions = list(by_session.items())
+
+        def track_write(index: int, future: Future[None]) -> None:
+            session = sessions[index][0]
+            self._producer_pushes.track_shard_futures(
+                list(session_records[session].values()),
+                [future],
+            )
+
+        writes = [partial(write, *session) for session in sessions]
+        self._run_fanout(writes, track_write)
+
+    def _push_batch(self, pushes: list[ProducerPushRecord]) -> None:
+        started_at = time.monotonic()
+        ready: list[tuple[ProducerPushRecord, dict[str, Any]]] = []
+        written_pushes: dict[str, ProducerPushRecord] = {}
+        failure: Exception | None = None
+        try:
+            for push in pushes:
+                self._validate_push_source(push)
+                reservations = self._producer_pushes.resolve_reservations(push)
+                stale = [
+                    index
+                    for index, shard in enumerate(reservations)
+                    if not shard.get("ready", False)
+                    and not shard.get("cancelled", False)
+                    and time.monotonic()
+                    - float(shard.get("_received_at", started_at))
+                    >= _RESERVATION_REFRESH_SECONDS
+                ]
+                if stale:
+                    reservations = self._refresh_remote_reservations(
+                        push.spec, reservations, push
+                    )
+                    self._producer_pushes.replace_reservations(
+                        push, reservations
+                    )
+                self._producer_pushes.begin_writing(push)
+                writable = [
+                    shard
+                    for shard in reservations
+                    if not shard.get("cached", False)
+                    and not shard.get("cancelled", False)
+                    and shard.get("write", True)
+                ]
+                source = push.source_tensor
+                assert source is not None
+                for shard in writable:
+                    if int(shard["nbytes"]) != source.nbytes:
+                        raise RuntimeError(
+                            "Reserved EC size does not match tensor for "
+                            f"mm_hash={push.spec.mm_hash}"
+                        )
+                    ready.append((push, shard))
+                    written_pushes.setdefault(push.spec.transfer_id, push)
+
+            if ready:
+                ordered_pushes = list(written_pushes.values())
+                tensors = [
+                    cast(torch.Tensor, push.source_tensor)
+                    for push in ordered_pushes
+                    if push.source_tensor is not None
+                ]
+                staged = self._producer_memory.stage(tensors)
+                if staged is not None:
+                    lengths = [tensor.nbytes for tensor in tensors]
+                    addresses = [tensor.data_ptr() for tensor in staged.tensors]
+                    try:
+                        source_index = {
+                            push.spec.transfer_id: index
+                            for index, push in enumerate(ordered_pushes)
+                        }
+                        by_session: dict[str, list[tuple[int, int]]] = {}
+                        session_records: dict[
+                            str, dict[str, ProducerPushRecord]
+                        ] = {}
+                        for push, shard in ready:
+                            session = str(shard["dst_session"])
+                            by_session.setdefault(session, []).append(
+                                (
+                                    source_index[push.spec.transfer_id],
+                                    int(shard["dst_ptr"]),
+                                )
+                            )
+                            session_records.setdefault(session, {})[
+                                push.spec.transfer_id
+                            ] = push
+
+                        def write(
+                            session: str,
+                            items: list[tuple[int, int]],
+                        ) -> None:
+                            self._transfer.write(
+                                session,
+                                [addresses[index] for index, _ in items],
+                                [dst for _, dst in items],
+                                [lengths[index] for index, _ in items],
+                            )
+
+                        sessions = list(by_session.items())
+
+                        def track_write(
+                            index: int,
+                            future: Future[None],
+                        ) -> None:
+                            session = sessions[index][0]
+                            self._producer_pushes.track_shard_futures(
+                                list(session_records[session].values()),
+                                [future],
+                            )
+
+                        writes: list[Callable[[], None]] = [
+                            partial(write, *session) for session in sessions
+                        ]
+                        self._run_fanout(writes, track_write)
+                    finally:
+                        self._producer_memory.release(staged)
+                else:
+                    waves = _plan_transfer_waves(
+                        tensors,
+                        self._bounce_arena_size,
+                    )
+                    cursor = 0
+                    for wave in waves:
+                        next_cursor = cursor + len(wave.sources)
+                        wave_pushes = ordered_pushes[cursor:next_cursor]
+                        acquired = self._acquire_transfer_wave(wave)
+                        try:
+                            self._write_transfer_wave(
+                                wave_pushes,
+                                ready,
+                                acquired,
+                            )
+                        finally:
+                            self._release_transfer_wave(acquired)
+                        cursor = next_cursor
+                    assert cursor == len(ordered_pushes)
+
+            self._producer_pushes.begin_notifying(pushes)
+            self._notify_completions(ready)
+            self._producer_pushes.complete(pushes)
+        except Exception as exc:
+            failure = exc
+            logger.exception(
+                "EC Mooncake push batch failed for mm_hashes=%s",
+                [push.spec.mm_hash for push in pushes],
+            )
+            self._producer_pushes.settle_all(pushes)
+            self._abandon_pushes(pushes)
+        finally:
+            if failure is not None:
+                self._producer_pushes.fail(pushes, failure)
 
     def _record_source_ready_event(self, tensor: torch.Tensor) -> torch.Event | None:
         if tensor.device.type != "npu":
