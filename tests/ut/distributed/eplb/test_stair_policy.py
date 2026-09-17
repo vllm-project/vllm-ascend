@@ -9,7 +9,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     BalanceScore,
     StairEplbPolicy,
     StairPlan,
-    align_slots,
     constrained_lpt,
     passes_hysteresis,
 )
@@ -116,7 +115,7 @@ def test_source_assignment_prefers_same_node_and_aligns_slots():
 
     sources = StairEplbPolicy.assign_sources(old, desired, (0, 1, 1), 1)
     assert sources == {(2, 0): (1, 0)}
-    placement, source_rank, source_slot = align_slots(old, desired, sources)
+    placement, source_rank, source_slot = StairEplbPolicy.align_slots(old, desired, sources)
 
     np.testing.assert_array_equal(placement, [[0, 1], [0, 2], [0, 4]])
     assert (source_rank[2, 0], source_slot[2, 0]) == (1, 0)

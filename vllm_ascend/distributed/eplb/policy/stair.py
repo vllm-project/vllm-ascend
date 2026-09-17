@@ -407,27 +407,28 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return assignment
 
 
-def align_slots(
-    old_placement: np.ndarray,
-    rank_experts: list[set[int]],
-    sources: dict[tuple[int, int], tuple[int, int]],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Keep retained experts in place and fill empty slots by expert id."""
-    old = np.asarray(old_placement, dtype=np.int64)
-    new = np.full_like(old, -1)
-    source_rank = np.full_like(old, -1)
-    source_slot = np.full_like(old, -1)
-    for rank, desired in enumerate(rank_experts):
-        for slot, expert in enumerate(old[rank]):
-            if int(expert) in desired:
+    @staticmethod
+    def align_slots(
+        old_placement: np.ndarray,
+        rank_experts: list[set[int]],
+        sources: dict[tuple[int, int], tuple[int, int]],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Keep retained experts in place and fill empty slots by expert id."""
+        old = np.asarray(old_placement, dtype=np.int64)
+        new = np.full_like(old, -1)
+        source_rank = np.full_like(old, -1)
+        source_slot = np.full_like(old, -1)
+        for rank, desired in enumerate(rank_experts):
+            for slot, expert in enumerate(old[rank]):
+                if int(expert) in desired:
+                    new[rank, slot] = expert
+                    source_rank[rank, slot], source_slot[rank, slot] = rank, slot
+            empty = iter(np.flatnonzero(new[rank] < 0))
+            for expert in sorted(desired - set(old[rank])):
+                slot = int(next(empty))
                 new[rank, slot] = expert
-                source_rank[rank, slot], source_slot[rank, slot] = rank, slot
-        empty = iter(np.flatnonzero(new[rank] < 0))
-        for expert in sorted(desired - set(old[rank])):
-            slot = int(next(empty))
-            new[rank, slot] = expert
-            source_rank[rank, slot], source_slot[rank, slot] = sources[(rank, expert)]
-    return new, source_rank, source_slot
+                source_rank[rank, slot], source_slot[rank, slot] = sources[(rank, expert)]
+        return new, source_rank, source_slot
 
 
 def _post_insert_risk(
@@ -536,7 +537,7 @@ def constrained_lpt(
     sources = search(0)
     if sources is None:
         return None
-    placement, source_rank, source_slot = align_slots(old, ranks, sources)
+    placement, source_rank, source_slot = StairEplbPolicy.align_slots(old, ranks, sources)
     cross_node = same_node = 0
     for dst, row in enumerate(source_rank):
         for src in row:
