@@ -15,18 +15,7 @@ from vllm_ascend.attention.indexer_kpool import (
     AscendIndexerKPoolTailMetadata,
     Glm5NextKPoolIndexerBackend,
 )
-
-# The operator PR owns these kernels. Each orchestration test below replaces
-# the kernel call with an asserting CPU implementation.
-with patch.dict(
-    "sys.modules",
-    {
-        "vllm_ascend.ops.triton.glm5_next_kpool_tail_compress": MagicMock(),
-        "vllm_ascend.ops.triton.glm5_next_lightning_indexer": MagicMock(),
-    },
-):
-    import vllm_ascend.models.glm5next.sparse_attn_indexer_kpool as kpool_module
-    from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
+from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool, append_causal_tail
 
 
 def test_cache_metadata_import_does_not_require_indexer_operators() -> None:
@@ -79,14 +68,18 @@ def _indexer_metadata(num_tokens: int = 8) -> AscendIndexerKPoolMetadata:
             [-1, -1, -1, 0, -1, -1, -1, 2, -1, -1],
             dtype=torch.int64,
         )[:num_tokens],
-        seq_lens=torch.tensor([1, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([1, 1], dtype=torch.int64),
         seq_lens_cpu=torch.tensor([1, 1], dtype=torch.int32),
         positions=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 0])[:num_tokens],
         block_size=2,
         compress_ratio=4,
-        cum_query_lens=torch.tensor([4, 8], dtype=torch.int32),
+        cum_query_lens=torch.tensor([4, 8], dtype=torch.int64),
         raw_seq_lens=torch.tensor([4, 4], dtype=torch.int32),
         num_actual_tokens=8,
+        query_start_loc=torch.tensor([0, 4, 8], dtype=torch.int32),
+        start_pos=torch.zeros(2, dtype=torch.int32),
+        pool_tail=torch.zeros(2, dtype=torch.int64),
+        pooled_key_indices=torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 1, 1])[:num_tokens],
     )
 
 
@@ -99,47 +92,62 @@ def _tail_metadata() -> AscendIndexerKPoolTailMetadata:
 
 
 @pytest.mark.parametrize("compute_topk", [False, True])
-def test_triton_indexer_updates_both_caches_and_masks_padding(monkeypatch, compute_topk):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_cann_indexer_updates_both_caches_and_masks_padding(monkeypatch, compute_topk, dtype):
     metadata = _indexer_metadata(num_tokens=10)
     tail_metadata = _tail_metadata()
     tail_metadata.slot_mapping = torch.arange(10)
     indexer_cache = torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16)
-    tail_cache = torch.zeros(2, 2, 4, 2)
+    # Keep padded block strides, as in the hybrid cache allocator.
+    backing = torch.zeros(2, 32)
+    tail_cache = backing[:, :16].view(2, 4, 4)
 
-    def compress(state, cache, k, gate, ape, positions, query_ends, seq_lens, state_slots, table, indexer_slots, pool):
-        assert k.dtype == gate.dtype == state.dtype == torch.float32
-        assert pool == 4
-        torch.testing.assert_close(query_ends, metadata.cum_query_lens)
-        torch.testing.assert_close(seq_lens, metadata.raw_seq_lens)
+    def compress(hidden, wk, gate, ape, state, table, starts, **kwargs):
+        assert hidden.dtype == wk.dtype == gate.dtype == dtype
+        assert state.dtype == ape.dtype == torch.float32
+        assert kwargs["cmp_ratio"] == 4
+        assert kwargs["cu_seqlens"] is metadata.query_start_loc
+        assert starts is metadata.start_pos
         assert table is tail_metadata.block_table
-        torch.testing.assert_close(indexer_slots, metadata.slot_mapping)
+        assert state.stride(0) == 32
         state[0, 0].fill_(7)
-        cache[0, 0].fill_(11)
+        return torch.tensor([[11, 11], [22, 22]], dtype=dtype)
 
-    select = MagicMock(return_value=torch.full((10, 1, 7), -1, dtype=torch.int32))
-    monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
-    monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
+    select = MagicMock(return_value=(torch.full((10, 7), -1, dtype=torch.int32), torch.empty(0)))
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_key_pool", compress, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_pool_key_indexer", select, raising=False)
     result = SparseAttnIndexerKpool(4, 2)(
-        torch.zeros(10, 2),
-        torch.zeros(10, 1, 2, dtype=torch.bfloat16),
-        torch.ones(10, 1, dtype=torch.bfloat16),
+        torch.zeros(10, 3, dtype=dtype),
+        torch.zeros(10, 1, 2, dtype=dtype),
+        torch.ones(10, 1, dtype=dtype),
         metadata.positions,
         indexer_cache,
         tail_cache,
         metadata,
         tail_metadata,
-        gate_score=torch.zeros(10, 2),
+        key_weight=torch.zeros(2, 3, dtype=dtype),
+        gate_weight=torch.zeros(2, 3, dtype=dtype),
+        norm_weight=torch.ones(2),
+        norm_bias=torch.zeros(2),
+        norm_eps=1e-6,
         compress_ape=torch.zeros(4, 2),
         index_kpool=4,
-        max_pool_seq_len=1,
         compute_topk=compute_topk,
     )
     torch.testing.assert_close(tail_cache[0, 0], torch.full_like(tail_cache[0, 0], 7))
     torch.testing.assert_close(indexer_cache[0, 0], torch.full_like(indexer_cache[0, 0], 11))
+    torch.testing.assert_close(indexer_cache[1, 0], torch.full_like(indexer_cache[1, 0], 22))
+    assert not backing[:, 16:].count_nonzero()
     if compute_topk:
         assert result.shape == (10, 1, 7)
         assert (result[8:] == -1).all()
         select.assert_called_once()
+        kwargs = select.call_args.kwargs
+        assert kwargs["actual_seq_q"] is metadata.cum_query_lens
+        assert kwargs["actual_seq_k"] is metadata.seq_lens
+        assert select.call_args.args[3] is metadata.pool_tail
+        assert select.call_args.args[0].dtype == select.call_args.args[2].dtype == torch.bfloat16
+        assert kwargs["layout_k"] == "PA_BBND"
     else:
         assert result is None
         select.assert_not_called()
@@ -167,21 +175,24 @@ def test_kpool_backend_rejects_context_parallelism(pcp_size: int, dcp_size: int)
 def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute_topk):
     compress = MagicMock()
     select = MagicMock()
-    monkeypatch.setattr(kpool_module, "glm5_next_kpool_tail_compress_and_write_cache_triton", compress)
-    monkeypatch.setattr(kpool_module, "glm5_next_lightning_indexer_triton", select)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_key_pool", compress, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_pool_key_indexer", select, raising=False)
     result = SparseAttnIndexerKpool(4, 2)(
         torch.empty(0, 2),
         torch.empty(0, 1, 2),
         torch.empty(0, 1),
         torch.empty(0, dtype=torch.int64),
         torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
-        torch.zeros(2, 2, 4, 2),
+        torch.zeros(2, 4, 4),
         _indexer_metadata(0),
         _tail_metadata(),
-        gate_score=torch.empty(0, 2),
+        key_weight=torch.empty(2, 3, dtype=torch.bfloat16),
+        gate_weight=torch.empty(2, 3, dtype=torch.bfloat16),
+        norm_weight=torch.ones(2),
+        norm_bias=torch.zeros(2),
+        norm_eps=1e-6,
         compress_ape=torch.zeros(4, 2),
         index_kpool=4,
-        max_pool_seq_len=0,
         compute_topk=compute_topk,
     )
     if compute_topk:
@@ -190,6 +201,96 @@ def test_backend_zero_token_batch_does_not_launch_operators(monkeypatch, compute
         assert result is None
     compress.assert_not_called()
     select.assert_not_called()
+
+
+@pytest.mark.parametrize("compute_topk", [False, True])
+def test_cann_empty_pool_keeps_cache_and_packs_tail_before_padding(monkeypatch, compute_topk):
+    metadata = _indexer_metadata(4)
+    metadata.positions = torch.tensor([0, 1, 2, 3])
+    metadata.query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+    metadata.cum_query_lens = torch.tensor([3], dtype=torch.int64)
+    metadata.start_pos = torch.tensor([0], dtype=torch.int32)
+    metadata.seq_lens = torch.tensor([0], dtype=torch.int64)
+    metadata.pool_tail = torch.tensor([3], dtype=torch.int64)
+    metadata.pooled_key_indices = torch.zeros(4, dtype=torch.int64)
+    metadata.slot_mapping = torch.full((4,), -1, dtype=torch.int64)
+    cache = torch.full((2, 2, 1, 2), 9, dtype=torch.bfloat16)
+    # No output row is defined when no pool completes. Reading a safe row
+    # must not write that garbage into slot zero or propagate its NaNs.
+    compress = MagicMock(return_value=torch.full((2, 2), float("nan"), dtype=torch.bfloat16))
+    select = MagicMock(return_value=(torch.full((4, 7), -1, dtype=torch.int32), torch.empty(0)))
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_key_pool", compress, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_pool_key_indexer", select, raising=False)
+    result = SparseAttnIndexerKpool(4, 2)(
+        torch.zeros(4, 3, dtype=torch.bfloat16),
+        torch.zeros(4, 1, 2, dtype=torch.bfloat16) if compute_topk else None,
+        torch.ones(4, 1, dtype=torch.bfloat16) if compute_topk else None,
+        metadata.positions,
+        cache,
+        torch.zeros(2, 4, 4),
+        metadata,
+        _tail_metadata(),
+        key_weight=torch.zeros(2, 3, dtype=torch.bfloat16),
+        gate_weight=torch.zeros(2, 3, dtype=torch.bfloat16),
+        norm_weight=torch.ones(2),
+        norm_bias=torch.zeros(2),
+        norm_eps=1e-6,
+        compress_ape=torch.zeros(4, 2),
+        index_kpool=4,
+        compute_topk=compute_topk,
+    )
+    torch.testing.assert_close(cache, torch.full_like(cache, 9))
+    compress.assert_called_once()
+    if compute_topk:
+        assert result[:, 0].tolist() == [
+            [0, -1, -1, -1, -1, -1, -1],
+            [0, 1, -1, -1, -1, -1, -1],
+            [0, 1, 2, -1, -1, -1, -1],
+            [-1, -1, -1, -1, -1, -1, -1],
+        ]
+    else:
+        assert result is None
+        select.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["tail_dtype", "tail_shape", "metadata", "query", "ape"])
+def test_invalid_cann_inputs_fail_before_mutating_cache(monkeypatch, invalid):
+    metadata = _indexer_metadata(8)
+    tail = torch.zeros(2, 4, 4)
+    query = torch.zeros(8, 1, 2, dtype=torch.bfloat16)
+    ape = torch.zeros(4, 2)
+    if invalid == "tail_dtype":
+        tail = tail.bfloat16()
+    elif invalid == "tail_shape":
+        tail = torch.zeros(2, 2, 4, 2)
+    elif invalid == "metadata":
+        metadata.query_start_loc = None
+    elif invalid == "query":
+        query = None
+    else:
+        ape = ape.bfloat16()
+    compress = MagicMock()
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_key_pool", compress, raising=False)
+    with pytest.raises((ValueError, TypeError)):
+        SparseAttnIndexerKpool(4, 2)(
+            torch.zeros(8, 3, dtype=torch.bfloat16),
+            query,
+            torch.ones(8, 1, dtype=torch.bfloat16),
+            metadata.positions,
+            torch.zeros(2, 2, 1, 2, dtype=torch.bfloat16),
+            tail,
+            metadata,
+            _tail_metadata(),
+            key_weight=torch.zeros(2, 3, dtype=torch.bfloat16),
+            gate_weight=torch.zeros(2, 3, dtype=torch.bfloat16),
+            norm_weight=torch.ones(2),
+            norm_bias=torch.zeros(2),
+            norm_eps=1e-6,
+            compress_ape=ape,
+            index_kpool=4,
+            compute_topk=True,
+        )
+    compress.assert_not_called()
 
 
 class _Projection(nn.Module):
@@ -231,11 +332,11 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     )
     backend.tail_cache = SimpleNamespace(
         prefix="indexer.tail",
-        kv_cache=torch.zeros(2, 2, 4, 2, dtype=torch.float32),
+        kv_cache=torch.zeros(2, 4, 4, dtype=torch.float32),
     )
     backend.topk_indices_buffer = None
     backend.softmax_scale = 0.5
-    backend._wk_weight_f32 = None
+    backend._key_weight = None
     backend.indexer_op = _RecordingKPool()
     tail_metadata = _tail_metadata()
     monkeypatch.setattr(
@@ -268,18 +369,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 
     assert result is not None
     assert backend.indexer_op.args is not None
+    assert backend.indexer_op.kwargs is not None
     torch.testing.assert_close(backend.indexer_op.args[1], normalized_q_c.repeat(1, 2).view(2, 2, 2))
-    expected_k = torch.nn.functional.layer_norm(
-        torch.nn.functional.linear(hidden + 3, backend.wk_weights_proj.weight)[:, :2],
-        (2,),
-        backend.k_norm.weight,
-        backend.k_norm.bias,
-        backend.k_norm.eps,
-    )
-    torch.testing.assert_close(backend.indexer_op.args[0], expected_k)
-    assert backend.indexer_op.args[0].dtype == torch.float32
+    torch.testing.assert_close(backend.indexer_op.args[0], hidden + 3)
+    torch.testing.assert_close(backend.indexer_op.kwargs["key_weight"], backend.wk_weights_proj.weight[:2])
+    torch.testing.assert_close(backend.indexer_op.kwargs["norm_weight"], backend.k_norm.weight.float())
+    assert backend.indexer_op.kwargs["norm_eps"] == backend.k_norm.eps
     expected_weights = torch.nn.functional.linear(hidden, backend.wk_weights_proj.weight[2:]) * (0.5 * 2**-0.5)
     torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
     assert backend.indexer_op.args[7] is tail_metadata
-    assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True

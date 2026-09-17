@@ -35,6 +35,114 @@
 
 namespace vllm_ascend {
 namespace meta {
+
+at::Tensor npu_key_pool_meta(
+    const at::Tensor& hidden_states,
+    const at::Tensor& wk,
+    const at::Tensor& gate_weight,
+    const at::Tensor& ape,
+    at::Tensor& state_cache,
+    const at::Tensor& cache_block_table,
+    const at::Tensor& start_pos,
+    const c10::optional<at::Tensor>& norm_weight,
+    const c10::optional<at::Tensor>& norm_bias,
+    const c10::optional<at::Tensor>& cos,
+    const c10::optional<at::Tensor>& sin,
+    const c10::optional<at::Tensor>& cu_seqlens,
+    const c10::optional<at::Tensor>& seqused,
+    int64_t cmp_ratio,
+    double norm_eps,
+    int64_t rotary_mode)
+{
+    (void)gate_weight;
+    (void)ape;
+    (void)state_cache;
+    (void)start_pos;
+    (void)norm_weight;
+    (void)norm_bias;
+    (void)cos;
+    (void)sin;
+    (void)cu_seqlens;
+    (void)seqused;
+    (void)norm_eps;
+    (void)rotary_mode;
+    TORCH_CHECK(cmp_ratio > 0, "cmp_ratio must be positive");
+    c10::SymInt tokens = hidden_states.dim() == 2
+                            ? hidden_states.sym_size(0) : hidden_states.sym_size(1);
+    c10::SymInt ratio(cmp_ratio);
+    if (hidden_states.dim() == 2) {
+        c10::SymInt capacity = tokens.min(tokens / ratio + cache_block_table.sym_size(0));
+        return at::empty_symint(c10::SymDimVector{capacity, wk.sym_size(0)}, hidden_states.options());
+    }
+    c10::SymInt capacity = (tokens + ratio - c10::SymInt(1)) / ratio;
+    return at::empty_symint(c10::SymDimVector{hidden_states.sym_size(0), capacity, wk.sym_size(0)},
+                           hidden_states.options());
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_pool_key_indexer_meta(
+    const at::Tensor& query,
+    const at::Tensor& pool_key,
+    const at::Tensor& weights,
+    const at::Tensor& pool_tail_k,
+    const c10::optional<at::Tensor>& actual_seq_q,
+    const c10::optional<at::Tensor>& actual_seq_k,
+    const c10::optional<at::Tensor>& block_table,
+    const c10::optional<at::Tensor>& q_descale,
+    const c10::optional<at::Tensor>& k_descale,
+    c10::string_view layout_q,
+    c10::string_view layout_k,
+    int64_t topk,
+    int64_t pool_size,
+    int64_t mask_mode,
+    int64_t quant_mode,
+    bool return_value)
+{
+    (void)pool_key;
+    (void)weights;
+    (void)pool_tail_k;
+    (void)actual_seq_q;
+    (void)actual_seq_k;
+    (void)block_table;
+    (void)q_descale;
+    (void)k_descale;
+    (void)layout_k;
+    (void)mask_mode;
+    (void)quant_mode;
+    // Matches ConstructPoolKeyIndexerOutputTensor in pool_key_indexer_torch_adpt.h:
+    //   BSND: indices [B, S1, topk + pool_size - 1], values [B, S1, topk / pool_size]
+    //   TND:  indices [T1, topk + pool_size - 1],     values [T1, topk / pool_size]
+    // indices are always INT32; values are FLOAT and empty ({0}) unless
+    // return_value is set.
+    TORCH_CHECK(pool_size > 0 && topk > 0 && topk % pool_size == 0,
+                "topk must be positive and divisible by pool_size");
+    c10::SymInt indices_last(topk + pool_size - 1);
+    c10::SymInt values_last(topk / pool_size);
+    bool is_bsnd = (std::string(layout_q) == "BSND");
+    at::Tensor indices;
+    at::Tensor values;
+    if (is_bsnd) {
+        c10::SymDimVector indices_shape{
+            query.sym_size(0), query.sym_size(1), indices_last};
+        indices = at::empty_symint(indices_shape,
+                                   query.options().dtype(at::kInt));
+        values = return_value
+                     ? at::empty_symint(
+                           c10::SymDimVector{query.sym_size(0),
+                                             query.sym_size(1), values_last},
+                           query.options().dtype(at::kFloat))
+                     : at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kFloat));
+    } else {
+        c10::SymInt t1 = query.sym_size(0);
+        indices = at::empty_symint(c10::SymDimVector{t1, indices_last},
+                                   query.options().dtype(at::kInt));
+        values = return_value
+                     ? at::empty_symint(c10::SymDimVector{t1, values_last},
+                                        query.options().dtype(at::kFloat))
+                     : at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kFloat));
+    }
+    return std::make_tuple(indices, values);
+}
+
 const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
@@ -2152,6 +2260,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 // Pybind on other platform
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    ops.impl("npu_key_pool", &vllm_ascend::meta::npu_key_pool_meta);
+    ops.impl("npu_pool_key_indexer", &vllm_ascend::meta::npu_pool_key_indexer_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
