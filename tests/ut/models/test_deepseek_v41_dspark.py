@@ -11,7 +11,6 @@ from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41DraftSWASpec
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec, register_ascend_kv_cache_specs
 from vllm_ascend.models.deepseek_v41 import dspark as deepseek_v41_dspark_module
 from vllm_ascend.models.deepseek_v41.dspark import (
@@ -32,7 +31,7 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
         dtype=torch.bfloat16,
         sliding_window=128,
         cache_dtype_str="bfloat16",
-        model_version="deepseek_v4",
+        model_version="deepseek_v41",
     )
     with patch.object(AscendDeepseekV41SWACache, "get_kv_cache_spec", return_value=spec):
         cache = DeepseekV41DSparkSWACache.__new__(DeepseekV41DSparkSWACache)
@@ -40,7 +39,7 @@ def test_draft_cache_uses_v41_backend_and_explicit_deepseek_v41_spec(monkeypatch
     from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 
     assert DeepseekV41DSparkSWACache.get_attn_backend(None) is DeepseekV41CacheBackend
-    assert type(draft) is DeepseekV41DraftSWASpec
+    assert type(draft) is AscendSlidingWindowMLASpec
     assert draft.page_size_bytes == 131072
     assert DeepseekV41DSparkDecoderLayer.attention_cls is DeepseekV41DSparkAttention
     assert DeepseekV41DSparkAttention.swa_cache_cls is DeepseekV41DSparkSWACache
@@ -216,7 +215,6 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         result.mlp = SimpleNamespace(gate=SimpleNamespace(tid2eid=None, bias_vl=None))
         return result
 
-    monkeypatch.setattr(module, "validate_cache_runtime", lambda _: None)
     monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
     monkeypatch.setattr(module, "VocabParallelEmbedding", lambda *a, **kw: torch.nn.Identity())
     monkeypatch.setattr(module, "ColumnParallelLinear", lambda *a, **kw: torch.nn.Identity())

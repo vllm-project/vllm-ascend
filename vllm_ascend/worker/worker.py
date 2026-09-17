@@ -691,7 +691,7 @@ class NPUWorker(WorkerBase):
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+            if any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in specs):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing

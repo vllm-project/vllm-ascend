@@ -32,7 +32,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, proce
 
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
-from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41DraftSWASpec, validate_cache_runtime
+from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -83,7 +83,7 @@ class DeepseekV41DSparkSWACache(AscendDeepseekV41SWACache):
     # TODO: Extract DeepseekV41DraftSWASpec construction from this cache subclass.
     def get_kv_cache_spec(self, vllm_config):
         spec = super().get_kv_cache_spec(vllm_config)
-        return DeepseekV41DraftSWASpec(
+        return AscendSlidingWindowMLASpec(
             block_size=spec.block_size,
             num_kv_heads=spec.num_kv_heads,
             head_size=spec.head_size,
@@ -144,7 +144,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     def __init__(self, *, vllm_config, prefix="") -> None:
         super().__init__()
         self.vllm_config = vllm_config
-        validate_cache_runtime(vllm_config)
         draft_model_config = vllm_config.speculative_config.draft_model_config
         config = normalize_deepseek_v41_config(draft_model_config.hf_text_config)
         self.config = config

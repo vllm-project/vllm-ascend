@@ -7,21 +7,19 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import CircularBufferSpec
 
-from vllm_ascend.core.deepseek_v41_kv_cache import (
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
+    get_storage_block_size,
+)
+from vllm_ascend.models.deepseek_v41.cache_config import (
     STATE_RING_ROWS,
-    DeepseekV41CompressorStateSpec,
-    DeepseekV41DraftSWASpec,
-    DeepseekV41FullSpec,
-    DeepseekV41IndexerSpec,
-    DeepseekV41SWASpec,
-    allocate_cache_config,
-    cache_slots_from_groups,
+    get_deepseek_v41_kv_cache_config,
+    get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     make_cache_groups,
-    pool_bytes_per_block,
-    reshape_cache,
 )
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
 
@@ -37,39 +35,43 @@ def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
     specs = {}
     for role in build_layer_plan(config).layers:
         attn_prefix = f"{prefix}.layers.{role.layer_idx}.self_attn"
-        specs[f"{attn_prefix}.swa_cache"] = DeepseekV41SWASpec(
+        specs[f"{attn_prefix}.swa_cache"] = AscendSlidingWindowMLASpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=width,
             dtype=torch.bfloat16,
             sliding_window=window,
+            model_version="deepseek_v41",
         )
         if not role.is_kv_source:
             continue
-        specs[f"{attn_prefix}.long_kv_cache"] = DeepseekV41FullSpec(
+        specs[f"{attn_prefix}.long_kv_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=width,
             dtype=torch.bfloat16,
             tokens_per_state=role.compress_ratio,
+            model_version="deepseek_v41",
             storage_block_size=block_size // role.compress_ratio,
         )
-        specs[f"{attn_prefix}.indexer.k_cache"] = DeepseekV41IndexerSpec(
+        specs[f"{attn_prefix}.indexer.k_cache"] = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=index_width,
             dtype=torch.int8,
             tokens_per_state=role.compress_ratio,
+            model_version="deepseek_v41",
             storage_block_size=block_size // role.compress_ratio,
             scale_dim=1,
             scale_dtype=torch.float16,
         )
         if role.compress_ratio == 2:
-            specs[f"{attn_prefix}.compressor.state_cache"] = DeepseekV41CompressorStateSpec(
+            specs[f"{attn_prefix}.compressor.state_cache"] = CircularBufferSpec(
                 block_size=STATE_RING_ROWS,
                 num_kv_heads=1,
                 head_size=2 * width,
                 dtype=torch.float32,
+                head_size_v=0,
             )
     return specs
 
@@ -283,35 +285,59 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
         head_dim=head_size,
         index_head_dim=index_size,
     )
-    runtime = SimpleNamespace(cache_config=SimpleNamespace(block_size=block_size, num_gpu_blocks_override=None))
+    runtime = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        )
+    )
     specs = build_v41_cache_specs(config, runtime)
     for stage in range(draft_layers):
-        specs[f"mtp.{stage}.self_attn.swa_cache"] = DeepseekV41DraftSWASpec(
+        specs[f"mtp.{stage}.self_attn.swa_cache"] = AscendSlidingWindowMLASpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=head_size,
             dtype=torch.bfloat16,
             sliding_window=config.sliding_window,
             cache_dtype_str="bfloat16",
-            model_version="deepseek_v4",
+            model_version="deepseek_v41",
         )
     groups = make_cache_groups(group_cache_specs(specs))
-    blocks, tensors = allocate_cache_config(runtime, groups, num_blocks * pool_bytes_per_block(groups))
-    return KVCacheConfig(num_blocks=blocks, kv_cache_tensors=tensors, kv_cache_groups=groups)
+    return get_deepseek_v41_kv_cache_config(
+        runtime,
+        groups,
+        num_blocks * get_deepseek_v41_pool_bytes_per_block(groups),
+    )
 
 
 def allocate_cache_views(config, device="cpu"):
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
     specs = {n: s for g in config.kv_cache_groups for n, s in g.kv_cache_spec.kv_cache_specs.items()}
     backings, caches = [], {}
-    for allocation, slot in zip(config.kv_cache_tensors, cache_slots_from_groups(config.kv_cache_groups)):
+    for allocation in config.kv_cache_tensors:
         raw = torch.zeros(allocation.size, dtype=torch.uint8, device=device)
         backings.append(raw)
-        for placement in slot.placements:
-            caches[placement.name] = reshape_cache(
+        for name in allocation.layers:
+            spec = specs[name]
+            shape = (config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.head_size)
+            shapes = [shape]
+            dtypes = [spec.dtype]
+            offset = 0
+            is_index = isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
+            if is_index:
+                source_name = name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
+                offset = specs[source_name].unpadded_page_size_bytes
+                shapes.append((config.num_blocks, get_storage_block_size(spec), spec.num_kv_heads, spec.scale_dim))
+                dtypes.append(spec.scale_dtype)
+            views = NPUModelRunner._adjust_kv_layout(
+                None,
                 raw,
-                specs[placement.name],
-                num_blocks=config.num_blocks,
-                offset=placement.offset,
-                block_stride=slot.page_size_bytes,
+                shapes,
+                dtypes,
+                allocation.block_stride,
+                initial_offset_bytes=offset,
             )
+            caches[name] = tuple(views) if is_index else views[0]
     return backings, caches

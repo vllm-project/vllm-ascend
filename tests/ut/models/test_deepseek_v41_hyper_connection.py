@@ -343,7 +343,6 @@ def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():
         ):
             stack.enter_context(patch.object(shared, name, side_effect=lambda *args, **kwargs: torch.nn.Identity()))
         stack.enter_context(patch.object(shared, "DeepseekV41DSparkDecoderLayer", factory))
-        stack.enter_context(patch.object(shared, "validate_cache_runtime"))
         model = DeepseekV41DSparkModel(vllm_config=config)
     assert len(model.layers) == factory.call_count == 3
     for call in factory.call_args_list:

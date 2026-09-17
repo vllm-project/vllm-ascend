@@ -8,16 +8,27 @@ import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
-from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41CompressorStateSpec
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.worker.block_table import BlockTable
 
 
 def ring_spec():
-    return DeepseekV41CompressorStateSpec(block_size=32, num_kv_heads=1, head_size=1024, dtype=torch.float32)
+    return CircularBufferSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=1024,
+        head_size_v=0,
+        dtype=torch.float32,
+    )
 
 
 def test_ring_lifetime_reuse_and_external_tokens():

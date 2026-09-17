@@ -23,7 +23,14 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_layout, is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    get_deepseek_v41_kv_cache_config,
+    get_deepseek_v41_pool_bytes_per_block,
+    group_cache_specs,
+    is_deepseek_v41_cache,
+    make_cache_groups,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -46,17 +53,6 @@ else:
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
-_orig_max_concurrency = vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config
-
-
-def _ascend_max_concurrency(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> float:
-    groups = kv_cache_config.kv_cache_groups
-
-    if (layout := get_kv_cache_layout(groups)) is not None:
-        return layout.max_concurrency(vllm_config, kv_cache_config)
-    return _orig_max_concurrency(vllm_config, kv_cache_config)
-
-
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -106,8 +102,7 @@ def _ascend_resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
-    layout = get_kv_cache_layout(groups)
-    if filtered_private_groups and not getattr(layout, "include_private_groups_in_block_alignment", False):
+    if filtered_private_groups and not is_deepseek_v41_cache(groups):
         # A fixed tail block is not a token-page scheduling or hashing unit.
         # Pool alignment is enforced by the GLM planner and prefix coordinator.
         kv_cache_config = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
@@ -261,8 +256,6 @@ def group_and_unify_kv_cache_specs(
     Group the KV cache specs and unify each group into one UniformTypeKVCacheSpecs.
     Currently, this is only used for DeepseekV4.
     """
-    if (layout := get_kv_cache_layout(kv_cache_spec.values())) is not None:
-        return layout.group_specs(kv_cache_spec)
     if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
         return None
 
@@ -297,8 +290,6 @@ def _get_kv_cache_groups_uniform_groups(
     Generate the KV cache groups from the grouped specs.
     """
     assert len(grouped_specs) > 0 and all(isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs)
-    if (layout := get_kv_cache_layout(grouped_specs)) is not None:
-        return layout.make_groups(grouped_specs)
     # For now, we restrict the first grouped_spec to be UniformTypeKVCacheSpecs
     # containing only MLAAttentionSpec.
     full_mla_spec = grouped_specs[0]
@@ -396,12 +387,15 @@ def _ascend_get_packed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
     """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
-    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
-    if grouped_specs is None:
-        assert _orig_get_packed_kv_cache_groups is not None
-        return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
-
-    groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    if is_deepseek_v41_cache(kv_cache_spec):
+        grouped_specs = group_cache_specs(kv_cache_spec)
+        groups = make_cache_groups(grouped_specs)
+    else:
+        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+        if grouped_specs is None:
+            assert _orig_get_packed_kv_cache_groups is not None
+            return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
@@ -558,8 +552,10 @@ def _get_kv_cache_config_deepseek_v4_main(
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    if not kv_cache_groups or not all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups
+    if (
+        is_deepseek_v41_cache(kv_cache_groups)
+        or not kv_cache_groups
+        or not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     ):
         return False
     for group in kv_cache_groups:
@@ -580,8 +576,8 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
-    if (layout := get_kv_cache_layout(kv_cache_groups)) is not None:
-        return layout.pool_bytes_per_block(kv_cache_groups)
+    if is_deepseek_v41_cache(kv_cache_groups):
+        return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -596,8 +592,6 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
-    if (layout := get_kv_cache_layout(kv_cache_groups)) is not None:
-        return layout.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
     if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
@@ -634,14 +628,8 @@ def _ascend_get_kv_cache_config_from_groups(
     available_memory: int,
 ) -> KVCacheConfig:
     """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
-    if (layout := get_kv_cache_layout(kv_cache_groups)) is not None:
-        num_blocks, kv_cache_tensors = layout.allocate(vllm_config, kv_cache_groups, available_memory)
-        return KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-            prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
-        )
+    if is_deepseek_v41_cache(kv_cache_groups):
+        return get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
@@ -667,7 +655,6 @@ if vllm_version_is("0.28.0"):
 else:
     assert _orig_get_packed_kv_cache_groups is not None
     vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
-vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config = _ascend_max_concurrency
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
 # _get_kv_cache_config_packed. The v0.28.0 planner still consumes shared_by;

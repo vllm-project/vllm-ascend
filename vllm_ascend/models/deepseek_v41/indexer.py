@@ -12,7 +12,7 @@ from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
 )
-from vllm_ascend.core.deepseek_v41_kv_cache import DeepseekV41IndexerSpec
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 from vllm_ascend.worker.device_metadata import (
@@ -73,12 +73,13 @@ class DeepseekV41Indexer(nn.Module):
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
-                DeepseekV41IndexerSpec(
+                AscendMLAAttentionSpec(
                     block_size=vllm_config.cache_config.block_size,
                     num_kv_heads=1,
                     head_size=self.width,
                     dtype=torch.int8,
                     tokens_per_state=compress_ratio,
+                    model_version="deepseek_v41",
                     storage_block_size=(vllm_config.cache_config.block_size // compress_ratio),
                     scale_dim=1,
                     scale_dtype=torch.float16,

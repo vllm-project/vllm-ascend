@@ -5,9 +5,10 @@
 import torch
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
-from vllm_ascend.core.deepseek_v41_kv_cache import STATE_RING_ROWS, DeepseekV41CompressorStateSpec
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 
 
 class DeepseekV41Compressor(nn.Module):
@@ -34,11 +35,12 @@ class DeepseekV41Compressor(nn.Module):
                 self.state_cache = DeepseekV41CacheLayer(
                     vllm_config,
                     f"{prefix}.state_cache",
-                    DeepseekV41CompressorStateSpec(
+                    CircularBufferSpec(
                         block_size=STATE_RING_ROWS,
                         num_kv_heads=1,
                         head_size=2 * self.width,
                         dtype=torch.float32,
+                        head_size_v=0,
                     ),
                 )
 

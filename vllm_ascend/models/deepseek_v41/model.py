@@ -54,11 +54,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.core.deepseek_v41_kv_cache import (
-    DeepseekV41FullSpec,
-    DeepseekV41SWASpec,
-    validate_cache_runtime,
-)
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -551,14 +547,14 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
-        spec = DeepseekV41SWASpec(
+        spec = AscendSlidingWindowMLASpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=head_dim,
             dtype=dtype,
             sliding_window=window_size,
             cache_dtype_str=cache_config.cache_dtype,
-            model_version="deepseek_v4",
+            model_version="deepseek_v41",
             alignment=None,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
@@ -674,7 +670,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         reduce_results=True,
         need_gather_q_kv=False,
     ):
-        validate_cache_runtime(vllm_config)
         layer_idx = int(prefix.split(".")[-2])
         topology = build_layer_plan(config)
         role = topology.layer(layer_idx)
@@ -701,12 +696,13 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                DeepseekV41FullSpec(
+                AscendMLAAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=1,
                     head_size=width,
                     dtype=torch.bfloat16,
                     tokens_per_state=role.compress_ratio,
+                    model_version="deepseek_v41",
                     storage_block_size=block_size // role.compress_ratio,
                 ),
             )

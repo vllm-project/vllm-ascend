@@ -25,16 +25,15 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
+from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
-from vllm_ascend.core.deepseek_v41_kv_cache import (
-    DeepseekV41CompressorStateSpec,
-    DeepseekV41DraftSWASpec,
-    DeepseekV41FullSpec,
-    DeepseekV41IndexerSpec,
-    DeepseekV41SWASpec,
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSlidingWindowMLASpec,
+    get_kv_cache_compression_ratio,
+    get_storage_block_size,
 )
-from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -578,6 +577,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # roles are fixed before allocation and graph capture.
         self._build_query_metadata = build_query_metadata
         self._build_compressor_metadata = build_compressor_metadata
+        if isinstance(kv_cache_spec, CircularBufferSpec):
+            self._cache_kind = "compressor_state"
+        elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
+            self._cache_kind = "swa"
+        elif isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
+        else:
+            raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
         query_metadata_size = V41_METADATA_BUFFER_SIZE if build_query_metadata else 0
         compressor_tokens = max_tokens if build_compressor_metadata else 0
         compressor_reqs = max_reqs if build_compressor_metadata else 0
@@ -599,11 +606,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 _config_value(text_config, "head_dim"),
             )
         )
-        c2_rope_rows = (
-            compressor_tokens
-            if self._supports_device_ops and isinstance(kv_cache_spec, DeepseekV41CompressorStateSpec)
-            else 0
-        )
+        c2_rope_rows = compressor_tokens if self._supports_device_ops and self._cache_kind == "compressor_state" else 0
         self._c2_source_cos = torch.ones(
             (c2_rope_rows, 1, 1, rope_dim),
             dtype=torch.float32,
@@ -645,7 +648,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
 
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
-        if self._build_compressor_metadata and isinstance(self.kv_cache_spec, DeepseekV41CompressorStateSpec):
+        if self._build_compressor_metadata and self._cache_kind == "compressor_state":
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
             self._c2_full_source_rope = source_rope
 
@@ -712,16 +715,11 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._device_metadata_tasks = ()
         spec = self.kv_cache_spec
         common = common_attn_metadata
-        is_compressor_state = isinstance(spec, DeepseekV41CompressorStateSpec)
-        ratio = spec.compress_ratio if is_compressor_state else get_kv_cache_compression_ratio(spec)
-        if isinstance(spec, (DeepseekV41SWASpec, DeepseekV41DraftSWASpec)):
-            cache_kind = "swa"
-        elif isinstance(spec, DeepseekV41FullSpec):
-            cache_kind = "long_kv"
-        elif isinstance(spec, DeepseekV41IndexerSpec):
-            cache_kind = "index_k"
-        elif is_compressor_state:
-            cache_kind = "compressor_state"
+        cache_kind = self._cache_kind
+        is_compressor_state = cache_kind == "compressor_state"
+        ratio = get_kv_cache_compression_ratio(spec)
+
+        storage_block_size = get_storage_block_size(spec)
 
         num_reqs = int(getattr(common, "num_reqs", common.seq_lens.shape[0]))
         num_actual_reqs = int(kwargs.get("num_actual_reqs", num_reqs))
@@ -757,7 +755,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # runner. Long KV and Indexer builders with the same physical
             # layout then share one persistent [T, 2] mapping, while every SWA
             # group owns a distinct mapping buffer.
-            slot_key = f"slot:c{ratio}:b{spec.storage_block_size}"
+            slot_key = f"slot:c{ratio}:b{storage_block_size}"
             prepared_slots = shared.get(slot_key)
             if prepared_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
@@ -780,7 +778,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         valid,
                         torch.div(
                             physical,
-                            spec.storage_block_size,
+                            storage_block_size,
                             rounding_mode="floor",
                         ),
                         -1,
@@ -789,7 +787,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._slot_mapping_2d[:num_input_tokens, 1].copy_(
                     torch.where(
                         valid,
-                        physical.remainder(spec.storage_block_size),
+                        physical.remainder(storage_block_size),
                         -1,
                     )
                 )
@@ -833,7 +831,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 common.block_table_tensor[:num_reqs],
                 self.vllm_config.speculative_config.num_speculative_tokens,
                 window_size,
-                spec.storage_block_size,
+                storage_block_size,
                 common.query_start_loc[: num_reqs + 1],
                 seq_lens,
                 num_actual_tokens,
@@ -1013,7 +1011,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             block_table=common.block_table_tensor[:num_reqs],
             slot_mapping=slots,
             compress_ratio=ratio,
-            storage_block_size=spec.storage_block_size,
+            storage_block_size=storage_block_size,
             is_compressor_state=is_compressor_state,
             cache_kind=cache_kind,
             cos=cos,

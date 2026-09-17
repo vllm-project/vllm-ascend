@@ -157,11 +157,6 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
-from vllm_ascend.core.deepseek_v41_kv_cache import (
-    is_deepseek_v41_cache_spec,
-    plan_cache_slots,
-    reshape_cache,
-)
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -179,6 +174,9 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    is_deepseek_v41_cache,
+)
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
@@ -3970,9 +3968,9 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     for kv_cache_gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
                         group_spec = group.kv_cache_spec
-                        if not isinstance(group_spec, UniformTypeKVCacheSpecs) or not any(
-                            is_deepseek_v41_cache_spec(spec) for spec in group_spec.kv_cache_specs.values()
-                        ):
+                        if not isinstance(
+                            group_spec, UniformTypeKVCacheSpecs
+                        ) or not is_deepseek_v41_cache(self.kv_cache_config.kv_cache_groups):
                             continue
                         # V4.1 derives backend-specific 2D slot mappings from
                         # this buffer. Dummy capture has no scheduler-owned
@@ -4678,11 +4676,10 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        if any(is_deepseek_v41_cache_spec(spec) for spec in layer_kv_cache_spec.values()):
+        if is_deepseek_v41_cache(layer_kv_cache_spec):
             for allocation in kv_cache_config.kv_cache_tensors:
-                allocation_layers = get_kv_cache_tensor_layers(allocation)
                 backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
-                for name in allocation_layers:
+                for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors
 
@@ -5126,9 +5123,11 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_dtype_list: list[int],
         page_size_bytes: int,
         overlap_full_kv_cache: bool = False,
+        initial_offset_bytes: int = 0,
     ):
         reshaped_kv_tensors = []
-        base_storage_offset_bytes = raw_tensor.storage_offset()
+        assert raw_tensor.element_size() == 1
+        base_storage_offset_bytes = raw_tensor.storage_offset() + initial_offset_bytes
         storage_offset_bytes = base_storage_offset_bytes
         for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
             if overlap_full_kv_cache and idx == 2:
@@ -5171,12 +5170,12 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
-        layer_placements = {}
-        if any(is_deepseek_v41_cache_spec(spec) for spec in layer_kv_cache_spec.values()):
-            layer_placements = {
-                p.name: (p.offset, slot.page_size_bytes)
-                for slot in plan_cache_slots(layer_kv_cache_spec)
-                for p in slot.placements
+        layer_tuple_strides = {}
+        if is_deepseek_v41_cache(layer_kv_cache_spec):
+            layer_tuple_strides = {
+                name: descriptor.block_stride
+                for descriptor in kv_cache_config.kv_cache_tensors
+                for name in descriptor.layers
             }
 
         for group in self._kv_cache_spec_attn_group_iterator():
@@ -5188,15 +5187,42 @@ class NPUModelRunner(GPUModelRunner):
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
 
-                if is_deepseek_v41_cache_spec(current_kv_cache_spec):
-                    offset, block_stride = layer_placements[layer_name]
-                    kv_caches[layer_name] = reshape_cache(
-                        kv_cache_raw_tensors[layer_name],
-                        current_kv_cache_spec,
-                        num_blocks=kv_cache_config.num_blocks,
-                        offset=offset,
-                        block_stride=block_stride,
+                if layer_name in layer_tuple_strides:
+                    block_stride = layer_tuple_strides[layer_name]
+                    initial_offset = 0
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_config.num_blocks,
+                        get_storage_block_size(current_kv_cache_spec),
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
                     )
+                    kv_cache_shape_list = [kv_cache_shape]
+                    kv_cache_dtype_list = [current_kv_cache_spec.dtype]
+                    is_index = (
+                        isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                        and current_kv_cache_spec.scale_dim
+                    )
+                    if is_index:
+                        source_name = layer_name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
+                        source_spec = layer_kv_cache_spec[source_name]
+                        initial_offset = source_spec.unpadded_page_size_bytes
+                        kv_cache_shape_list.append(
+                            attn_backend.get_kv_cache_shape(
+                                kv_cache_config.num_blocks,
+                                get_storage_block_size(current_kv_cache_spec),
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.scale_dim,
+                            )
+                        )
+                        kv_cache_dtype_list.append(current_kv_cache_spec.scale_dtype)
+                    views = self._adjust_kv_layout(
+                        kv_cache_raw_tensors[layer_name],
+                        kv_cache_shape_list,
+                        kv_cache_dtype_list,
+                        block_stride,
+                        initial_offset_bytes=initial_offset,
+                    )
+                    kv_caches[layer_name] = tuple(views) if is_index else views[0]
                     continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
