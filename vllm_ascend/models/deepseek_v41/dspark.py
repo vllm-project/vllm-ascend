@@ -174,7 +174,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         )
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
-        self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
         self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
@@ -226,7 +226,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
         full_num_tokens = positions.shape[0]
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel_moe:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
@@ -252,7 +252,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel_moe:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
 

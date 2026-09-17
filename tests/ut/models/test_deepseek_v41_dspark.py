@@ -162,7 +162,7 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
     model = SimpleNamespace(
         embed_tokens=MagicMock(return_value=hidden),
         hc_mult=4,
-        use_sequence_parallel=True,
+        use_sequence_parallel_moe=True,
         needs_moe_input_ids=False,
         layers={"40": Layer()},
     )
