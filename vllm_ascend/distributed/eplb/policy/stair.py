@@ -3,6 +3,7 @@
 
 """Pure NumPy building blocks for the STAIR EPLB policy."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -111,3 +112,116 @@ class StairEplbPolicy(AbstractEplbPolicy):
         p95 = imbalance[order[np.searchsorted(cumulative, p95_rank, side="left")]]
         mean = np.sum(imbalance * sample_weights, dtype=np.float64) / sample_weights.sum()
         return BalanceScore(float(mean), float(p95))
+
+    @staticmethod
+    def expert_risk(mean: np.ndarray, variance: np.ndarray, z_score: float) -> np.ndarray:
+        """Return FlashLB's mean-plus-deviation risk per expert."""
+        averages = np.asarray(mean, dtype=np.float64)
+        variances = np.asarray(variance, dtype=np.float64)
+        if (
+            averages.ndim != 1
+            or variances.shape != averages.shape
+            or not np.all(np.isfinite(averages))
+            or not np.all(np.isfinite(variances))
+            or np.any(averages < 0)
+            or np.any(variances < 0)
+            or not np.isfinite(z_score)
+            or z_score < 0
+        ):
+            raise ValueError("STAIR expert moments and z-score must be finite and non-negative")
+        return averages + z_score * np.sqrt(variances)
+
+    @staticmethod
+    def _allocate_extra_replicas(
+        risk: np.ndarray,
+        replicas: np.ndarray,
+        extra_slots: int,
+        num_ranks: int,
+        experts: tuple[int, ...],
+    ) -> np.ndarray | None:
+        result = replicas.copy()
+        for _ in range(extra_slots):
+            candidates = [expert for expert in experts if result[expert] < num_ranks]
+            if not candidates:
+                return None
+            expert = min(candidates, key=lambda item: (-risk[item] / result[item], item))
+            result[expert] += 1
+        return result
+
+    @staticmethod
+    def _nearby_budgets(center: int, lower: int, upper: int, radius: int) -> list[int]:
+        budgets = []
+        for distance in range(radius + 1):
+            values = (center,) if distance == 0 else (center - distance, center + distance)
+            budgets.extend(value for value in values if lower <= value <= upper)
+        return budgets
+
+    @classmethod
+    def replica_candidates(
+        cls,
+        risk: np.ndarray,
+        total_slots: int,
+        num_ranks: int,
+        *,
+        num_stages: int,
+        radius: int,
+        beam_size: int,
+        score: Callable[[np.ndarray], float],
+    ) -> list[np.ndarray]:
+        """Return a bounded FlashTree-style beam of replica-count vectors."""
+        values = np.asarray(risk, dtype=np.float64)
+        num_experts = values.size
+        integer_inputs = (total_slots, num_ranks, num_stages, radius, beam_size)
+        if (
+            values.ndim != 1
+            or num_experts == 0
+            or not np.all(np.isfinite(values))
+            or np.any(values < 0)
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in integer_inputs)
+            or num_ranks < 1
+            or not num_experts <= total_slots <= num_experts * num_ranks
+            or total_slots % num_ranks != 0
+            or num_stages < 1
+            or radius < 0
+            or beam_size < 1
+            or not callable(score)
+        ):
+            raise ValueError("Invalid STAIR replica search input")
+
+        order = sorted(range(num_experts), key=lambda expert: (-values[expert], expert))
+        stage_count = min(num_stages, num_experts)
+        groups = [tuple(group) for group in np.array_split(order, stage_count)]
+        beam = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
+
+        for group_index, group in enumerate(groups[:-1]):
+            later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
+            expanded = []
+            for replicas, remaining in beam:
+                greedy = cls._allocate_extra_replicas(values, replicas, remaining, num_ranks, group + later)
+                if greedy is None:
+                    continue
+                center = int(np.sum(greedy[list(group)] - replicas[list(group)]))
+                group_capacity = sum(num_ranks - replicas[expert] for expert in group)
+                later_capacity = sum(num_ranks - replicas[expert] for expert in later)
+                lower = max(0, remaining - later_capacity)
+                upper = min(remaining, group_capacity)
+                for budget in cls._nearby_budgets(center, lower, upper, radius):
+                    partial = cls._allocate_extra_replicas(values, replicas, budget, num_ranks, group)
+                    if partial is None:
+                        continue
+                    complete = cls._allocate_extra_replicas(values, partial, remaining - budget, num_ranks, later)
+                    if complete is not None:
+                        expanded.append((partial, remaining - budget, complete))
+            unique = {tuple(partial): (partial, remaining, complete) for partial, remaining, complete in expanded}
+            ranked = sorted(
+                unique.values(),
+                key=lambda item: (float(np.max(values / item[2])), tuple(item[2]), tuple(item[0])),
+            )
+            beam = [(partial, remaining) for partial, remaining, _ in ranked[:beam_size]]
+
+        complete = {}
+        for replicas, remaining in beam:
+            candidate = cls._allocate_extra_replicas(values, replicas, remaining, num_ranks, groups[-1])
+            if candidate is not None:
+                complete[tuple(candidate)] = candidate
+        return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:beam_size]
