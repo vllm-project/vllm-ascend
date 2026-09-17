@@ -635,6 +635,7 @@ class KVTransferThread(threading.Thread):
         direction: int,
         max_transfer_blocks: int,
         max_transfer_bytes: int,
+        skip_validation: bool = False,
     ) -> int:
         if len(gvas) == 0:
             return 0
@@ -669,12 +670,23 @@ class KVTransferThread(threading.Thread):
                 split_gvas.tolist(),
                 split_sizes.tolist(),
             )
-            res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
-                direction,
-            )
+            if skip_validation and direction == 1:
+                # Direct G2L: blobs are leased by the scheduler; skip the
+                # per-process gvaBlobTracker/lease validation (flag=1).
+                res = self.m_store.store.batch_copy(
+                    split_gvas.tolist(),
+                    split_addrs.tolist(),
+                    split_sizes.tolist(),
+                    direction,
+                    1,
+                )
+            else:
+                res = self.m_store.store.batch_copy(
+                    split_gvas.tolist(),
+                    split_addrs.tolist(),
+                    split_sizes.tolist(),
+                    direction,
+                )
             if res != 0:
                 logger.error("[KVPOOL] batch_copy %s FAILED res=%d", dir_name, res)
                 return res
@@ -1848,6 +1860,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        load_failure_cb: Callable[[set[int]], None] | None = None,
+        loaded_req_cb: Callable[[str], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1873,6 +1887,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
         self._active_load_indices: set[int] | None = None
+        self.load_failure_cb = load_failure_cb
+        self.loaded_req_cb = loaded_req_cb
+        # Minimum scheduler lease deadline of the current step's load
+        # requests; set by the worker before layer loads are submitted.
+        self.step_lease_deadline: float | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -2015,6 +2034,29 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         while time.perf_counter() < deadline:
             pass
 
+    def _report_direct_g2l_expiry(self, transfer_tasks: list[LayerTransferTask]) -> None:
+        if self.load_failure_cb is None:
+            return
+        failed: set[int] = set()
+        for task in transfer_tasks:
+            for block_range in task.block_ranges:
+                request = block_range.request
+                block_ids = (
+                    request.block_ids_by_group_np[task.group_id]
+                    if (
+                        request.block_ids_by_group_np is not None and task.group_id < len(request.block_ids_by_group_np)
+                    )
+                    else request.block_ids_np
+                )
+                if block_ids is not None:
+                    failed.update(int(block_id) for block_id in block_ids)
+        if failed:
+            logger.warning(
+                "direct_g2l: lease expired mid-load; %d blocks marked for recompute",
+                len(failed),
+            )
+            self.load_failure_cb(failed)
+
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
@@ -2082,15 +2124,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             while not attention_start_gate.wait(timeout=10):
                 logger.info("Layerwise %d load waits for attention compute start", layer_id)
 
-        all_load_keys: list[str] = []
         all_req_ids: set[str] = set()
         last_chunk_req_ids: set[str] = set()
         all_gvas = []
         all_addrs = []
         all_sizes = []
         for task, req_meta in task_metas:
-            if req_meta.load_keys:
-                all_load_keys.extend(req_meta.load_keys)
             for req_id, is_last_chunk in zip(req_meta.req_ids, req_meta.is_last_chunks):
                 all_req_ids.add(req_id)
                 if is_last_chunk:
@@ -2105,14 +2144,22 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         if self.external_slot_release_waiter is not None:
             self.external_slot_release_waiter(layer_id)
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
+        if self.step_lease_deadline is not None and time.time() >= self.step_lease_deadline:
+            # Lease window closed mid-load: mark the affected blocks for
+            # recompute and skip the copy. The step's output for these
+            # requests is discarded by the scheduler's invalid-block path.
+            self._report_direct_g2l_expiry(transfer_tasks)
+            res = 0
+        else:
+            res = self._batch_copy_with_limits(
+                gvas_array,
+                addr_array,
+                size_array,
+                1,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
+                skip_validation=True,
+            )
         if layer_id <= 2 or res != 0:
             logger.debug(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",
@@ -2124,18 +2171,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if res != 0:
             raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
 
-        if layer_id == self.final_layer_id and all_load_keys:
-            unique_load_keys = list(dict.fromkeys(all_load_keys))
-            self.m_store.batch_remove_lease(unique_load_keys)
-            logger.debug(
-                "[KVPOOL] load_thread released %d leases after final layer %d",
-                len(unique_load_keys),
-                layer_id,
-            )
         if layer_id == self.final_layer_id:
             for req_id in all_req_ids:
                 if req_id in last_chunk_req_ids:
                     self.set_finished_request(req_id)
+                if self.loaded_req_cb is not None:
+                    self.loaded_req_cb(req_id)
         assert not self.layer_load_finished_events[layer_id].is_set(), f"thread: {layer_id} load failed "
         logger.debug("Layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()

@@ -1,5 +1,6 @@
 import importlib
 import math
+import time
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -40,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
     LoadSpec,
+    PoolGvaSnapshot,
     PoolKey,
     ReqMeta,
     RequestTracker,
@@ -47,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -60,6 +63,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+
+# Pool read-lease window owned by the scheduler: a lease is taken at the
+# request's first hit-check pass, renewed when the deadline draws near, and
+# released once the workers report the load complete (or the request leaves
+# the scheduler). The lease must cover queue wait plus the asynchronous
+# multi-layer load; expiry falls back to recompute.
+POOL_LEASE_TTL_MS = 60_000
+POOL_LEASE_RENEW_HORIZON_S = 10.0
 
 
 class KVPoolScheduler:
@@ -191,6 +202,16 @@ class KVPoolScheduler:
         # registry; generic code never imports the protocol module by name.
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_protocol is not None
+        # The scheduler leases pool blobs for the whole load window and passes
+        # the per-rank GVAs down in the request metadata (see PoolGvaSnapshot),
+        # so the worker load path issues zero memcache RPCs.
+        # req_id -> PoolGvaSnapshot (hit-check cache, reused across passes).
+        self._pool_gva_snapshots: dict[str, PoolGvaSnapshot] = {}
+        # lease key -> [deadline, dependent req_ids]. Leases are per-key
+        # singletons with accumulating TTL and remove clears the whole lease,
+        # so a key is only released when its last dependent request is done.
+        self._pool_leases: dict[str, list] = {}
+        self._pool_lease_req_keys: dict[str, set[str]] = {}
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -401,6 +422,10 @@ class KVPoolScheduler:
         coordinator = self.cache_coordinator
         assert coordinator is not None
 
+        reused = self._reuse_pool_gva_snapshot(request.request_id, token_len)
+        if reused is not None:
+            return reused
+
         def query_group_hits(
             group_id: int,
             group_block_hashes: Sequence[BlockHash | str],
@@ -434,12 +459,20 @@ class KVPoolScheduler:
                     hits.append(block_hash)
             return hits
 
-        return coordinator.find_reachable_hit_tokens(
+        hit_tokens = coordinator.find_reachable_hit_tokens(
             request.block_hashes,
             token_len,
             query_group_hits,
             log_context=f"hit_check: req={request.request_id}",
         )
+        if hit_tokens > 0:
+            self._build_pool_gva_snapshot(
+                request.request_id,
+                request.block_hashes,
+                hit_tokens,
+                token_len,
+            )
+        return hit_tokens
 
     def _lookup_layerwise_contiguous(
         self,
@@ -452,6 +485,10 @@ class KVPoolScheduler:
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
         hits_per_group: list[int] = []
+
+        reused = self._reuse_pool_gva_snapshot(request.request_id, token_len)
+        if reused is not None:
+            return reused
 
         for group_id in range(len(self.grouped_block_size)):
             effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
@@ -506,6 +543,13 @@ class KVPoolScheduler:
             hits_per_group,
             hit_tokens,
         )
+        if hit_tokens > 0:
+            self._build_pool_gva_snapshot(
+                request.request_id,
+                request.block_hashes,
+                hit_tokens,
+                token_len,
+            )
         return hit_tokens
 
     def _get_mooncake_layerwise_hit_tokens(
@@ -581,6 +625,201 @@ class KVPoolScheduler:
         if self.backend_name == "mooncake":
             return self._get_mooncake_layerwise_hit_tokens(request, token_len, num_computed_tokens)
         raise RuntimeError(f"Unsupported block-key layerwise backend: {self.backend_name}")
+
+    def _worker_cached_tokens(self, load_spec: LoadSpec) -> int:
+        """Mirror the worker's cached_tokens derivation (pool_worker)."""
+        cached_tokens = load_spec.kvpool_cached_tokens
+        if not self.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
+            cached_tokens = load_spec.kvpool_store_skip_tokens
+        return cached_tokens
+
+    def _reuse_pool_gva_snapshot(self, req_id: str, token_len: int) -> int | None:
+        """Return the cached hit tokens for this pass, or None to re-query.
+
+        The snapshot's blobs are leased, so eviction and same-key rewrites
+        cannot invalidate the cached GVAs before the deadline; only the
+        deadline itself can, which triggers a lease renewal.
+        """
+        snap = self._pool_gva_snapshots.get(req_id)
+        if snap is None or snap.token_len != token_len:
+            return None
+        if time.time() > snap.deadline - POOL_LEASE_RENEW_HORIZON_S:
+            self._renew_pool_lease(req_id, snap)
+        return snap.cached_tokens
+
+    def _renew_pool_lease(self, req_id: str, snap: PoolGvaSnapshot) -> None:
+        if not snap.lease_keys:
+            return
+        results = self.store_scheduler.batch_add_lease(snap.lease_keys, POOL_LEASE_TTL_MS)
+        if len(results) != len(snap.lease_keys) or any(res != 0 for res in results):
+            # A leased blob disappeared, which the lease contract excludes.
+            # Drop the snapshot: this pass still returns the stale hit, but
+            # attach-time rebuild revalidates and the next pass re-queries.
+            logger.warning(
+                "direct_g2l lease renewal failed for req=%s (%d/%d keys); rebuilding snapshot",
+                req_id,
+                sum(1 for res in results if res == 0) if len(results) == len(snap.lease_keys) else 0,
+                len(snap.lease_keys),
+            )
+            self._pool_gva_snapshots.pop(req_id, None)
+            return
+        snap.deadline = time.time() + POOL_LEASE_TTL_MS / 1000.0
+        for key in snap.lease_keys:
+            entry = self._pool_leases.get(key)
+            if entry is not None:
+                entry[0] = snap.deadline
+
+    def _build_pool_gva_snapshot(
+        self,
+        req_id: str,
+        block_hashes,
+        cached_tokens: int,
+        token_len: int,
+    ) -> PoolGvaSnapshot | None:
+        """Query and lease pool GVAs for [0, cached_tokens) in one pass.
+
+        One batch_get_key_info plus one batch_add_lease per request. The
+        per-group GVA layout is block-major: gvas_by_group[g][block * R + r]
+        with R = tp_size // put_step, matching the worker's rank indexing.
+        """
+        num_ranks = self.tp_size // self.put_step
+        gvas_by_group: list[list[int]] = []
+        partial_gvas_by_group: list[list[int]] = []
+        lease_keys: list[str] = []
+        # (array, index) pairs so failed leases can zero their GVA entries.
+        lease_positions: list[tuple[list[int], int]] = []
+        for group_id in range(len(self.grouped_block_size)):
+            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
+            group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
+            full_blocks = min(cached_tokens // effective_block_size, len(group_block_hashes))
+            query_keys: list[str] = []
+            for block_idx in range(full_blocks):
+                query_keys.extend(
+                    self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(group_block_hashes[block_idx]))
+                )
+            full_key_count = len(query_keys)
+            # Partial keys only matter for the offload continuation path (the
+            # worker nulls partial ranges otherwise); end_token must match the
+            # save-side construction.
+            if self.layerwise_offload:
+                partial_idx = get_partial_block_index(
+                    cached_tokens, effective_block_size, len(group_block_hashes), True
+                )
+                if partial_idx is not None:
+                    query_keys.extend(
+                        f"{self.model_name}@partial@{req_id}@{group_id}@{partial_idx}@{cached_tokens}@{rank}"
+                        for rank in range(num_ranks)
+                    )
+            group_gvas: list[int] = []
+            group_partial: list[int] = [0] * num_ranks
+            if query_keys:
+                key_infos = self.store_scheduler.batch_get_key_info(query_keys)
+                if len(key_infos) == len(query_keys):
+                    gvas = [ki.gva_list()[0] if ki.size() and ki.size() > 0 else 0 for ki in key_infos]
+                else:
+                    logger.error(
+                        "KV pool batch_get_key_info returned %d results for %d keys (req=%s)",
+                        len(key_infos),
+                        len(query_keys),
+                        req_id,
+                    )
+                    gvas = [0] * len(query_keys)
+                group_gvas = gvas[:full_key_count]
+                if full_key_count < len(gvas):
+                    group_partial = gvas[full_key_count:]
+            gvas_by_group.append(group_gvas)
+            partial_gvas_by_group.append(group_partial)
+            for i, key in enumerate(query_keys):
+                if i < full_key_count:
+                    if group_gvas[i] > 0:
+                        lease_keys.append(key)
+                        lease_positions.append((group_gvas, i))
+                elif group_partial[i - full_key_count] > 0:
+                    lease_keys.append(key)
+                    lease_positions.append((group_partial, i - full_key_count))
+        deadline = time.time() + POOL_LEASE_TTL_MS / 1000.0
+        leased: list[str] = []
+        if lease_keys:
+            results = self.store_scheduler.batch_add_lease(lease_keys, POOL_LEASE_TTL_MS)
+            if len(results) != len(lease_keys):
+                logger.error(
+                    "MemCache lease returned %d results for %d keys (req=%s)",
+                    len(results),
+                    len(lease_keys),
+                    req_id,
+                )
+                results = [1] * len(lease_keys)
+            for key, res, position in zip(lease_keys, results, lease_positions):
+                if res == 0:
+                    entry = self._pool_leases.setdefault(key, [0.0, set()])
+                    entry[0] = deadline
+                    entry[1].add(req_id)
+                    leased.append(key)
+                else:
+                    # Unleased blob may be evicted; zero it so the worker
+                    # falls back to recompute for that block.
+                    position[0][position[1]] = 0
+        if leased:
+            self._pool_lease_req_keys.setdefault(req_id, set()).update(leased)
+        snap = PoolGvaSnapshot(
+            token_len=token_len,
+            cached_tokens=cached_tokens,
+            gvas_by_group=gvas_by_group,
+            partial_gvas_by_group=partial_gvas_by_group,
+            lease_keys=leased,
+            deadline=deadline,
+        )
+        self._pool_gva_snapshots[req_id] = snap
+        logger.debug(
+            "direct_g2l snapshot req=%s cached_tokens=%d groups=%d leased=%d deadline=%.3f",
+            req_id,
+            cached_tokens,
+            len(gvas_by_group),
+            len(leased),
+            deadline,
+        )
+        return snap
+
+    def _release_pool_lease(self, req_id: str) -> None:
+        """Drop this request's lease deps; release keys with no deps left."""
+        self._pool_gva_snapshots.pop(req_id, None)
+        keys = self._pool_lease_req_keys.pop(req_id, set())
+        released: list[str] = []
+        for key in keys:
+            entry = self._pool_leases.get(key)
+            if entry is None:
+                continue
+            entry[1].discard(req_id)
+            if not entry[1]:
+                del self._pool_leases[key]
+                released.append(key)
+        if released:
+            self.store_scheduler.batch_remove_lease(released)
+
+    def _attach_direct_g2l(self, meta: AscendConnectorMetadata) -> None:
+        """Attach leased pool GVAs to load requests in the connector metadata."""
+        if not self.use_layerwise_transfer:
+            return
+        for req_meta in meta.requests:
+            if req_meta.load_spec is None or not req_meta.load_spec.can_load:
+                continue
+            needed = self._worker_cached_tokens(req_meta.load_spec)
+            snap = self._pool_gva_snapshots.get(req_meta.req_id)
+            if snap is None or snap.cached_tokens < needed:
+                # Offload continuation (or a stale snapshot): rebuild for the
+                # exact range. token_len=0 keeps this snapshot out of the
+                # hit-check reuse cache.
+                snap = self._build_pool_gva_snapshot(
+                    req_meta.req_id,
+                    req_meta.block_hashes,
+                    needed,
+                    0,
+                )
+            if snap is None:
+                continue
+            req_meta.pool_load_gvas_by_group = snap.gvas_by_group
+            req_meta.pool_partial_gvas_by_group = snap.partial_gvas_by_group
+            req_meta.pool_lease_deadline = snap.deadline
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
@@ -1022,6 +1261,7 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
             self._loading_req_ids.discard(finished_req_id)
+            self._release_pool_lease(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
@@ -1029,6 +1269,7 @@ class KVPoolScheduler:
             self._unfinished_requests.pop(req_id, None)
             self._loading_req_ids.discard(req_id)
             self._set_delayed_free(req_id, 0)
+            self._release_pool_lease(req_id)
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
@@ -1080,6 +1321,7 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
+        self._attach_direct_g2l(meta)
         return meta
 
     def get_sending_event_id(self):
@@ -1121,6 +1363,9 @@ class KVPoolScheduler:
         self.update_finished_sending(connector_output.finished_sending)
 
         meta = connector_output.kv_connector_worker_meta
+        if isinstance(meta, AscendStoreKVConnectorWorkerMetadata):
+            for req_id in meta.loaded_req_ids:
+                self._release_pool_lease(req_id)
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
 

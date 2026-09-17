@@ -16,6 +16,7 @@
 #
 
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1373,11 +1374,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
     def test_mtp_gva_prepare_uses_safe_extent_not_store_skip_extent(self):
         worker = self._make_gva_worker()
         worker.use_eagle = True
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info]
-        worker.m_store.batch_add_lease.return_value = [0]
         request = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
@@ -1390,21 +1386,21 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 can_load=True,
                 kvpool_store_skip_tokens=32,
             ),
+            pool_load_gvas_by_group=[[201, 999]],
+            pool_lease_deadline=time.time() + 60.0,
         )
 
         worker._prepare_load_gvas([request])
 
-        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
-        self.assertEqual(len(queried_keys), 1)
+        # The eagle path loads the verified 16-token extent (one block), not
+        # the 32-token store-skip extent.
+        self.assertEqual(request.load_block_gvas_np.tolist(), [201, 0])
+        worker.m_store.batch_get_key_info.assert_not_called()
+        worker.m_store.batch_add_lease.assert_not_called()
 
     def test_full_pool_hit_uses_verified_extent(self):
         worker = self._make_gva_worker()
         worker.independent_layers = [0]
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info]
-        worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
             load_spec=LoadSpec(
                 vllm_cached_tokens=0,
@@ -1414,15 +1410,16 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
             can_save=True,
         )
+        request.pool_load_gvas_by_group = [[201]]
+        request.pool_lease_deadline = time.time() + 60.0
 
         worker._prepare_load_gvas([request])
         worker._alloc_gvas_for_save([request])
         worker._process_load_for_layer_batch([request], 1)
         worker._process_save_for_layer_batch([request], 1)
 
-        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
-        self.assertEqual(len(queried_keys), 1)
-        self.assertNotIn("@partial@", queried_keys[0])
+        worker.m_store.batch_get_key_info.assert_not_called()
+        worker.m_store.batch_add_lease.assert_not_called()
         worker.m_store.batch_alloc.assert_not_called()
         load_range = worker.layer_load_tasks[1][0].block_ranges[0]
         self.assertEqual((load_range.start_block, load_range.end_block), (0, 1))
@@ -1474,18 +1471,6 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         save_range = worker.layer_save_tasks[1][0].block_ranges[0]
         self.assertEqual(save_range.partial_block_index, 1)
 
-        normal_info = MagicMock()
-        normal_info.size.return_value = 64
-        normal_info.gva_list.return_value = [201]
-        partial_info = MagicMock()
-        partial_info.size.return_value = 64
-        partial_info.gva_list.return_value = [202]
-        worker.m_store.batch_get_key_info.return_value = [
-            normal_info,
-            partial_info,
-        ]
-        worker.m_store.batch_add_lease.return_value = [0, 0]
-
         load_request = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
@@ -1500,13 +1485,15 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             ),
             block_ids_np=np.asarray([0, 1], dtype=np.int64),
             block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+            pool_load_gvas_by_group=[[201]],
+            pool_partial_gvas_by_group=[[202]],
+            pool_lease_deadline=time.time() + 60.0,
         )
         worker._prepare_load_gvas([load_request])
         worker._process_load_for_layer_batch([load_request], 0)
         worker._process_load_for_layer_batch([load_request], 1)
 
-        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
-        self.assertIn(partial_key, queried_keys)
+        worker.m_store.batch_get_key_info.assert_not_called()
         self.assertNotIn(partial_key, worker._allocated_gvas)
         self.assertEqual(load_request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.layer_load_tasks[0], [])
@@ -1520,13 +1507,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             (0, 1, 1),
         )
 
-    def test_layerwise_lease_failure_is_not_copied(self):
+    def test_layerwise_unleased_gva_is_not_copied(self):
         worker = self._make_gva_worker()
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info]
-        worker.m_store.batch_add_lease.return_value = [-1]
         request = self._make_gva_request(
             load_spec=LoadSpec(
                 vllm_cached_tokens=16,
@@ -1534,6 +1516,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 can_load=True,
             ),
         )
+        # The scheduler zeroes GVAs it failed to lease; the worker must not
+        # copy them and must report the block for recompute.
+        request.pool_load_gvas_by_group = [[0]]
+        request.pool_lease_deadline = time.time() + 60.0
 
         worker._prepare_load_gvas([request])
 
@@ -1541,63 +1527,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.load_keys, [])
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_partial_lease_retries_until_snapshot_is_readable(self):
-        worker = self._make_gva_worker()
-        full_info = MagicMock()
-        full_info.size.return_value = 64
-        full_info.gva_list.return_value = [201]
-        partial_info = MagicMock()
-        partial_info.size.return_value = 64
-        partial_info.gva_list.return_value = [202]
-        worker.m_store.batch_get_key_info.return_value = [
-            full_info,
-            partial_info,
-        ]
-        worker.m_store.batch_add_lease.side_effect = [
-            [0, -3101],
-            [0],
-        ]
-        request = ReqMeta(
-            req_id="r1",
-            token_len_chunk=16,
-            target_token_len=24,
-            block_ids=[7, 8],
-            block_hashes=["h0"],
-            load_spec=LoadSpec(
-                vllm_cached_tokens=20,
-                kvpool_cached_tokens=20,
-                can_load=True,
-            ),
-            block_ids_np=np.asarray([7, 8], dtype=np.int64),
-            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
-        )
-
-        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.time.sleep") as sleep:
-            worker._prepare_load_gvas([request])
-
-        partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
-        self.assertEqual(
-            worker.m_store.batch_add_lease.call_args_list[1].args[0],
-            [partial_key],
-        )
-        sleep.assert_called_once()
-        self.assertEqual(request.load_keys, [worker._make_layerwise_full_key(0, "h0"), partial_key])
-        self.assertEqual(request.partial_load_gva_per_group, [202])
-        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
-
     def test_multi_group_load_failure_stops_before_forward(self):
         worker = self._make_gva_worker(2)
-        valid_info = MagicMock()
-        valid_info.size.return_value = 64
-        valid_info.gva_list.return_value = [201]
-        missing_info = MagicMock()
-        missing_info.size.return_value = 0
-        missing_info.gva_list.return_value = []
-        worker.m_store.batch_get_key_info.side_effect = [
-            [valid_info],
-            [missing_info],
-        ]
-        worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
             num_groups=2,
             load_spec=LoadSpec(
@@ -1606,15 +1537,17 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                 can_load=True,
             ),
         )
+        request.pool_load_gvas_by_group = [[201], [0]]
+        request.pool_lease_deadline = time.time() + 60.0
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "multi-group KV load failed",
+            "multi-group",
         ):
             worker._prepare_load_gvas([request])
 
-        group0_key = worker._make_layerwise_full_key(0, "h0")
-        worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
+        # Leases live on the scheduler; the worker never releases them.
+        worker.m_store.batch_remove_lease.assert_not_called()
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
         worker = self._make_worker()
@@ -2148,11 +2081,6 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
         worker = self._make_worker()
         worker.cache_coordinator = object()
         worker.token_database.load_mask = MagicMock(return_value=([False, True, False, True],))
-        key_info = MagicMock()
-        key_info.size.return_value = 64
-        key_info.gva_list.return_value = [201]
-        worker.m_store.batch_get_key_info.return_value = [key_info, key_info]
-        worker.m_store.batch_add_lease.return_value = [0, 0]
         request = self._make_request(
             can_save=None,
             load_spec=LoadSpec(
@@ -2161,11 +2089,12 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
                 can_load=True,
             ),
         )
+        request.pool_load_gvas_by_group = [[0, 201, 0, 201]]
+        request.pool_lease_deadline = time.time() + 60.0
 
         worker._prepare_load_gvas([request])
 
-        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
-        self.assertEqual(queried_keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
+        worker.m_store.batch_get_key_info.assert_not_called()
         self.assertEqual(request.load_masks, ([False, True, False, True],))
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0, 201, 0, 201])
 

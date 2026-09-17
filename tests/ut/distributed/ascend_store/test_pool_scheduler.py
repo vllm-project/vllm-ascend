@@ -1206,8 +1206,10 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
         self.assertEqual(hit, 64)
         queried_keys = scheduler.store_scheduler.batch_get_key_info.call_args_list
-        # Only the 4 FA keys + 2 sparsely-stored SWA keys are queried.
-        self.assertEqual(sum(len(call.args[0]) for call in queried_keys), 6)
+        # Hit check queries only the 4 FA keys + 2 sparsely-stored SWA keys;
+        # the direct-G2L snapshot build then queries all 8 full-block keys
+        # (4 blocks x 2 groups) once to lease them for the whole load window.
+        self.assertEqual(sum(len(call.args[0]) for call in queried_keys), 6 + 8)
 
     def test_hit_stops_where_stored_tail_is_missing(self):
         scheduler = self._make_scheduler()

@@ -816,6 +816,24 @@ class LoadSpec:
     token_len: int = 0
 
 
+@dataclass
+class PoolGvaSnapshot:
+    """Scheduler-side GVA snapshot for the layerwise direct-G2L load path.
+
+    ``gvas_by_group[g][block * num_ranks + rank]`` holds the pool blob GVA of
+    that full block; ``partial_gvas_by_group[g][rank]`` the trailing partial
+    block. Leased at snapshot time by the scheduler, so the GVAs stay valid
+    until ``deadline`` (absolute seconds, time.time() domain).
+    """
+
+    token_len: int
+    cached_tokens: int
+    gvas_by_group: list[list[int]]
+    partial_gvas_by_group: list[list[int]]
+    lease_keys: list[str]
+    deadline: float
+
+
 @dataclass(init=False)
 class RequestTracker:
     # Request id
@@ -1006,6 +1024,9 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        pool_load_gvas_by_group: list[list[int]] | None = None,
+        pool_partial_gvas_by_group: list[list[int]] | None = None,
+        pool_lease_deadline: float | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1047,6 +1068,9 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        self.pool_load_gvas_by_group = pool_load_gvas_by_group
+        self.pool_partial_gvas_by_group = pool_partial_gvas_by_group
+        self.pool_lease_deadline = pool_lease_deadline
 
     @property
     def block_ids(self) -> list[int]:
@@ -1080,6 +1104,12 @@ class ReqMeta:
     # the coordinator is unavailable).
     store_masks: tuple[Sequence[bool] | None, ...] | None = None
     load_masks: tuple[Sequence[bool] | None, ...] | None = None
+
+    # Direct-G2L load path: pool GVAs leased by the scheduler, indexed
+    # [block * num_ranks + rank] per group (None keeps the legacy RPC path).
+    pool_load_gvas_by_group: list[list[int]] | None = None
+    pool_partial_gvas_by_group: list[list[int]] | None = None
+    pool_lease_deadline: float | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -1346,6 +1376,9 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
 
+    loaded_req_ids: list[str] = field(default_factory=list)
+    """Request ids whose layerwise loads finished (direct-G2L lease release)."""
+
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
             "aggregate worker metadata must be type of AscendStoreKVConnectorWorkerMetadata"
@@ -1357,4 +1390,5 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        return AscendStoreKVConnectorWorkerMetadata(merged)
+        loaded = list(dict.fromkeys([*self.loaded_req_ids, *other.loaded_req_ids]))
+        return AscendStoreKVConnectorWorkerMetadata(merged, loaded_req_ids=loaded)
