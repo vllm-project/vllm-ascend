@@ -440,12 +440,8 @@ def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     idx_mapping_np = np.array([1, 0], dtype=np.int32)
     query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
-    total_len = Ascend310PStagedWriteTensor(
-        2, dtype=torch.int32, device=torch.device("cpu")
-    )
-    num_computed_tokens = Ascend310PStagedWriteTensor(
-        2, dtype=torch.int32, device=torch.device("cpu")
-    )
+    total_len = Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu"))
+    num_computed_tokens = Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu"))
     req_states = SimpleNamespace(
         all_token_ids=SimpleNamespace(cpu=torch.zeros((2, 8), dtype=torch.int32)),
         last_sampled_tokens_cpu=torch.zeros((2, 1), dtype=torch.int64),
@@ -477,9 +473,7 @@ def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
     )
     req_states.total_len.apply_write()
     req_states.num_computed_tokens.apply_write()
-    torch.testing.assert_close(
-        req_states.total_len.gpu, torch.tensor([1, 2], dtype=torch.int32)
-    )
+    torch.testing.assert_close(req_states.total_len.gpu, torch.tensor([1, 2], dtype=torch.int32))
     torch.testing.assert_close(
         req_states.num_computed_tokens.gpu,
         torch.tensor([1, 2], dtype=torch.int32),
