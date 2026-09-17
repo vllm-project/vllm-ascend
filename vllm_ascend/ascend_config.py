@@ -18,10 +18,12 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import math
 import os
+from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, model_validator
+from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -172,6 +174,79 @@ class AscendFusionConfig:
     fusion_ops_gmmswigluquant: bool = True
 
 
+@config(config=ConfigDict(frozen=True))
+class StairConfig:
+    """Advanced tuning for the MRv2 STAIR policy.
+
+    Covariance-aware risk and hysteresis are mandatory policy behavior. Balance
+    is the reciprocal of the mean max-to-average rank-load ratio.
+
+    Attributes:
+        load_window_bins: Maximum chronological bins used to compress the
+            upstream EPLB load window. Bin means and weights represent all
+            samples in that window.
+        load_risk_quantile: One-sided standard-normal quantile converted to a
+            z-score for mean-plus-deviation expert and rank risk.
+        relative_balance_threshold: Rebalance when current balance divided by
+            the last committed balance is at or below this value.
+        absolute_balance_threshold: Rebalance when current balance is at or
+            below this value.
+        rank_pair_migration_limit: Maximum expert transfers for each directed
+            source-destination rank pair in one layer plan.
+        replica_search_num_stages: Number of risk-ordered expert groups handled
+            by the FlashTree-style replica search.
+        replica_search_radius: Maximum distance from the greedy extra-replica
+            budget explored at each search stage.
+        replica_search_beam_size: Maximum unique replica-count candidates kept
+            after each search stage.
+        placement_search_backtrack_limit: Maximum feasible-branch reversals
+            while constrained LPT places one candidate. Zero disables them.
+    """
+
+    load_window_bins: int = 64
+    load_risk_quantile: float = 0.75
+    relative_balance_threshold: float = 0.95
+    absolute_balance_threshold: float = 0.90
+    rank_pair_migration_limit: int = 1
+    replica_search_num_stages: int = 4
+    replica_search_radius: int = 8
+    replica_search_beam_size: int = 64
+    placement_search_backtrack_limit: int = 32
+
+    @property
+    def z_score(self) -> float:
+        return NormalDist().inv_cdf(self.load_risk_quantile)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_bool(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("STAIR numeric fields must not be booleans")
+        return value
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if not 2 <= self.load_window_bins <= 256:
+            raise ValueError("stair_config.load_window_bins must be between 2 and 256")
+        if not math.isfinite(self.load_risk_quantile) or not 0.5 < self.load_risk_quantile < 1:
+            raise ValueError("stair_config.load_risk_quantile must be between 0.5 and one")
+        for name in ("relative_balance_threshold", "absolute_balance_threshold"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"stair_config.{name} must be between zero and one")
+        if self.rank_pair_migration_limit < 1:
+            raise ValueError("stair_config.rank_pair_migration_limit must be positive")
+        if not 1 <= self.replica_search_num_stages <= 8:
+            raise ValueError("stair_config.replica_search_num_stages must be between 1 and 8")
+        if not 0 <= self.replica_search_radius <= 32:
+            raise ValueError("stair_config.replica_search_radius must be between 0 and 32")
+        if not 1 <= self.replica_search_beam_size <= 128:
+            raise ValueError("stair_config.replica_search_beam_size must be between 1 and 128")
+        if not 0 <= self.placement_search_backtrack_limit <= 64:
+            raise ValueError("stair_config.placement_search_backtrack_limit must be between 0 and 64")
+        return self
+
+
 @config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
@@ -195,6 +270,7 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+    stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -363,7 +439,8 @@ class AscendConfig:
                 "num_redundant_experts": 0,
                 "eplb_policy_type": 2,
                 "eplb_heat_collection_stage": "all",
-                "load_collection_phase": "all"
+                "load_collection_phase": "all",
+                "stair_config": {}
             },
             "rejection_sampler_config": {
                 "enable_block_verify": false,
