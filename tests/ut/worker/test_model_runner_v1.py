@@ -112,6 +112,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
                 runner.speculative_config = None
                 runner._has_gdn = True
                 runner.vllm_config = MagicMock()
+                runner.vllm_config.model_config.multimodal_config = None
                 agreed_counts = torch.tensor([padded_tokens, 192], dtype=torch.int32)
                 runner._determine_batch_execution_and_padding = MagicMock(
                     return_value=(
@@ -177,6 +178,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         for token_counts in ([24, 8], [8, 24], [8, 8]):
             with self.subTest(token_counts=token_counts):
                 runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
                 runner.uniform_decode_query_len = 1
                 runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4)
                 runner.dynamic_eplb = False
@@ -262,6 +264,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.use_compress = True
         runner._has_gdn = False
         runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.multimodal_config = None
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(
