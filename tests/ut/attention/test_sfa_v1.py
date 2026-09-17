@@ -1096,6 +1096,52 @@ class TestAscendSFAImpl(TestBase):
         mock_dispose.assert_called_once()
         mock_maybe_trans_nz.assert_called_once()
 
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_runtime_weight_address(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """A weight update reload must refresh ``W_UV``/``W_UK_T`` in place.
+
+        In graph + RL scenario the graph is captured once, so the addresses of
+        ``W_UV``/``W_UK_T`` are baked into the captured graph. Re-triggering
+        ``process_weights_after_loading`` (which is exactly what vLLM does
+        after a layerwise weight update) therefore has to reuse the existing
+        storage instead of rebinding the attributes.
+        """
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+        w_uv_ptr = self.impl.W_UV.data_ptr()
+        w_uk_t_ptr = self.impl.W_UK_T.data_ptr()
+        old_w_uv = self.impl.W_UV.clone()
+
+        # A weight update replaces the raw kv_b_proj weight; the derived
+        # tensors must follow it while staying at the same address.
+        kv_b_proj_shape = (
+            self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim),
+            self.impl.kv_lora_rank,
+        )
+        layer.weight = torch.randn(*kv_b_proj_shape, dtype=torch.bfloat16)
+        mock_format_cast.return_value = layer.weight
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        self.assertEqual(self.impl.W_UV.data_ptr(), w_uv_ptr)
+        self.assertEqual(self.impl.W_UK_T.data_ptr(), w_uk_t_ptr)
+
+        # ... and the refreshed buffers must hold the new kv_b_proj split.
+        expected_w_uk, expected_w_uv = layer.weight.T.view(
+            self.impl.kv_lora_rank,
+            self.impl.num_heads,
+            self.impl.qk_nope_head_dim + self.impl.v_head_dim,
+        ).split([self.impl.qk_nope_head_dim, self.impl.v_head_dim], dim=-1)
+        torch.testing.assert_close(self.impl.W_UV, expected_w_uv.transpose(0, 1).contiguous())
+        torch.testing.assert_close(self.impl.W_UK_T, expected_w_uk.permute(1, 2, 0).contiguous())
+        self.assertFalse(torch.equal(self.impl.W_UV, old_w_uv))
+
     # ============ _process_weights_for_fused_prolog_v3 ============
 
     def _run_prolog_v3_weight_test(self, qt, has_scales):
