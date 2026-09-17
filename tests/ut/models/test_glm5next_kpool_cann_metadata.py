@@ -57,6 +57,11 @@ def test_cann_metadata_addresses_flat_pools_across_chunks_eviction_and_padding()
     common = _common()
     metadata = builder.build(0, common)
 
+    assert metadata.start_pos is not None
+    assert metadata.query_start_loc is not None
+    assert metadata.cum_query_lens is not None
+    assert metadata.pool_tail is not None
+    assert metadata.pooled_key_indices is not None
     assert metadata.start_pos.tolist() == [2, 7]
     assert metadata.query_start_loc.tolist() == [0, 6, 8]
     assert metadata.cum_query_lens.tolist() == [6, 8]
@@ -126,6 +131,11 @@ def test_cann_graph_padding_has_empty_query_and_nonnegative_start(padded_end):
     )
     common = _common()
     captured = builder.build(0, common)
+    assert captured.query_start_loc is not None
+    assert captured.cum_query_lens is not None
+    assert captured.start_pos is not None
+    assert captured.raw_seq_lens is not None
+    assert captured.pool_tail is not None
     common.num_input_tokens = 2
     common.num_actual_tokens = 1
     common.query_start_loc = torch.tensor([0, 1, padded_end], dtype=torch.int32)
@@ -133,6 +143,8 @@ def test_cann_graph_padding_has_empty_query_and_nonnegative_start(padded_end):
     common.positions = torch.tensor([8, 3])
     common.slot_mapping = torch.tensor([8, -1])
     updated = builder.build(0, common)
+    assert updated.query_start_loc is not None
+    assert updated.pooled_key_indices is not None
     assert updated.query_start_loc.data_ptr() == captured.query_start_loc.data_ptr()
     assert captured.query_start_loc.tolist() == [0, 1, 1]
     assert captured.cum_query_lens.tolist() == [1, 1]

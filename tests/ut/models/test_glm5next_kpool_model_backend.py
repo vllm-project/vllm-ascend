@@ -371,6 +371,7 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
 
     assert result is not None
     assert backend.indexer_op.args is not None
+    assert backend.indexer_op.kwargs is not None
     torch.testing.assert_close(backend.indexer_op.args[1], normalized_q_c.repeat(1, 2).view(2, 2, 2))
     torch.testing.assert_close(backend.indexer_op.args[0], hidden + 3)
     torch.testing.assert_close(backend.indexer_op.kwargs["key_weight"], backend.wk_weights_proj.weight[:2])
@@ -379,5 +380,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     expected_weights = torch.nn.functional.linear(hidden, backend.wk_weights_proj.weight[2:]) * (0.5 * 2**-0.5)
     torch.testing.assert_close(backend.indexer_op.args[2], expected_weights)
     assert backend.indexer_op.args[7] is tail_metadata
-    assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
