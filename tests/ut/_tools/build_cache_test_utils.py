@@ -69,9 +69,9 @@ def build_cache_command(
         "--publish-dir": publish_dir,
         "--publish-state-dir": publish_state_dir,
     }
-    for option, value in custom_values.items():
-        if value is not None:
-            command.extend([option, str(value)])
+    for option, custom_value in custom_values.items():
+        if custom_value is not None:
+            command.extend([option, str(custom_value)])
 
     command.append("--")
     command.extend(build_command)
