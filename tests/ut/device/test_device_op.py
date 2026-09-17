@@ -114,6 +114,7 @@ def test_moe_gating_top_k_uses_cann_api():
     with mock.patch(
         "vllm_ascend.device.device_op.torch_npu.npu_moe_gating_top_k",
         return_value=(native_weights, native_ids, native_out),
+        create=True,
     ) as mock_gating:
         weights, ids, out = BaseDeviceAdaptor.moe_gating_top_k(
             x,
