@@ -234,7 +234,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref) }}
+      vllm_ascend_ref: "${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref) }}"
       request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
