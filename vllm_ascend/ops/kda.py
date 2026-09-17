@@ -26,12 +26,12 @@ def run_recurrent_kda(
     beta_is_preprocessed: bool = True,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # Recurrent KDA consumes independent Q/K/V token/head strides directly.
+    # Recurrent KDA consumes Q/K/V and BF16 gate token/head strides directly.
     return torch.ops._C_ascend.recurrent_kda(
         q,
         k,
         v,
-        raw_gate.contiguous(),
+        raw_gate,
         beta.contiguous(),
         state,
         cu_seqlens,

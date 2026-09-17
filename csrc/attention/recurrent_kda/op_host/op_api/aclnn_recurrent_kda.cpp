@@ -452,6 +452,7 @@ aclnnStatus PreProcess(
     bool queryNeedsContiguous,
     bool keyNeedsContiguous,
     bool valueNeedsContiguous,
+    bool gateNeedsContiguous,
     aclOpExecutor *executor)
 {
     SetInputOriginalShape(params);
@@ -461,7 +462,8 @@ aclnnStatus PreProcess(
               ACLNN_ERR_INNER_NULLPTR);
     CHECK_RET(DataContiguousIfNeeded(params.value, valueNeedsContiguous, executor) == ACLNN_SUCCESS,
               ACLNN_ERR_INNER_NULLPTR);
-    CHECK_RET(DataContiguous(params.gate, executor) == ACLNN_SUCCESS, ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(DataContiguousIfNeeded(params.gate, gateNeedsContiguous, executor) == ACLNN_SUCCESS,
+              ACLNN_ERR_INNER_NULLPTR);
     CHECK_RET(DataContiguous(params.beta, executor) == ACLNN_SUCCESS, ACLNN_ERR_INNER_NULLPTR);
     CHECK_RET(DataContiguous(params.cuSeqlensOptional, executor) == ACLNN_SUCCESS, ACLNN_ERR_INNER_NULLPTR);
     CHECK_RET(DataContiguous(params.ssmStateIndicesOptional, executor) == ACLNN_SUCCESS, ACLNN_ERR_INNER_NULLPTR);
@@ -535,11 +537,15 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     const bool querySupportsDirect = IsSupportedQkvView(params.query, parsedLayout);
     const bool keySupportsDirect = IsSupportedQkvView(params.key, parsedLayout);
     const bool valueSupportsDirect = IsSupportedQkvView(params.value, parsedLayout);
+    // The BFG projection exposes a BF16 gate view with a padded token stride.
+    const bool gateSupportsDirect = params.gate->GetDataType() == op::DataType::DT_BF16 &&
+                                    IsSupportedQkvView(params.gate, parsedLayout);
+    const bool gateUsesDirectView = !IsContiguous(params.gate) && gateSupportsDirect;
     const bool queryUsesDirectView = !IsContiguous(params.query) && querySupportsDirect;
     const bool keyUsesDirectView = !IsContiguous(params.key) && keySupportsDirect;
     const bool valueUsesDirectView = !IsContiguous(params.value) && valueSupportsDirect;
     CHECK_RET(PreProcess(params, !querySupportsDirect, !keySupportsDirect, !valueSupportsDirect,
-                         executorPtr) == ACLNN_SUCCESS,
+                         !gateSupportsDirect, executorPtr) == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);
     if (queryUsesDirectView) {
         CHECK_RET(CreateViewIfNonContiguous(params.query, executorPtr) == ACLNN_SUCCESS,
@@ -551,6 +557,11 @@ aclnnStatus aclnnRecurrentKdaGetWorkspaceSize(
     }
     if (valueUsesDirectView) {
         CHECK_RET(CreateViewIfNonContiguous(params.value, executorPtr) == ACLNN_SUCCESS,
+                  ACLNN_ERR_INNER_NULLPTR);
+    }
+
+    if (gateUsesDirectView) {
+        CHECK_RET(CreateViewIfNonContiguous(params.gate, executorPtr) == ACLNN_SUCCESS,
                   ACLNN_ERR_INNER_NULLPTR);
     }
 

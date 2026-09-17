@@ -42,6 +42,35 @@ from vllm import LLM
 LLM(model="Qwen/Qwen3-8B", additional_config={"config_key":"config_value"})
 ```
 
+### Chunked-prefill workspace token capacity
+
+`chunked_prefill_workspace_max_tokens` controls the token cap used by the
+MLA/SFA chunked-prefill workspace sizing helper. It defaults to `131072`
+(128 Ki tokens). Supply a positive JSON integer; zero, negative values,
+booleans, strings, and fractional values are rejected.
+
+To use the same sizing as replacing the previous `128 * 1024` constant with
+`512 * 1024`, add this key to your existing additional configuration:
+
+```bash
+--additional-config '{"chunked_prefill_workspace_max_tokens":524288}'
+```
+
+This configures a token count, not bytes or an exact allocation. The existing
+sizing rule remains:
+
+```text
+max(min(max(8 * max_model_len, 4 * max_num_seqs * block_size),
+        chunked_prefill_workspace_max_tokens),
+    max_num_seqs * block_size)
+```
+
+The per-batch minimum takes precedence and can exceed the configured cap.
+A short-context workload can allocate less than the cap. Increasing the cap
+can increase temporary NPU memory consumption and reduce memory available to
+the KV cache; it does not change `max_model_len` or `max_num_batched_tokens`.
+It only affects attention paths that use this sizing helper.
+
 ### Configuration options
 
 The following table lists additional configuration options available in vLLM Ascend:
@@ -54,6 +83,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
+| `chunked_prefill_workspace_max_tokens` | int | `131072` | Positive integer token cap for MLA/SFA chunked-prefill workspace sizing. The per-batch minimum still applies; see the sizing rule above. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
@@ -66,12 +96,13 @@ The following table lists additional configuration options available in vLLM Asc
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
 | `enable_mc2_hierarchy_comm`         | bool | `False` | Enable dispatch/combine op inter-node communication by ROCE. This param will be deprecated and be replaced by mc2_comm_alg = "hierarchy" |
 | `enable_prefill_mc2`                | bool | `False` | Whether to reserve mc2_token_capacity for prefill batches. When enabled, `max_num_batched_tokens` is used to calculate the mc2_token_capacity instead of the decode-only capacity. In this scenario, the recommended maximum value of `max_num_batched_tokens` is `tp_size * 512`. This is a temporary switch; once MC2 operators are complete for all scenarios, this switch will be removed and MC2 will be enabled by default. |
+| `enable_kimi_o_proj_mm_reduce_scatter` | bool | `True` | Optimize Kimi K3 BF16 O-projection GEMM and TP ReduceScatter on A5. Requires sequence parallel attention residuals, the original TP group, ND O weights (`weight_nz_mode` 0 or 1), and no LoRA. Pure prefill uses `npu_quant_mm_reduce_scatter` without quantization scales and with `comm_mode="ai_cpu"`; eligible MLA decode writes its output shard directly. See [Kimi O-projection fusion](#kimi-o-projection-fusion). |
 | `mega_moe_max_tokens`               | int  | `65536` | Reference per-rank token capacity after dispatch in the fused MC2/MegaMoe path. It is passed as `dispatch_ffn_combine`'s `max_output_size` and CANN MegaMoe buffer's `max_recv_token_num`. If a rank's actual MoE load exceeds this value, precision degradation may occur. The absolute safe upper bound is `num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank)`, but using it directly can consume very large device memory. Tune this value based on actual expert load distribution. |
 | `msmonitor_use_daemon`              | bool | `False` | Whether to use daemon mode for msmonitor. The legacy `MSMONITOR_USE_DAEMON` environment variable is no longer supported. |
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. With `2`, CANN MegaMoe is selected from instantiated layer capabilities: A2/A3 support BF16/W8A8/W4A8, and A5 supports W4A8 MXFP with `group_size=32`. Unsupported layouts keep the non-MegaMoe path. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled. Enabling it automatically enables FlashComm.|
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. The legacy `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is kept for compatibility. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
@@ -84,6 +115,54 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+**enable_fused_mc2 (CANN MegaMoe / dispatch_ffn_combine)**
+
+`enable_fused_mc2=0` disables the fused path. `1` retains the legacy fused
+path where supported and does not enable CANN MegaMoe. `2` explicitly enables
+CANN MegaMoe; configuration initialization normalizes it to `1` while keeping
+the MegaMoe runtime gate enabled. On A5 the MegaMoe path is
+selected from the instantiated MoE layer capabilities instead of checkpoint
+metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
+On A5, only pure prefill batches at `DP=1` select MegaMoe (`PP>1` is supported).
+Multi-DP execution retains the existing communication selection: local prefill
+flags do not provide an EP-wide decision when another DP worker is idle or decoding.
+This branch is not gated by
+the decode MC2 token capacity; decode and mixed batches retain the existing
+MC2/AllGather/AllToAll selection.
+
+| Item | A2 / A3 | A5 (Ascend 950PR / 950DT) |
+| ---- | ------- | ------------------------- |
+| Quantization | W8A8 / W4A8 (INT) and BF16 | W4A8 MXFP only, `group_size=32` |
+| Activation | SwiGLU | SwiGLU and SiTU (`activation_params={beta, linear_beta}`) |
+| Max routed experts | 1024 | 2048 (must be divisible by EP size) |
+| Max EP world size | 64 | 1024 |
+| Max top-k | 16 | 32 |
+| Hidden size | [1024, 8192], multiple of 512 | [1024, 8192], multiple of 512 |
+
+Notes for A5:
+
+- The validated CANN 9.2 package exposes the communication-context builder at
+  `cann_ops_transformer.ops.mc2.common.comm_context`. Its native loader reuses
+  cached bindings and can build missing bindings on first use. Warm up the
+  intended prefill shapes before collecting performance profiles.
+- Requires a `cann_ops_transformer` build with SiTUGLU support and the
+  `mega_moe` custom operator package. If the package is installed under
+  `${ASCEND_HOME_PATH}/opp/vendors`, make sure `ASCEND_CUSTOM_OPP_PATH` also
+  contains that vendor directory. vLLM Ascend prepends its own bundled vendors
+  path at startup, which otherwise shadows the installed package and makes the
+  call fall back to the built-in older operator.
+- The symmetric buffer receive capacity uses the operator's automatic mode
+  (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
+- The MegaMoe path is mutually exclusive with
+  `multistream_overlap_shared_expert`; the latter is force-disabled when
+  `enable_fused_mc2=2`.
+
+```bash
+vllm serve <model> \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --additional-config '{"enable_fused_mc2": 2}'
+```
 
 **xlite_graph_config**
 
@@ -326,4 +405,72 @@ An example of additional configuration is as follows:
     },
     "refresh": False
 }
+```
+
+## Kimi O-projection fusion
+
+The eligible path is enabled by default. The existing explicit switch also
+enables it on PP stages, including a PP4/TP8 prefill node. Add this field to
+the existing `--additional-config` JSON:
+
+```json
+{"enable_kimi_o_proj_mm_reduce_scatter": true}
+```
+
+MRv1 and MRv2 both read the pure-prefill flag through the same context proxy.
+No additional environment variable is required. Set
+`"enable_kimi_o_proj_mm_reduce_scatter": false` in the existing
+`--additional-config` JSON to disable it.
+The option applies to the main Kimi K3 model's KDA and MLA O projections;
+DSpark draft projections retain their existing communication.
+Only pure-prefill execution uses fusion. Decode, mixed batches and graph capture
+retain GEMM followed by ReduceScatter because AI-CPU fusion adds latency at small
+token counts. Both paths return the same SP shard.
+For eligible BF16 MLA decode, live-row masking is fused into the output gate
+and ReduceScatter writes the caller's output buffer directly, avoiding a
+separate post-collective mask/copy.
+
+The supported Kimi path uses attention residuals and sequence parallelism
+(`TP > 1` and expert parallelism enabled). Each PP stage uses its own TP
+group; fusion does not change the SP tensors sent between stages. O weights must be
+unquantized BF16, even when the other model weights use MXFP quantization.
+Fine-grained O-projection TP, BF16 NZ weights (`weight_nz_mode=2`), and LoRA
+are not supported by this path.
+
+Enabling the option selects fusion only for supported layers. Unsupported
+configurations retain the original
+O projection and communication path instead of failing model initialization.
+Sequence-parallel layers keep their separate ReduceScatter; layers without
+sequence parallelism retain their original full-token output layout. Existing
+  custom projection operators, quantized or non-BF16 O weights, and projections
+with bias also keep their original implementation.
+
+Selection also requires the V2 Python interface, a TP size in
+`{2, 4, 8, 16, 32, 64}`, and nonempty 2D weights with local `K` in
+`[256, 65535)`. At execution, unsupported activation dtype/shape, weight
+strides, empty batches, or padded communication payloads at or above 4 GiB
+use the original GEMM followed by `sp_reduce_scatter`. This fallback still
+returns the token shard expected by the MLA buffer and decoder. Branches
+depend on tensor metadata shared by the TP ranks, not tensor values or
+rank-local resource availability. The payload ceiling is an upper bound;
+kernel support below it still depends on the installed CANN version and shape.
+
+Each rank keeps its existing TP weight shard. Token padding moves before the
+fused GEMM, the MLA output buffer holds `ceil(num_tokens / TP)` rows, and the
+decoder skips its separate ReduceScatter. Output gates, KDA normalization,
+and residual additions retain their existing order. TP communication uses
+AI CPU; this option does not select the MoE EP communication engine.
+
+The installed `torch_npu.npu_quant_mm_reduce_scatter` must support BF16 inputs
+and the `comm_mode` argument. Kernel errors are propagated. Compare accuracy,
+prefill latency, and decode latency against the default path before enabling
+it for a deployment.
+
+The following test checks rank-distinct BF16 results for padded and unpadded
+batches in eager mode and NPU graph replay, then prints baseline/fused latency
+for each shape. Run it on reserved A5 devices before model-level validation:
+
+```bash
+torchrun --standalone --nproc-per-node=8 -m pytest --noconftest -s \
+  tests/e2e/nightly/single_node/ops/multicard_ops_a5/test_kimi_o_proj_mm_reduce_scatter.py
 ```

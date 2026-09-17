@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from typing import cast
 
@@ -107,6 +108,39 @@ class RecomputeSchedulerOutput(SchedulerOutput):
 
 class RecomputeScheduler(Scheduler):
     running: list[Request]
+
+    def _update_requests_with_invalid_blocks(
+        self,
+        requests: Iterable[Request],
+        invalid_block_ids: set[int],
+        num_scheduled_tokens: dict[str, int],
+        evict_blocks: bool = True,
+    ) -> tuple[set[str], int, set[int]]:
+        if self.recompute_kv_load_failures:
+            return super()._update_requests_with_invalid_blocks(
+                requests, invalid_block_ids, num_scheduled_tokens, evict_blocks
+            )
+
+        # The fail policy terminates the request; it does not need to map a
+        # failed block to a token offset across heterogeneous cache groups.
+        affected_req_ids: set[str] = set()
+        total_affected_tokens = 0
+        blocks_to_evict: set[int] = set()
+        for request in requests:
+            req_id = request.request_id
+            grouped_block_ids = self.kv_cache_manager.get_block_ids(req_id)
+            if not any(
+                block_id in invalid_block_ids for group_block_ids in grouped_block_ids for block_id in group_block_ids
+            ):
+                continue
+            affected_req_ids.add(req_id)
+            total_affected_tokens += request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
+            if evict_blocks:
+                # Do not cache any part of a failed request, including groups
+                # whose transfers completed before another group failed.
+                for group_block_ids in grouped_block_ids:
+                    blocks_to_evict.update(group_block_ids)
+        return affected_req_ids, total_affected_tokens, blocks_to_evict
 
     def _get_computed_blocks_for_connector(self, request: Request) -> tuple[KVCacheBlocks, int, int, bool]:
         kv_cache_manager = self.kv_cache_manager
@@ -726,13 +760,19 @@ class RecomputeScheduler(Scheduler):
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
-                        and (scheduled_running_reqs and not prefill_scheduled)
+                        and not prefill_scheduled
+                        and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        num_new_tokens = 1 + self.num_spec_tokens
-                        if num_new_tokens > token_budget or num_computed_tokens + num_new_tokens > self.max_model_len:
-                            # Prefer to not schedule than schedule un-padded here.
-                            break
-                        pad_spec_decode = True
+                        padded_num_tokens = 1 + self.num_spec_tokens
+                        if (
+                            num_computed_tokens + padded_num_tokens + self.num_sampled_tokens_per_step
+                            <= self.max_model_len
+                        ):
+                            if padded_num_tokens > token_budget:
+                                # Prefer to not schedule than schedule un-padded here.
+                                break
+                            num_new_tokens = padded_num_tokens
+                            pad_spec_decode = True
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -775,6 +815,12 @@ class RecomputeScheduler(Scheduler):
                     )
                     if num_new_tokens == 0:
                         break
+
+                if pad_spec_decode and num_new_tokens != 1 + self.num_spec_tokens:
+                    # A clipped verifier window must not advertise more draft
+                    # logits than its query rows. Keep the real prompt tail.
+                    num_new_tokens = 1
+                    pad_spec_decode = False
 
                 # During async KV load, no forward pass is run yet. Allocate
                 # speculative lookahead slots later to avoid mismatching local

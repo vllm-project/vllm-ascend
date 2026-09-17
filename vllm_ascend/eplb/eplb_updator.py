@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+from queue import Empty
+
 import numpy
 import torch
 import torch.distributed as dist
@@ -67,6 +69,9 @@ class EplbUpdator:
 
         self.reqs = []
         self.update_info_all = []
+        self._local_plan_ready = False
+        self._all_plans_ready = False
+        self._plan_ready = torch.zeros(1, dtype=torch.int32, device="cpu")
 
         self.cur_iterations: torch.int64 = 0
 
@@ -87,6 +92,8 @@ class EplbUpdator:
 
             self.adaptor.clear_all_moe_loads()
             self.cur_iterations = 0
+            self._local_plan_ready = False
+            self._all_plans_ready = False
 
     def get_update_info_flag(self):
         return self.cur_iterations == (self.expert_heat_collection_interval + self.algorithm_execution_interval - 1)
@@ -106,7 +113,19 @@ class EplbUpdator:
     def forward_before(self):
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
-            self.update_info_all = self.eplb_process.block_update_q.get()
+            if not self._local_plan_ready:
+                try:
+                    self.update_info_all = self.eplb_process.block_update_q.get_nowait()
+                except Empty:
+                    pass
+                else:
+                    self._local_plan_ready = True
+            # Planning can outlive algorithm_execution_interval. Keep serving
+            # with the current weights until every rank has its new plan; a
+            # local readiness decision would mismatch the weight P2P calls.
+            self._plan_ready.fill_(self._local_plan_ready)
+            dist.all_reduce(self._plan_ready, op=dist.ReduceOp.MIN, group=self.comm_group.cpu_group)
+            self._all_plans_ready = bool(self._plan_ready.item())
         if self.update_expert_weight_flag():
             with record_function_or_nullcontext("EPLB generate p2p task"):
                 (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
@@ -127,6 +146,10 @@ class EplbUpdator:
                 self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
+        if self.get_update_info_flag() and not self._all_plans_ready:
+            # Freeze only the EPLB phase, never the model forward. Poll again
+            # next step without waking another planner or clearing its load.
+            return
         if self.wakeup_eplb_worker_flag():
             with record_function_or_nullcontext("EPLB gather moe load"):
                 self.compute_and_set_moe_load()

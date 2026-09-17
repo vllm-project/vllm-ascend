@@ -6,6 +6,107 @@ import torch_npu
 from vllm.distributed import get_dcp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
+
+_DCP_MTP_COMM_STREAM: torch.npu.Stream | None = None
+
+
+def _dcp_mtp_comm_stream() -> torch.npu.Stream:
+    global _DCP_MTP_COMM_STREAM
+    if _DCP_MTP_COMM_STREAM is None:
+        _DCP_MTP_COMM_STREAM = torch_npu.npu.Stream()
+    return _DCP_MTP_COMM_STREAM
+
+
+def exchange_flash_attention_output(
+    output: torch.Tensor,
+    lse: torch.Tensor,
+    dcp_group=None,
+    *,
+    fp32_output: bool = False,
+) -> torch.Tensor:
+    """Exchange history shards without waiting for the local current chunk."""
+    size = dcp_group.world_size if dcp_group is not None else 1
+    return torch.ops.vllm.sfa_dcp_a2a_fused(
+        # The existing SFA pack encodes FP32 LSE alongside BF16 values,
+        # and its fused combine accumulates in FP32. Avoid a full-size FP32
+        # output copy unless the expanded-prefill projection needs it below.
+        output.float() if fp32_output else output,
+        lse.transpose(0, 1).unsqueeze(-1).float(),
+        size,
+        1,
+        dcp_group.unique_name if size > 1 else "",
+        defer_combine=True,
+    )
+
+
+def combine_flash_attention_output(
+    recv: torch.Tensor,
+    head_dim: int,
+    *,
+    current_output: torch.Tensor | None = None,
+    current_lse: torch.Tensor | None = None,
+    value_projection: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Merge received history and count the replicated current chunk once."""
+    if value_projection is not None:
+        ranks, heads, tokens, _ = recv.shape
+        latent = recv[..., :head_dim].permute(1, 0, 2, 3).reshape(heads, ranks * tokens, head_dim)
+        projected = torch.bmm(latent, value_projection.float())
+        projected = projected.view(heads, ranks, tokens, -1).permute(1, 0, 2, 3)
+        recv = torch.cat((projected, recv[..., head_dim:]), dim=-1).contiguous()
+        head_dim = value_projection.shape[-1]
+    return fused_sfa_dcp_lse_combine(
+        recv,
+        head_dim,
+        scatter_dim=1,
+        local_output=current_output,
+        local_lse=current_lse.transpose(0, 1).unsqueeze(-1) if current_lse is not None else None,
+    )
+
+
+def merge_flash_attention_output(
+    output: torch.Tensor,
+    lse: torch.Tensor,
+    dcp_group=None,
+    *,
+    current_output: torch.Tensor | None = None,
+    current_lse: torch.Tensor | None = None,
+    value_projection: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reuse DCP exchange/combine, including Flash's empty-rank LSE sentinel."""
+    recv = exchange_flash_attention_output(output, lse, dcp_group, fp32_output=value_projection is not None)
+    return combine_flash_attention_output(
+        recv,
+        output.shape[-1],
+        current_output=current_output,
+        current_lse=current_lse,
+        value_projection=value_projection,
+    )
+
+
+def expand_dcp_replicated_block_table(
+    block_table: torch.Tensor,
+    manager_block_size: int,
+    kernel_block_size: int,
+    replication_size: int,
+    column_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Expand target-DCP block IDs into the GQA draft's resident lane pages."""
+    if manager_block_size % kernel_block_size != 0:
+        raise ValueError("Replicated draft manager blocks must be divisible by the kernel block size.")
+    blocks_per_phys_block = manager_block_size // kernel_block_size
+    local_columns = (
+        column_indices // (replication_size * blocks_per_phys_block) * blocks_per_phys_block
+        + column_indices % blocks_per_phys_block
+    )
+    lanes = (column_indices // blocks_per_phys_block) % replication_size
+    local_blocks = torch.index_select(block_table, 1, local_columns.to(torch.int64))
+    if blocks_per_phys_block == 1:
+        return local_blocks * replication_size + lanes
+    local_sub_blocks = local_blocks % blocks_per_phys_block
+    local_phys_blocks = local_blocks // blocks_per_phys_block
+    return (local_phys_blocks * replication_size + lanes) * blocks_per_phys_block + local_sub_blocks
 
 
 def get_dcp_local_seq_lens(

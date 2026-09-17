@@ -40,6 +40,7 @@ from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
+from vllm_ascend.ops.triton.eplb_load import collect_moe_load
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -57,8 +58,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
-        vllm_config = get_current_vllm_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
+        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
         self.lora_context = None
         self._lora_routing = None
@@ -375,7 +375,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.global_redundant_expert_num: int = 0
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
-        if not self._use_v2_model_runner:
+        if not self._use_v2_model_runner or ascend_config.eplb_config.dynamic_eplb:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
 
@@ -521,7 +521,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
         """Return the global-to-local map used by Ascend MoE execution."""
-        if getattr(self, "_use_v2_model_runner", False):
+        if getattr(self, "_use_v2_model_runner", False) and not getattr(self, "dynamic_eplb", False):
             return self.expert_map
         return getattr(self, "_ascend_expert_map", None)
 
@@ -614,6 +614,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def collect_moe_load(self, expert_tokens: torch.Tensor, group_list_type: int) -> None:
+        load_enabled = getattr(self, "eplb_load_enabled", None)
+        if self.dynamic_eplb and (load_enabled is not None or _EXTRA_CTX.eplb_heat_collection_status):
+            assert expert_tokens is not None and group_list_type is not None, (
+                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
+            )
+            assert self.moe_load is not None
+            collect_moe_load(
+                expert_tokens,
+                self.moe_load,
+                group_list_type,
+                self.load_counter if self.multi_stage else None,
+                load_enabled,
+                getattr(self, "eplb_counter_enabled", None),
+            )
+
     def forward_impl(
         self,
         *,
@@ -670,27 +686,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type should not be None when dynamic_eplb is enabled."
-            )
-            local_load = (
-                expert_tokens
-                if group_list_type == 1
-                else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            )
-            assert self.moe_load is not None
-            if self.multi_stage:
-                assert self.load_counter is not None and self.num_iter is not None
-                cur_iter = torch.remainder(self.load_counter, self.num_iter)
-                self.moe_load.index_add_(
-                    dim=0, index=cur_iter, source=local_load.to(torch.int32, non_blocking=True).view(1, -1)
-                )
-                self.load_counter.add_(1)
-            else:
-                self.moe_load.add_(local_load)
+        if not fused_experts_results.eplb_load_collected:
+            self.collect_moe_load(fused_experts_results.expert_tokens, fused_experts_results.group_list_type)
 
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,

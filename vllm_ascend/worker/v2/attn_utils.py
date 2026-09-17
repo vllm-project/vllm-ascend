@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -33,15 +34,18 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.attn_utils import init_attn_backend as _upstream_init_attn_backend
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -51,6 +55,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -64,12 +69,35 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
+    is_kimi_k3_gqa_dspark,
     vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTaskProvider
+from vllm_ascend.worker.flash_kv_cache import create_flash_kernel_block_view
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+_device_metadata_executor: ContextVar[DeviceMetadataExecutor | None] = ContextVar(
+    "ascend_mrv2_device_metadata_executor", default=None
+)
+
+
+@contextmanager
+def device_metadata_context(executor: DeviceMetadataExecutor | None):
+    """Keep task buffers owned until the target/draft consumer has been queued."""
+    if executor is None or _device_metadata_executor.get() is executor:
+        yield
+        return
+    token = _device_metadata_executor.set(executor)
+    try:
+        yield
+    finally:
+        if executor.submission_in_flight:
+            executor.release()
+        _device_metadata_executor.reset(token)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -106,6 +134,15 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # Keep Mamba groups after attention groups. Ascend graph parameter
             # updates rely on this stable backend ordering.
             mamba_specs[layer_name] = spec
+            continue
+
+        if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Preserve the upstream MLA draft capability and manager geometry;
+            # GQA only changes physical K/V head slots through its backend.
+            if not isinstance(attn_module, MLAAttention):
+                spec = attn_module.get_attn_backend().customize_spec(spec)
+            kv_cache_spec[layer_name] = spec
+            attention_layer_names.append(layer_name)
             continue
 
         if isinstance(attn_module, MLAAttention):
@@ -182,7 +219,50 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
+    if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and is_kimi_k3_gqa_dspark(vllm_config):
+        for layer_name, spec in kv_cache_spec.items():
+            # MLA inherits FullAttentionSpec too; only the GQA draft uses
+            # replicated pages, while the target retains its MLA cache layout.
+            if isinstance(spec, FullAttentionSpec) and not isinstance(spec, (MLAAttentionSpec, AscendMLAAttentionSpec)):
+                kv_cache_spec[layer_name] = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                    spec, vllm_config.parallel_config.decode_context_parallel_size
+                )
     return kv_cache_spec
+
+
+def init_attn_backend(kv_cache_config, vllm_config, device, **kwargs):
+    """Refine Flash metadata groups without changing scheduler KV groups."""
+    attn_groups, cg_support, kernel_block_sizes = _upstream_init_attn_backend(
+        kv_cache_config, vllm_config, device, **kwargs
+    )
+    if not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        return attn_groups, cg_support, kernel_block_sizes
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    layer_order = {name: index for index, name in enumerate(layers)}
+    for group_id, groups in enumerate(attn_groups):
+        refined = []
+        for group in groups:
+            partitions = {}
+            for name in sorted(group.layer_names, key=layer_order.__getitem__):
+                impl = getattr(layers[name], "impl", None)
+                # Upstream already splits Q heads and cache geometry. Flash
+                # tiling also bakes in RoPE mode and softmax scale.
+                key = (getattr(impl, "use_mla_rope", None), getattr(impl, "scale", None))
+                partitions.setdefault(key, []).append(name)
+            if len(partitions) <= 1:
+                refined.append(group)
+                continue
+            for names in partitions.values():
+                split_group = AttentionGroup(group.backend, names, group.kv_cache_spec, group.kv_cache_group_id)
+                split_group.create_metadata_builders(
+                    vllm_config=vllm_config,
+                    device=device,
+                    kernel_block_size=kernel_block_sizes[group_id] if group_id < len(kernel_block_sizes) else None,
+                    num_metadata_builders=len(group.metadata_builders),
+                )
+                refined.append(split_group)
+        attn_groups[group_id] = refined
+    return attn_groups, cg_support, kernel_block_sizes
 
 
 def build_attn_metadata(
@@ -216,6 +296,12 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    executor = _device_metadata_executor.get()
+    if executor is not None and executor.submission_in_flight:
+        # Capture factories and draft replay can build another metadata set
+        # after consuming the previous one on this stream.
+        executor.release()
+    device_metadata_tasks = []
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -284,6 +370,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                attn_metadata_builder.enable_device_metadata()
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             attn_metadata_extra_kwargs = (
@@ -324,6 +412,17 @@ def build_attn_metadata(
                 common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                device_metadata_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
+    if device_metadata_tasks:
+        # Both upstream capture factories and runtime builders execute outside
+        # the captured model. Ordinary stream events therefore stay outside
+        # FULL graphs; replay reads the stable buffers after these waits.
+        assert not torch.npu.is_current_stream_capturing()
+        assert executor is not None
+        executor.submit(device_metadata_tasks)
+        for task in device_metadata_tasks:
+            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 
@@ -601,6 +700,38 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
+        if not sizes:
+            return {}
+        assert len(sizes) == 1, "Flash KV descriptors must share one backing allocation"
+        size = sizes.pop()
+        backing = torch.zeros(
+            size + (alignment if vllm_config.kv_transfer_config is not None else 0),
+            dtype=torch.int8,
+            device=device,
+        )
+        if vllm_config.kv_transfer_config is not None:
+            backing = _align_memory(backing, alignment)[:size]
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            for index, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+                spec = layer_kv_cache_spec[layer_name]
+                payload = spec.num_heads * spec.num_states * spec.state_content_size_bytes
+                replication_size = (
+                    spec.dcp_replication_size if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) else 1
+                )
+                block_stride = (
+                    spec.lane_page_size_bytes
+                    if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+                    else descriptor.block_stride
+                )
+                kv_cache_raw_tensors[layer_name] = torch.as_strided(
+                    backing,
+                    (kv_cache_config.num_blocks * replication_size, payload),
+                    (block_stride, 1),
+                    backing.storage_offset() + descriptor.offset + index * descriptor.layer_stride,
+                )
+        return kv_cache_raw_tensors
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -989,6 +1120,43 @@ def _reshape_kv_cache_v2(
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
+            if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+                raw = kv_cache_raw_tensors[layer_name]
+                assert isinstance(raw, torch.Tensor)
+                if isinstance(kv_cache_spec, MambaSpec):
+                    states = []
+                    offset = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        size = int(np.prod(shape)) * get_dtype_size(dtype)
+                        states.append(raw[:, offset : offset + size].view(dtype).view(raw.shape[0], *shape))
+                        offset += size
+                    kv_caches[layer_name] = tuple(states)
+                else:
+                    ratio = kv_cache_spec.block_size // kernel_block_size
+                    if ratio > 1:
+                        descriptor = next(
+                            tensor
+                            for tensor in kv_cache_config.kv_cache_tensors
+                            if layer_name in get_kv_cache_tensor_layers(tensor)
+                        )
+                        cache = create_flash_kernel_block_view(
+                            raw,
+                            kv_cache_spec,
+                            kernel_block_size,
+                            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                            descriptor,
+                            get_kv_cache_tensor_layers(descriptor).index(layer_name),
+                        )
+                    else:
+                        cache = raw.view(kv_cache_spec.dtype).view(
+                            raw.shape[0],
+                            kv_cache_spec.num_heads,
+                            kv_cache_spec.get_num_kernel_states(kernel_block_size),
+                            kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                        )
+                    kv_caches[layer_name] = cache.squeeze(1) if isinstance(kv_cache_spec, MLAAttentionSpec) else cache
+                continue
+
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
                 raw_cache = kv_cache_raw_tensors[layer_name]
@@ -1191,7 +1359,7 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_state=None):
     """Wrap build_attn_metadata to forward rotary positions for the draft block.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1204,6 +1372,8 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        if attn_state is not None:
+            kwargs["attn_state"] = attn_state
         return raw(*args, **kwargs)
 
     try:

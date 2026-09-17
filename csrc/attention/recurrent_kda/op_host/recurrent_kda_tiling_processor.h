@@ -85,6 +85,8 @@ struct RecurrentKdaTilingContext {
     std::array<int64_t, RKDA_RANK4_QKV_DIM_NUM> queryStrides = {};
     std::array<int64_t, RKDA_RANK4_QKV_DIM_NUM> keyStrides = {};
     std::array<int64_t, RKDA_RANK4_QKV_DIM_NUM> valueStrides = {};
+    std::array<int64_t, RKDA_RANK4_QKV_DIM_NUM> gateStrides = {};
+    bool hasGateStrides = false;
     bool hasQueryStrides = false;
     bool hasKeyStrides = false;
     bool hasValueStrides = false;
@@ -554,6 +556,9 @@ private:
         tiling.keyHeadStride = static_cast<uint64_t>(keyStrides[headDim]);
         tiling.valueTokenStride = static_cast<uint64_t>(valueStrides[tokenDim]);
         tiling.valueHeadStride = static_cast<uint64_t>(valueStrides[headDim]);
+        const auto gateStrides = ResolveQkvStrides(ctx_.gateShape, ctx_.gateStrides, ctx_.hasGateStrides);
+        tiling.gateTokenStride = static_cast<uint64_t>(gateStrides[tokenDim]);
+        tiling.gateHeadStride = static_cast<uint64_t>(gateStrides[headDim]);
         const auto stateInStrides = ResolveStateStrides(false);
         const auto stateOutStrides = ResolveStateStrides(true);
         tiling.stateInStride0 = static_cast<uint64_t>(stateInStrides[RKDA_DIM_0]);

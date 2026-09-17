@@ -187,6 +187,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
+        "attn_res_fwd"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"
@@ -208,6 +209,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "flash_mla_with_kvcache"
+        "flash_mla_with_kvcache_metadata"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
@@ -223,10 +226,15 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "hc_pre"
         "swiglu_group_quant"
         "situ_mx_quant"
+        "grouped_matmul_situ_quant"
         "indexer_compress_epilog_v2"
         "causal_conv1d"
+        "causal_conv1d_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
+        "attn_res_fwd"
+        "attn_res_fwd_with_add"
+        "attn_res_fwd_fused"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "chunk_kda_fwd"
@@ -277,9 +285,14 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  # CANN OPC invokes nested make processes outside Ninja's jobserver.
+  # Propagate the requested concurrency so tiling keys do not build serially.
+  build_jobs="${MAX_JOBS:-$(nproc)}"
+  export MAKEFLAGS="${MAKEFLAGS:+${MAKEFLAGS} }-j${build_jobs}"
+  log "build parallelism: jobs=${build_jobs} MAKEFLAGS=${MAKEFLAGS}"
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}" -j"${build_jobs}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"

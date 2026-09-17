@@ -1,5 +1,8 @@
 # MlaPrologV3 API 与调用示例
 
+本验证分支仅编译 Kimi-K3 A5 TP8 decode 使用的 MXFP8、BF16 KV、PA_BSND、NoPE、split-N 模板。该模板也覆盖 TP8/DCP8 replicated-Q 的 96 个 Q heads；V-up 和 O 投影仍使用本 TP rank 的 12 个 heads。
+下面的完整 API 描述保留用于参考；本分支产物不包含其他量化与布局模板。
+
 ## 1. API 总览
 
 | 通路 | API/入口 | 支持情况 |
@@ -82,7 +85,7 @@
 
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
-`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；除首轴外的其余轴必须连续。
+`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；PA_BSND 还支持 token 轴的非连续布局，可直接写入 FlashMLA 合并缓存中 token stride 为 576 的 CKV/KR 视图。
 
 #### 量化模式合法组合（`weight_quant_mode` × `kv_cache_quant_mode`）
 

@@ -207,6 +207,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
+    """Return token capacity, preserving the per-batch minimum allocation."""
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
@@ -216,14 +217,14 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         # 4 pages of cache per request
         max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
         # For long-context models try not to over-allocate limiting
-        # kv-cache space, limiting it to 128k tokens,
+        # kv-cache space, limiting it to 128k tokens by default,
         # which would result in the workspace being:
         #   2*(576)*(128*1024) = 288mb
         # (assuming 576 MLA head dim, and fp16)
         # which would result in up-projected context being
         #   2*(192*128)*(128*1024) = 6gb
         # (assuming 192 QK head dim, 128 heads, and fp16)
-        128 * 1024,
+        get_ascend_config().chunked_prefill_workspace_max_tokens,
     )
 
     chunked_prefill_workspace_size = max(

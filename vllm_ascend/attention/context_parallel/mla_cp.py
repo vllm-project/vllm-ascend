@@ -9,6 +9,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
@@ -27,6 +28,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    _dcp_mtp_comm_stream,
     get_dcp_local_seq_lens,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -37,7 +39,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, weak_ref_tensors
 
 
 class MLASplitAttentionKind(Enum):
@@ -51,16 +53,6 @@ class MLASplitAttentionGraphParams(NamedTuple):
     attention_params: tuple
     attention_kind: MLASplitAttentionKind
     layer_name: str
-
-
-_DCP_MTP_COMM_STREAM: torch.npu.Stream | None = None
-
-
-def _dcp_mtp_comm_stream() -> torch.npu.Stream:
-    global _DCP_MTP_COMM_STREAM
-    if _DCP_MTP_COMM_STREAM is None:
-        _DCP_MTP_COMM_STREAM = torch_npu.npu.Stream()
-    return _DCP_MTP_COMM_STREAM
 
 
 @dataclass
@@ -214,6 +206,60 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     understand this class
     """
 
+    can_return_lse_for_decode: bool = True
+
+    @property
+    def dcp_q_replicate(self) -> bool:
+        return getattr(self.q_proj, "qrep_active", False)
+
+    def _project_query(self, x, *, local_heads=False):
+        heads = self.num_heads * (self.dcp_size if self.dcp_q_replicate else 1)
+        q = self.q_proj(x)[0].view(-1, heads, self.qk_head_dim)
+        if local_heads and self.dcp_q_replicate:
+            q = self.q_proj._local_view(q)
+        return q
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA and not self.dcp_q_replicate:
+            self.enable_mlapo = False
+        if self.dcp_q_replicate:
+            if self.fa_quant_layer:
+                raise ValueError("DCP replicated Q requires unquantized MLA KV cache")
+            # The A5 NoPE prolog accepts the same group-head Q projection as
+            # the unfused path. Other backends retain their existing path.
+            if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+                self.enable_mlapo = False
+        super().process_weights_after_loading(act_dtype)
+        if self.dcp_q_replicate:
+            # Only K-up participates in replicated Q absorption. V-up and O
+            # remain TP-local after the DCP output exchange.
+            weight = torch_npu.npu_format_cast(self.W_UK_T, ACL_FORMAT_FRACTAL_ND)
+            gathered = self._dcp_all_gather(weight, 0)
+            if hasattr(self, "dcp_W_UK_T"):
+                self.dcp_W_UK_T.copy_(gathered)
+            else:
+                self.dcp_W_UK_T = gathered
+            if self.enable_mlapo:
+                self.mlapo_W_UK_T = self.dcp_W_UK_T
+                self.mlapo_num_heads = self.num_heads * self.dcp_size
+
+    def _q_proj_and_k_up_proj(self, x):
+        if not self.dcp_q_replicate:
+            return super()._q_proj_and_k_up_proj(x)
+        q_nope, q_pe = self._project_query(x).split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_abs = torch.bmm(q_nope.transpose(0, 1), self.dcp_W_UK_T).transpose(0, 1)
+        return q_abs, q_pe
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # AscendMLAImpl bypasses the upstream MLA initializer. Both FIA and
+        # Flash MLA return LSE for the internal DCP merge.
+        self.need_to_return_lse_for_decode = self.dcp_size > 1
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Flash MLA merges DCP-local history with causal current tokens;
+            # the history lengths account for the configured KV interleave.
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -223,6 +269,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The executor refreshes Flash schedules outside the captured graph.
+            return
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
@@ -341,6 +390,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         return prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[index]
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if self.dcp_q_replicate:
+            return decode_q_nope, decode_q_pe
         return self._dcp_all_gather_fragments(
             decode_q_nope,
             decode_q_pe,
@@ -507,9 +558,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 graph_params = get_graph_params()
             assert graph_params is not None
             if graph_params.workspaces.get(num_tokens) is None:
-                # Both FIA calls execute serially on the main stream. Size the
-                # shared workspace before either call is captured so its address
-                # stays fixed; history all-to-all only reads the FIA outputs.
+                # The current FIA waits for the history FIA across streams. Size
+                # their shared workspace before capture so its address stays
+                # fixed; history packing only reads the FIA outputs.
                 workspace_kwargs = {
                     "num_key_value_heads": self.num_kv_heads,
                     "input_layout": "TND",
@@ -566,46 +617,45 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attention_kind=MLASplitAttentionKind.HISTORY,
         )
 
-        # Overlap history all-to-all with current-token attention.
+        # Run current-token attention on the side stream while the main
+        # stream packs and exchanges history. The ready event also orders
+        # current attention after the history FIA's shared workspace use.
         main_stream = torch.npu.current_stream()
-        comm_stream = _dcp_mtp_comm_stream()
+        attn_stream = _dcp_mtp_comm_stream()
         history_ready = main_stream.record_event()
-        history_output.record_stream(comm_stream)
-        history_lse.record_stream(comm_stream)
-        with torch.npu.stream(comm_stream):
-            comm_stream.wait_event(history_ready)
-            history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
-                history_output.float(),
-                history_lse.float(),
-                self.dcp_size,
-                1,
-                self.dcp_group.unique_name if self.dcp_size > 1 else "",
-                defer_combine=True,
+        for tensor in (current_q_nope, current_q_pe, current_k_nope, current_k_pe, decode_meta.attn_mask):
+            if tensor is not None:
+                tensor.record_stream(attn_stream)
+        with torch.npu.stream(attn_stream):
+            attn_stream.wait_event(history_ready)
+            # Current K/V is replicated. Each rank computes its own Q heads
+            # and contributes the current chunk once during the local merge.
+            current_output, current_lse = self._run_dcp_mtp_split_attention_op(
+                current_q_nope,
+                current_q_pe,
+                current_k_nope,
+                current_k_pe,
+                attn_mask=decode_meta.attn_mask,
+                sparse_mode=3,
+                block_table=None,
+                block_size=0,
+                actual_seq_lengths=decode_meta.actual_seq_lengths_q,
+                actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                attention_kind=MLASplitAttentionKind.CURRENT,
             )
-            history_comm_done = comm_stream.record_event()
-        # The result is allocated on the communication stream and consumed
-        # on the main stream; keep its storage alive through the merge.
-        history_recv.record_stream(main_stream)
+            current_attn_done = attn_stream.record_event()
+        current_output.record_stream(main_stream)
+        current_lse.record_stream(main_stream)
 
-        # Current K/V is replicated on every CP rank. Each DCP rank computes
-        # only the Q heads it owns after history all-to-all. Merge this chunk
-        # locally after the collective so it is counted exactly once.
-        current_output, current_lse = self._run_dcp_mtp_split_attention_op(
-            current_q_nope,
-            current_q_pe,
-            current_k_nope.contiguous(),
-            current_k_pe.contiguous(),
-            attn_mask=decode_meta.attn_mask,
-            sparse_mode=3,
-            block_table=None,
-            block_size=0,
-            actual_seq_lengths=decode_meta.actual_seq_lengths_q,
-            actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-            attention_kind=MLASplitAttentionKind.CURRENT,
+        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+            history_output,
+            history_lse.float(),
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name if self.dcp_size > 1 else "",
+            defer_combine=True,
         )
-
-        # Join the history communication only when both branches are ready.
-        main_stream.wait_event(history_comm_done)
+        main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
         attn_output = fused_sfa_dcp_lse_combine(

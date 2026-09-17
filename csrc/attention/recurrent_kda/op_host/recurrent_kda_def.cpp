@@ -27,7 +27,8 @@ public:
         this->Input("value").ParamType(REQUIRED).DataTypeList(qkvTypes).FormatList(formats)
             .IgnoreContiguous();
         this->Input("gate").ParamType(REQUIRED)
-            .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND});
+            .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND})
+            .IgnoreContiguous();
         this->Input("beta").ParamType(REQUIRED)
             .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND});
         this->Input("initial_state")

@@ -230,6 +230,81 @@ class TestAscendEPLBController(unittest.TestCase):
             )
 
 
+class TestLegacyFlashLBController(unittest.TestCase):
+    def make_controller(self):
+        controller = AscendEPLBController(
+            SimpleNamespace(enable_eplb=False, tensor_parallel_size=8),
+            torch.device("cpu"),
+            legacy_config=SimpleNamespace(eplb_policy_type=3),
+        )
+        controller.legacy_updator = MagicMock()
+        controller.legacy_updator.update_expert_weight_flag.return_value = False
+        controller.legacy_load_enabled = torch.zeros((), dtype=torch.int32)
+        controller.legacy_counter_enabled = torch.zeros((), dtype=torch.int32)
+        return controller
+
+    def test_real_and_idle_steps_advance_same_planner_without_dummy_load(self):
+        for is_dummy in (False, True):
+            with self.subTest(is_dummy=is_dummy):
+                controller = self.make_controller()
+                controller._legacy_is_dummy = is_dummy
+                controller.prepare_forward(SimpleNamespace(), 4)
+                self.assertEqual(controller.legacy_load_enabled.item(), int(not is_dummy))
+                self.assertEqual(controller.legacy_counter_enabled.item(), 1)
+                controller.legacy_updator.forward_before.assert_called_once()
+                controller.step(is_dummy=is_dummy)
+                controller.step(is_dummy=is_dummy)
+                controller.legacy_updator.forward_end.assert_called_once()
+                self.assertEqual(controller.legacy_load_enabled.item(), 0)
+                self.assertEqual(controller.legacy_counter_enabled.item(), 0)
+
+    def test_profile_and_capture_suppression_excludes_collection_and_update(self):
+        controller = self.make_controller()
+        controller.legacy_load_enabled.fill_(1)
+        controller.legacy_counter_enabled.fill_(1)
+        with controller.suppress_legacy():
+            with controller.suppress_legacy():
+                controller.prepare_forward(SimpleNamespace(), 4)
+                controller.step(is_dummy=True)
+            self.assertTrue(controller.suppressed)
+            self.assertEqual(controller.legacy_load_enabled.item(), 0)
+            self.assertEqual(controller.legacy_counter_enabled.item(), 0)
+        self.assertFalse(controller.suppressed)
+        controller.legacy_updator.forward_before.assert_not_called()
+        controller.legacy_updator.forward_end.assert_not_called()
+
+    def test_weight_replacement_waits_for_forward_before_update(self):
+        controller = self.make_controller()
+        controller.legacy_updator.update_expert_weight_flag.return_value = True
+        calls = []
+        controller.legacy_updator.forward_end.side_effect = lambda: calls.append("update")
+        controller.prepare_forward(SimpleNamespace(), 4)
+        with patch("torch.npu.current_stream") as current_stream:
+            current_stream.return_value.synchronize.side_effect = lambda: calls.append("synchronize")
+            controller.step()
+        self.assertEqual(calls, ["synchronize", "update"])
+
+    def test_registration_uses_real_policy3_and_shared_graph_gates(self):
+        controller = self.make_controller()
+        layers = [nn.Linear(2, 2), nn.Linear(2, 2)]
+        with (
+            patch("vllm_ascend.worker.v2.eplb.Manager"),
+            patch("vllm_ascend.worker.v2.eplb.VllmEplbAdaptor") as adaptor,
+            patch("vllm_ascend.worker.v2.eplb.D2DExpertWeightLoader"),
+            patch("vllm_ascend.worker.v2.eplb.EplbProcess") as process,
+            patch("vllm_ascend.worker.v2.eplb.EplbUpdator") as updator,
+        ):
+            adaptor.return_value.moe_layers = layers
+            added = controller.maybe_register_model(nn.Linear(2, 2), SimpleNamespace(), False)
+        self.assertFalse(added)
+        self.assertEqual(process.call_args.kwargs["policy_type"], 3)
+        self.assertEqual(process.call_args.kwargs["tp_size"], 8)
+        self.assertIsNone(controller.state)
+        self.assertIs(layers[0].eplb_load_enabled, layers[1].eplb_load_enabled)
+        self.assertIs(layers[0].eplb_counter_enabled, layers[1].eplb_counter_enabled)
+        updator.return_value.warm_up_eplb.assert_called_once()
+
+
 class TestUnwrapMoe(unittest.TestCase):
     def test_unwraps_multimodal_non_moe_model(self):
         model = MagicMock(spec=SupportsMultiModal)

@@ -45,6 +45,7 @@ class HardwareCapability(Enum):
     MC2_HIERARCHY_COMM = auto()
     MOE_DISPATCH_EXTRA_ARGS = auto()
     MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
+    MM_REDUCE_SCATTER_AI_CPU_INFERENCE = auto()
     NPUGRAPH_EX = auto()
     NPU_TOP_K_TOP_P = auto()
     PAGED_ATTENTION = auto()
@@ -242,6 +243,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
+                    HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,

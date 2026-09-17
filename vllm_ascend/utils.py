@@ -863,6 +863,24 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
+def _is_kimi_k3_target(vllm_config) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or ()
+    return any(
+        architecture in {"KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"}
+        for architecture in architectures
+    )
+
+
+def enable_kimi_k3_sp(vllm_config) -> bool:
+    """K3 keeps sequence shards between layers, including at DP=1."""
+    if not _is_kimi_k3_target(vllm_config):
+        return False
+    parallel_config = vllm_config.parallel_config
+    return parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
+
+
 def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         try:
@@ -875,6 +893,8 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
+    if _is_kimi_k3_target(vllm_config):
+        return enable_kimi_k3_sp(vllm_config)
     return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
@@ -1070,13 +1090,8 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
-def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
-    """True on PD-disaggregated decode nodes with recompute_scheduler_enable.
-
-    After KV recv, RecomputeScheduler sets num_computed_tokens to N-1 so the
-    decode node recomputes the last prompt token before MTP decode. Worker
-    metadata must not treat that step as prefill.
-    """
+def is_pd_decode_node(vllm_config: VllmConfig | None = None) -> bool:
+    """Identify a dedicated KV consumer independently of its scheduler."""
     try:
         if vllm_config is None:
             # No caller-provided config: fall back to the upstream runtime
@@ -1093,11 +1108,14 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
         if vllm_config is None:
             return False
         kv_cfg = vllm_config.kv_transfer_config
-        if kv_cfg is None or not kv_cfg.is_kv_consumer or kv_cfg.is_kv_producer:
-            return False
-        return get_ascend_config().scheduler_config.recompute_scheduler_enable
+        return kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
     except (RuntimeError, AttributeError):
         return False
+
+
+def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
+    """True on dedicated KV consumers using the recompute scheduler."""
+    return is_pd_decode_node(vllm_config) and get_ascend_config().scheduler_config.recompute_scheduler_enable
 
 
 def _compute_potential_max_tokens(vllm_config) -> int:
@@ -1157,7 +1175,13 @@ def get_potential_max_tokens() -> int:
     return _potential_max_tokens
 
 
-def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
+def should_skip_allreduce_across_dp_group(
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
@@ -1196,13 +1220,22 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
         return False
 
     from vllm_ascend.ascend_forward_context import select_moe_comm_method, use_cann_megamoe
+    from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
-    if use_cann_megamoe(vllm_config):
-        return False
+    if ascend_config.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if cann_mega_moe_supported is None and model_instance is not None:
+            cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
+        if use_cann_megamoe(vllm_config) or cann_mega_moe_supported:
+            return False
 
     def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        return select_moe_comm_method(
+            n,
+            vllm_config,
+            model_instance=model_instance,
+            cann_mega_moe_supported=cann_mega_moe_supported,
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
@@ -1225,6 +1258,36 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if _HAS_LAYER_IDX is None:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
+
+
+def is_kimi_k3_gqa_dspark(vllm_config) -> bool:
+    """Whether Kimi K3 uses the separate Qwen3 GQA DSpark drafter."""
+    spec_config = getattr(vllm_config, "speculative_config", None)
+    if spec_config is None or getattr(spec_config, "method", None) != "dspark":
+        return False
+    target = spec_config.target_model_config or vllm_config.model_config
+    draft = spec_config.draft_model_config
+    if target is None or draft is None:
+        return False
+    target_architectures = {
+        *(getattr(target, "architectures", ()) or ()),
+        *(getattr(target.hf_config, "architectures", ()) or ()),
+    }
+    architecture = getattr(target, "architecture", None)
+    if architecture:
+        target_architectures.add(architecture)
+    draft_architectures = {
+        *(getattr(draft, "architectures", ()) or ()),
+        *(getattr(draft.hf_config, "architectures", ()) or ()),
+    }
+    return (
+        (
+            getattr(target.hf_config, "model_type", None) == "kimi_k3"
+            or any("KimiK3" in architecture for architecture in target_architectures)
+        )
+        and getattr(draft.hf_config, "model_type", None) == "qwen3"
+        and bool(draft_architectures & {"DSparkDraftModel", "Qwen3DSparkModel"})
+    )
 
 
 def refresh_block_size(vllm_config):
@@ -1269,6 +1332,9 @@ def refresh_block_size(vllm_config):
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
         # logic rather than the generic platform default.
+        return
+
+    if cache_config.user_specified_block_size:
         return
 
     if cache_config.block_size != 128:

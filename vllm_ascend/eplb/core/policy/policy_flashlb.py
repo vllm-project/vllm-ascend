@@ -954,6 +954,12 @@ class FlashLB(EplbPolicy):
         if self.update_layers_upper_bound > 0:
             priority_idx = priority_idx[: self.update_layers_upper_bound]
 
+        # Callers apply every returned layer, so rejected candidates must keep
+        # their current placement, including layers excluded by the update cap.
+        selected = np.zeros(num_layers, dtype=bool)
+        selected[priority_idx] = True
+        new_deployment[~selected] = np.asarray(current_expert_table)[~selected]
+
         # Update global state with optimal deployments
         for layer in priority_idx:
             self.current_deployment[layer] = new_deployment[layer]

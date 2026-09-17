@@ -379,6 +379,8 @@ struct MlaPrologContext {
 
     uint64_t kvCacheStride0 = 0U;
     uint64_t krCacheStride0 = 0U;
+    uint64_t kvCacheTokenStride = 0U;
+    uint64_t krCacheTokenStride = 0U;
 
     size_t *workSpaces;
     uint64_t tilingKey;

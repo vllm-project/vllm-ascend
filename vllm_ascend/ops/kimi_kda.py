@@ -18,7 +18,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
 )
-from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
 )
@@ -26,8 +25,10 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -47,6 +48,48 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
     return _KDA_BFG_STREAM
+
+
+def _copy_strided_recurrent_states(
+    state: torch.Tensor,
+    packed_states: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    to_cache: bool,
+) -> None:
+    """Copy selected [H,V,K] states using the existing Mamba byte-copy kernel."""
+    if state.ndim != 4 or packed_states.shape != (indices.numel(), *state.shape[1:]):
+        raise ValueError("KDA state copy requires matching [N,H,V,K] tensors.")
+    if packed_states.dtype != state.dtype or not packed_states.is_contiguous():
+        raise ValueError("KDA state copy requires a contiguous buffer with the cache dtype.")
+    state_elements = 1
+    for size, stride in zip(reversed(state.shape[1:]), reversed(state.stride()[1:])):
+        if size > 1 and stride != state_elements:
+            raise ValueError("KDA state copy supports only first-axis strided caches.")
+        state_elements *= size
+    if state.stride(0) < state_elements or state.shape[0] == 0:
+        raise ValueError("KDA state pages must contain nonoverlapping states.")
+    num_states = indices.numel()
+    if num_states == 0:
+        return
+    # Widen before multiplying: the selected state can be beyond 4 GiB.
+    indices = indices.reshape(-1).to(torch.int64)
+    valid = (indices >= 0) & (indices < state.shape[0])
+    state_bytes = state_elements * state.element_size()
+    # data_ptr already includes the layer/state storage offset. Copy only the
+    # state payload, never the page stride containing other layers' state.
+    cache_ptrs = state.data_ptr() + indices.clamp(0, state.shape[0] - 1) * (state.stride(0) * state.element_size())
+    packed_ptrs = (
+        packed_states.data_ptr() + torch.arange(num_states, device=indices.device, dtype=torch.int64) * state_bytes
+    )
+    sizes = valid.to(torch.int64) * state_bytes
+    if to_cache:
+        src_ptrs, dst_ptrs = packed_ptrs, cache_ptrs
+    else:
+        # PAD_SLOT_ID rows have no source state and must not read the last page.
+        packed_states.zero_()
+        src_ptrs, dst_ptrs = cache_ptrs, packed_ptrs
+    batch_memcpy_kernel[(num_states,)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=8192)
 
 
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
@@ -175,6 +218,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
         super().__init__(config, vllm_config, prefix)
         self.uses_mixed_projection = uses_mixed_projection
+        self._conv_max_query_len = 1 + (
+            getattr(getattr(vllm_config, "speculative_config", None), "num_speculative_tokens", 0) or 0
+        )
         if uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
@@ -208,18 +254,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.o_norm.eps = config.rms_norm_eps
         # vLLM keeps the checkpoint-compatible FP32 [3C, 1, W] weight, while
         # npu_causal_conv1d_custom consumes an activation-dtype [W, 3C]
-        # tensor. Materialize that kernel layout once after weight loading.
-        self.register_parameter(
+        # tensor. This is derived runtime storage, not a checkpoint parameter.
+        # Keep it as a nonpersistent buffer so strict loading still checks the
+        # original conv1d.weight and module device/dtype moves include the copy.
+        self.register_buffer(
             _PACKED_CONV_WEIGHT_NAME,
-            nn.Parameter(
-                torch.empty(
-                    self.conv_size,
-                    3 * self.local_projection_size,
-                    dtype=self.model_config.dtype,
-                    device=self.conv1d.weight.device,
-                ),
-                requires_grad=False,
+            torch.empty(
+                self.conv_size,
+                3 * self.local_projection_size,
+                dtype=self.model_config.dtype,
+                device=self.conv1d.weight.device,
             ),
+            persistent=False,
         )
         original_process_weights = self.conv1d.quant_method.process_weights_after_loading
 
@@ -370,8 +416,30 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
+        max_query_len: int = 1,
     ) -> torch.Tensor:
         output = torch.empty_like(mixed_qkv)
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            initial = None
+            if initial_state_mode is not None:
+                initial = (
+                    initial_state_mode if initial_state_mode.dtype == torch.bool else initial_state_mode.to(torch.int32)
+                )
+            return torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_t,
+                conv_state,
+                None,
+                query_start_loc.to(torch.int32).contiguous(),
+                cache_indices.to(torch.int32),
+                initial,
+                None if num_accepted_tokens is None else num_accepted_tokens.to(torch.int32).contiguous(),
+                1,
+                PAD_SLOT_ID,
+                run_mode,
+                mixed_qkv.shape[0] if run_mode == 0 else max_query_len,
+            )
         # Consume the operator's declared output alias. Returning ``output``
         # independently would let graph functionalization treat the custom-op
         # result as dead and expose the uninitialized allocation instead.
@@ -394,19 +462,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _pack_conv_weights(self) -> None:
         if self.conv1d.weight.is_meta:
             return
-        packed_param = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        packed_buffer = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
         packed_weight = (
             self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             .transpose(0, 1)
-            .to(device=packed_param.device, dtype=packed_param.dtype)
+            .to(dtype=packed_buffer.dtype)
             .contiguous()
         )
-        replace_parameter(
-            self,
-            _PACKED_CONV_WEIGHT_NAME,
-            packed_weight,
-            prefer_copy=True,
-        )
+        if packed_buffer.device == packed_weight.device and packed_buffer.shape == packed_weight.shape:
+            packed_buffer.copy_(packed_weight)
+        else:
+            # Loading may materialize a meta tensor or temporarily move CPU
+            # offloaded parameters to the execution device. Keep runtime data
+            # on the processed weight's device; normal reloads retain storage.
+            setattr(self, _PACKED_CONV_WEIGHT_NAME, packed_weight)
 
     def _run_recurrent(
         self,
@@ -460,7 +529,13 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         # The recurrent cache uses [H,V,K]. The fused prefill operator accepts
         # that state layout directly through state_v_first.
-        initial_state_vk = recurrent_state[state_indices].contiguous()
+        if recurrent_state.is_contiguous():
+            initial_state_vk = recurrent_state[state_indices].contiguous()
+        else:
+            # CANN advanced indexing normalizes the whole strided view and
+            # fails for large shared-cache spans. Gather only live states.
+            initial_state_vk = recurrent_state.new_empty((state_indices.numel(), *recurrent_state.shape[1:]))
+            _copy_strided_recurrent_states(recurrent_state, initial_state_vk, state_indices, to_cache=False)
         clear_ssm_states(initial_state_vk, has_initial_state)
 
         output, final_state = run_chunk_kda(
@@ -476,7 +551,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
         )
-        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
+        final_state = final_state.to(recurrent_state.dtype)
+        if recurrent_state.is_contiguous():
+            recurrent_state[state_indices] = final_state
+        else:
+            _copy_strided_recurrent_states(recurrent_state, final_state.contiguous(), state_indices, to_cache=True)
         return output
 
     @eager_break_during_capture
@@ -512,7 +591,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         )
 
         conv_state, recurrent_state = self.kv_cache
-        conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+        conv_weights_t = self.get_buffer(_PACKED_CONV_WEIGHT_NAME)
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
@@ -552,6 +631,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 None,
                 run_mode=1,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
+                max_query_len=self._conv_max_query_len if envs.VLLM_ASCEND_ENABLE_FLASH_MLA else 1,
             )
             q_spec, k_spec, v_spec = (
                 rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in mixed_spec.chunk(3, dim=-1)
@@ -667,23 +747,27 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out.zero_()
             return
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
-        core_attn_out[:, :num_actual_tokens].zero_()
+        output = core_attn_out
+        if num_actual_tokens != core_attn_out.shape[1]:
+            output = core_attn_out[:, :num_actual_tokens]
         if core_spec is not None and core_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
             assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
-            core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
+            # FULL graphs may leave rows outside both live index sets. Only
+            # those mixed batches need initialization before the scatter.
+            output.zero_()
+            output.index_copy_(1, spec_token_indices, core_spec)
+            output.index_copy_(1, non_spec_token_indices, core_non_spec)
+            norm_input = output
         elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
-        elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
+            norm_input = core_spec
+        else:
+            norm_input = core_non_spec
 
         # The registered Ascend FusedRMSNormGated uses the fused norm-gate
-        # kernel while preserving the upstream parameter/loading contract.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        core_attn_out[:, :num_actual_tokens].copy_(normalized)
-        core_attn_out[:, num_actual_tokens:].zero_()
+        # kernel. Pure decode/prefill batches can consume the kernel result
+        # directly, without clearing and copying an intermediate output.
+        self.o_norm(norm_input, g2, out=output)
+        if num_actual_tokens < core_attn_out.shape[1]:
+            core_attn_out[:, num_actual_tokens:].zero_()

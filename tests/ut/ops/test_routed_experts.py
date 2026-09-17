@@ -73,18 +73,20 @@ def test_get_expert_weights_rejects_non_contiguous_view():
 
 
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
-def test_ascend_expert_map_follows_model_runner(use_v2_model_runner):
+@pytest.mark.parametrize("dynamic_eplb", [False, True])
+def test_ascend_expert_map_follows_model_runner(use_v2_model_runner, dynamic_eplb):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     legacy_map = torch.tensor([1, 0], dtype=torch.int32)
     upstream_map = torch.tensor([0, 1], dtype=torch.int32)
     object.__setattr__(routed_experts, "_use_v2_model_runner", use_v2_model_runner)
+    object.__setattr__(routed_experts, "dynamic_eplb", dynamic_eplb)
     # Both v0.28.0 and main read quant_method in RoutedExperts.expert_map.
     routed_experts.quant_method = SimpleNamespace(moe_kernel=None)
     routed_experts.ascend_expert_map = legacy_map
     object.__setattr__(routed_experts, "_expert_map", upstream_map)
     object.__setattr__(routed_experts, "rocm_aiter_fmoe_enabled", False)
 
-    expected = upstream_map if use_v2_model_runner else legacy_map
+    expected = upstream_map if use_v2_model_runner and not dynamic_eplb else legacy_map
     assert routed_experts.ascend_expert_map is expected
 
 

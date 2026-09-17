@@ -33,6 +33,7 @@ class TestVllmAdaptor(unittest.TestCase):
         mock_model.model.named_parameters.return_value = dict()
         config = DeepseekV2Config(n_routed_experts=n_routed_experts)
         mock_model.config = config
+        mock_model.modules.return_value = [self.mock_layer]
         del mock_model.language_model
         self.model = mock_model
         num_dense_layers = getattr(config, "first_k_dense_replace", 0)
@@ -111,11 +112,24 @@ class TestVllmAdaptor(unittest.TestCase):
             model.quant_config = MagicMock()
             model.config.first_k_dense_replace = 0
             del model.language_model
+            model.modules.return_value = [layer]
             adaptor = VllmEplbAdaptor(model)
 
         self.assertEqual(adaptor.num_moe_layers, 1)
         self.assertEqual(adaptor.num_local_experts, 4)
         self.assertEqual(adaptor.ep_rank, 0)
+
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_excludes_other_models_registered_layers(self, mock_get_config):
+        mock_get_config.return_value.enable_fused_mc2 = 0
+        draft_layer = MagicMock()
+        VllmEplbAdaptor._registered_moe_layers.insert(0, draft_layer)
+        adaptor = VllmEplbAdaptor(self.model)
+
+        self.assertEqual(adaptor.moe_layers, [self.mock_layer])
+        self.assertEqual(adaptor.num_moe_layers, 1)
+        self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.W8A8, False))
+        self.assertEqual(VllmEplbAdaptor._registered_moe_layers, [draft_layer, self.mock_layer])
 
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_mixed_quant_type_per_layer(self, mock_get_config):
@@ -158,6 +172,7 @@ class TestVllmAdaptor(unittest.TestCase):
         model.quant_config = MagicMock()
         model.config.first_k_dense_replace = 0
         del model.language_model
+        model.modules.return_value = [w8a8_layer, mxfp8_layer]
         adaptor = VllmEplbAdaptor(model)
 
         w8a8_key = (QuantType.W8A8, True)
@@ -195,6 +210,7 @@ class TestVllmAdaptor(unittest.TestCase):
         model.quant_config = MagicMock()
         model.config.first_k_dense_replace = 0
         del model.language_model
+        model.modules.return_value = list(VllmEplbAdaptor._registered_moe_layers)
 
         with self.assertRaisesRegex(AssertionError, "EPLB expert weight shapes mismatch"):
             VllmEplbAdaptor(model)
@@ -203,6 +219,29 @@ class TestVllmAdaptor(unittest.TestCase):
         self.mock_rank.stop()
         self.mock_size.stop()
         VllmEplbAdaptor._registered_moe_layers = []
+
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.torch_npu.copy_memory_")
+    def test_update_mxfp_expert_preserves_storage_and_weight_views(self, mock_copy):
+        mock_copy.side_effect = lambda dst, src: dst.untyped_storage().copy_(src.untyped_storage())
+        adaptor = VllmEplbAdaptor.__new__(VllmEplbAdaptor)
+        key = (QuantType.W4A8MXFP, False)
+        weights = [torch.zeros(16, dtype=torch.uint8) for _ in range(4)]
+        buffers = [torch.arange(16, dtype=torch.uint8) + index for index in range(4)]
+        weights[0] = weights[0].view(torch.float4_e2m1fn_x2)
+        buffers[0] = buffers[0].view(torch.float4_e2m1fn_x2)
+        aliases = [tensor.view(torch.uint8) for tensor in weights]
+        pointers = [tensor.data_ptr() for tensor in weights]
+        adaptor.expert_weight_key_per_layer = {0: key}
+        adaptor.expert_param_per_layer = {0: [weights]}
+        adaptor.buffer_tensor_list = {key: [buffers]}
+
+        adaptor.do_update_expert_weight(0, 0, 0)
+
+        self.assertEqual(mock_copy.call_count, 2)
+        for index, (tensor, alias, buffer) in enumerate(zip(weights, aliases, buffers)):
+            self.assertEqual(tensor.data_ptr(), pointers[index])
+            self.assertEqual(alias.data_ptr(), pointers[index])
+            torch.testing.assert_close(alias, buffer.view(torch.uint8))
 
 
 if __name__ == "__main__":

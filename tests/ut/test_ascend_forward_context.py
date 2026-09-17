@@ -472,7 +472,13 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
 
-def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
+@pytest.mark.parametrize(
+    ("num_prefills", "num_decodes", "expected_pure_prefill"),
+    [(1, 0, True), (1, 1, False), (0, 1, False), (0, 0, False)],
+)
+def test_set_ascend_forward_context_pins_current_vllm_config(
+    monkeypatch, num_prefills, num_decodes, expected_pure_prefill
+):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -497,7 +503,8 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
     monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
-    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    selector = MagicMock(return_value=None)
+    monkeypatch.setattr(afc, "select_moe_comm_method", selector)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
 
     moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
@@ -506,8 +513,10 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     else:
         monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: None))
 
-    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4):
+    metadata = {"layer": SimpleNamespace(num_prefills=num_prefills, num_decodes=num_decodes)}
+    with afc.set_ascend_forward_context(metadata, vllm_config, num_tokens=4):
         assert seen["inside"] is True
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+    selector.assert_called_once_with(4, vllm_config, model_instance=None, is_pure_prefill=expected_pure_prefill)

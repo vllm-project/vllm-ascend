@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -49,14 +50,17 @@ _HIDDEN_SIZE = 16
 
 
 @pytest.mark.parametrize(
-    ("dcp_size", "pcp_enabled", "expected_submit"),
-    [(1, False, True), (2, False, False), (1, True, False)],
+    ("dcp_size", "pcp_enabled", "flash_enabled", "expected_submit"),
+    [(1, False, False, True), (2, False, False, False), (2, False, True, True), (1, True, True, False)],
 )
-def test_build_draft_metadata_submits_only_non_cp_device_tasks(
+def test_build_draft_metadata_submits_only_eligible_device_tasks(
+    monkeypatch,
     dcp_size: int,
     pcp_enabled: bool,
+    flash_enabled: bool,
     expected_submit: bool,
 ):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASH_MLA", str(int(flash_enabled)))
     tasks = [DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, group_id) for group_id in (7, 9)]
 
     class DraftMetadataProvider:
@@ -261,6 +265,7 @@ class _DSparkProposerTestBase:
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
         draft_sample_method: str = "greedy",
+        use_cuda_graph: bool = False,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace(), draft_sample_method)
@@ -279,6 +284,7 @@ class _DSparkProposerTestBase:
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
+            proposer.use_cuda_graph = use_cuda_graph
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
             proposer.model = (
@@ -407,7 +413,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
             parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=384),
         )
 
-        def check_dcp_metadata(*, common_attn_metadata, num_query_per_req):
+        def check_dcp_metadata(*, common_attn_metadata, num_query_per_req, use_device_seq_lens):
             assert common_attn_metadata.is_prefilling.tolist() == [False, False]
             assert common_attn_metadata._seq_lens_cpu.tolist() == [133, 133]
             common_attn_metadata.context_parallel_metadata = SimpleNamespace(
@@ -575,7 +581,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             hf_config=hf_config,
             draft_sample_method=draft_sample_method,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        expected_max_query_tokens = _MAX_BATCH_SIZE * (1 + _NUM_SPECULATIVE_TOKENS)
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
@@ -687,6 +693,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         dcp_manager.prepare_dspark_first_pass_cp_metadata.assert_called_once_with(
             common_attn_metadata=cad,
             num_query_per_req=5,
+            use_device_seq_lens=bool(envs.VLLM_ASCEND_ENABLE_FLASH_MLA),
         )
         assert num_query_total == 5
 
@@ -762,7 +769,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=384))
         expected_host = torch.full((num_reqs,), 131, dtype=torch.int32)
 
-        def check_metadata(*, common_attn_metadata, num_query_per_req):
+        def check_metadata(*, common_attn_metadata, num_query_per_req, use_device_seq_lens):
             torch.testing.assert_close(common_attn_metadata._seq_lens_cpu, expected_host)
             return None, None
 
@@ -839,6 +846,8 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         has_executor,
         expected_tokens,
     ):
+        monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASH_MLA", "1")
+
         class DraftBuilder:
             def __init__(self):
                 self.max_num_tokens = None
@@ -991,3 +1000,76 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
         assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
         assert proposer._layer_group_idx == [0] * 5
+
+
+@pytest.mark.parametrize(
+    ("manager_block_size", "kernel_block_size", "local_blocks", "expected"),
+    [
+        (4, 4, [[3, 7]], [[6, 7, 14, 15]]),
+        (8, 4, [[6, 7]], [[12, 13, 14, 15]]),
+    ],
+)
+def test_dcp_replicated_dspark_block_table_and_slot_mapping(
+    manager_block_size,
+    kernel_block_size,
+    local_blocks,
+    expected,
+) -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: manager_block_size}
+    proposer._per_group_kernel_block_sizes = {0: kernel_block_size}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+    proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(16, dtype=torch.int32)}
+
+    replicated = proposer._build_replicated_block_table(
+        0,
+        torch.tensor(local_blocks, dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor(expected, dtype=torch.int32),
+    )
+    slots = proposer._build_replicated_context_slot_mapping(
+        0,
+        replicated,
+        torch.arange(8, dtype=torch.int32),
+        torch.tensor([0, 8], dtype=torch.int32),
+        num_reqs=1,
+        num_tokens=8,
+    )
+    expected_slots = torch.arange(
+        expected[0][0] * kernel_block_size,
+        expected[0][0] * kernel_block_size + 8,
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(slots[:8], expected_slots)
+    assert torch.all(slots[8:] == -1)
+
+
+def test_dcp_replicated_dspark_uses_only_active_block_table_rows() -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: 4}
+    proposer._per_group_kernel_block_sizes = {0: 4}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+
+    block_table_capacity = torch.tensor([[3, 7], [5, 9]], dtype=torch.int32)
+    active_batch_size = 1
+    replicated = proposer._build_replicated_block_table(
+        0,
+        block_table_capacity[:active_batch_size],
+        torch.tensor([8], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor([[6, 7, 14, 15]], dtype=torch.int32),
+    )

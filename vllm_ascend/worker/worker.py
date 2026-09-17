@@ -672,6 +672,10 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if envs_ascend.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # VA keeps descriptor page strides in one backing allocation;
+            # the planner budget already covers it without split-pool scaling.
+            return available_memory
         # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
         # #51718 multi-group scale is main-only. Also avoids
         # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
@@ -778,7 +782,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if enable_sp():
+            if enable_sp(self.vllm_config):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
@@ -802,7 +806,7 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if enable_sp():
+        if enable_sp(self.vllm_config):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
@@ -1218,7 +1222,11 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            skip_gdn_state_update=True,
+        )
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -23,8 +23,17 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 
 
-def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata(dcp_size) -> None:
     assert issubclass(AscendAttentionDCPImpl, AscendAttentionBackendImpl)
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendAttentionBackendImpl, "__init__", return_value=None),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+    ):
+        impl = AscendAttentionDCPImpl()
+    assert impl.can_return_lse_for_decode
+    assert impl.need_to_return_lse_for_decode is (dcp_size > 1)
     assert issubclass(
         AscendAttentionDCPMetadataBuilder,
         AscendAttentionMetadataBuilder,

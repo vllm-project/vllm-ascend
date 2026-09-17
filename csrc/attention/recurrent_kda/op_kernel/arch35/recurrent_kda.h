@@ -81,6 +81,8 @@ public:
         keyHeadStride_ = tilingData->keyHeadStride;
         valueTokenStride_ = tilingData->valueTokenStride;
         valueHeadStride_ = tilingData->valueHeadStride;
+        gateTokenStride_ = tilingData->gateTokenStride;
+        gateHeadStride_ = tilingData->gateHeadStride;
         scale_ = tilingData->scale;
         lowerBound_ = tilingData->lowerBound;
         hasCuSeqlens_ = (tilingData->hasCuSeqlens == 1);
@@ -481,7 +483,7 @@ private:
         SyncVToMte2();
         DataCopyExtParams gateInParams{static_cast<uint16_t>(seqLen),
                                        static_cast<uint32_t>(realK_ * sizeof(gateType)),
-                                       static_cast<uint32_t>((NV_ - 1) * realK_ * sizeof(gateType)), 0, 0};
+                                       static_cast<uint32_t>((gateTokenStride_ - realK_) * sizeof(gateType)), 0, 0};
         DataCopyPadExtParams<gateType> gatePadParams{
             true, 0, static_cast<uint8_t>(alignK_ - realK_), static_cast<gateType>(0)};
         if constexpr (std::is_same<gateType, float32_t>()) {
@@ -858,7 +860,7 @@ private:
         uint64_t qOffset = static_cast<uint64_t>(seq0) * queryTokenStride_ + qkHead * queryHeadStride_;
         uint64_t kOffset = static_cast<uint64_t>(seq0) * keyTokenStride_ + qkHead * keyHeadStride_;
         uint64_t vOffset = static_cast<uint64_t>(seq0) * valueTokenStride_ + head_i * valueHeadStride_;
-        uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
+        uint64_t gateOffset = static_cast<uint64_t>(seq0) * gateTokenStride_ + head_i * gateHeadStride_;
         CopyInQKVGate(qOffset, kOffset, vOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
         if (realV_ == 0) {
             return;
@@ -981,6 +983,8 @@ private:
     uint64_t keyHeadStride_;
     uint64_t valueTokenStride_;
     uint64_t valueHeadStride_;
+    uint64_t gateTokenStride_;
+    uint64_t gateHeadStride_;
     uint64_t stateInStride0_;
     uint64_t stateInStride1_;
     uint64_t stateInStride2_;

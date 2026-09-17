@@ -44,7 +44,7 @@ def _enable_batch_info_tracking(
     max_num_reqs: int = 4,
 ) -> None:
     manager.decode_threshold = 8
-    manager.pd_decode_recompute_scheduler_enabled = False
+    manager.is_pd_decode_node = False
     manager.query_lens_full = SimpleNamespace(
         cpu=torch.full((max_num_reqs,), -1, dtype=torch.int32),
         copy_to_gpu=MagicMock(),

@@ -104,6 +104,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_trace_handler.assert_called_once_with(
             "/path/to/traces",
             worker_name="warmup_dp0_pp0_tp0_dcp0_ep0_rank0",
+            async_mode=True,
         )
 
         mock_profile.assert_called_once()

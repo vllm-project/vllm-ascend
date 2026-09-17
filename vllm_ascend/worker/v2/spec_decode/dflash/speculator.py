@@ -309,11 +309,10 @@ if vllm_version_is("0.28.0"):
             for i in range(q_pad_start, max_num_tokens):
                 tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
 else:
-    # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added
-    # ``cp_rank``/``CP_SIZE``/``CP_INTERLEAVE`` for DCP support (see
-    # vllm-project/vllm#52188). The extra parameters are unused: Ascend does not
-    # run dflash with DCP (CP_SIZE is always 1, where upstream ``cp_local_slot``
-    # yields the same slots as this kernel).
+    from vllm.v1.worker.gpu.cp_utils import cp_local_slot
+
+    # Keep the NPU scalar-loop kernel while sharing upstream's DCP ownership
+    # and local-offset mapping with target KV writes.
     @triton.jit
     def _prepare_dflash_inputs_kernel_ascend(
         # Outputs
@@ -373,6 +372,7 @@ else:
 
         nrejected = tl.load(num_rejected_ptr + req_idx)
         valid_ctx_end = ctx_end - nrejected
+        num_valid_ctx = valid_ctx_end - ctx_start
 
         nsampled = tl.load(num_sampled_ptr + req_idx)
         if nsampled > 0:
@@ -387,11 +387,18 @@ else:
         # --- Context positions / slots ---
         for j in range(0, num_ctx):
             ctx_pos_idx = ctx_start + j
-            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            ctx_block_num = ctx_pos // block_size
+            is_valid_ctx = j < num_valid_ctx
+            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
+            ctx_block_num = ctx_pos // (block_size * CP_SIZE)
             ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-            ctx_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + ctx_block_num).to(tl.int64)
-            ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+            ctx_block_id = tl.load(
+                block_table_ptr + req_idx * block_table_stride + ctx_block_num, mask=is_valid_ctx, other=0
+            ).to(tl.int64)
+            local_ctx_slot = cp_local_slot(
+                ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+            )
+            # Rejected suffix rows and evicted/null blocks never write KV.
+            ctx_slot = tl.where(is_valid_ctx & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
             tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
             tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
 
@@ -404,10 +411,13 @@ else:
             else:
                 input_id = parallel_drafting_token_id
 
-            q_block_num = query_pos // block_size
+            q_block_num = query_pos // (block_size * CP_SIZE)
             q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
             q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-            q_slot = q_block_id * block_size + (query_pos % block_size)
+            local_q_slot = cp_local_slot(
+                query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+            )
+            q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
 
             tl.store(out_input_ids_ptr + query_idx, input_id)
             clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)

@@ -28,6 +28,8 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend import envs
+
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
@@ -48,6 +50,7 @@ from vllm_ascend.utils import (
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_kimi_k3_gqa_dspark,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -230,6 +233,14 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            if use_sparse or use_compress or attn_selector_config.use_pcp:
+                raise ValueError("A5 Flash attention requires dense uncompressed attention with PCP=DCP=1")
+            if use_mla:
+                return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+            if attn_selector_config.attn_type == "decoder":
+                return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
@@ -352,7 +363,21 @@ class NPUPlatform(Platform):
         return 24  # safe default (24 Cube Cores)
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Target and draft can have the same numeric layer index. The
+            # runner owns canonical per-name caches; upstream preserves both
+            # entries and binds each layer by its full name.
+            return
+        super().check_runner_kv_caches_multi_layer()
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The upstream hook runs after model construction and aligns the
+            # complete attention token against every Mamba state segment.
+            super().update_block_size_for_backend(vllm_config)
+
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
@@ -459,8 +484,39 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            from vllm_ascend.device.device_config import is_950
+
+            cache = vllm_config.cache_config
+            parallel = vllm_config.parallel_config
+            if not is_950() or not vllm_config.model_config.use_mla:
+                raise ValueError("Flash MLA requires an A5 dense MLA target")
+            if parallel.prefill_context_parallel_size != 1:
+                raise ValueError("Flash MLA requires PCP=1")
+            if cache.cache_dtype not in ("auto", "bfloat16", "float16"):
+                raise ValueError("Flash MLA requires unquantized KV cache")
+            if getattr(cache, "use_kda_recoverssm", False):
+                raise ValueError("Flash MLA does not support KDA recoverSSM")
+            if vllm_config.kv_transfer_config is not None:
+                transfer = vllm_config.kv_transfer_config
+                if transfer.kv_connector != "MooncakeConnectorV1":
+                    raise ValueError("Flash MLA PD currently requires MooncakeConnectorV1")
+                if (
+                    parallel.decode_context_parallel_size > 1
+                    and parallel.cp_kv_cache_interleave_size != cache.block_size
+                ):
+                    raise ValueError("Flash MLA PD with DCP requires cp_kv_cache_interleave_size=block_size")
+            if cache.mamba_cache_mode not in ("none", "align"):
+                raise ValueError("Flash MLA supports Mamba cache modes none/align")
+            if vllm_config.model_config.is_hybrid:
+                from vllm.model_executor.layers.mamba.mamba_utils import get_conv_state_layout
+
+                if get_conv_state_layout() != "SD":
+                    raise ValueError("Flash MLA requires SD convolution state layout")
+
         cls._validate_indexer_pp_config(vllm_config)
 
+        _enable_kimi_k3_flash_dcp_q_replicate(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
@@ -530,9 +586,12 @@ class NPUPlatform(Platform):
         """
         # NOTE(Ronald1995): avoid circular import.
         from vllm_ascend.ascend_forward_context import (
+            _is_decode_only_node,
             get_mc2_mask,
             get_mrv2_in_profile_run,
+            _MRV2_MODEL,
             select_moe_comm_method,
+            use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -587,9 +646,14 @@ class NPUPlatform(Platform):
 
         # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
         # to ensure consistent communication method across all DP ranks
+        is_pure_prefill = bool(attn_metadata) and all(
+            meta.num_prefills > 0 and meta.num_decodes == 0 for meta in attn_metadata.values()
+        )
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            model_instance=_MRV2_MODEL.get(),
+            is_pure_prefill=is_pure_prefill,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -607,6 +671,9 @@ class NPUPlatform(Platform):
         return {
             "moe_comm_type": moe_comm_type,
             "moe_comm_method": moe_comm_method,
+            "is_decode_only_node": _is_decode_only_node(vllm_config),
+            "is_pure_prefill": is_pure_prefill,
+            "use_mega_moe": use_cann_megamoe(vllm_config),
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
@@ -862,6 +929,20 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 
     use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
     if use_v2_model_runner:
+        if eplb_config.get("dynamic_eplb", False):
+            if vllm_config.parallel_config.enable_eplb:
+                raise ValueError("Legacy FlashLB cannot be combined with upstream --enable-eplb.")
+            if not vllm_config.parallel_config.enable_expert_parallel:
+                raise ValueError("Legacy FlashLB requires --enable-expert-parallel.")
+            if eplb_config.get("eplb_policy_type", 2) != 3:
+                raise ValueError("Legacy EPLB on Model Runner V2 requires eplb_policy_type=3 (FlashLB).")
+            if eplb_config.get("eplb_heat_collection_stage", "all") != "all":
+                raise ValueError("MRv2 FlashLB requires eplb_heat_collection_stage='all' for synchronized DP windows.")
+            if eplb_config.get("load_collection_phase", "all") != "all":
+                raise ValueError("load_collection_phase applies to upstream EPLB, not legacy FlashLB.")
+            if vllm_config.parallel_config.enable_elastic_ep:
+                raise ValueError("Legacy FlashLB does not support elastic EP.")
+            return
         legacy_eplb_fields = sorted(set(eplb_config) - {"load_collection_phase"})
         if legacy_eplb_fields:
             raise ValueError(
@@ -1511,6 +1592,28 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
+def _enable_kimi_k3_flash_dcp_q_replicate(vllm_config: VllmConfig) -> None:
+    """Choose replicated Q before model loading and draft-config construction."""
+    if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA or not get_current_hardware_profile().supports(
+        HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
+    ):
+        return
+    model = vllm_config.model_config
+    architectures = getattr(model.hf_config, "architectures", None) or ()
+    parallel = vllm_config.parallel_config
+    if (
+        model.use_mla
+        and any(name in {"KimiK3ForCausalLM", "KimiK3ForConditionalGeneration"} for name in architectures)
+        and parallel.tensor_parallel_size == 8
+        and parallel.decode_context_parallel_size == 8
+        and parallel.prefill_context_parallel_size == 1
+    ):
+        # DSpark's runtime config copies the target parallel config, so MLA
+        # draft projections inherit this choice before their weights load.
+        # GQA DSpark still changes its own DCP size to one.
+        parallel.dcp_q_replicate = True
+
+
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -1532,6 +1635,22 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     draft_model_config = speculative_config.draft_model_config
     if draft_model_config is None:
+        return
+
+    if is_kimi_k3_gqa_dspark(vllm_config):
+        draft_parallel_config = speculative_config.draft_parallel_config
+        if draft_parallel_config is not None and (
+            draft_parallel_config.tensor_parallel_size != parallel_config.tensor_parallel_size
+        ):
+            raise ValueError(
+                "Kimi K3 GQA DSpark requires draft tensor parallel size to match the target tensor parallel size."
+            )
+        if parallel_config.tensor_parallel_size % decode_context_parallel_size != 0:
+            raise ValueError(
+                "Target tensor parallel size must be divisible by decode context parallel size for Kimi K3 GQA DSpark."
+            )
+        # The target remains DCP-sharded. The GQA draft uses DCP=1 with
+        # replicated KV pages, so the GQA/MQA head-sharding limits do not apply.
         return
 
     # MLA draft models do not use the GQA/MQA DCP head-sharding rule.

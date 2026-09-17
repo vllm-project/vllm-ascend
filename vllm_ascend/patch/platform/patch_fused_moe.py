@@ -156,7 +156,7 @@ def _ascend_FusedMoE(
     # the legacy Ascend quant-method path until that path also routes solely
     # through the Router.
     hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner and not eplb_config.dynamic_eplb
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,

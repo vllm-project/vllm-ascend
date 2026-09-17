@@ -117,6 +117,8 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     CopyQkvStrides(context_->GetInputStride(VALUE_INDEX), ctx.valueShape.GetDimNum(),
                    ctx.valueStrides, ctx.hasValueStrides);
     ctx.gateShape = context_->GetInputShape(GATE_INDEX)->GetOriginShape();
+    CopyQkvStrides(context_->GetInputStride(GATE_INDEX), ctx.gateShape.GetDimNum(),
+                   ctx.gateStrides, ctx.hasGateStrides);
     ctx.betaShape = context_->GetInputShape(BETA_INDEX)->GetOriginShape();
     ctx.stateShape = context_->GetInputShape(STATE_INDEX)->GetOriginShape();
     CopyStateStrides(context_->GetInputStride(STATE_INDEX), ctx.stateInStrides, ctx.hasStateInStrides);

@@ -1,4 +1,5 @@
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -14,12 +15,14 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
+from vllm_ascend.worker.v2.attn_utils import device_metadata_context
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -66,7 +69,13 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
+        capture_context = getattr(self.speculator, "draft_capture_context", nullcontext)
+        with (
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, False),
+            device_metadata_context(getattr(self.speculator, "device_metadata_executor", None)),
+            capture_context(),
+        ):
             super().capture(
                 forward_fn,
                 input_buffers,
@@ -80,6 +89,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
+        if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Upstream propose has already rebuilt and waited for the device
+            # metadata. Replay consumes those buffers directly; no FIA update
+            # or second metadata submission is needed.
+            return super().run_fullgraph(desc)
         num_tokens = desc.num_tokens
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(

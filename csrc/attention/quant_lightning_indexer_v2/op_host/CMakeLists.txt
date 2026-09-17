@@ -11,7 +11,7 @@ add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
     # Only the Ascend 950 implementation requires LightningIndexerV2 headers.
-    if (ASCEND_COMPUTE_UNIT STREQUAL "ascend950")
+    if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
         set(quant_lightning_indexer_v2_depends attention/lightning_indexer_v2 CACHE INTERNAL "Dependencies for quant_lightning_indexer_v2")
     endif()
     target_sources(op_host_aclnn PRIVATE

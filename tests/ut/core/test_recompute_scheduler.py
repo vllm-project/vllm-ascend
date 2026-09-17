@@ -532,6 +532,49 @@ def test_schedule_resumes_waiting_request_with_cached_tokens():
     assert request.num_computed_tokens >= 4
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "case,expected_tokens,expected_drafts",
+    [
+        ("received_tail", 4, 3),
+        ("missing_prefix", 4, 0),
+        ("short_budget", 0, 0),
+        ("short_model", 1, 0),
+        ("clipped_window", 1, 0),
+    ],
+)
+def test_schedule_cached_tail_speculation_without_running_requests(
+    async_scheduling, case, expected_tokens, expected_drafts
+):
+    config = make_dyntra_test_config()
+    # The received blocks are already local; this regression needs no transport.
+    config.kv_transfer_config = None
+    config.scheduler_config.async_scheduling = async_scheduling
+    scheduler_cls = AsyncRecomputeScheduler if async_scheduling else RecomputeScheduler
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=scheduler_cls)
+    scheduler.num_spec_tokens = 3
+    scheduler.num_lookahead_tokens = 3
+    scheduler._spec_token_placeholders = [-1] * 3
+    request = create_request(request_id=1, num_tokens=16, block_size=config.cache_config.block_size)
+    scheduler.add_request(request)
+    num_computed_tokens = 12 if case == "missing_prefix" else 15
+    assert scheduler.kv_cache_manager.allocate_slots(request, num_computed_tokens) is not None
+    request.num_computed_tokens = num_computed_tokens
+    if case == "short_budget":
+        scheduler.max_num_scheduled_tokens = 2
+    elif case == "short_model":
+        scheduler.max_model_len = 18
+    elif case == "clipped_window":
+        scheduler.scheduler_config.long_prefill_token_threshold = 2
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens.get(request.request_id, 0) == expected_tokens
+    assert output.scheduled_spec_decode_tokens.get(request.request_id, []) == [-1] * expected_drafts
+    assert request.prompt_token_ids == list(range(16))
+    assert not request.output_token_ids
+
+
 def test_schedule_recompute_preemption_fallback_finishes_victim():
     _, scheduler = _create_live_recompute_scheduler()
     scheduler.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)

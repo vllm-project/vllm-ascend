@@ -73,6 +73,9 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                 profiler_config.torch_profiler_dir,
                 worker_name=trace_name,
+                # Parsing can take tens of seconds. Do not hold the worker RPC
+                # (and every EP peer) until the profiling report is generated.
+                async_mode=True,
             ),
         )
 

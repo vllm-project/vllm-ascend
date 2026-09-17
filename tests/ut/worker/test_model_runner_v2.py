@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -9,6 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_forward_context import _MRV2_MODEL
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -23,6 +25,9 @@ def _make_runner(need_timing: bool = True):
     runner.vllm_config = SimpleNamespace()
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.model = torch.nn.Module()
+    runner.eplb = SimpleNamespace(suppress_legacy=lambda *_: nullcontext())
+    runner.device_metadata_executor = None
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
@@ -288,7 +293,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
 def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
+    dummy = SimpleNamespace(num_tokens_after_padding=4)
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     if vllm_version_is("0.28.0"):
@@ -353,3 +358,27 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
     assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
     assert state.kvpp_is_dummy_run is False
+
+
+@pytest.mark.parametrize("dummy_run,is_profile", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("raises", [False, True])
+def test_execute_model_scopes_target_model(dummy_run, is_profile, raises):
+    runner = _make_runner(need_timing=False)
+    outer_model = torch.nn.Module()
+    token = _MRV2_MODEL.set(outer_model)
+
+    def forward(*args, **kwargs):
+        assert _MRV2_MODEL.get() is (None if dummy_run or is_profile else runner.model)
+        if raises:
+            raise RuntimeError("forward failed")
+
+    try:
+        with patch.object(GPUModelRunner, "execute_model", side_effect=forward):
+            if raises:
+                with pytest.raises(RuntimeError, match="forward failed"):
+                    runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile)
+            else:
+                runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile)
+        assert _MRV2_MODEL.get() is outer_model
+    finally:
+        _MRV2_MODEL.reset(token)

@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_layout  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -49,6 +50,20 @@ import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 
+# ** File: platform/patch_kv_cache_layout.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.utils.resolve_kv_cache_layout`
+#    Why:
+#       PP stages can host different attention backends, especially when only
+#       the final stage hosts DSpark. Their supported layout lists can differ.
+#    How:
+#       Pass the ordered intersection of worker layouts to the upstream
+#       resolver, retaining its cache-shape and explicit-layout validation.
+#    Related PR (if no, explain why):
+#       No upstream PR currently covers this PP + DSpark layout negotiation.
+#    Future Plan:
+#       Remove this patch when upstream negotiates layouts across PP stages.
+#
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils`

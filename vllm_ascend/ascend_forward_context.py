@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -17,6 +18,7 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
@@ -31,6 +33,7 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_MRV2_MODEL: ContextVar[torch.nn.Module | None] = ContextVar("_MRV2_MODEL", default=None)
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
@@ -144,9 +147,15 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
+        is_pure_prefill = bool(attn_metadata) and all(
+            meta.num_prefills > 0 and meta.num_decodes == 0 for meta in attn_metadata.values()
+        )
+        forward_context.is_pure_prefill = is_pure_prefill
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            model_instance=model_instance,
+            is_pure_prefill=is_pure_prefill,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -319,11 +328,29 @@ def _select_capacity_and_world_size_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+    is_pure_prefill: bool = False,
 ) -> MoECommType:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    if cann_mega_moe_supported is None:
+        cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
+    if (
+        is_pure_prefill
+        # Per-DP prefill flags are not collective consensus: idle DP workers
+        # execute dummy decode batches. Keep their EP operation consistent until
+        # the DP batch coordinator also carries a global pure-prefill decision.
+        and vllm_config.parallel_config.data_parallel_size == 1
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+        and cann_mega_moe_supported
+    ):
+        return MoECommType.FUSED_MC2
+
     num_experts_per_tok = getattr(
-        vllm_config.model_config.hf_text_config,
+        hf_text_config,
         "num_experts_per_tok",
-        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+        getattr(hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
@@ -333,20 +360,34 @@ def _select_capacity_and_world_size_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-_MOE_COMM_SELECTORS = {
+_MOE_COMM_SELECTORS: dict[MoECommPolicy, Callable[[int, VllmConfig, int], MoECommType]] = {
     MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
     MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
     MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
 }
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+    is_pure_prefill: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
+        is_pure_prefill (bool): Select A5 MegaMoe only for pure prefill;
+            decode and mixed batches retain the original MC2 selection.
+        model_instance (torch.nn.Module | None): Loaded model used to aggregate
+            registered MegaMoe layer capabilities.
+        cann_mega_moe_supported (bool | None): Optional already-aggregated
+            capability result for initialization paths without a model handle.
+
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -364,6 +405,15 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
+    elif moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+        moe_comm_type = _select_capacity_and_world_size_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            model_instance,
+            cann_mega_moe_supported,
+            is_pure_prefill=is_pure_prefill,
+        )
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:
@@ -373,7 +423,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             mc2_tokens_capacity,
         )
     logger.debug(
-        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%s, mc2_capacity=%s",
         moe_comm_policy,
         moe_comm_type,
         num_tokens,
@@ -390,6 +440,7 @@ class _ExtraForwardContextProxy:
         "moe_comm_type",
         "moe_comm_method",
         "is_decode_only_node",
+        "is_pure_prefill",
         "use_mega_moe",
         "mmrs_fusion",
         "num_tokens",

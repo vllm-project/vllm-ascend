@@ -215,7 +215,8 @@ def test_fused_bfg_projection_preserves_staged_outputs():
     torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
 
 
-def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
+@pytest.mark.parametrize("output_tokens", [2, 4])
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(output_tokens):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
@@ -227,7 +228,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     beta = torch.rand(1, 4, 2, dtype=torch.float32)
     raw_gate = torch.randn(1, 4, 2, 3)
     output_gate = torch.randn(4, 2, 3)
-    projected = torch.randn(4, 6)
+    projected = torch.randn(output_tokens, 6)
     attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate))
     attention._forward = MagicMock()
     attention.o_proj = _RecordingLinear(projected)
@@ -237,6 +238,26 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
     assert actual is projected
     assert attention._forward.call_args.kwargs["beta"] is beta
     assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
+
+
+def test_unquantized_kda_forward_accepts_fused_o_proj_token_shard():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.uses_mixed_projection = False
+    attention.local_num_heads = 2
+    attention.head_dim = 3
+    attention.local_projection_size = 6
+    attention.in_proj_padding = 0
+    attention.in_proj_qkvgfab = _RecordingLinear(torch.randn(4, 29))
+    attention.f_b_proj = _RecordingLinear(torch.randn(4, 6))
+    attention._forward = MagicMock()
+    projected = torch.randn(2, 6)
+    attention.o_proj = _RecordingLinear(projected)
+
+    actual = attention.forward(torch.randn(4, 6), torch.arange(4))
+
+    assert actual is projected
+    assert attention._forward.call_args.kwargs["core_attn_out"].shape == (1, 4, 2, 3)
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
@@ -481,16 +502,17 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
     attention.conv1d = nn.Module()
     source = torch.arange(18 * 4, dtype=torch.float32).reshape(18, 1, 4)
     attention.conv1d.weight = nn.Parameter(source)
-    attention.register_parameter(
+    attention.register_buffer(
         _PACKED_CONV_WEIGHT_NAME,
-        nn.Parameter(torch.empty(4, 18, dtype=torch.bfloat16), requires_grad=False),
+        torch.empty(4, 18, dtype=torch.bfloat16),
+        persistent=False,
     )
-    original = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    original = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     original_ptr = original.data_ptr()
 
     attention._pack_conv_weights()
 
-    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    packed = attention.get_buffer(_PACKED_CONV_WEIGHT_NAME)
     assert packed.data_ptr() == original_ptr
     assert packed.dtype == torch.bfloat16
     assert packed.is_contiguous()
@@ -537,7 +559,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
         _run_recurrent=recurrent,
-        o_norm=lambda x, g: x * torch.sigmoid(g),
+        o_norm=lambda x, g, *, out: out.copy_(x * torch.sigmoid(g)),
     )
     output = torch.full((1, 8, 1, 2), torch.nan)
     with (

@@ -27,6 +27,7 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 def apply_moe_mlp(
     mlp_compute_input: MoEMlpComputeInput,
     quant_method,
+    eplb_load_stream: torch.npu.Stream | None = None,
 ) -> tuple[torch.Tensor, torch.npu.Event]:
     """
     Unified MoE MLP entry.
@@ -53,7 +54,15 @@ def apply_moe_mlp(
         hidden_states, act_out_scale = quant_method.apply_act_quant(mlp_compute_input, hidden_states)
 
     before_gmm2_evt = torch.npu.current_stream().record_event()
+    if eplb_load_stream is not None:
+        # GMM1 can fuse vector activation/quantization. Start accounting only
+        # after it completes, overlap GMM2's cube work, and join before combine.
+        eplb_load_stream.wait_event(before_gmm2_evt)
+        with torch.npu.stream(eplb_load_stream):
+            mlp_compute_input.layer.collect_moe_load(mlp_compute_input.group_list, mlp_compute_input.group_list_type)
     hidden_states = quant_method.apply_gmm2(mlp_compute_input, hidden_states, act_out_scale)
+    if eplb_load_stream is not None:
+        torch.npu.current_stream().wait_stream(eplb_load_stream)
     return hidden_states, before_gmm2_evt
 
 

@@ -49,6 +49,10 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
+#include "attention/attn_res_fwd_with_add/attn_res_fwd_with_add_torch_adpt.h"
+#include "attention/attn_res_fwd_fused/attn_res_fwd_fused_torch_adpt.h"
+#include "attention/flash_mla_with_kvcache/flash_mla_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
@@ -60,6 +64,10 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+#include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#endif
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -659,8 +667,23 @@ at::Tensor npu_causal_conv1d_custom(
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t  run_mode,
+    int64_t max_query_len)
 {
+    if (max_query_len >= 0) {
+        const c10::optional<at::IntArrayRef> no_cpu_metadata = c10::nullopt;
+        const char* activation = activation_mode == 1 ? "silu" : "none";
+        const int64_t null_block_id = -1;
+        const int64_t head_num = 0;
+        const int64_t update_bound = run_mode == 1 ? max_query_len : -1;
+        // Padded segments are skipped by the kernel.
+        output.zero_();
+        EXEC_NPU_CMD(aclnnCausalConv1dV2, x, weight, bias_opt, conv_state,
+            query_start_loc_opt, cache_indices_opt, initial_state_mode_opt, num_accepted_tokens_opt,
+            no_cpu_metadata, no_cpu_metadata, no_cpu_metadata, no_cpu_metadata,
+            activation, pad_slot_id, null_block_id, run_mode, head_num, update_bound, output);
+        return output;
+    }
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
@@ -2870,6 +2893,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
 
     ops.def(
+        "attn_res_fwd(Tensor prefix_sum, Tensor block_residual, Tensor proj_weight, "
+        "Tensor norm_weight, float norm_eps=1e-5) -> Tensor output");
+    ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
+    ops.def(
+        "attn_res_fwd_with_add(Tensor prefix_sum, Tensor addend, Tensor block_residual, "
+        "Tensor proj_weight, Tensor norm_weight, float norm_eps=1e-5) -> (Tensor, Tensor)");
+    ops.impl("attn_res_fwd_with_add", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_with_add);
+    ops.def(
+        "attn_res_fwd.fused(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "
+        "Tensor proj_weight, Tensor norm_weight, float norm_eps, int num_valid_blocks, "
+        "Tensor? output_norm_weight=None, float output_norm_eps=1e-5, int block_write_idx=-1, "
+        "bool return_materialized=False, bool mix=True) -> (Tensor(c), Tensor(b), Tensor(c))");
+    ops.impl("attn_res_fwd.fused", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd_fused);
+
+
+    ops.def(
         "dequant_situ_quant(Tensor x, "
         "                   *, Tensor? weight_scale=None, "
         "                   Tensor? activation_scale=None, "
@@ -2890,6 +2929,37 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
+
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+    ops.def(
+        "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
+        "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
+        "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
+        "float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nd);
+    ops.def(
+        "grouped_matmul_situ_quant.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nd_list);
+    ops.def(
+        "grouped_matmul_situ_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, "
+        "Tensor? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant_weight_nz", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nz);
+    ops.def(
+        "grouped_matmul_situ_quant_weight_nz.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant_weight_nz.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nz_list);
+#endif
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
@@ -3256,9 +3326,27 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor? num_accepted_tokens_opt, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
-        "                         int run_mode"
+        "                         int run_mode, int max_query_len=-1"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+
+    ops.def(
+        "flash_mla_with_kvcache_metadata(Tensor cache_seqlens, int num_heads_q, int num_heads_kv, "
+        "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, int head_dim_qk=576, int head_dim_v=512, "
+        "int mask_mode=0, str layout_q='BSND') -> Tensor");
+    ops.impl("flash_mla_with_kvcache_metadata", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache_metadata);
+
+    ops.def(
+        "flash_mla_with_kvcache(Tensor q, Tensor k_cache, Tensor? block_table=None, "
+        "Tensor? cache_seqlens=None, Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
+        "Tensor? attn_mask=None, Tensor? metadata=None, int head_dim_v=512, "
+        "float softmax_scale=1.0, int mask_mode=0, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, str layout_q='TND', str layout_kv='PA_NZ', "
+        "str? layout_out=None, bool return_softmax_lse=False) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_with_kvcache", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache);
 
     ops.def(
         "moe_gating_top_k_hash("

@@ -1,4 +1,6 @@
 import unittest
+from queue import Queue
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -81,6 +83,74 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.assertEqual(moe_load.shape, (100, 58, self.world_size, 8))
         self.assertTrue("moe_load" in self.updator.shared_dict)
         self.assertEqual(moe_load.device.type, "cpu")
+
+
+class TestEplbPlanReadiness(unittest.TestCase):
+    def setUp(self):
+        self.updator = EplbUpdator.__new__(EplbUpdator)
+        self.updator.expert_heat_collection_interval = 3
+        self.updator.algorithm_execution_interval = 2
+        self.updator.num_moe_layers = 2
+        self.updator.cur_iterations = 4
+        self.updator.expert_map_record_path = None
+        self.updator.adaptor = MagicMock()
+        self.updator.eplb_loader = MagicMock()
+        self.updator.eplb_process = SimpleNamespace(block_update_q=Queue())
+        self.updator.comm_group = SimpleNamespace(cpu_group=object())
+        self.updator.update_info_all = []
+        self.updator._local_plan_ready = False
+        self.updator._all_plans_ready = False
+        self.updator._plan_ready = torch.zeros(1, dtype=torch.int32)
+        self.plan = [([], [], [0, 1], [0, 1], layer) for layer in range(2)]
+
+    @patch("vllm_ascend.eplb.eplb_updator.dist.all_reduce")
+    def test_late_planner_does_not_block_or_advance_weight_update(self, all_reduce):
+        for _ in range(3):
+            self.updator.forward_before()
+            self.updator.forward_end()
+            self.assertEqual(self.updator.cur_iterations, 4)
+            self.assertFalse(self.updator.update_expert_weight_flag())
+        self.assertEqual(all_reduce.call_count, 3)
+        self.updator.eplb_loader.asyn_expert_weight_transfer.assert_not_called()
+        self.updator.adaptor.clear_all_moe_loads.assert_not_called()
+
+        self.updator.eplb_process.block_update_q.put(self.plan)
+        self.updator.forward_before()
+        self.updator.forward_end()
+        self.assertEqual(self.updator.cur_iterations, 5)
+        self.assertTrue(self.updator.update_expert_weight_flag())
+
+    @patch("vllm_ascend.eplb.eplb_updator.dist.all_reduce")
+    def test_ready_rank_retains_plan_until_every_peer_is_ready(self, all_reduce):
+        self.updator.eplb_process.block_update_q.put(self.plan)
+        all_reduce.side_effect = lambda value, **kwargs: value.zero_()
+        for _ in range(2):
+            self.updator.forward_before()
+            self.updator.forward_end()
+            self.assertEqual(self.updator.cur_iterations, 4)
+            self.assertIs(self.updator.update_info_all, self.plan)
+        self.assertTrue(self.updator._local_plan_ready)
+        self.updator.eplb_loader.asyn_expert_weight_transfer.assert_not_called()
+
+        all_reduce.side_effect = None
+        self.updator.forward_before()
+        self.updator.forward_end()
+        self.assertEqual(self.updator.cur_iterations, 5)
+        all_reduce.assert_called_with(
+            self.updator._plan_ready,
+            op=torch.distributed.ReduceOp.MIN,
+            group=self.updator.comm_group.cpu_group,
+        )
+
+        for layer in range(2):
+            self.updator.forward_before()
+            self.assertEqual(self.updator.eplb_loader.generate_expert_d2d_transfer_task.call_args.args[-1], layer)
+            self.updator.forward_end()
+        self.assertEqual(self.updator.eplb_loader.update_expert_map_and_weight.call_count, 2)
+        self.assertEqual(self.updator.cur_iterations, 0)
+        self.assertFalse(self.updator._local_plan_ready)
+        self.assertFalse(self.updator._all_plans_ready)
+        self.updator.adaptor.clear_all_moe_loads.assert_called_once()
 
 
 if __name__ == "__main__":

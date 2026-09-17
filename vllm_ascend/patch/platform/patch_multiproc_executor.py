@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -208,4 +209,14 @@ class AscendWorkerProc(WorkerProc):
         return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
 
-vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
+def _patch_multiproc_executor() -> None:
+    vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
+    # The headless CLI imports the executor before platform patches are loaded
+    # while constructing VllmConfig. Update that alias too, without importing
+    # the CLI here (it may still be initializing).
+    serve_module = sys.modules.get("vllm.entrypoints.cli.serve")
+    if serve_module is not None and getattr(serve_module, "MultiprocExecutor", None) is MultiprocExecutor:
+        serve_module.MultiprocExecutor = AscendMultiprocExecutor
+
+
+_patch_multiproc_executor()

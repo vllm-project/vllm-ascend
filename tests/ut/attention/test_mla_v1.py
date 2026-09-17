@@ -732,10 +732,15 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config = MagicMock()
         mock_kv_cache_spec = MagicMock()
 
-        result = AscendMLAMetadataBuilder.get_cudagraph_support(mock_vllm_config, mock_kv_cache_spec)
         from vllm.v1.attention.backend import AttentionCGSupport
 
-        self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
+        for enable_flash in (False, True):
+            with (
+                self.subTest(enable_flash=enable_flash),
+                patch("vllm_ascend.attention.mla_v1.envs.VLLM_ASCEND_ENABLE_FLASH_MLA", enable_flash),
+            ):
+                result = AscendMLAMetadataBuilder.get_cudagraph_support(mock_vllm_config, mock_kv_cache_spec)
+                self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
 
     def test_set_num_actual_tokens(self):
         mock_vllm_config = MagicMock()

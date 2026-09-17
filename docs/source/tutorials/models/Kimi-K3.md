@@ -20,6 +20,45 @@ for the model support matrix and the
 This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
 `FULL_DECODE_ONLY` ACL Graph, and DSpark with a matching draft checkpoint.
 
+### Pipeline parallelism with sequence parallelism
+
+With expert parallelism enabled and TP greater than one, Kimi-K3 keeps token
+shards across PP stages, including at DP=1. Only the first stage shards the
+embedding output. Later stages receive the matching hidden-state and residual
+shards; the last stage gathers the final output. All stages must use the same
+TP size and token ordering.
+
+The PP payload includes attention-residual block states and any auxiliary
+hidden states captured on earlier stages. Dense MLP layers gather their input
+and reduce-scatter their output; routed MoE and shared experts retain their SP
+paths. Model Runner V1 uses the same local token count for PP receives,
+profiling and graph-capture buffers. Model Runner V2 uses local-sized receive
+views and graph input/output views while retaining persistent buffer storage
+across batches and graph gears.
+Memory profiling and graph preparation also slice PP receive views before
+model execution; ordinary input preparation is not called on those paths.
+
+### Combining PP, SP and DSpark on Model Runner V2
+
+Model Runner V2 supports Kimi-K3 DSpark with PP, including sequence-sharded
+PP execution. The draft model runs on the last PP stage, using that stage's
+TP size for `draft_tensor_parallel_size`. K3 MLA and legacy GQA draft
+architectures are accepted by the rank-local draft check.
+
+Target stages carry cumulative auxiliary states using the existing PP
+transport keys. MLA drafts receive raw prefix sums, without adding the
+three-dimensional attention-residual bank. Legacy GQA drafts retain their
+materialized auxiliary-state path.
+
+Every speculative PP stage keeps the CPU attention lengths synchronized with
+device token positions. This includes rejection corrections on stages without
+a local draft model and non-final prefill chunks that advance without a
+sampled-token broadcast. The next attention-metadata preparation waits for
+that copy before consuming the host positions.
+
+Existing context-parallel compatibility constraints still apply. Model
+Runner V1 PP+SP support does not imply MRV1 DSpark+PP support.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weights and Hardware

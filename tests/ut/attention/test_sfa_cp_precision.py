@@ -72,56 +72,27 @@ def test_sfa_dsa_dcp_routes_token_scatter_to_custom_op(fused_a2a) -> None:
 
 
 @pytest.mark.parametrize("scatter_dim", [0, 1])
-@pytest.mark.parametrize(
-    "dtype,return_lse",
-    [
-        (torch.float32, False),
-        (torch.float32, True),
-        (torch.float16, False),
-        (torch.bfloat16, False),
-    ],
-)
-def test_sfa_custom_op_optional_lse_fake_shape(scatter_dim, dtype, return_lse):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_sfa_custom_op_fake_shape(scatter_dim, dtype):
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     with FakeTensorMode():
         output = torch.empty(48, 96, 512, dtype=dtype)
         lse = torch.empty(48, 96, 1, dtype=torch.float32)
-        merged = torch.ops.vllm.sfa_dcp_a2a_fused(output, lse, 16, scatter_dim, "fake-dcp", return_lse=return_lse)
-        expected = (3, 96, 512 + int(return_lse)) if scatter_dim == 0 else (48, 6, 512 + int(return_lse))
+        merged = torch.ops.vllm.sfa_dcp_a2a_fused(output, lse, 16, scatter_dim, "fake-dcp")
+        expected = (3, 96, 512) if scatter_dim == 0 else (48, 6, 512)
         assert merged.shape == expected
         assert merged.dtype == dtype
         assert merged.device == output.device
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_sfa_return_lse_rejects_low_precision_in_real_and_fake_paths(dtype):
-    from torch._subclasses.fake_tensor import FakeTensorMode
-
-    import vllm_ascend.ops.triton.sfa_cp as kernels
-
-    output = torch.empty(2, 3, 4, dtype=dtype)
-    lse = torch.empty(2, 3, 1, dtype=torch.float32)
-    # The real wrapper must reject before any collective or NPU kernel runs.
-    with patch.object(kernels, "sfa_dcp_a2a_fused_combine") as combine:
-        with pytest.raises(TypeError, match="requires FP32 attention output"):
-            kernels.sfa_dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
-        combine.assert_not_called()
-    with FakeTensorMode(), pytest.raises(TypeError, match="requires FP32 attention output"):
-        torch.ops.vllm.sfa_dcp_a2a_fused(
-            torch.empty(2, 3, 4, dtype=dtype), torch.empty(2, 3, 1), 1, 1, "", return_lse=True
-        )
-
-
-def test_sfa_custom_op_passes_optional_lse_to_combine():
+def test_sfa_custom_op_passes_inputs_to_combine():
     import vllm_ascend.ops.triton.sfa_cp as kernels
 
     output = torch.randn(2, 3, 4)
     lse = torch.randn(2, 3, 1)
-    expected = torch.randn(2, 3, 5)
+    expected = torch.randn(2, 3, 4)
     with patch.object(kernels, "sfa_dcp_a2a_fused_combine", return_value=expected) as combine:
-        actual = kernels.sfa_dcp_a2a_fused(output, lse, 1, 1, "", return_lse=True)
+        actual = kernels.sfa_dcp_a2a_fused(output, lse, 1, 1, "")
     assert actual is expected
-    combine.assert_called_once_with(
-        output, lse, 1, 1, scatter_group=None, pcp_group=None, return_lse=True, defer_combine=False
-    )
+    combine.assert_called_once_with(output, lse, 1, 1, scatter_group=None, pcp_group=None, defer_combine=False)

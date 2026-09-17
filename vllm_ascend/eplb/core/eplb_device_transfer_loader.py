@@ -16,11 +16,23 @@
 #
 from enum import Enum
 
+import torch
 import torch.distributed as dist
 from vllm.logger import logger
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
+
+
+def _as_hccl_p2p_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a zero-copy HCCL-compatible view for byte-packed tensors.
+
+    HCCL P2P supports int8 but not uint8 or native FP4. Reinterpreting the
+    storage preserves the raw bytes and the tensor's private NPU format.
+    """
+    if tensor.element_size() == 1 and tensor.dtype != torch.int8:
+        return tensor.view(torch.int8)
+    return tensor
 
 
 class ExpertWeightUpdateState(Enum):
@@ -59,9 +71,13 @@ class D2DExpertWeightLoader:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[layer_id][local_expert_id]:
+                transport_tensor = _as_hccl_p2p_tensor(src_tensor)
                 self.comm_op_list.append(
                     dist.P2POp(
-                        dist.isend, src_tensor, self.comm_group.ranks[dst_rank], group=self.comm_group.device_group
+                        dist.isend,
+                        transport_tensor,
+                        self.comm_group.ranks[dst_rank],
+                        group=self.comm_group.device_group,
                     )
                 )
 
@@ -69,9 +85,13 @@ class D2DExpertWeightLoader:
             recv_rank, global_expert_id_to_recv = recv_info
             expert_weight_key = self.eplb_adaptor.expert_weight_key_per_layer[layer_id]
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[expert_weight_key][buffer_tensor_id]:
+                transport_tensor = _as_hccl_p2p_tensor(buffer_tensor)
                 self.comm_op_list.append(
                     dist.P2POp(
-                        dist.irecv, buffer_tensor, self.comm_group.ranks[recv_rank], group=self.comm_group.device_group
+                        dist.irecv,
+                        transport_tensor,
+                        self.comm_group.ranks[recv_rank],
+                        group=self.comm_group.device_group,
                     )
                 )
             local_expert_to_replace = self.updated_expert_map[global_expert_id_to_recv].item()
