@@ -16,7 +16,7 @@ class TestStairLoadStatistics(unittest.TestCase):
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)
 
-        compressed, weights = StairEplbPolicy.compress_samples(samples, 2)
+        compressed, weights = StairEplbPolicy.compress_load_window(samples, 2)
 
         np.testing.assert_array_equal(weights, [2, 3])
         np.testing.assert_allclose(compressed[0], samples[:2].mean(axis=0))
@@ -46,15 +46,15 @@ class TestStairLoadStatistics(unittest.TestCase):
         samples = np.array([[8.0, 0.0], [4.0, 4.0]])
         weights = np.array([1, 19])
 
-        score = StairEplbPolicy.placement_score(samples, weights, np.array([[0], [1]]))
+        imbalance = StairEplbPolicy.placement_imbalance(samples, weights, np.array([[0], [1]]))
 
-        self.assertEqual(score.mean, 1.05)
-        self.assertEqual(score.p95, 1.0)
+        self.assertEqual(imbalance.mean_ratio, 1.05)
+        self.assertEqual(imbalance.p95_ratio, 1.0)
 
     def test_replica_counts_reject_invalid_placements(self):
         for placement in (np.array([[0, 0], [1, 2]]), np.array([[0], [1]])):
             with self.subTest(placement=placement), self.assertRaises(ValueError):
-                StairEplbPolicy.replica_counts(placement, 3)
+                StairEplbPolicy.placement_replica_counts(placement, 3)
 
     def test_expert_risk_uses_mean_and_variance(self):
         risk = StairEplbPolicy.expert_risk(np.array([1.0, 2.0]), np.array([4.0, 0.0]), 0.5)
@@ -176,8 +176,8 @@ class TestStairLoadStatistics(unittest.TestCase):
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
         with self.assertRaises(ValueError):
-            StairEplbPolicy.compress_samples(invalid_samples, 2)
+            StairEplbPolicy.compress_load_window(invalid_samples, 2)
         with self.assertRaises(ValueError):
             StairEplbPolicy.weighted_moments(np.ones((2, 2)), np.array([1.0, 1.0]))
         with self.assertRaises(ValueError):
-            StairEplbPolicy.placement_score(np.ones((1, 2)), np.array([0]), np.array([[0], [1]]))
+            StairEplbPolicy.placement_imbalance(np.ones((1, 2)), np.array([0]), np.array([[0], [1]]))
