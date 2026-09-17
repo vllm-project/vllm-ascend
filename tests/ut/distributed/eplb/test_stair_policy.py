@@ -11,8 +11,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     StairPlan,
     align_slots,
     assign_sources,
-    capped_min_max,
-    compress_samples,
     constrained_lpt,
     passes_hysteresis,
     replica_candidates,
@@ -54,7 +52,7 @@ def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, diff
 def test_compression_preserves_every_step_as_weighted_bins():
     samples = np.arange(20).reshape(5, 2, 2)
 
-    compressed, weights = compress_samples(samples, 2)
+    compressed, weights = StairEplbPolicy.compress_samples(samples, 2)
 
     np.testing.assert_array_equal(weights, [2, 3])
     np.testing.assert_allclose(compressed[0], samples[:2].mean(axis=0))
@@ -84,7 +82,7 @@ def test_score_uses_mean_and_weighted_nearest_rank_p95():
 
 
 def test_capped_min_max_respects_one_copy_per_rank():
-    replicas = capped_min_max(np.array([8.0, 3.0]), np.ones(2, dtype=np.int64), 4, 3)
+    replicas = StairEplbPolicy.capped_min_max(np.array([8.0, 3.0]), np.ones(2, dtype=np.int64), 4, 3)
 
     np.testing.assert_array_equal(replicas, [3, 3])
 

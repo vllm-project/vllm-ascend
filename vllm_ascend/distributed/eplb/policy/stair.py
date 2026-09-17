@@ -209,42 +209,42 @@ class StairEplbPolicy(AbstractEplbPolicy):
         mean = np.sum(imbalance * sample_weights, dtype=np.float64) / sample_weights.sum()
         return BalanceScore(float(mean), float(p95))
 
+    @staticmethod
+    def capped_min_max(
+        risk: np.ndarray,
+        replicas: np.ndarray,
+        slots: int,
+        num_ranks: int,
+        experts: Iterable[int] | None = None,
+    ) -> np.ndarray | None:
+        """Allocate slots to the largest risk-per-replica expert."""
+        weights = np.asarray(risk, dtype=np.float64)
+        result = np.asarray(replicas, dtype=np.int64).copy()
+        allowed = tuple(range(weights.size)) if experts is None else tuple(experts)
+        if (
+            weights.shape != result.shape
+            or not np.all(np.isfinite(weights))
+            or np.any(result < 1)
+            or np.any(result > num_ranks)
+            or slots < 0
+        ):
+            raise ValueError("Invalid STAIR replica allocation input")
+        for _ in range(slots):
+            candidates = [expert for expert in allowed if result[expert] < num_ranks]
+            if not candidates:
+                return None
+            expert = min(candidates, key=lambda item: (-weights[item] / result[item], item))
+            result[expert] += 1
+        return result
 
-def capped_min_max(
-    risk: np.ndarray,
-    replicas: np.ndarray,
-    slots: int,
-    num_ranks: int,
-    experts: Iterable[int] | None = None,
-) -> np.ndarray | None:
-    """Allocate slots to the largest risk-per-replica expert."""
-    weights = np.asarray(risk, dtype=np.float64)
-    result = np.asarray(replicas, dtype=np.int64).copy()
-    allowed = tuple(range(weights.size)) if experts is None else tuple(experts)
-    if (
-        weights.shape != result.shape
-        or not np.all(np.isfinite(weights))
-        or np.any(result < 1)
-        or np.any(result > num_ranks)
-        or slots < 0
-    ):
-        raise ValueError("Invalid STAIR replica allocation input")
-    for _ in range(slots):
-        candidates = [expert for expert in allowed if result[expert] < num_ranks]
-        if not candidates:
-            return None
-        expert = min(candidates, key=lambda item: (-weights[item] / result[item], item))
-        result[expert] += 1
-    return result
-
-
-def _nearby_budgets(center: int, lower: int, upper: int, width: int) -> list[int]:
-    values = []
-    for distance in range(width + 1):
-        for value in (center,) if distance == 0 else (center + distance, center - distance):
-            if lower <= value <= upper and value not in values:
-                values.append(value)
-    return values
+    @staticmethod
+    def _nearby_budgets(center: int, lower: int, upper: int, width: int) -> list[int]:
+        values = []
+        for distance in range(width + 1):
+            for value in (center,) if distance == 0 else (center + distance, center - distance):
+                if lower <= value <= upper and value not in values:
+                    values.append(value)
+        return values
 
 
 def replica_candidates(
@@ -271,18 +271,18 @@ def replica_candidates(
         later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
         expanded = []
         for replicas, remaining in beam:
-            baseline = capped_min_max(weights, replicas, remaining, num_ranks, (*group, *later))
+            baseline = StairEplbPolicy.capped_min_max(weights, replicas, remaining, num_ranks, (*group, *later))
             if baseline is None:
                 continue
             center = int(np.sum(baseline[list(group)] - replicas[list(group)]))
             current_capacity = sum(num_ranks - replicas[expert] for expert in group)
             later_capacity = sum(num_ranks - replicas[expert] for expert in later)
             lower, upper = max(0, remaining - later_capacity), min(remaining, current_capacity)
-            for budget in _nearby_budgets(center, lower, upper, width):
-                partial = capped_min_max(weights, replicas, budget, num_ranks, group)
+            for budget in StairEplbPolicy._nearby_budgets(center, lower, upper, width):
+                partial = StairEplbPolicy.capped_min_max(weights, replicas, budget, num_ranks, group)
                 if partial is None:
                     continue
-                full = capped_min_max(weights, partial, remaining - budget, num_ranks, later)
+                full = StairEplbPolicy.capped_min_max(weights, partial, remaining - budget, num_ranks, later)
                 if full is not None:
                     expanded.append((partial, remaining - budget, full))
         unique = {partial.astype("<i4").tobytes(): (partial, remaining, full) for partial, remaining, full in expanded}
@@ -291,7 +291,7 @@ def replica_candidates(
 
     complete = {}
     for replicas, remaining in beam:
-        candidate = capped_min_max(weights, replicas, remaining, num_ranks, groups[-1])
+        candidate = StairEplbPolicy.capped_min_max(weights, replicas, remaining, num_ranks, groups[-1])
         if candidate is not None:
             complete[candidate.astype("<i4").tobytes()] = candidate
     return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
