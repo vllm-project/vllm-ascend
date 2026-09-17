@@ -96,15 +96,45 @@ class StairEplbPolicy(AbstractEplbPolicy):
         *,
         sample_weights: np.ndarray | None = None,
     ) -> StairPlan:
-        """Build the placement, explicit-source, and admission plan."""
-        return _plan_rebalance(
-            logical_load,
-            old_placement,
-            accepted_scores,
-            node_by_rank,
-            config,
-            sample_weights=sample_weights,
-        )
+        """Run STAIR's six stages for every eligible layer."""
+        if sample_weights is None:
+            samples, weights = cls.compress_samples(logical_load, config.sample_size)
+        else:
+            samples = np.asarray(logical_load, dtype=np.float64)
+            weights = np.asarray(sample_weights, dtype=np.int64)
+            if samples.ndim != 3 or weights.shape != (samples.shape[0],) or np.any(weights <= 0):
+                raise ValueError("STAIR compressed samples and weights disagree")
+        old = np.asarray(old_placement, dtype=np.int64)
+        if old.ndim != 3 or samples.shape[1] != old.shape[0] or len(node_by_rank) != old.shape[1]:
+            raise ValueError("STAIR load, placement, and topology shapes disagree")
+        anchors = np.asarray(accepted_scores, dtype=np.float64)
+        if anchors.shape != (old.shape[0],):
+            raise ValueError("STAIR accepted scores must match the layer count")
+
+        placement = old.copy()
+        source_rank = np.broadcast_to(np.arange(old.shape[1])[None, :, None], old.shape).copy()
+        source_slot = np.broadcast_to(np.arange(old.shape[2])[None, None, :], old.shape).copy()
+        new_scores = np.full(old.shape[0], np.nan, dtype=np.float64)
+        eligible = []
+        for layer in range(old.shape[0]):
+            cls.replica_counts(old[layer], samples.shape[2])
+            if np.sum(samples[:, layer], dtype=np.float64) == 0:
+                continue
+            current = cls.placement_score(samples[:, layer], weights, old[layer])
+            if current.mean > config.imbalance_threshold and cls.passes_hysteresis(
+                current.mean, anchors[layer], config
+            ):
+                deterioration = 0.0 if np.isnan(anchors[layer]) else current.mean / anchors[layer] - 1.0
+                eligible.append((-current.mean, -deterioration, layer))
+
+        for _, _, layer in sorted(eligible):
+            result = cls._plan_layer(samples[:, layer], weights, old[layer], node_by_rank, config)
+            if result is not None:
+                placement[layer] = result.placement
+                source_rank[layer] = result.source_rank
+                source_slot[layer] = result.source_slot
+                new_scores[layer] = result.score.mean
+        return StairPlan(placement, source_rank, source_slot, new_scores)
 
     @classmethod
     def validate_plan(cls, old_placement: np.ndarray, plan: StairPlan, num_experts: int, pair_cap: int) -> None:
@@ -623,53 +653,3 @@ class StairEplbPolicy(AbstractEplbPolicy):
         minimum = min(score for score, _, _ in candidates)
         tied = [item for item in candidates if item[0] <= minimum + _SCORE_TIE_TOLERANCE]
         return min(tied, key=lambda item: item[1])[2]
-
-
-def _plan_rebalance(
-    logical_load: np.ndarray,
-    old_placement: np.ndarray,
-    accepted_scores: np.ndarray,
-    node_by_rank: tuple[int, ...],
-    config: StairConfig,
-    *,
-    sample_weights: np.ndarray | None = None,
-) -> StairPlan:
-    """Run STAIR's six stages for every eligible layer."""
-    if sample_weights is None:
-        samples, weights = StairEplbPolicy.compress_samples(logical_load, config.sample_size)
-    else:
-        samples = np.asarray(logical_load, dtype=np.float64)
-        weights = np.asarray(sample_weights, dtype=np.int64)
-        if samples.ndim != 3 or weights.shape != (samples.shape[0],) or np.any(weights <= 0):
-            raise ValueError("STAIR compressed samples and weights disagree")
-    old = np.asarray(old_placement, dtype=np.int64)
-    if old.ndim != 3 or samples.shape[1] != old.shape[0] or len(node_by_rank) != old.shape[1]:
-        raise ValueError("STAIR load, placement, and topology shapes disagree")
-    anchors = np.asarray(accepted_scores, dtype=np.float64)
-    if anchors.shape != (old.shape[0],):
-        raise ValueError("STAIR accepted scores must match the layer count")
-
-    placement = old.copy()
-    source_rank = np.broadcast_to(np.arange(old.shape[1])[None, :, None], old.shape).copy()
-    source_slot = np.broadcast_to(np.arange(old.shape[2])[None, None, :], old.shape).copy()
-    new_scores = np.full(old.shape[0], np.nan, dtype=np.float64)
-    eligible = []
-    for layer in range(old.shape[0]):
-        StairEplbPolicy.replica_counts(old[layer], samples.shape[2])
-        if np.sum(samples[:, layer], dtype=np.float64) == 0:
-            continue
-        current = StairEplbPolicy.placement_score(samples[:, layer], weights, old[layer])
-        if current.mean > config.imbalance_threshold and StairEplbPolicy.passes_hysteresis(
-            current.mean, anchors[layer], config
-        ):
-            deterioration = 0.0 if np.isnan(anchors[layer]) else current.mean / anchors[layer] - 1.0
-            eligible.append((-current.mean, -deterioration, layer))
-
-    for _, _, layer in sorted(eligible):
-        result = StairEplbPolicy._plan_layer(samples[:, layer], weights, old[layer], node_by_rank, config)
-        if result is not None:
-            placement[layer] = result.placement
-            source_rank[layer] = result.source_rank
-            source_slot[layer] = result.source_slot
-            new_scores[layer] = result.score.mean
-    return StairPlan(placement, source_rank, source_slot, new_scores)
