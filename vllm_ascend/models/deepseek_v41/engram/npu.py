@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from safetensors import safe_open
 from torch import nn
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 SCALE_GROUP = 32
@@ -272,6 +273,13 @@ class NodeShardedEngram(nn.Module):
                 HostUvaBuffer((host_rows, width), torch.int8, device),
                 HostUvaBuffer((host_rows, width // SCALE_GROUP), torch.float32, device),
             )
+            registered = host_rows * (width + (width // SCALE_GROUP) * 4)
+            logger.info(
+                "Engram shard rows %d-%d offloaded to host memory (%.2f GiB registered)",
+                self.start,
+                self.end,
+                registered / 1024**3,
+            )
         codes = self._host_uva[0].tensor if self._host_uva is not None else None
         self.weight = nn.Parameter(
             codes
@@ -335,6 +343,7 @@ class NodeShardedEngram(nn.Module):
             for start in range(self.start, self.end, chunk_rows):
                 stop = min(start + chunk_rows, self.end)
                 self.set_rows(start - self.start, tensor[start:stop])
+        logger.info("Engram shard rows %d-%d loaded from %s", self.start, self.end, index[key])
 
     def lookup_local(self, ids):
         # Idle DP replicas still enter routing collectives, but must not launch
