@@ -22,7 +22,38 @@ import torch
 
 import vllm_ascend.spec_decode as spec_decode
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer, _LayerResolvedSource
+
+
+def _layer_provider(layer_name):
+    def resolve(step_metadata):
+        metadata = step_metadata[layer_name]
+        return {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+            "block_table": metadata.block_tables,
+        }
+
+    return SimpleNamespace(layer_name=layer_name, resolve=resolve)
+
+
+def _two_group_multi_steps():
+    def metadata(block_table, step):
+        return SimpleNamespace(
+            actual_seq_lengths_q=[step],
+            seq_lens_list=[step + 1],
+            block_tables=block_table,
+        )
+
+    sliding = [torch.full((1, 4), 11), torch.full((1, 4), 12)]
+    full = [torch.full((1, 4), 21), torch.full((1, 4), 22)]
+    return [
+        {
+            "draft.attn.0": metadata(sliding[step], step),
+            "draft.attn.3": metadata(full[step], step),
+        }
+        for step in range(2)
+    ]
 
 
 def test_routes_gemma4_mtp_to_ascend_proposer():
@@ -128,3 +159,59 @@ def test_build_draft_attn_metadata_uses_per_group_block_tables():
         )
         assert metadata[gid].attn_state == AscendAttentionState.SpecDecoding
     assert metadata[1].attn_mask is None
+
+
+def test_layer_resolved_source_picks_each_layer_own_block_table():
+    multi_steps = _two_group_multi_steps()
+    source = _LayerResolvedSource(multi_steps)
+
+    sliding_params = source.get(_layer_provider("draft.attn.0"))
+    full_params = source.get(_layer_provider("draft.attn.3"))
+
+    assert len(sliding_params) == 2
+    assert len(full_params) == 2
+    for step in range(2):
+        assert torch.equal(
+            sliding_params[step]["block_table"],
+            multi_steps[step]["draft.attn.0"].block_tables,
+        )
+        assert torch.equal(
+            full_params[step]["block_table"],
+            multi_steps[step]["draft.attn.3"].block_tables,
+        )
+    # The full-attention layer must not be served the sliding group's table.
+    assert not torch.equal(
+        full_params[0]["block_table"],
+        sliding_params[0]["block_table"],
+    )
+
+
+def test_layer_resolved_source_falls_back_to_representative_layer():
+    multi_steps = _two_group_multi_steps()
+    source = _LayerResolvedSource(multi_steps)
+
+    params = source.get(SimpleNamespace())
+
+    assert len(params) == 2
+    for step in range(2):
+        assert torch.equal(
+            params[step]["block_table"],
+            multi_steps[step]["draft.attn.0"].block_tables,
+        )
+
+
+def test_maybe_update_metadata_installs_layer_resolved_source():
+    proposer = AscendGemma4Proposer.__new__(AscendGemma4Proposer)
+    proposer._runnable = MagicMock()
+    multi_steps = _two_group_multi_steps()
+
+    with patch(
+        "vllm_ascend.spec_decode.gemma4_proposer.use_updatable_graph",
+        return_value=True,
+    ):
+        proposer._maybe_update_metadata(object(), multi_steps)
+
+    (source,) = proposer._runnable.update_draft_model_metadata.call_args.args
+    assert isinstance(source, _LayerResolvedSource)
+    assert source.multi_steps_attn_metadata is multi_steps
+    proposer._runnable.set_attn_backend.assert_called_once()
