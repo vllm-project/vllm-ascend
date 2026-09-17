@@ -157,7 +157,7 @@ vllm serve /path/to/hybrid-model \
     "kv_connector_extra_config": {
       "backend": "mooncake",
       "use_layerwise": true,
-      "layerwise_prefetch_layers": 1,
+      "layerwise_prefetch_layers": 2,
       "layerwise_max_transfer_blocks": 64,
       "layerwise_max_transfer_bytes": 16777216
     }
@@ -165,7 +165,7 @@ vllm serve /path/to/hybrid-model \
 ```
 
 Choose TP size, chunk size, quantization, and model arguments for the actual
-hardware/model. Begin with one future-layer prefetch window. This example is
+hardware/model. Begin with two future-layer prefetch windows. This example is
 not a verified DeepSeek-V4 deployment recipe or a memory-capacity guarantee.
 
 ## Validation

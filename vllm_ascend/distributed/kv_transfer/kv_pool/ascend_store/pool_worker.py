@@ -547,9 +547,9 @@ class KVPoolWorker:
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = 1
+            self.num_prefetch_layers = 2
             if self.use_layerwise:
-                prefetch_layers = self._extra_config.get("layerwise_prefetch_layers", 1)
+                prefetch_layers = self._extra_config.get("layerwise_prefetch_layers", 2)
                 if isinstance(prefetch_layers, bool):
                     raise ValueError("layerwise_prefetch_layers must be a positive integer")
                 try:
