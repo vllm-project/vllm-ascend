@@ -2123,6 +2123,94 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+// Meta implementation for npu_blasst_attention_score (TND layout).
+// Output shapes mirror the real kernel adapter
+// (csrc/blasst_attention_score/blasst_attention_score_torch_adpt.h):
+//   attention_out: same shape/dtype as query  [total_q, num_heads, head_dim]
+//   softmax_lse:   float32 [total_q, num_heads, 1]
+//   sparse_stats:  int32 [2]（块级稀疏统计 [sparse_block_sum, total_block_sum]）
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_blasst_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const c10::optional<at::Tensor> &pse_shift,
+    const c10::optional<at::Tensor> &atten_mask,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &blocktable,
+    int64_t num_heads, double scale, int64_t pre_tokens, int64_t next_tokens,
+    c10::string_view input_layout, int64_t num_key_value_heads,
+    int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
+    int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
+    bool sparse_stats_flag, bool flash_decode)
+{
+    (void)flash_decode;
+    at::Tensor attention_out = at::empty_symint(query.sym_sizes(), query.options());
+    at::Tensor softmax_lse = at::empty_symint(
+        {query.sym_size(0), query.sym_size(1), 1},
+        query.options().dtype(at::kFloat));
+    // 16 int32 = one full 64B cacheline: the kernel's stats epilogue does a
+    // cacheline writeback (DataCacheCleanAndInvalid CACHELINE_OUT) on this
+    // tensor; an 8-byte {2} buffer would clobber the 56 neighbouring bytes.
+    at::Tensor sparse_stats = at::empty_symint(c10::SymDimVector{16}, query.options().dtype(at::kInt));
+    return {attention_out, softmax_lse, sparse_stats};
+}
+
+// Meta for npu_blasst_attention_score_out（图模式 out 变体）：写回传入 tensor，
+// 无返回。签名与 torch_binding.cpp 的 def 一致。
+void npu_blasst_attention_score_out_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    at::Tensor &attention_out, at::Tensor &softmax_lse, at::Tensor &sparse_stats,
+    const c10::optional<at::Tensor> &workspace,
+    const c10::optional<at::Tensor> &pse_shift,
+    const c10::optional<at::Tensor> &atten_mask,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &blocktable,
+    int64_t num_heads, double scale, int64_t pre_tokens, int64_t next_tokens,
+    c10::string_view input_layout, int64_t num_key_value_heads,
+    int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
+    int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
+    bool sparse_stats_flag, bool flash_decode)
+{
+    (void)query; (void)key; (void)value; (void)attention_out; (void)softmax_lse;
+    (void)sparse_stats; (void)workspace; (void)pse_shift; (void)atten_mask;
+    (void)actual_seq_lengths; (void)actual_seq_lengths_kv; (void)blocktable;
+    (void)num_heads; (void)scale; (void)pre_tokens; (void)next_tokens;
+    (void)input_layout; (void)num_key_value_heads; (void)sparse_mode;
+    (void)inner_precise; (void)block_size; (void)antiquant_mode; (void)sparse_lambda;
+    (void)softmax_lse_flag; (void)sparse_stats_flag;
+    (void)flash_decode;
+}
+
+// Meta for get_workspace：返回值在 trace 期符号化，真实大小由运行时 impl 提供。
+// 返回的 query.sym_size(0) 仅为 schema 占位（fake/meta 模式下无法推导真实 workspace
+// 尺寸）；任何依赖该返回值分配 workspace 的路径都必须走真实 op。
+int64_t npu_blasst_attention_score_get_workspace_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const c10::optional<at::Tensor> &pse_shift,
+    const c10::optional<at::Tensor> &atten_mask,
+    at::IntArrayRef actual_seq_lengths,
+    at::IntArrayRef actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &blocktable,
+    int64_t num_heads, double scale, int64_t pre_tokens, int64_t next_tokens,
+    c10::string_view input_layout, int64_t num_key_value_heads,
+    int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
+    int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
+    bool sparse_stats_flag, bool flash_decode)
+{
+    (void)key; (void)value; (void)pse_shift; (void)atten_mask;
+    (void)actual_seq_lengths; (void)actual_seq_lengths_kv; (void)blocktable;
+    (void)num_heads; (void)scale; (void)pre_tokens; (void)next_tokens;
+    (void)input_layout; (void)num_key_value_heads; (void)sparse_mode;
+    (void)inner_precise; (void)block_size; (void)antiquant_mode; (void)sparse_lambda;
+    (void)softmax_lse_flag; (void)sparse_stats_flag;
+    (void)flash_decode;
+    // Symbolic-tracing placeholder: the real workspace size is only known
+    // after host-side tiling, so this returns a non-zero proxy to keep
+    // traced graphs well-formed. The eager and ACL-Graph paths always query
+    // the real size through the op itself; never rely on this value.
+    return query.sym_size(0).expect_int(__FILE__, __LINE__);
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -2251,6 +2339,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
+    // Fused infer attention score
+    ops.impl("npu_blasst_attention_score", &vllm_ascend::meta::npu_blasst_attention_score_meta);
+    // Fused infer attention score graph-mode variants
+    ops.impl("npu_blasst_attention_score_out", &vllm_ascend::meta::npu_blasst_attention_score_out_meta);
+    ops.impl("npu_blasst_attention_score_get_workspace", &vllm_ascend::meta::npu_blasst_attention_score_get_workspace_meta);
 }
 }
 #endif

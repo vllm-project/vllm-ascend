@@ -40,6 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -69,6 +70,39 @@ SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+_BLASST_WORKSPACE_KEY = "npu_blasst_attention_score.workspace"
+# Host seq-list capacity embedded in the BlasST op's TilingData
+# (BLASST_MAX_HOST_SEQ_LIST in csrc/.../blasst_attention_score_tiling.h).
+# Larger batches fall back to the baseline FIA path instead of failing
+# inside the op's tiling.
+BLASST_MAX_HOST_SEQ = 256
+# sparse_mode=3 (compressed causal mask) is the only mask mode the custom
+# BlasST op implements; non-causal batches fall back to the baseline path.
+BLASST_SPARSE_MODE_COMPRESSED_CAUSAL = 3
+
+
+def _blasst_op_kwargs(blasst_config, num_heads: int, num_kv_heads: int, scale: float) -> dict:
+    """Shared tail args of the BlasST op calls.
+
+    The eager entry, graph capture and task-update calls all pass the same
+    contract; the torch schema exposes these as named parameters, so a
+    single kwargs dict replaces three synchronized positional literals.
+    """
+    return dict(
+        num_heads=num_heads,
+        scale=scale,
+        pre_tokens=SWA_INT_MAX,
+        next_tokens=SWA_INT_MAX,
+        input_layout="TND",
+        num_key_value_heads=num_kv_heads,
+        sparse_mode=BLASST_SPARSE_MODE_COMPRESSED_CAUSAL,
+        inner_precise=0,
+        antiquant_mode=0,
+        sparse_lambda=blasst_config.sparse_lambda,
+        softmax_lse_flag=False,
+        sparse_stats_flag=False,
+        flash_decode=blasst_config.flash_decode,
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -480,6 +514,22 @@ class FIAParamProvider:
 
 
 @dataclass(frozen=True, slots=True)
+class BlasstParamProvider:
+    """ParamProvider for BlasST full-graph tasks (its block-table kwarg is
+    spelled ``blocktable``)."""
+
+    layer_name: str | None
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        return {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+            "blocktable": metadata.block_tables,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
     layer_name: str | None
 
@@ -557,6 +607,46 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        # Static capability matrix for the BlasST op, evaluated
+        # once per layer (same pattern as _use_layer_aware_fia_graph_replay
+        # above); per-call conditions live in _can_use_blasst. Anything
+        # the op cannot take falls back to the baseline FIA path instead of
+        # failing inside the op. The config is always initialized in engine
+        # flows; unit-test constructions may skip it, in which case the
+        # custom path stays off.
+        try:
+            blasst_cfg = get_ascend_config().blasst_config
+        except RuntimeError:
+            blasst_cfg = None
+        # Hybrid linear-attention models always use the baseline FIA path:
+        # sparse-skip perturbations accumulate in linear layers' recurrent state.
+        _hf_cfg = self.vllm_config.model_config.hf_config
+        _layer_types = getattr(_hf_cfg, "layer_types", None) or getattr(
+            getattr(_hf_cfg, "text_config", None), "layer_types", None
+        )
+        self._is_hybrid_linear = bool(_layer_types) and "linear_attention" in _layer_types
+        self._blasst_supported = (
+            blasst_cfg is not None
+            and blasst_cfg.enabled
+            and not self._is_hybrid_linear
+            # Op-side hard limits (blasst_attention_score_tiling.cpp):
+            # FP16/BF16 only and K/V dtypes must match the query dtype. Use
+            # an explicit whitelist: get_kv_quant_mode("int8") == NONE in
+            # vllm 0.26, so a quant-mode check alone leaks int8 KV caches.
+            and self.vllm_config.model_config.dtype in (torch.float16, torch.bfloat16)
+            and self.kv_cache_dtype in ("auto", "float16", "bfloat16")
+            # The kernel's GEMM tiles are designed for head_dim 128;
+            # head_dim 256 (Qwen3.5 full-attention layers) is validated
+            # bit-exact against torch_npu FIA on prefill/decode/chunked
+            # single-op cases; other head sizes remain untested.
+            and self.head_size in (128, 256)
+            # No learnable-sink / sliding-window support in the op.
+            and self.sinks is None
+            and self.sliding_window is None
+            # _C_ascend custom ops are not registered in batch-invariant mode,
+            # and the batch-invariant phase split is not implemented here.
+            and not envs_vllm.VLLM_BATCH_INVARIANT
+        )
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -822,6 +912,217 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
+
+    def _can_use_blasst(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> bool:
+        """Gate for routing a batch through the BlasST op.
+
+        Static limits (enabled flag, dtypes, head size, sinks, sliding
+        window, batch-invariant mode) are evaluated once in ``__init__`` as
+        ``_blasst_supported``; only per-call conditions live here.
+        Every unsupported case falls back to the baseline FIA path.
+        """
+        if not self._blasst_supported:
+            return False
+        # The op maps sparse_mode=3 to causal masking unconditionally and does
+        # not check that an attention mask exists, while non-causal batches
+        # carry attn_mask=None -> silent wrong output for bidirectional
+        # attention (encoder / cross-attention / pooling layers).
+        if not attn_metadata.causal:
+            return False
+        # Seq lengths are embedded into a fixed-size array in the op tiling
+        # (BLASST_MAX_HOST_SEQ_LIST); over-limit calls fail inside the tiling, so
+        # fall back here instead. The list length equals the batch size.
+        if len(attn_metadata.actual_seq_lengths_q) > BLASST_MAX_HOST_SEQ:
+            return False
+        # Cache-backed states need the cache handle bound; unlike the baseline
+        # path this one does not lazily initialize it from kv_cache.
+        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache and self.key_cache is None:
+            return False
+        # Mixed decode+prefill chunked batches: the baseline splits phases to
+        # keep numerics batch-composition independent; the custom path runs
+        # one fused call, so stay on the baseline for those batches.
+        if (
+            attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+            and attn_metadata.num_decodes > 0
+            and attn_metadata.num_prefills > 0
+            and get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+        ):
+            return False
+        if _EXTRA_CTX.capturing:
+            # Graph path: opt-in full-graph capture, decode buckets only. The
+            # update branch registers into the target graph pool (no draft
+            # split) and resolves metadata by raw key (no layer_name
+            # handling), so both stay on the baseline.
+            if not (
+                get_ascend_config().blasst_config.full_graph
+                and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            ):
+                return False
+            if _EXTRA_CTX.is_draft_model or self._use_layer_aware_fia_graph_replay:
+                return False
+        # Supported states; PrefillCacheHit / SpecDecoding stay on baseline.
+        return attn_metadata.attn_state in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.ChunkedPrefill,
+        )
+
+    def forward_blasst_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        """Forward path through the BlasST operator.
+
+        This mirrors ``forward_fused_infer_attention`` but calls
+        ``torch.ops._C_ascend.npu_blasst_attention_score``, which exposes
+        the BlasST ``sparse_lambda`` parameter directly instead of encoding it
+        via ``antiquant_mode``.
+        """
+        if _EXTRA_CTX.capturing:
+            attn_output, num_tokens = self.full_graph_blasst(query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+        ):
+            key = key[:num_tokens]
+            value = value[:num_tokens]
+
+        # The custom op takes host int64 lists for sequence lengths (aligned
+        # with the CANN aclnn FIA interface): the op host embeds them into
+        # TilingData via attrs with zero D2H on the host side, and the kernel
+        # reads them from the framework-managed tiling buffer.
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        # Match the baseline (torch_npu) path: always sparse_mode=3 with
+        # attn_mask. sparse_lambda comes from blasst_config; -99.0 means
+        # dense (no block skipping).
+        attn_output, _, _ = torch.ops._C_ascend.npu_blasst_attention_score(
+            query,
+            key,
+            value,
+            pse_shift=None,
+            atten_mask=attn_metadata.attn_mask,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            blocktable=block_table,
+            block_size=block_size,
+            **_blasst_op_kwargs(get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale),
+        )
+
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def full_graph_blasst(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        """BlasST 的 full-graph capture 路径（UpdatableGraph 风格，镜像
+        full_graph_fia）。
+
+        与 baseline 的三点差别：
+        - 调 _C_ascend 的 _out 变体（3 输出 + 外部常驻 workspace）；
+        - host-list-only：seq 以 host IntArray attrs 传入，由 op host 内嵌进
+          TilingData（框架托管上传，capture/update 均合法），与 torch_npu
+          内置 FIA 的 host list 接口契约一致；窗口内组里只剩纯 aclnn
+          launch，拓扑恒定；
+        - 图内禁用统计输出（softmax_lse/sparse_stats，host 读 device 在
+          capture/replay 下非法）。
+        """
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        # 常驻输出：capture/update/replay 复用同一组地址（task update patch 的
+        # 写出地址必须与 capture 一致）
+        attention_out = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+        softmax_lse = torch.empty(query.shape[0], self.num_heads, 1, dtype=torch.float32, device=query.device)
+        # 与 adapter/proto/meta 的 {16} 对齐（kernel 对 stats 张量做整 64B
+        # cacheline 回写，16 int32 是防踩邻的安全下限）；图内
+        # sparse_stats_flag=False 实际不写入。
+        sparse_stats = torch.empty(16, dtype=torch.int32, device=query.device)
+
+        # 常驻 workspace：FD 追加区随 batch 与 kv 增长，按满 batch ×
+        # max_model_len 取上界（aq 为累积列表，详见 tiling 注释）；
+        # get_workspace 只经 attr 推导，无 H2D，capture 期可调用。
+        ws_args = dict(
+            pse_shift=None,
+            atten_mask=attn_metadata.attn_mask,
+            blocktable=block_table,
+            block_size=block_size,
+            **_blasst_op_kwargs(get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale),
+        )
+        max_kv = self.vllm_config.model_config.max_model_len
+
+        def _make_workspace():
+            ws_size = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                query,
+                key,
+                value,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                **ws_args,
+            )
+            ws_size_fd = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                query,
+                key,
+                value,
+                actual_seq_lengths=list(range(1, num_tokens + 1)),
+                actual_seq_lengths_kv=[max_kv] * num_tokens,
+                **ws_args,
+            )
+            return torch.empty(max(ws_size, ws_size_fd), dtype=torch.uint8, device=query.device)
+
+        workspace = get_capture_resource(
+            _BLASST_WORKSPACE_KEY,
+            _make_workspace,
+            self._use_max_workspace_for_fia_graph,
+        )
+        register_task(
+            torch.ops._C_ascend.npu_blasst_attention_score_out,
+            {
+                "query": query,
+                "key": key,
+                "value": value,
+                "attention_out": attention_out,
+                "softmax_lse": softmax_lse,
+                "sparse_stats": sparse_stats,
+                "workspace": workspace,
+                "pse_shift": None,
+                "atten_mask": attn_metadata.attn_mask,
+                "actual_seq_lengths": actual_seq_lengths_q,
+                "actual_seq_lengths_kv": actual_seq_lengths_kv,
+                "blocktable": block_table,
+                "block_size": block_size,
+                **_blasst_op_kwargs(get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale),
+            },
+            BlasstParamProvider(self._layer_name),
+        )
+
+        attn_output = attention_out.view(num_tokens, self.num_heads, self.head_size)
+        return attn_output, num_tokens
 
     def forward_fused_infer_attention(
         self,
@@ -1204,12 +1505,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         record_attention_compute_start()
         num_tokens = query.shape[0]
 
+        # Dispatch priority (deliberate, 2026-09-11): paged attention keeps
+        # the decode fast path even when blasst is enabled, so decode on
+        # PA-capable configs never reaches the custom op. The BlasST
+        # branch effectively covers PrefillNoCache / ChunkedPrefill and
+        # decode configs where paged attention does not apply. Revisit only
+        # together with a perf comparison of the two decode paths.
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and self.sliding_window is None
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
+        elif self._can_use_blasst(attn_metadata):
+            output = self.forward_blasst_attention(query, key, value, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
