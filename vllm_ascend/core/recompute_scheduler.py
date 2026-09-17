@@ -854,7 +854,7 @@ class RecomputeScheduler(Scheduler):
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
-            **({"uses_xdrope": self.model_uses_xdrope} if hasattr(self, "model_uses_xdrope") else {}),
+            **({"uses_xdrope": self.model_uses_xdrope} if vllm_version_is("0.29.0") else {}),
         }
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
