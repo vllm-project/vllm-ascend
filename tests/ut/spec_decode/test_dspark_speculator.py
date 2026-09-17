@@ -15,6 +15,7 @@ from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.models import dspark as dspark_model
 from vllm_ascend.models import register_model
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
@@ -32,6 +33,7 @@ def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.vllm_config = vllm_config
     spec.draft_model_config = SimpleNamespace(hf_config=draft_hf_config)
+    vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
     return spec
 
 
@@ -103,7 +105,7 @@ def test_draft_without_hook_preserves_target_capture(monkeypatch):
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
     target.set_dspark_aux_capture_materialized.assert_not_called()
-    assert config._ascend_target_rotation_path is not None
+    assert not hasattr(config, "_ascend_target_rotation_path")
 
 
 def test_qwen3_class_selects_materialized_target_capture():
@@ -162,13 +164,13 @@ def test_injects_rotation_before_draft_construction(monkeypatch):
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
+        "vllm_ascend.models.dspark.get_rotation_path",
         lambda config: "/rotation",
     )
     spec = _spec(_vllm_config(quarot=True), draft_config)
 
     assert spec.load_draft_model(target, set()) is draft
-    assert draft_config._ascend_target_rotation_path == "/rotation"
+    assert not hasattr(draft_config, "_ascend_target_rotation_path")
 
 
 def test_draft_loading_failure_propagates(monkeypatch):
@@ -180,7 +182,7 @@ def test_draft_loading_failure_propagates(monkeypatch):
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", fail_load)
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
+        "vllm_ascend.models.dspark.get_rotation_path",
         lambda config: "/rotation",
     )
     spec = _spec(_vllm_config(quarot=True), draft_config)
@@ -191,7 +193,7 @@ def test_draft_loading_failure_propagates(monkeypatch):
 
 
 @pytest.mark.parametrize("quarot", [False, True])
-def test_target_rotation_path_is_retained(monkeypatch, quarot):
+def test_target_rotation_path_is_scoped_to_loading(monkeypatch, quarot):
     config = _gqa_config()
 
     def load(*args):
@@ -201,15 +203,12 @@ def test_target_rotation_path_is_retained(monkeypatch, quarot):
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     _spec(_vllm_config(quarot=quarot), config).load_draft_model(_target(), set())
-    expected = str(Path("/target") / "rotation.safetensors") if quarot else None
-    assert config._ascend_target_rotation_path == expected
+    assert not hasattr(config, "_ascend_target_rotation_path")
 
 
-@pytest.mark.parametrize("initial_path", [None, Path("/draft-rotation")])
-def test_load_weights_uses_target_rotation(monkeypatch, initial_path):
+def test_load_weights_uses_target_rotation(monkeypatch):
     draft = _draft()
-    draft.rotation_path = initial_path
-    draft.config._ascend_target_rotation_path = "/target-rotation"
+    draft.rotation_path = Path("/target-rotation")
     rotation_loader = MagicMock(return_value=torch.eye(2))
     monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.get_rotation_matrix", rotation_loader)
     loaded = []
@@ -218,6 +217,23 @@ def test_load_weights_uses_target_rotation(monkeypatch, initial_path):
     draft.load_weights([("fc.weight", weight), ("embed_tokens.weight", weight), ("lm_head.weight", weight)])
     rotation_loader.assert_called_once_with(Path("/target-rotation"))
     torch.testing.assert_close(loaded[0][1], weight)
+
+
+@pytest.mark.parametrize("target_path", [None, "target-rotation"])
+def test_gqa_constructor_caches_target_rotation(monkeypatch, target_path):
+    hf_config = _gqa_config()
+    hf_config._ascend_target_rotation_path = target_path
+    config = _vllm_config(quarot=True)
+    config.speculative_config = SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=hf_config))
+
+    def init(self, **kwargs):
+        torch.nn.Module.__init__(self)
+        self.config = hf_config
+
+    monkeypatch.setattr(Qwen3DSparkForCausalLM, "__init__", init)
+    monkeypatch.setattr(dspark_model, "get_rotation_path", lambda _: Path("draft-rotation"))
+    draft = AscendQwen3DSparkForCausalLM(vllm_config=config)
+    assert draft.rotation_path == (Path(target_path) if target_path else None)
 
 
 def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):

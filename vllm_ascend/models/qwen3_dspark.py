@@ -5,10 +5,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
+from vllm_ascend.models.dspark import get_target_rotation_path
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
-    get_rotation_path,
 )
 
 TARGET_EMBED_WEIGHT_NAMES = (
@@ -46,7 +46,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        self.rotation_path = get_rotation_path(vllm_config)
+        self.rotation_path = get_target_rotation_path(vllm_config)
         self.target_model_path = Path(vllm_config.model_config.model)
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
@@ -71,12 +71,6 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         includes_embed_tokens = any("embed_tokens" in name for name, _ in all_weights)
         includes_lm_head = any("lm_head" in name for name, _ in all_weights)
         rotation_weight = None
-        injected_rotation_path = getattr(self.config, "_ascend_target_rotation_path", None)
-        # FC consumes target-space hidden states, so the target rotation takes
-        # precedence over any path inferred from the draft's own quant config.
-        if injected_rotation_path is not None:
-            self.rotation_path = Path(injected_rotation_path)
-
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
             rotation_weight = get_rotation_matrix(self.rotation_path)
