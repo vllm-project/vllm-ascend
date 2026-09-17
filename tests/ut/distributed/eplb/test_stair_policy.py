@@ -9,7 +9,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     BalanceScore,
     StairEplbPolicy,
     StairPlan,
-    passes_hysteresis,
 )
 
 
@@ -170,8 +169,8 @@ def test_hysteresis_uses_last_committed_score():
 
     config = StairConfig(hysteresis_relative=0.9, hysteresis_absolute=0.8)
 
-    assert not passes_hysteresis(1.05, 1.0, config)
-    assert passes_hysteresis(1.2, 1.0, config)
+    assert not StairEplbPolicy.passes_hysteresis(1.05, 1.0, config)
+    assert StairEplbPolicy.passes_hysteresis(1.2, 1.0, config)
 
 
 def test_plan_rebalance_filters_zero_and_balanced_layers():

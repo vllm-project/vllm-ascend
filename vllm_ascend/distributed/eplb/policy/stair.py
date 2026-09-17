@@ -558,15 +558,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return placement, source_rank, source_slot, cross_node, same_node
 
 
-def passes_hysteresis(current_score: float, accepted_score: float, config: StairConfig) -> bool:
-    if not config.hysteresis_enabled or np.isnan(accepted_score):
-        return True
-    current_balance = 1.0 / current_score
-    accepted_balance = 1.0 / accepted_score
-    return (
-        current_balance / accepted_balance <= config.hysteresis_relative
-        or current_balance <= config.hysteresis_absolute
-    )
+    @staticmethod
+    def passes_hysteresis(current_score: float, accepted_score: float, config: StairConfig) -> bool:
+        if not config.hysteresis_enabled or np.isnan(accepted_score):
+            return True
+        current_balance = 1.0 / current_score
+        accepted_balance = 1.0 / accepted_score
+        return (
+            current_balance / accepted_balance <= config.hysteresis_relative
+            or current_balance <= config.hysteresis_absolute
+        )
 
 
 def _plan_layer(
@@ -656,7 +657,9 @@ def _plan_rebalance(
         if np.sum(samples[:, layer], dtype=np.float64) == 0:
             continue
         current = StairEplbPolicy.placement_score(samples[:, layer], weights, old[layer])
-        if current.mean > config.imbalance_threshold and passes_hysteresis(current.mean, anchors[layer], config):
+        if current.mean > config.imbalance_threshold and StairEplbPolicy.passes_hysteresis(
+            current.mean, anchors[layer], config
+        ):
             deterioration = 0.0 if np.isnan(anchors[layer]) else current.mean / anchors[layer] - 1.0
             eligible.append((-current.mean, -deterioration, layer))
 
