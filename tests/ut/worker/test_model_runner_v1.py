@@ -482,7 +482,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
-    def test_mla_single_raw_backing_selects_layout_by_hardware(self):
+    def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
         runner = self._build_runner()
         layer_name = "model.layers.0.self_attn.attn"
         num_blocks = 2
@@ -512,7 +512,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
 
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
-        for q_heads in (64, 96):
+        for q_heads in (8, 12, 64, 96):
             with self.subTest(q_heads=q_heads):
                 attn_module.num_heads = q_heads
                 with patch(

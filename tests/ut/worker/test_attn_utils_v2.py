@@ -138,7 +138,7 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
-def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
+def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(monkeypatch):
     layer_name = "model.layers.0.self_attn.attn"
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
@@ -207,7 +207,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
         )[layer_name]
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
-    for q_heads in (64, 96):
+    for q_heads in (8, 12, 64, 96):
         attn_module.num_heads = q_heads
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
