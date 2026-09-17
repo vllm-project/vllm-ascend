@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import copy
-from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING
 
 from vllm.logger import logger
@@ -25,21 +24,18 @@ if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
-def group_cache_spec_signature(group) -> tuple[str, ...]:
-    """Per-group cache schemas, independent of how the spec is packaged.
+def group_block_size_signature(group) -> tuple[int, ...]:
+    """Per-group page sizes, independent of how the spec is packaged.
 
     The scheduler and a worker can hold the *same* group in two different
     shapes: one merged spec versus a ``UniformTypeKVCacheSpecs`` mapping every
-    layer name to its own spec. Reduce either shape to the set of its member
-    schemas so equivalent layouts agree without discarding dtype or geometry.
+    layer name to its own spec. Both describe the same pages, so reduce either
+    shape to the set of block sizes it contains rather than reading a single
+    representative (which depends on dict order).
     """
     spec = group.kv_cache_spec
     specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-    signatures = set()
-    for sub in specs:
-        fields = asdict(sub) if is_dataclass(sub) else vars(sub)
-        signatures.add(json.dumps((type(sub).__name__, fields), sort_keys=True, default=str))
-    return tuple(sorted(signatures))
+    return tuple(sorted({int(sub.block_size) for sub in specs}))
 
 
 def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
@@ -53,13 +49,13 @@ def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
     queried another, so the pool never reported a hit, silently and with no
     error anywhere.
 
-    Layer membership, group order and normalized member schemas are identical
-    in both representations. Keeping the member type and fields also isolates
-    incompatible dtypes and cache geometries.
+    Layer membership, group order and per-group page sizes are identical in
+    both representations, and the model name is already part of every key, so
+    this still isolates incompatible layouts from each other.
     """
     groups = []
     for group in kv_cache_config.kv_cache_groups:
-        groups.append((sorted(group.layer_names), group_cache_spec_signature(group)))
+        groups.append((sorted(group.layer_names), group_block_size_signature(group)))
     # No default= fallback on purpose: anything non-serializable here would have
     # to come from a repr that can differ per process, which is exactly the bug
     # this hash must never reacquire. Fail loudly instead.

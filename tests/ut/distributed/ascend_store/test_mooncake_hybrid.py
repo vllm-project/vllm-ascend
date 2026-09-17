@@ -237,7 +237,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             tracker.record_get_result(key, ["request"], succeeded=True)
         self.assertEqual(set(tracker.release_terminal({"request"})), {"swa", "compressed"})
 
-    def test_layout_fingerprint_covers_group_membership_and_dtype(self):
+    def test_layout_fingerprint_covers_group_membership_and_page_size(self):
         config = SimpleNamespace(
             kv_cache_groups=[
                 KVCacheGroupSpec(["model.layers.0.kv"], FullAttentionSpec(block_size=16, dtype="uint8")),
@@ -249,6 +249,8 @@ class TestMooncakeHybrid(unittest.TestCase):
         self.assertNotEqual(original, hybrid_layout_id(config))
         config.kv_cache_groups[0].layer_names.pop()
         config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(block_size=16, dtype="float16")
+        self.assertEqual(original, hybrid_layout_id(config))
+        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(block_size=32, dtype="float16")
         self.assertNotEqual(original, hybrid_layout_id(config))
 
     def test_layout_fingerprint_normalizes_uniform_wrapper(self):
