@@ -5,11 +5,14 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 @pytest.mark.parametrize(
@@ -93,6 +96,33 @@ def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
     assert kwargs["num_input_tokens"] == expected_tokens
     assert kwargs["positions"].shape[0] == expected_tokens
     assert kwargs["slot_mapping"].shape[0] == expected_tokens
+
+
+@pytest.mark.parametrize(
+    ("adaptive_verification", "context_len", "expected"),
+    [
+        (object(), 8192, True),
+        (object(), 0, False),
+        (None, 8192, False),
+    ],
+)
+def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, context_len, expected):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.adaptive_verification = adaptive_verification
+    observed = []
+
+    def fake_dummy_run(*args, **kwargs):
+        observed.append(get_mrv2_in_profile_run())
+        return None, None
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_run", side_effect=fake_dummy_run),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+    ):
+        runner._dummy_run(256, context_len=context_len)
+
+    assert observed == [expected]
+    assert get_mrv2_in_profile_run() is False
 
 
 def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
