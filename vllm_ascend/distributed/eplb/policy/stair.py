@@ -152,42 +152,42 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("STAIR placement must cover every expert without rank-local duplicates")
         return counts
 
+    @staticmethod
+    def compress_samples(samples: np.ndarray, sample_size: int) -> tuple[np.ndarray, np.ndarray]:
+        """Compress chronological samples into weighted, non-empty bins."""
+        values = np.asarray(samples, dtype=np.float64)
+        if values.ndim != 3 or values.shape[0] == 0 or sample_size < 1:
+            raise ValueError("STAIR samples must be [steps, layers, experts]")
+        bins = min(values.shape[0], sample_size)
+        boundaries = np.arange(bins + 1) * values.shape[0] // bins
+        weights = np.diff(boundaries).astype(np.int64)
+        compressed = np.stack(
+            [values[start:end].mean(axis=0, dtype=np.float64) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        )
+        return compressed, weights
 
-def compress_samples(samples: np.ndarray, sample_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Compress chronological samples into weighted, non-empty bins."""
-    values = np.asarray(samples, dtype=np.float64)
-    if values.ndim != 3 or values.shape[0] == 0 or sample_size < 1:
-        raise ValueError("STAIR samples must be [steps, layers, experts]")
-    bins = min(values.shape[0], sample_size)
-    boundaries = np.arange(bins + 1) * values.shape[0] // bins
-    weights = np.diff(boundaries).astype(np.int64)
-    compressed = np.stack(
-        [values[start:end].mean(axis=0, dtype=np.float64) for start, end in zip(boundaries[:-1], boundaries[1:])]
-    )
-    return compressed, weights
-
-
-def weighted_moments(
-    samples: np.ndarray,
-    weights: np.ndarray,
-    *,
-    covariance: bool,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return the weighted mean and sample variance or covariance."""
-    values = np.asarray(samples, dtype=np.float64)
-    counts = np.asarray(weights, dtype=np.int64)
-    if values.ndim != 2 or counts.shape != (values.shape[0],) or np.any(counts <= 0):
-        raise ValueError("STAIR moments require [samples, experts] and positive weights")
-    total = int(counts.sum())
-    mean = np.sum(values * counts[:, None], axis=0, dtype=np.float64) / total
-    centered = values - mean
-    if total == 1:
-        shape = (values.shape[1], values.shape[1]) if covariance else (values.shape[1],)
-        return mean, np.zeros(shape, dtype=np.float64)
-    if covariance:
-        moments = (centered * counts[:, None]).T @ centered / (total - 1)
-        return mean, (moments + moments.T) * 0.5
-    return mean, np.sum(centered**2 * counts[:, None], axis=0, dtype=np.float64) / (total - 1)
+    @staticmethod
+    def weighted_moments(
+        samples: np.ndarray,
+        weights: np.ndarray,
+        *,
+        covariance: bool,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the weighted mean and sample variance or covariance."""
+        values = np.asarray(samples, dtype=np.float64)
+        counts = np.asarray(weights, dtype=np.int64)
+        if values.ndim != 2 or counts.shape != (values.shape[0],) or np.any(counts <= 0):
+            raise ValueError("STAIR moments require [samples, experts] and positive weights")
+        total = int(counts.sum())
+        mean = np.sum(values * counts[:, None], axis=0, dtype=np.float64) / total
+        centered = values - mean
+        if total == 1:
+            shape = (values.shape[1], values.shape[1]) if covariance else (values.shape[1],)
+            return mean, np.zeros(shape, dtype=np.float64)
+        if covariance:
+            moments = (centered * counts[:, None]).T @ centered / (total - 1)
+            return mean, (moments + moments.T) * 0.5
+        return mean, np.sum(centered**2 * counts[:, None], axis=0, dtype=np.float64) / (total - 1)
 
 
 def placement_score(samples: np.ndarray, weights: np.ndarray, placement: np.ndarray) -> BalanceScore:
@@ -557,7 +557,7 @@ def _plan_layer(
     config: StairConfig,
 ) -> LayerPlan | None:
     current = placement_score(samples, weights, old)
-    mean, moments = weighted_moments(samples, weights, covariance=config.use_covariance)
+    mean, moments = StairEplbPolicy.weighted_moments(samples, weights, covariance=config.use_covariance)
     diagonal = np.diag(moments) if moments.ndim == 2 else moments
     risk = mean + config.z_score * np.sqrt(np.maximum(diagonal, 0.0))
 
@@ -613,7 +613,7 @@ def _plan_rebalance(
 ) -> StairPlan:
     """Run STAIR's six stages for every eligible layer."""
     if sample_weights is None:
-        samples, weights = compress_samples(logical_load, config.sample_size)
+        samples, weights = StairEplbPolicy.compress_samples(logical_load, config.sample_size)
     else:
         samples = np.asarray(logical_load, dtype=np.float64)
         weights = np.asarray(sample_weights, dtype=np.int64)

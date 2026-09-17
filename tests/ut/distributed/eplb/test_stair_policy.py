@@ -17,7 +17,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     passes_hysteresis,
     placement_score,
     replica_candidates,
-    weighted_moments,
 )
 
 
@@ -68,7 +67,7 @@ def test_weighted_moments_match_uncompressed_samples():
     weights = np.array([2, 1])
     expanded = np.repeat(samples, weights, axis=0)
 
-    mean, covariance = weighted_moments(samples, weights, covariance=True)
+    mean, covariance = StairEplbPolicy.weighted_moments(samples, weights, covariance=True)
 
     np.testing.assert_allclose(mean, expanded.mean(axis=0))
     np.testing.assert_allclose(covariance, np.cov(expanded, rowvar=False))
