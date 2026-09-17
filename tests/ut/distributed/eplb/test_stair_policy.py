@@ -4,8 +4,8 @@ import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb import stair_policy
-from vllm_ascend.distributed.eplb.stair_policy import (
+from vllm_ascend.distributed.eplb.policy import stair
+from vllm_ascend.distributed.eplb.policy.stair import (
     BalanceScore,
     StairEplbPolicy,
     StairPlan,
@@ -29,11 +29,11 @@ from vllm_ascend.distributed.eplb.stair_policy import (
 def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, accepted):
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(mean, p95)])
-    monkeypatch.setattr(stair_policy, "placement_score", lambda *_: next(scores))
-    monkeypatch.setattr(stair_policy, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)])
-    monkeypatch.setattr(stair_policy, "constrained_lpt", lambda *_, **__: (old, old, old, 0, 0))
+    monkeypatch.setattr(stair, "placement_score", lambda *_: next(scores))
+    monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)])
+    monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: (old, old, old, 0, 0))
 
-    result = stair_policy._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
+    result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 0), StairConfig())
 
     assert (result is not None) == accepted
 
@@ -42,13 +42,13 @@ def test_admission_requires_non_worsening_mean_and_p95(monkeypatch, mean, p95, a
 def test_internal_score_tolerance_breaks_ties_by_transfer_cost(monkeypatch, difference, expected_cross_node):
     old = np.array([[0], [1]])
     scores = iter([BalanceScore(1.2, 1.3), BalanceScore(1.1, 1.2), BalanceScore(1.1 + difference, 1.2)])
-    monkeypatch.setattr(stair_policy, "placement_score", lambda *_: next(scores))
-    monkeypatch.setattr(stair_policy, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)] * 2)
+    monkeypatch.setattr(stair, "placement_score", lambda *_: next(scores))
+    monkeypatch.setattr(stair, "replica_candidates", lambda *_, **__: [np.ones(2, dtype=int)] * 2)
     placements = [old[::-1].copy(), old.copy()]
     results = iter([(placements[0], old, old, 1, 0), (placements[1], old, old, 0, 0)])
-    monkeypatch.setattr(stair_policy, "constrained_lpt", lambda *_, **__: next(results))
+    monkeypatch.setattr(stair, "constrained_lpt", lambda *_, **__: next(results))
 
-    result = stair_policy._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 1), StairConfig())
+    result = stair._plan_layer(np.array([[2.0, 1.0]]), np.ones(1), old, (0, 1), StairConfig())
 
     assert result is not None
     np.testing.assert_array_equal(result.placement, placements[1 - expected_cross_node])

@@ -17,7 +17,7 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
-from .stair_policy import replica_counts
+from .policy.stair import replica_counts
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 

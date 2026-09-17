@@ -13,7 +13,7 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.stair_policy import StairEplbPolicy, validate_plan
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy, validate_plan
 
 
 def run_stair_planner(
