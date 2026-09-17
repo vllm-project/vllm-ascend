@@ -24,14 +24,25 @@ Decode consumers preserve the complete verifier window. Sparse index-kpool
 producers align against the resolved common cache-group boundary because their
 physical indexer-state block is smaller than the Mamba checkpoint interval.
 Other models retain the upstream behavior.
+
+On a pure PD prefill producer or a standalone instance the EAGLE one-block
+backoff of the last cacheable position is suppressed: matched content-hash
+blocks are always verified prompt blocks there, while the backoff would leave
+the final full mamba-align state page unmaterialized across the chunk boundary
+(copy-on-write in MambaManager.allocate_new_blocks), pinning hybrid prefix
+hits one full page (or entirely) short.
 """
 
 import functools
 import inspect
+from typing import Any
 
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
+from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
+    _skips_eagle_block_drop,
+)
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
@@ -103,3 +114,108 @@ if current_parameters != _EXPECTED_PARAMETERS:
     )
 
 Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
+
+
+def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None) -> None:
+    """Suppress the EAGLE-block-drop backoff in ``_mamba_block_aligned_split``
+    on a PD prefill producer or a standalone instance.
+
+    This is the scheduler-side companion of the drop exemption in
+    ``AscendHybridKVCacheCoordinator`` above.
+
+    ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
+    mamba-align page off by one block (and, on newer vLLM revisions, shifts
+    the partial-tail checkpoint boundary) whenever the EAGLE block drop is
+    active. Consequently a producer prefill can never end a chunk at its
+    final full-page boundary. In mamba "align" mode the recurrent state of a
+    page is only materialized across a chunk boundary (copy-on-write in
+    ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
+    final full state page unhashed. Hybrid coordinator hits reconcile to the
+    per-group minimum: even with the full-attention group fixed by the
+    coordinator exemption above, the mamba groups report one full page less
+    (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
+    align pages) - the observed MTP prefix-cache kill band.
+
+    Rather than copy the scheduler method (its body moves between vLLM
+    revisions), invoke the original with the drop bit temporarily cleared:
+    every read of the bit inside the method exists solely to compensate for
+    the block drop, and on the producer matched blocks are always verified
+    prompt blocks and the coordinator never drops. Scheduling is
+    single-threaded per scheduler instance, so the temporary toggle is safe.
+    vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
+    dedicated ``use_eagle_block_drop`` knob.
+
+    The wrapper is installed unconditionally and self-gates at call time on
+    ``self.vllm_config.kv_transfer_config`` (the same PD role source used by
+    the coordinator and the neighboring mamba split patch; see
+    ``_skips_eagle_block_drop``), so consumers and ``kv_both`` instances pass
+    straight through with upstream behavior. Standalone instances (no
+    connector) suppress the backoff too: the coordinator never drops there,
+    so backing the split off would only erase cacheable hit length.
+
+    The producer wrapper is always installed around the method currently
+    registered on ``Scheduler``.  This ordering is important: the neighboring
+    consumer/sparse-index patch has early-return paths which never delegate to
+    its saved original.  An inner producer wrapper would therefore leave the
+    EAGLE drop enabled on those paths.
+    """
+    if scheduler_cls is None:
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        scheduler_cls = Scheduler
+
+    if not hasattr(scheduler_cls, "_mamba_block_aligned_split"):
+        return
+    registered_split = scheduler_cls._mamba_block_aligned_split
+    if getattr(registered_split, "_ascend_producer_no_eagle_drop", False):
+        # Idempotent under module reload.
+        return
+
+    original_split = registered_split
+
+    @functools.wraps(original_split)
+    def _producer_mamba_block_aligned_split(
+        self,
+        request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        if not _skips_eagle_block_drop(
+            getattr(getattr(self, "vllm_config", None), "kv_transfer_config", None)
+        ):
+            return original_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+        # vLLM 0.28.x and newer revisions use different names.  Some
+        # transitional scheduler implementations expose both and different
+        # wrapper layers consult different attributes, so clear every
+        # attribute that exists and restore all of them after the call.
+        drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+        original_drop_values = {name: getattr(self, name) for name in drop_attrs}
+        for name in drop_attrs:
+            setattr(self, name, False)
+        try:
+            return original_split(
+                self,
+                request,
+                num_new_tokens,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+            )
+        finally:
+            for name, value in original_drop_values.items():
+                setattr(self, name, value)
+
+    _producer_mamba_block_aligned_split._ascend_producer_no_eagle_drop = True  # type: ignore[attr-defined]
+    scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
+
+
+# The wrapper self-gates on the PD role at call time, so installation is
+# unconditional. It wraps the consumer/sparse-index wrapper registered just
+# above and must stay outermost (early-return paths never delegate).
+_install_producer_mamba_block_aligned_split_patch()
