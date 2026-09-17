@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pydantic.dataclasses import rebuild_dataclass
-from vllm.config import VllmConfig
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config import parallel as parallel_config
 from vllm.config.parallel import ParallelConfig, logger
 
@@ -94,5 +94,8 @@ if vllm_version_is("0.29.0"):
         "_validate_parallel_config"
     ].func = _validate_parallel_config
     rebuild_dataclass(ParallelConfig, force=True)
-    # VllmConfig may already hold the nested ParallelConfig schema.
+    # SpeculativeConfig retains two ParallelConfig schema references even under
+    # SkipValidation. Rebuild it before VllmConfig to avoid reusing the old
+    # shared schema for VllmConfig.parallel_config.
+    rebuild_dataclass(SpeculativeConfig, force=True)
     rebuild_dataclass(VllmConfig, force=True)
