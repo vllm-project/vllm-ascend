@@ -311,3 +311,30 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
     torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("num_tokens", [8, 16, 31, 32, 63, 64, 65, 128, 256])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_kimi_k3_dcp8_local_combine(num_tokens: int, strided: bool) -> None:
+    """Cover the A5 row-batching threshold, tails and profiler DCP8 shape."""
+    torch.manual_seed(20260917)
+    dcp_size, num_heads, head_dim, destination_rank = 8, 96, 512, 3
+    stride = 2 if strided else 1
+    values = torch.randn(dcp_size, num_tokens, num_heads, head_dim * stride, device="npu", dtype=torch.bfloat16)[
+        ..., ::stride
+    ]
+    lses = (torch.randn(dcp_size, num_tokens, num_heads, stride, device="npu") * 3)[..., :1]
+    local = torch.randn(num_tokens, 12, head_dim * stride, device="npu", dtype=torch.bfloat16)[..., ::stride]
+    local_lse = (torch.randn(num_tokens, 12, stride, device="npu") * 3)[..., :1]
+    values[:, 0] = torch.nan
+    lses[:, 0] = -torch.inf
+    local[0] = torch.nan
+    local_lse[0] = -torch.inf
+    recv = _simulate_receive(values, lses, destination_rank, scatter_dim=1)
+    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim=1, local_output=local, local_lse=local_lse)
+    head_slice = slice(destination_rank * 12, (destination_rank + 1) * 12)
+    reference_values = torch.cat((values[:, :, head_slice], local.unsqueeze(0)))
+    reference_lses = torch.cat((lses[:, :, head_slice], local_lse.unsqueeze(0)))[..., 0]
+    expected = _reference_merge(reference_values, reference_lses)
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
