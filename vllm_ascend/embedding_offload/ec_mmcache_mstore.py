@@ -64,7 +64,7 @@ class EMoonCakeStoreConnector():
             except Exception as e:
                 logger.error(f"embed offload {mm_hash} to cpu, error code: {str(e)}")
                 if 'mm_hash' in locals():
-                    self.send_queue.task_done()
+                    self.offload_queue.task_done()
                 continue
 
     def offload_encoder_caches(self, tensor: torch.Tensor | None, mm_hash):
@@ -121,7 +121,7 @@ class EMoonCakeStoreConnector():
         tensor = self.load_cache_from_store(mm_hash, self.recv_aligned_tensor)
         encoder_cache[mm_hash] = tensor
 
-        logger.info(
+        logger.debug(
             "[Recv] Get tensor from store %s copy tensor %s",
             self.recv_aligned_tensor.view(-1)[: tensor.numel()].view(tensor.shape),
             tensor,

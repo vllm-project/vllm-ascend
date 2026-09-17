@@ -1419,11 +1419,8 @@ def encoder_cache_manager__init__(self, cache_size: int):
     self.freeable: OrderedDict[str, int] = OrderedDict()
     self.freed: list[str] = []
 
-    # 新增：mm_hash → 访问次数（local + external 统一）
     self.hash_freq: dict[str, tuple[int, int]] = {}
-    # 新增：交换冷热频差阈值（可配置）
     self.swap_threshold: int = 2
-    # 新增：每次调度冷热交换的hash个数
     self.max_swaps_per_step: int = 1
     self.external_hash = []
 
@@ -1447,12 +1444,12 @@ def reset(self) -> None:
 def swap_embed_hash(self):
     if not self.external_hash or len(self.cached) < 2:
         return []
-    # local 低频
+    # local low freq
     local_low = sorted(
         [(self.hash_freq.get(mm_hash, (0,0)), mm_hash) for mm_hash in self.cached],
         reverse=False
     )[:self.max_swaps_per_step]
-    # external 高频
+    # external high freq
     external_high = sorted(
         [(self.hash_freq.get(mm_hash, (0,0)), mm_hash) for mm_hash in self.external_hash],
         reverse=True
@@ -1474,8 +1471,6 @@ def swap_embed_hash(self):
     return to_local[:self.max_swaps_per_step]
 
 def get_swap_candidates(self) -> list[str]:
-    """返回 (to_external: local 低频项, to_local: external 高频项)"""
-
     if self.feature != None and self.feature.done():
         to_locals = self.feature.result()
         self.feature = None
@@ -1502,7 +1497,6 @@ def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         True if the encoder output for this input is already cached
     """
     mm_hash = request.mm_features[input_id].identifier
-    # 新增：hash访问频次统计
     num_embeds = request.get_num_encoder_embeds(input_id)
     key_freq, embeddings = self.hash_freq.get(mm_hash, (0,0))
     self.hash_freq[mm_hash] = (key_freq+1, embeddings+num_embeds)
@@ -1526,7 +1520,7 @@ def can_allocate(
     input_id: int,
     encoder_compute_budget: int,
     num_embeds_to_schedule: int,
-    allow_lfu: bool = False, # 新增：由Scheduler传入, 驱逐策略选择
+    allow_lfu: bool = False,
 ) -> bool:
     """Check if there's sufficient cache space for a multimodal input.
     If there is, return True and update EncoderCacheManager state.
@@ -1577,7 +1571,6 @@ def can_allocate(
     # until model runner is notified by the scheduler output.
     while num_embeds > self.num_free_slots:
         if allow_lfu:
-            # 找出当前 freeable 中 freq 最低的
             mm_hash = min(self.freeable.keys(), key=lambda h: (self.hash_freq.get(h, (0,0))))
             num_free_embeds = self.freeable.pop(mm_hash, 0)
         else:
@@ -1594,7 +1587,7 @@ vllm.v1.core.encoder_cache_manager.EncoderCacheManager.can_allocate = can_alloca
 vllm.v1.core.encoder_cache_manager.EncoderCacheManager.check_and_update_cache = check_and_update_cache
 vllm.v1.core.encoder_cache_manager.EncoderCacheManager.get_swap_candidates = get_swap_candidates
 vllm.v1.core.encoder_cache_manager.EncoderCacheManager.__init__ = encoder_cache_manager__init__
-vllm.v1.core.encoder_cache_manager.EncoderCacheManager.resets = reset
+vllm.v1.core.encoder_cache_manager.EncoderCacheManager.reset = reset
 vllm.v1.core.encoder_cache_manager.EncoderCacheManager.swap_embed_hash = swap_embed_hash
 
 def _process_encoder_cache_scheduler_output(
@@ -1667,7 +1660,7 @@ def _gather_mm_embeddings(
 
             mm_hash = mm_feature.identifier
             encoder_output = self._get_encoder_output_from_cache(mm_hash)
-            if encoder_output == None:
+            if encoder_output == None and get_ascend_config().encoder_caches_offload_config.enabled_offload:
                 self.mm_embed_offload.load_encoder_caches(encoder_cache=self.encoder_cache, mm_hash=mm_hash)
                 encoder_output = self.encoder_cache.get(mm_hash, None)
             if encoder_output is None:
