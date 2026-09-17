@@ -106,16 +106,14 @@ def _make_coordinator(
     *,
     use_eagle: bool,
     kv_transfer_config=None,
-    role_tagged: bool = True,
     mamba_eagle: bool = False,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
-    if role_tagged:
-        # The kv-transfer config is attached by the
-        # get_kv_cache_config_from_groups builder in real engine startup.
-        kv_cache_config.kv_transfer_config = kv_transfer_config
+    # The kv-transfer config is attached by the
+    # get_kv_cache_config_from_groups builder in real engine startup.
+    kv_cache_config.kv_transfer_config = kv_transfer_config
     return AscendHybridKVCacheCoordinator(
         kv_cache_config=kv_cache_config,
         max_model_len=4096,
@@ -174,7 +172,6 @@ def test_coordinator_reads_producer_tag(monkeypatch):
         use_eagle=True,
         kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
     )
-    assert coordinator.is_kv_producer is True
     assert coordinator.skips_eagle_block_drop is True
 
 
@@ -184,13 +181,7 @@ def test_coordinator_non_producer_tag(monkeypatch):
         use_eagle=True,
         kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True),
     )
-    assert coordinator.is_kv_producer is False
     assert coordinator.skips_eagle_block_drop is False
-
-
-def test_coordinator_defaults_non_producer_without_tag(monkeypatch):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=True, role_tagged=False)
-    assert coordinator.is_kv_producer is False
 
 
 def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
@@ -198,22 +189,7 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
     # producer, but every content-hash match is a verified local prompt
     # block, so the EAGLE drop is suppressed just like on the producer.
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, kv_transfer_config=None)
-    assert coordinator.is_kv_producer is False
     assert coordinator.skips_eagle_block_drop is True
-
-
-@pytest.mark.parametrize(
-    ("kv_transfer_config", "expected"),
-    [
-        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
-        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
-        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
-        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
-        (None, False),
-    ],
-)
-def test_is_kv_producer_role_semantics(kv_transfer_config, expected):
-    assert mod._is_kv_producer(kv_transfer_config) is expected
 
 
 @pytest.mark.parametrize(
@@ -296,7 +272,6 @@ class _RecordingMamba(_RecordingManager):
 
 def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
-    coordinator.is_kv_producer = producer
     coordinator.skips_eagle_block_drop = producer or standalone
     coordinator.dcp_world_size = 1
     coordinator.hash_block_size = HASH_BLOCK_SIZE

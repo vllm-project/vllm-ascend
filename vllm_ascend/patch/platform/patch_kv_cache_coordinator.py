@@ -41,38 +41,29 @@ _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_
 
 
 @staticmethod
-def _is_kv_producer(kv_transfer_config) -> bool:
-    """Whether this process is a PD prefill producer that never consumes.
-
-    ``kv_both`` instances (both ``is_kv_producer`` and ``is_kv_consumer``)
-    also accept consumer traffic and intentionally keep upstream behavior.
-    ``getattr`` fallbacks keep this callable with partial config doubles in
-    unit tests and across vLLM revisions.
-    """
-    return (
-        kv_transfer_config is not None
-        and getattr(kv_transfer_config, "is_kv_producer", False)
-        and not getattr(kv_transfer_config, "is_kv_consumer", False)
-    )
-
-
-@staticmethod
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     """Whether the EAGLE last-block drop must be suppressed on this process.
 
-    Suppressed for a pure PD prefill producer (see ``_is_kv_producer``)
-    and for a standalone instance (``kv_transfer_config is None``). A
-    standalone instance has no connector: ``num_external_computed_tokens``
-    is always zero and every content-hash match comes from verified local
-    prompt blocks, so the drop only erases hit length - on hybrid
-    mamba-align models with a fine ``prefix_match_unit`` it trims the
-    full-attention hit below the mamba partial-tail entry and collapses
-    the reconciled hybrid hit to 0 (the single-instance counterpart of the
-    P-side kill band). Consumers and ``kv_both`` instances keep upstream
-    behavior: they receive external loads whose verifier window the drop
-    protects.
+    Suppressed for a pure PD prefill producer (``is_kv_producer`` and not
+    ``is_kv_consumer``; ``getattr`` fallbacks keep the check working with
+    partial config doubles in unit tests and across vLLM revisions) and for
+    a standalone instance (``kv_transfer_config is None``). A standalone
+    instance has no connector: ``num_external_computed_tokens`` is always
+    zero and every content-hash match comes from verified local prompt
+    blocks, so the drop only erases hit length - on hybrid mamba-align
+    models with a fine ``prefix_match_unit`` it trims the full-attention
+    hit below the mamba partial-tail entry and collapses the reconciled
+    hybrid hit to 0 (the single-instance counterpart of the P-side kill
+    band). Consumers and ``kv_both`` instances keep upstream behavior: they
+    receive external loads whose verifier window the drop protects.
     """
-    return kv_transfer_config is None or _is_kv_producer(kv_transfer_config)
+    return (
+        kv_transfer_config is None
+        or (
+            getattr(kv_transfer_config, "is_kv_producer", False)
+            and not getattr(kv_transfer_config, "is_kv_consumer", False)
+        )
+    )
 
 
 def _select_kv_token_budget(
@@ -260,7 +251,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
-        self.is_kv_producer = _is_kv_producer(kv_transfer_config)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
 
     @property
