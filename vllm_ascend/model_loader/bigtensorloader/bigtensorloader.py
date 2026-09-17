@@ -568,7 +568,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
         rank = torch.distributed.get_rank()
         self._check_fingerprint(manifest.get("fingerprint"), fingerprint, manifest_path)
 
-        with open(blob_path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        with open(blob_path, "rb") as bf, mmap.mmap(bf.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             verify_time = self._verify_blob(mm, manifest, manifest_path)
             h2d_start = time.perf_counter()
             bulk, chunk_size, _, _ = self._plan_bulk(manifest["tensors"], len(mm))
