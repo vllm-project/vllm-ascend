@@ -107,9 +107,11 @@ def test_runner_sync_preparation_and_capture_through_vl(monkeypatch, mode, captu
     from vllm_ascend.worker import model_runner_v1 as runner_module
 
     calls = []
+    history_inputs = object()
 
     class LanguageModel(torch.nn.Module):
         def prepare_engram_inputs(self, *args):
+            assert args[-1] is history_inputs
             calls.append("sync")
             return {}
 
@@ -130,7 +132,95 @@ def test_runner_sync_preparation_and_capture_through_vl(monkeypatch, mode, captu
         model=wrapper,
         enable_enpu=False,
         _engram_capture_active=capture,
+        _get_engram_history_inputs=lambda: history_inputs,
         _update_full_graph_params_if_needed=lambda *args: None,
     )
     assert runner_module.NPUModelRunner._model_forward(runner, 4) == 42
     assert calls == ["capture" if capture else "sync"]
+
+
+@pytest.mark.parametrize("num_reqs", [0, 2])
+def test_runner_engram_history_selects_swa_group_and_full_requests(monkeypatch, num_reqs):
+    from vllm_ascend.worker import model_runner_v1 as runner_module
+
+    pages = torch.tensor([[7, 8, 9], [12, 13, 14], [99, 99, 99]], dtype=torch.int32)
+    boundaries = torch.tensor([0, 3, 9, 99], dtype=torch.int32)
+    groups = [
+        SimpleNamespace(layer_names=["long_kv"], kv_cache_spec=object()),
+        SimpleNamespace(layer_names=["swa"], kv_cache_spec=object()),
+    ]
+    monkeypatch.setattr(
+        runner_module, "get_storage_block_size", lambda spec: 4 if spec is groups[1].kv_cache_spec else 8
+    )
+    runner = SimpleNamespace(
+        model=SimpleNamespace(engram_cache_layer_name="swa"),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+        query_start_loc=SimpleNamespace(cpu=boundaries),
+        input_batch=SimpleNamespace(
+            num_reqs=num_reqs,
+            block_table=[None, SimpleNamespace(get_cpu_tensor=lambda: pages)],
+        ),
+    )
+    actual_boundaries, actual_pages, block_size = runner_module.NPUModelRunner._get_engram_history_inputs(runner)
+    torch.testing.assert_close(actual_boundaries, boundaries[: num_reqs + 1])
+    torch.testing.assert_close(actual_pages, pages[:num_reqs])
+    assert actual_boundaries.data_ptr() == boundaries.data_ptr()
+    if num_reqs:
+        assert actual_pages.data_ptr() == pages.data_ptr()
+    assert block_size == 4
+
+
+def test_runner_disabled_engram_does_not_read_batch():
+    from vllm_ascend.worker import model_runner_v1 as runner_module
+
+    runner = SimpleNamespace(model=SimpleNamespace(engram_cache_layer_name=None))
+    assert runner_module.NPUModelRunner._get_engram_history_inputs(runner) is None
+
+
+def test_runner_dummy_engram_does_not_read_live_batch(monkeypatch):
+    from unittest.mock import Mock
+
+    from vllm_ascend.worker import model_runner_v1 as runner_module
+
+    model = Mock(return_value=42)
+    model.prepare_engram_inputs.return_value = {}
+    runner = SimpleNamespace(model=model, enable_enpu=False, _update_full_graph_params_if_needed=lambda *args: None)
+    monkeypatch.setattr(
+        runner_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=runner_module.CUDAGraphMode.NONE),
+    )
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
+    assert runner_module.NPUModelRunner._model_forward(runner, 4, is_dummy_run=True) == 42
+    model.prepare_engram_inputs.assert_called_once_with(None, None, 4, None)
+
+
+def test_engram_history_consumes_explicit_full_request_inputs(model):
+    from unittest.mock import Mock
+
+    pages = torch.tensor([[7, 8, 9], [12, 13, 14]], dtype=torch.int32)
+    boundaries = torch.tensor([0, 3, 9], dtype=torch.int32)
+    hashes = torch.zeros((9, 2, 24), dtype=torch.int64)
+    mask = torch.ones(9, dtype=torch.bool)
+    model.engram_history = SimpleNamespace(update=Mock(return_value=(hashes, mask)))
+    table = model.layers[1].engram.embed
+    table.route_many = Mock(return_value=[torch.zeros(9, 24, 32), torch.zeros(9, 24, 32)])
+    inputs, positions = torch.arange(12), torch.arange(12)
+    implementation.DeepseekV41Model.prepare_engram(model, inputs, positions, (boundaries, pages, 4))
+    args = model.engram_history.update.call_args.args
+    torch.testing.assert_close(args[0], inputs[:9])
+    torch.testing.assert_close(args[1], positions[:9])
+    torch.testing.assert_close(args[2], torch.tensor([0, 0, 0, 1, 1, 1, 1, 1, 1]))
+    assert args[3] is pages and args[4] == 4
+
+
+def test_engram_dummy_routes_empty_hashes(model):
+    from unittest.mock import Mock
+
+    model.engram_history = SimpleNamespace(update=Mock())
+    table = model.layers[1].engram.embed
+    table.route_many = Mock(return_value=[torch.zeros(0, 24, 32), torch.zeros(0, 24, 32)])
+    implementation.DeepseekV41Model.prepare_engram(model, torch.arange(4), torch.arange(4), None)
+    model.engram_history.update.assert_not_called()
+    ids = table.route_many.call_args.args[1]
+    assert len(ids) == 2 and all(value.shape == (0, 24) for value in ids)

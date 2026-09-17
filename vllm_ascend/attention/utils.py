@@ -259,7 +259,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     seq_lens_cpu: torch.Tensor = None
 
     # Host mirror of this cache group's block table, including padded rows.
-    block_table_cpu: torch.Tensor | None = None
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
@@ -318,7 +317,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # there will be error about shape mismatch during reshape and cache.
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
-            block_table_cpu=self.block_table_cpu,
             slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],

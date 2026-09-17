@@ -10,21 +10,6 @@ _HISTORY_SLAB_MIN_TOKENS = 16
 _PAGE_WRITE_NUMPY_MIN_TOKENS = 16
 
 
-def engram_history_metadata(metadata):
-    """Read full-request SWA pages, before attention's local CP slicing.
-
-    V4.1 CP exposes local queries directly and keeps the replicated request
-    in global_metadata. Engram runs before token slicing, so all TP ranks
-    must use the full request lengths.
-    """
-    request_metadata = getattr(metadata, "global_metadata", None)
-    if request_metadata is None:
-        request_metadata = metadata
-    boundaries = getattr(request_metadata, "query_start_loc_cpu", None)
-    block_table = getattr(request_metadata, "block_table_cpu", None)
-    return boundaries.long(), block_table, request_metadata.storage_block_size
-
-
 def valid_engram_token_mask(
     input_ids: torch.Tensor,
     image_token_id: int,

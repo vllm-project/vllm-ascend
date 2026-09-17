@@ -72,7 +72,7 @@ from vllm_ascend.utils import enable_custom_op, enable_dsa_cp, normalize_deepsee
 
 from .compressor import DeepseekV41Compressor, _read, text_config_of
 from .engram_gate import engram_gate
-from .engram_hash import PagedNgramHistory, engram_history_metadata
+from .engram_hash import PagedNgramHistory
 from .engram_hbm import EngramQueryGroup, NodeShardedEngram
 from .indexer import DeepseekV41Indexer
 
@@ -242,7 +242,6 @@ class DeepseekV41MoE(nn.Module):
         hidden_states_fp32: torch.Tensor | None = None,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
-
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if hidden_states_fp32 is not None:
@@ -1039,19 +1038,20 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
 
-    def prepare_engram(self, input_ids, positions):
-        """Eager boundary: every DP participates, including metadata-free dummies."""
+    def prepare_engram(self, input_ids, positions, history_inputs=None):
+        """Route every DP using Runner's (CPU boundaries, pages, block size).
+
+        Dummy runs pass None and participate with empty hashes.
+        """
         config = self.config
         if not get_ascend_config().enable_engram:
             return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
         columns = (config.engram_max_ngram_size - 1) * config.engram_n_heads
         hashes = torch.empty((0, len(config.engram_layer_ids), columns), dtype=torch.int64, device="cpu")
         mask = torch.empty(0, dtype=torch.bool, device="cpu")
-        metadata = get_forward_context().attn_metadata
-        if metadata is not None and self.engram_history is not None:
-            first = self.layers[0].self_attn.dsa_attn.swa_cache_layer
-            meta = metadata[first.prefix]
-            boundaries, block_table, block_size = engram_history_metadata(meta)
+        if history_inputs is not None and self.engram_history is not None:
+            boundaries, block_table, block_size = history_inputs
+            boundaries = boundaries.long()
             n = int(boundaries[-1])
             requests = torch.repeat_interleave(torch.arange(len(boundaries) - 1, device="cpu"), boundaries.diff())
             hashes, mask = self.engram_history.update(
@@ -1072,14 +1072,14 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             lookups[layer_id] = values.flatten(1)
         return lookups, mask.to(positions.device)
 
-    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None):
+    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None, history_inputs=None):
         """Synchronously refresh the rows read by this forward, before replay."""
         graph_inputs = self.prepare_engram_graph_inputs(padded_tokens)
         if not graph_inputs["engram_lookups"]:
             return graph_inputs
         num_tokens = positions.shape[0]
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
-        lookups, mask = self.prepare_engram(input_ids, positions)
+        lookups, mask = self.prepare_engram(input_ids, positions, history_inputs)
         buffers, mask_buffer = self._engram_input_buffers
         mask_buffer[: mask.numel()].copy_(mask)
         mask_buffer[mask.numel() : output_tokens].zero_()
@@ -1120,6 +1120,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
         if engram_lookups is None:
+            assert not get_ascend_config().enable_engram, "Runner must prepare Engram inputs before model forward"
             lookups, token_mask = self.prepare_engram(input_ids, positions)
         else:
             lookups, token_mask = engram_lookups, engram_mask
@@ -1218,8 +1219,8 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     _DEFERRED_WEIGHT_MARKERS: tuple[str, ...] = ()
     _DEFERRED_WEIGHT_PREFIXES = ("aligner.", "vision.", "image_", "mtp.")
 
-    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None):
-        return self.model.prepare_engram_inputs(input_ids, positions, padded_tokens)
+    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None, history_inputs=None):
+        return self.model.prepare_engram_inputs(input_ids, positions, padded_tokens, history_inputs)
 
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.model.prepare_engram_graph_inputs(padded_tokens)
@@ -1561,5 +1562,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         return loaded_params
 
     @property
-    def requires_cpu_block_table(self) -> bool:
-        return get_ascend_config().enable_engram
+    def engram_cache_layer_name(self) -> str | None:
+        if not get_ascend_config().enable_engram:
+            return None
+        return self.model.layers[0].self_attn.dsa_attn.swa_cache_layer.prefix

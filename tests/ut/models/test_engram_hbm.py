@@ -66,36 +66,6 @@ def cpu_offload_runtime():
         yield allocations
 
 
-@pytest.mark.parametrize("cp", ["none", "v41", "v41_empty_rank"])
-def test_engram_history_metadata_uses_full_requests(cp):
-    boundaries = torch.tensor([0, 3, 9], dtype=torch.int32)
-    pages = torch.tensor([[7, 8, 9], [12, 13, 14]], dtype=torch.int32)
-    # Device tensors are intentionally unusable: history must use host mirrors.
-    fields = dict(
-        query_start_loc=None,
-        block_table=None,
-        storage_block_size=4,
-        query_start_loc_cpu=boundaries,
-        block_table_cpu=pages,
-    )
-    request = SimpleNamespace(**fields)
-    if cp.startswith("v41"):
-        local = torch.tensor([0, 0, 0] if cp == "v41_empty_rank" else [0, 0, 2])
-        metadata = SimpleNamespace(
-            global_metadata=request,
-            query_start_loc=local,
-            query_start_loc_cpu=local,
-            block_table=None,
-            storage_block_size=4,
-        )
-    else:
-        metadata = request
-    actual_boundaries, actual_pages, block_size = hash_mod.engram_history_metadata(metadata)
-    assert torch.equal(actual_boundaries, boundaries.long())
-    assert torch.equal(actual_pages, pages)
-    assert block_size == 4
-
-
 def _worker(rank, rendezvous):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=4, timeout=timedelta(seconds=60))

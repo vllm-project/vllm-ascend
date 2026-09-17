@@ -208,11 +208,12 @@ class AscendDeepseekV41ForCausalLM(
     def prepare_engram_graph_inputs(self, padded_tokens=None):
         return self.language_model.prepare_engram_graph_inputs(padded_tokens)
 
-    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None):
+    def prepare_engram_inputs(self, input_ids, positions, padded_tokens=None, history_inputs=None):
         return self.language_model.prepare_engram_inputs(
             input_ids,
             positions,
             padded_tokens,
+            history_inputs,
         )
 
     def forward(
@@ -274,5 +275,5 @@ class AscendDeepseekV41ForCausalLM(
             hook()
 
     @property
-    def requires_cpu_block_table(self) -> bool:
-        return self.language_model.requires_cpu_block_table
+    def engram_cache_layer_name(self) -> str | None:
+        return self.language_model.engram_cache_layer_name

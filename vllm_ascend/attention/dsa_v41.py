@@ -117,7 +117,6 @@ class AscendDSAV41Metadata(AttentionMetadata):
     num_prefill_tokens: int = 0
     logical_block_size: int = 0
     query_start_loc_cpu: torch.Tensor | None = None
-    block_table_cpu: torch.Tensor | None = None
     seq_lens_cpu: torch.Tensor | None = None
     cache_seq_lens: torch.Tensor | None = None
     max_query_len: int = 0
@@ -1009,9 +1008,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             c2_metadata_group_id = id(self._c2_complete_mask)
         return AscendDSAV41Metadata(
             block_table=common.block_table_tensor[:num_reqs],
-            block_table_cpu=(
-                common.block_table_cpu[:num_reqs] if getattr(common, "block_table_cpu", None) is not None else None
-            ),
             slot_mapping=slots,
             compress_ratio=ratio,
             storage_block_size=spec.storage_block_size,

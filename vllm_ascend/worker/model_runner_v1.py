@@ -3073,6 +3073,23 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
             )
 
+    def _get_engram_history_inputs(self) -> tuple[torch.Tensor, torch.Tensor, int] | None:
+        """Read full-request host pages before any attention CP slicing."""
+        layer_name = self.model.engram_cache_layer_name
+        if layer_name is None:
+            return None
+        group_id, group = next(
+            (group_id, group)
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if layer_name in group.layer_names
+        )
+        num_reqs = self.input_batch.num_reqs
+        return (
+            self.query_start_loc.cpu[: num_reqs + 1],
+            self.input_batch.block_table[group_id].get_cpu_tensor()[:num_reqs],
+            get_storage_block_size(group.kv_cache_spec),
+        )
+
     def _model_forward(
         self,
         num_tokens_padded: int,
@@ -3080,6 +3097,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        is_dummy_run: bool = False,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None
@@ -3103,7 +3121,8 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
             else:
-                model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded))
+                history_inputs = None if is_dummy_run else self._get_engram_history_inputs()
+                model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded, history_inputs))
         run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
@@ -3658,17 +3677,6 @@ class NPUModelRunner(GPUModelRunner):
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
-            cm.block_table_cpu = None
-            if getattr(self.model, "requires_cpu_block_table", False):
-                if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                    cm.block_table_cpu = torch.zeros((num_reqs_padded, 1), dtype=torch.int32, device="cpu")
-                else:
-                    cm.block_table_cpu = self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()[:num_reqs_padded]
-                    if num_reqs < num_reqs_padded:
-                        # Match the device padding without modifying an H2D source
-                        # that may still be in flight.
-                        cm.block_table_cpu = cm.block_table_cpu.clone()
-                        cm.block_table_cpu[num_reqs:num_reqs_padded].zero_()
             if self.speculative_config and isinstance(self.drafter, (AscendStep3p5MTPProposer, AscendDSparkProposer)):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can
@@ -4084,7 +4092,7 @@ class NPUModelRunner(GPUModelRunner):
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, is_dummy_run=True
                 )
             if active_device_metadata_executor is not None:
                 active_device_metadata_executor.release()

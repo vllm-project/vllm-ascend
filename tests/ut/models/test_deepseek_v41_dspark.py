@@ -93,7 +93,15 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         norm=lambda hidden: hidden,
     )
     hidden = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    output, aux = DeepseekV41Model.forward(model, torch.arange(3), torch.arange(3), None, inputs_embeds=hidden)
+    output, aux = DeepseekV41Model.forward(
+        model,
+        torch.arange(3),
+        torch.arange(3),
+        None,
+        inputs_embeds=hidden,
+        engram_lookups={},
+        engram_mask=torch.empty(0, dtype=torch.bool),
+    )
     torch.testing.assert_close(aux[0], hidden)
     torch.testing.assert_close(aux[1], hidden + 3)
     torch.testing.assert_close(output, hidden + 6)
