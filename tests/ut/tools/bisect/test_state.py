@@ -57,9 +57,11 @@ def test_save_preserves_previous_state_on_write_failure(tmp_path: Path):
 
     @contextmanager
     def failing_temp_file(*args, **kwargs):
-        with original_factory(*args, **kwargs) as temp_file:
-            with patch.object(temp_file, "write", side_effect=OSError("disk full")):
-                yield temp_file
+        with (
+            original_factory(*args, **kwargs) as temp_file,
+            patch.object(temp_file, "write", side_effect=OSError("disk full")),
+        ):
+            yield temp_file
 
     with (
         patch.object(tempfile, "NamedTemporaryFile", failing_temp_file),
@@ -95,9 +97,11 @@ def test_save_failure_does_not_publish_initial_state(tmp_path: Path):
 
     @contextmanager
     def failing_temp_file(*args, **kwargs):
-        with original_factory(*args, **kwargs) as temp_file:
-            with patch.object(temp_file, "write", side_effect=OSError("disk full")):
-                yield temp_file
+        with (
+            original_factory(*args, **kwargs) as temp_file,
+            patch.object(temp_file, "write", side_effect=OSError("disk full")),
+        ):
+            yield temp_file
 
     with (
         patch.object(tempfile, "NamedTemporaryFile", failing_temp_file),
