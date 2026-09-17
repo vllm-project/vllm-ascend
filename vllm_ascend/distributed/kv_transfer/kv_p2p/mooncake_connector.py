@@ -111,6 +111,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    enable_kv_nz: bool = False
 
 
 @dataclass
@@ -469,12 +470,13 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
+        self.remote_enable_kv_nz: dict[str, dict[int, bool]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
         # last TP-offset pull task for each shard; applied once all pull tasks finish.
-        self.pending_reformat: defaultdict[str, dict[int, list[tuple[int, list[list[int]], int, list[int]]]]] = (
-            defaultdict(dict)
-        )
+        self.pending_reformat: defaultdict[
+            str, dict[int, tuple[bool, list[tuple[int, list[list[int]], int, list[int]]]]]
+        ] = defaultdict(dict)
         self.pending_reformat_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
@@ -810,6 +812,7 @@ class KVCacheRecvingThread(threading.Thread):
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
+            remote_enable_kv_nz = self.remote_enable_kv_nz.get(remote_engine_id, {}).get(remote_handshake_port, False)
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -1028,6 +1031,7 @@ class KVCacheRecvingThread(threading.Thread):
                 req_meta["request_id"],
                 shard_idx,
                 ready_attention_group_reformat_block_ids,
+                remote_enable_kv_nz,
             )
 
     def _stash_pending_reformat(
@@ -1035,26 +1039,46 @@ class KVCacheRecvingThread(threading.Thread):
         request_id: str,
         shard_idx: int,
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+        remote_enable_kv_nz: bool = False,
     ) -> None:
         with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+            self.pending_reformat[request_id][shard_idx] = (
+                remote_enable_kv_nz,
+                ready_attention_group_reformat_block_ids,
+            )
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
             shard_reformats = self.pending_reformat.pop(request_id, {})
         for shard_idx in sorted(shard_reformats):
+            remote_enable_kv_nz, reformat_block_ids = shard_reformats[shard_idx]
             logger.debug(
-                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
+                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s remote_enable_kv_nz=%s",
                 request_id,
                 shard_idx,
+                remote_enable_kv_nz,
             )
-            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+            self._apply_kv_cache_reformat(reformat_block_ids, remote_enable_kv_nz)
 
     def _apply_kv_cache_reformat(
         self,
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
+        remote_enable_kv_nz: bool = False,
     ) -> None:
         if not ready_attention_group_reformat_block_ids:
+            return
+
+        local_enable_kv_nz = get_ascend_config().enable_kv_nz
+        if remote_enable_kv_nz:
+            if not local_enable_kv_nz:
+                raise RuntimeError(
+                    "Remote prefill uses NZ KV cache, but local decode does not enable_kv_nz. "
+                    "P and D must configure the same KV cache layout."
+                )
+            if self.is_hma_required:
+                raise NotImplementedError("Remote NZ KV cache does not support hybrid linear MLA reformat.")
+            if any(num_group_pulls > 1 for _, _, num_group_pulls, _ in ready_attention_group_reformat_block_ids):
+                raise NotImplementedError("Remote NZ KV cache does not support multi-pull KV cache concatenation.")
             return
 
         gqa_reformat_groups = [
@@ -1095,7 +1119,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         num_group_pulls = next(iter(uniform_num_pulls))
         need_cat_cache = num_group_pulls > 1
-        need_nz_cache = get_ascend_config().enable_kv_nz
+        need_nz_cache = local_enable_kv_nz
         if not (need_cat_cache or need_nz_cache):
             return
 
@@ -1438,6 +1462,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+                self.remote_enable_kv_nz[engine_id][remote_handshake_port] = agent_meta.enable_kv_nz
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -2552,6 +2577,7 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            enable_kv_nz=get_ascend_config().enable_kv_nz,
         )
         self.xfer_handshake_metadata = metadata
 
