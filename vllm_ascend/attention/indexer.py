@@ -43,7 +43,6 @@ from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
 )
 
-
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0

@@ -64,7 +64,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -256,10 +256,6 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        # TODO: Remove this vLLM 0.28 workaround once support for 0.28 is dropped.
-        # vLLM 0.29 already fixes wrapped Mamba block-table sizing upstream.
-        if vllm_version_is("0.28.0"):
-            kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
             # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
             # kv_cache_allocation_context. Gate it the same way as other
