@@ -412,9 +412,30 @@ def _cleanup():
     torch.npu.empty_cache()
 
 
-@pytest.mark.parametrize("case", ACCURACY_CASES, ids=lambda case: case["name"])
-def test_prepare_dflash_inputs_impl(case):
+def _run_case(case):
     data = _build_inputs(case, "npu")
     prepare_dflash_inputs_triton(*_impl_args(data, case))
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
+
+
+@pytest.mark.parametrize("case", ACCURACY_CASES, ids=lambda case: case["name"])
+def test_prepare_dflash_inputs_impl(case):
+    _run_case(case)
+
+
+@pytest.mark.parametrize("num_reqs,context_len", [(39, 9), (40, 9), (41, 9), (48, 9), (8, 1024), (1, 16384)])
+def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
+    case = {
+        "req_lens": [context_len] * num_reqs,
+        "position_starts": [0] * num_reqs,
+        "idx_mapping": list(range(num_reqs)),
+        "max_num_reqs": 64,
+        "max_num_tokens": num_reqs * context_len,
+        "max_model_len": 32768,
+        "block_size": 128,
+        "num_query_per_req": 9,
+        "num_speculative_steps": 8,
+        "parallel_drafting_token_id": 151669,
+    }
+    _run_case(case)

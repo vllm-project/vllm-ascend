@@ -23,9 +23,25 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
+# Longer scheduled contexts are split across additional request-local workers.
 _MAX_CONTEXT_BLOCK_SIZE = 256
 _QUERY_BLOCK_SIZE = 16
 _SAMPLE_BLOCK_SIZE = 16
+# Elements per vector iteration for graph-padding stores, not buffer-size limits.
+# Each loop covers the full worker partition regardless of the chosen tile width.
+_REQUEST_PADDING_BLOCK_SIZE = 16
+_SAMPLE_PADDING_BLOCK_SIZE = 64
+_QUERY_PADDING_BLOCK_SIZE = 256
+
+
+@triton.jit
+def _partition_work(num_items, worker_idx, num_workers):
+    # Contiguous, disjoint partitions; the first remainder workers get one extra item.
+    base = num_items // num_workers
+    extra = num_items % num_workers
+    begin = worker_idx * base + tl.minimum(worker_idx, extra)
+    count = base + tl.where(worker_idx < extra, 1, 0)
+    return begin, count
 
 
 @triton.jit
@@ -70,6 +86,9 @@ def _prepare_dflash_inputs_kernel(
     BLOCK_SIZE: tl.constexpr,
     QUERY_BLOCK_SIZE: tl.constexpr,
     SAMPLE_BLOCK_SIZE: tl.constexpr,
+    REQUEST_PADDING_BLOCK_SIZE: tl.constexpr,
+    SAMPLE_PADDING_BLOCK_SIZE: tl.constexpr,
+    QUERY_PADDING_BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     worker_idx = tl.program_id(1)
@@ -87,10 +106,7 @@ def _prepare_dflash_inputs_kernel(
     valid_ctx_end = ctx_end - num_rejected
     num_valid_ctx = valid_ctx_end - ctx_start
 
-    ctx_base = num_ctx // workers_per_req
-    ctx_extra = num_ctx % workers_per_req
-    ctx_begin = worker_idx * ctx_base + tl.minimum(worker_idx, ctx_extra)
-    ctx_count = ctx_base + tl.where(worker_idx < ctx_extra, 1, 0)
+    ctx_begin, ctx_count = _partition_work(num_ctx, worker_idx, workers_per_req)
 
     ctx_lane = tl.arange(0, BLOCK_SIZE)
     ctx_mask = ctx_lane < ctx_count
@@ -120,10 +136,7 @@ def _prepare_dflash_inputs_kernel(
     query_base = req_idx * num_query_per_req
 
     # Query
-    base_queries_per_worker = num_query_per_req // workers_per_req
-    extra_queries = num_query_per_req % workers_per_req
-    query_begin = worker_idx * base_queries_per_worker + tl.minimum(worker_idx, extra_queries)
-    query_count = base_queries_per_worker + tl.where(worker_idx < extra_queries, 1, 0)
+    query_begin, query_count = _partition_work(num_query_per_req, worker_idx, workers_per_req)
 
     query_lane = tl.arange(0, QUERY_BLOCK_SIZE)
     query_mask = query_lane < query_count
@@ -155,10 +168,7 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
 
     # Sample
-    base_samples_per_worker = num_speculative_steps // workers_per_req
-    extra_samples = num_speculative_steps % workers_per_req
-    sample_begin = worker_idx * base_samples_per_worker + tl.minimum(worker_idx, extra_samples)
-    sample_count = base_samples_per_worker + tl.where(worker_idx < extra_samples, 1, 0)
+    sample_begin, sample_count = _partition_work(num_speculative_steps, worker_idx, workers_per_req)
 
     sample_lane = tl.arange(0, SAMPLE_BLOCK_SIZE)
     sample_mask = sample_lane < sample_count
@@ -188,39 +198,33 @@ def _prepare_dflash_inputs_kernel(
 
     # query_start_loc: [num_reqs, max_num_reqs + 1)
     qs_pad_count = max_num_reqs + 1 - num_reqs
-    qs_base = qs_pad_count // total_workers
-    qs_extra = qs_pad_count % total_workers
-    qs_begin = num_reqs + global_worker_idx * qs_base + tl.minimum(global_worker_idx, qs_extra)
-    qs_count = qs_base + tl.where(global_worker_idx < qs_extra, 1, 0)
+    qs_begin, qs_count = _partition_work(qs_pad_count, global_worker_idx, total_workers)
+    qs_begin += num_reqs
     qs_end = qs_begin + qs_count
 
-    for i in range(qs_begin, qs_end, 16):
-        qs_off = i + tl.arange(0, 16)
+    for i in range(qs_begin, qs_end, REQUEST_PADDING_BLOCK_SIZE):
+        qs_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
         tl.store(out_query_start_loc_ptr + qs_off, last_query_end, mask=qs_off < qs_end)
 
     # seq_lens: [num_reqs, max_num_reqs)
     seq_pad_count = max_num_reqs - num_reqs
-    seq_base = seq_pad_count // total_workers
-    seq_extra = seq_pad_count % total_workers
-    seq_begin = num_reqs + global_worker_idx * seq_base + tl.minimum(global_worker_idx, seq_extra)
-    seq_count = seq_base + tl.where(global_worker_idx < seq_extra, 1, 0)
+    seq_begin, seq_count = _partition_work(seq_pad_count, global_worker_idx, total_workers)
+    seq_begin += num_reqs
     seq_end = seq_begin + seq_count
 
-    for i in range(seq_begin, seq_end, 16):
-        seq_off = i + tl.arange(0, 16)
+    for i in range(seq_begin, seq_end, REQUEST_PADDING_BLOCK_SIZE):
+        seq_off = i + tl.arange(0, REQUEST_PADDING_BLOCK_SIZE)
         tl.store(out_seq_lens_ptr + seq_off, 0, mask=seq_off < seq_end)
 
     # Sample buffers: [num_reqs * steps, max_num_reqs * steps)
     sample_pad_start = num_reqs * num_speculative_steps
     sample_pad_count = (max_num_reqs - num_reqs) * num_speculative_steps
-    sp_base = sample_pad_count // total_workers
-    sp_extra = sample_pad_count % total_workers
-    sp_begin = sample_pad_start + global_worker_idx * sp_base + tl.minimum(global_worker_idx, sp_extra)
-    sp_count = sp_base + tl.where(global_worker_idx < sp_extra, 1, 0)
+    sp_begin, sp_count = _partition_work(sample_pad_count, global_worker_idx, total_workers)
+    sp_begin += sample_pad_start
     sp_end = sp_begin + sp_count
 
-    for i in range(sp_begin, sp_end, 64):
-        sp_off = i + tl.arange(0, 64)
+    for i in range(sp_begin, sp_end, SAMPLE_PADDING_BLOCK_SIZE):
+        sp_off = i + tl.arange(0, SAMPLE_PADDING_BLOCK_SIZE)
         sp_mask = sp_off < sp_end
         tl.store(out_sample_indices_ptr + sp_off, 0, mask=sp_mask)
         tl.store(out_sample_pos_ptr + sp_off, 0, mask=sp_mask)
@@ -229,14 +233,12 @@ def _prepare_dflash_inputs_kernel(
     # query_slot_mapping: [num_reqs * query_per_req, max_num_tokens)
     q_pad_start = num_reqs * num_query_per_req
     q_pad_count = max_num_tokens - q_pad_start
-    qp_base = q_pad_count // total_workers
-    qp_extra = q_pad_count % total_workers
-    qp_begin = q_pad_start + global_worker_idx * qp_base + tl.minimum(global_worker_idx, qp_extra)
-    qp_count = qp_base + tl.where(global_worker_idx < qp_extra, 1, 0)
+    qp_begin, qp_count = _partition_work(q_pad_count, global_worker_idx, total_workers)
+    qp_begin += q_pad_start
     qp_end = qp_begin + qp_count
 
-    for i in range(qp_begin, qp_end, 256):
-        qp_off = i + tl.arange(0, 256)
+    for i in range(qp_begin, qp_end, QUERY_PADDING_BLOCK_SIZE):
+        qp_off = i + tl.arange(0, QUERY_PADDING_BLOCK_SIZE)
         tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
 
 
@@ -328,4 +330,7 @@ def prepare_dflash_inputs_triton(
         BLOCK_SIZE=block_size_kernel,
         QUERY_BLOCK_SIZE=_QUERY_BLOCK_SIZE,
         SAMPLE_BLOCK_SIZE=_SAMPLE_BLOCK_SIZE,
+        REQUEST_PADDING_BLOCK_SIZE=_REQUEST_PADDING_BLOCK_SIZE,
+        SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
+        QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
     )
