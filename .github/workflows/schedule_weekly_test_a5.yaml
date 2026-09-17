@@ -104,7 +104,7 @@ env:
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
-    runs-on: linux-aarch64-a5-0
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -118,16 +118,24 @@ jobs:
             const eventName = context.eventName;
             let testCases = '${{ inputs.test_cases }}'.trim();
             core.setOutput('ref', context.sha || 'unknown');
-            
-            // 仅新增：pull_request时读取 /weekly 标签，无标签则testCases保持原样
+            core.info(`eventName: ${eventName}, input testCases: ${testCases}`);
+
             if (eventName === 'pull_request' && !testCases) {
-              const labels = context.payload.pull_request?.labels || [];
+              const prNumber = context.payload.pull_request.number;
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              const labels = pr.labels || [];
+              core.info(`latest labels from api: ${JSON.stringify(labels.map(l=>l.name))}`);
               const weeklyLabel = labels.find(l => l.name.startsWith('/weekly '));
               if (weeklyLabel) {
                 testCases = weeklyLabel.name.replace(/^\/weekly\s+/, '').trim();
+                core.info(`parsed testCases from label: ${testCases}`);
               }
             }
-
+            core.info(`final testCases: ${testCases}`);
             if (testCases) {
               core.setOutput('run', 'true');
               if (testCases === 'all') {
@@ -135,11 +143,10 @@ jobs:
               } else {
                 core.setOutput('filter', ',' + testCases.split(',').map(s => s.trim()).join(',') + ',');
               }
-              return;
+            } else {
+              core.setOutput('run', 'false');
+              core.setOutput('filter', '');
             }
-
-            core.setOutput('run', 'false');
-            core.setOutput('filter', '');
 
   setup-vars:
     name: Export global env vars as job outputs
@@ -151,6 +158,9 @@ jobs:
       multi_node: ${{ steps.set-matrix.outputs.multi_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - id: export
         run: |
           {
@@ -163,9 +173,6 @@ jobs:
             normalized=$(echo "$input_branch" | tr '/' '-')
             echo "vllm_ascend_branches=[\"${normalized}\"]"
           } >> $GITHUB_OUTPUT
-
-      - name: Checkout repository
-        uses: actions/checkout@v7
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
@@ -183,7 +190,7 @@ jobs:
       - name: Read A5 weekly test matrix config
         id: set-matrix
         env:
-          MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
+          MATRIX_FILE: ${{ (github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '') && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
           MATRIX_OUTPUTS: '{"single_node":"a5.single_node.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
