@@ -9,10 +9,12 @@ HF model; values are fixed-random BF16 and require no checkpoint weights. The
 test proves dummy inference in FULL_DECODE_ONLY mode before comparing a complete
 baseline with an exact full-payload reload across a pause/resume boundary.
 Both unpacked and packed HCCL broadcasts exercise the same transaction.
-"""
 
-import math
-import threading
+The trainer side is driven by ``HCCLTrainerWeightTransferEngine``: it opens the
+rank-0 HCCL endpoint itself, then ``send_weights()`` owns the whole remote
+transaction (init handshake, START -> broadcast -> FINISH), mirroring the
+upstream NCCL trainer engine.
+"""
 
 import pytest
 import requests
@@ -26,13 +28,13 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     WeightUpdateModelCase,
     assert_dummy_then_fixed_reload,
     generation_signature,
+    packed_buffer_size_for,
     pytest_model_cases,
+    register_engines_once,
 )
 
 INFERENCE_WORLD_SIZE = 1
 TRAINER_DEVICE_INDEX = INFERENCE_WORLD_SIZE
-INIT_TIMEOUT = 120
-UPDATE_TIMEOUT = 300
 CONTROL_TIMEOUT = 60
 
 
@@ -44,78 +46,6 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     response = requests.post(server.url_for(route), json=json, timeout=timeout)
     response.raise_for_status()
     return response
-
-
-class _BackgroundPost(threading.Thread):
-    """Run a blocking server-side HCCL RPC and surface its exception."""
-
-    def __init__(self, server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-        super().__init__(daemon=True)
-        self._server = server
-        self._route = route
-        self._json = json
-        self._timeout = timeout
-        self.error: BaseException | None = None
-
-    def run(self) -> None:
-        try:
-            _post(self._server, self._route, json=self._json, timeout=self._timeout)
-        except BaseException as exc:  # noqa: BLE001 - re-raised by raise_if_failed
-            self.error = exc
-
-    def raise_if_failed(self) -> None:
-        if self.error is not None:
-            raise RuntimeError(f"server-side /{self._route} failed") from self.error
-
-
-def _collect_weight_metadata(source: FixedRandomWeightSource):
-    metadata = source.metadata()
-    max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
-    return (
-        [meta.name for meta in metadata],
-        [str(meta.dtype).split(".")[-1] for meta in metadata],
-        [list(meta.shape) for meta in metadata],
-        max(max_tensor_bytes + 128 * 2**20, 2**30),
-    )
-
-
-def _send_update(server, source, model_update_group, *, packed: bool) -> None:
-    from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-        HCCLTrainerSendWeightsArgs,
-        HCCLWeightTransferEngine,
-    )
-
-    names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(source)
-    _post(server, "pause")
-    _post(server, "start_weight_update")
-
-    update_thread = _BackgroundPost(
-        server,
-        "update_weights",
-        json={
-            "update_info": {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": shapes,
-                "packed": packed,
-                "packed_buffer_size_bytes": packed_buffer_size_bytes,
-            }
-        },
-        timeout=UPDATE_TIMEOUT,
-    )
-    update_thread.start()
-    HCCLWeightTransferEngine.trainer_send_weights(
-        iterator=iter(source),
-        trainer_args=HCCLTrainerSendWeightsArgs(
-            group=model_update_group,
-            packed=packed,
-            packed_buffer_size_bytes=packed_buffer_size_bytes,
-        ),
-    )
-    update_thread.join()
-    update_thread.raise_if_failed()
-    _post(server, "finish_weight_update")
-    _post(server, "resume")
 
 
 @pytest.mark.skipif(
@@ -167,34 +97,26 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
         torch.npu.set_device(TRAINER_DEVICE_INDEX)
         source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
 
-        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
+        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+        from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
-        master_address = get_ip()
-        master_port = get_open_port()
-        world_size = INFERENCE_WORLD_SIZE + 1
-        init_thread = _BackgroundPost(
-            server,
-            "init_weight_transfer_engine",
-            json={
-                "init_info": {
-                    "master_address": master_address,
-                    "master_port": master_port,
-                    "rank_offset": 1,
-                    "world_size": world_size,
-                }
-            },
-            timeout=INIT_TIMEOUT,
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+        register_engines_once()
+        engine = WeightTransferTrainerFactory.trainer_init(
+            HCCLTrainerInitInfo(
+                rank=0,
+                master_address=get_ip(),
+                master_port=get_open_port(),
+                # The trainer is HCCL rank 0; the single inference worker is
+                # rank 1, so the group is the workers plus the sender.
+                world_size=INFERENCE_WORLD_SIZE + 1,
+                packed=packed,
+                packed_buffer_size_bytes=packed_buffer_size_for(source),
+            ),
+            client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
+            source=source,
         )
-        init_thread.start()
-        model_update_group = HCCLWeightTransferEngine.trainer_init(
-            {
-                "master_address": master_address,
-                "master_port": master_port,
-                "world_size": world_size,
-            }
-        )
-        init_thread.join()
-        init_thread.raise_if_failed()
 
         signatures = []
         for update_round in range(2):
@@ -202,7 +124,11 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
                 f"{case.id}: sending {('packed' if packed else 'unpacked')} "
                 f"fixed-random update round={update_round + 1}"
             )
-            _send_update(server, source, model_update_group, packed=packed)
+            _post(server, "pause")
+            # send_weights owns the complete INIT -> START -> LOAD -> FINISH
+            # transaction against the inference server.
+            engine.send_weights()
+            _post(server, "resume")
             signatures.append(generation_signature(client, case.model))
 
     assert_dummy_then_fixed_reload(dummy_signature, signatures[0], signatures[1], case)

@@ -10,7 +10,7 @@ import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
 # Default values for packed tensor configuration.
-# These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
+# These are imported by HCCLWeightTransferUpdateInfo and the HCCL trainer engine.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
@@ -268,6 +268,48 @@ def packed_npu_ipc_producer(
         }
 
 
+class NPUPackedBufferImporter:
+    """One-slot cache for the consumer-side mapping of a packed NPU IPC buffer.
+
+    torch's cross-process refcount pairs one ``reduce_tensor`` export with one
+    consumer rebuild-release cycle. The producer exports its buffer once and
+    ships the same args with every chunk, so rebuilding and releasing per chunk
+    decrements the counter once per chunk, drives it negative, and the dropped
+    buffer is then never reclaimable on the producer side (it leaks one buffer
+    per transfer). Caching the rebuilt buffer keyed by the rebuild args restores
+    the pairing: chunks of one transfer reuse the mapping (it aliases producer
+    memory, so it always reads the current chunk's bytes), and replacing the
+    entry when the next export arrives - or ``close()`` - releases the previous
+    mapping exactly once.
+
+    Mirrors upstream's ``PackedBufferImporter`` for the NPU
+    (``rebuild_npu_tensor``) handle layout. The importer that consumes a
+    multi-chunk transfer must be one object reused across chunks; a fresh
+    importer per chunk reintroduces the per-chunk release.
+    ``NPUIPCWeightTransferEngine`` owns one instance per engine and closes it
+    when the transaction ends and on shutdown.
+    """
+
+    def __init__(self) -> None:
+        self._entry: tuple[tuple, torch.Tensor] | None = None
+
+    def rebuild(self, list_args: list) -> torch.Tensor:
+        # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not
+        # be imported at module load time on non-NPU hosts.
+        from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
+        key = tuple(list_args)
+        if self._entry is not None and self._entry[0] == key:
+            return self._entry[1]
+        packed = rebuild_npu_tensor(*list_args)
+        self._entry = (key, packed)
+        return packed
+
+    def close(self) -> None:
+        """Release the held mapping (one producer-side refcount decrement)."""
+        self._entry = None
+
+
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
     physical_npu_id: str,
@@ -276,6 +318,7 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
+    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -293,11 +336,10 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
+        importer: Import cache shared across every chunk of one packed export.
+            ``None`` creates an ephemeral importer, which is only safe for a
+            single-chunk transfer (see ``NPUPackedBufferImporter``).
     """
-    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
-    # imported at module load time on non-NPU hosts.
-    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
@@ -308,7 +350,9 @@ def packed_npu_ipc_consumer(
     # Index 6 of the args from reduce_tensor is the device_index.
     # Overwrite it with the receiver's device index.
     list_args[6] = device_index
-    packed = rebuild_npu_tensor(*list_args)
+    if importer is None:
+        importer = NPUPackedBufferImporter()
+    packed = importer.rebuild(list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]

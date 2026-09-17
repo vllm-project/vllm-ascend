@@ -30,7 +30,8 @@ The example performs the following steps:
 * Load the training model on NPU 0.
 * Generate text using the vLLM server via OpenAI-compatible API. The output
   is expected to be nonsense because the server is initialized with dummy weights.
-* Initialize weight transfer via HTTP endpoint.
+* Build the trainer-side HCCL engine, which opens the HCCL group (trainer is
+  rank 0) and drives the whole weight-update transaction over HTTP.
 * Broadcast the real weights from the training model to the vLLM server
   using HCCL.
 * Generate text again to show normal output after the weight update.
@@ -43,11 +44,6 @@ import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 from vllm.utils.network_utils import get_ip, get_open_port
-
-from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-    HCCLTrainerSendWeightsArgs,
-    HCCLWeightTransferEngine,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -67,73 +63,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         )
         results.append(response.choices[0].text)
     return results
-
-
-def init_weight_transfer_engine(
-    base_url: str,
-    master_address: str,
-    master_port: int,
-    rank_offset: int,
-    world_size: int,
-) -> None:
-    """Initialize weight transfer via HTTP endpoint."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload = {
-        "init_info": dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-        )
-    }
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def update_weights(
-    base_url: str,
-    names: list[str],
-    dtype_names: list[str],
-    shapes: list[list[int]],
-    packed: bool = False,
-    packed_buffer_size_bytes: int | None = None,
-) -> None:
-    """Update weights via HTTP endpoint."""
-    url = f"{base_url}/update_weights"
-    payload = {
-        "update_info": dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=packed,
-        )
-    }
-    if packed and packed_buffer_size_bytes is not None:
-        payload["update_info"]["packed_buffer_size_bytes"] = packed_buffer_size_bytes
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str) -> None:
-    """Start weight update via HTTP endpoint.
-
-    Prepares the model for layerwise reload on the vLLM server side.
-    Must be called before update_weights.
-    """
-    url = f"{base_url}/start_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish weight update via HTTP endpoint.
-
-    Finalizes layerwise reload on the vLLM server side.
-    Must be called after all update_weights calls are complete.
-    """
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
 
 
 def pause_generation(base_url: str) -> None:
@@ -199,57 +128,14 @@ def main():
         logger.info("-" * 50)
 
     # Set up the communication channel between the training process and the
-    # vLLM server. The trainer is rank 0, vLLM worker(s) start at rank_offset.
+    # vLLM server. The trainer is HCCL rank 0 and the vLLM worker(s) follow at
+    # rank 1, so the group is the inference workers plus the trainer.
     master_address = get_ip()
     master_port = get_open_port()
-    rank_offset = 1
-
-    logger.info("Initializing weight transfer: master=%s:%s", master_address, master_port)
-
-    # Initialize weight transfer on vLLM server (this is async, server will
-    # wait for HCCL connection)
-    import threading
-
-    init_thread = threading.Thread(
-        target=init_weight_transfer_engine,
-        args=(BASE_URL, master_address, master_port, rank_offset, world_size),
-    )
-    init_thread.start()
-
-    # Initialize HCCL process group on trainer side
-    model_update_group = HCCLWeightTransferEngine.trainer_init(
-        dict(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=world_size,
-        ),
-    )
-
-    # Wait for init_weight_transfer_engine to complete
-    init_thread.join()
-
-    # Pause generation before weight sync
-    pause_generation(BASE_URL)
-
-    # Start weight update (prepares layerwise reload on the vLLM server)
-    start_weight_update(BASE_URL)
-
-    # Collect weight metadata for the update request.
-    # Also track the largest tensor to auto-size the packed buffer.
-    names = []
-    dtype_names = []
-    shapes = []
-    max_tensor_bytes = 0
-    for name, p in train_model.named_parameters():
-        names.append(name)
-        dtype_names.append(str(p.dtype).split(".")[-1])
-        shapes.append(list(p.shape))
-        tensor_bytes = p.numel() * p.element_size()
-        if tensor_bytes > max_tensor_bytes:
-            max_tensor_bytes = tensor_bytes
 
     # Size the packed buffer to fit the largest tensor with 128 MB headroom,
     # but keep the default 1 GB when the largest tensor is smaller than that.
+    max_tensor_bytes = max(p.numel() * p.element_size() for _, p in train_model.named_parameters())
     packed_buffer_size_bytes = max(max_tensor_bytes + 128 * 2**20, 2**30)
     logger.info(
         "Largest tensor: %.2f GiB, packed buffer: %.2f GiB",
@@ -257,32 +143,37 @@ def main():
         packed_buffer_size_bytes / 2**30,
     )
 
-    # Start the update_weights call in a separate thread since it will block
-    # waiting for HCCL broadcasts
-    # packed=True enables efficient batched tensor broadcasting
-    update_thread = threading.Thread(
-        target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes, True, packed_buffer_size_bytes),
+    # Pause generation before weight sync
+    pause_generation(BASE_URL)
+
+    logger.info("Initializing weight transfer: master=%s:%s", master_address, master_port)
+
+    # The trainer-side engine owns the whole transaction: ``trainer_init`` opens
+    # the rank-0 HCCL endpoint and hands the worker its matching init info over
+    # HTTP, then ``send_weights`` runs START -> broadcast -> FINISH. packed=True
+    # enables efficient batched tensor broadcasting.
+    from vllm.distributed.weight_transfer.base import ModuleSource
+    from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+    engine = WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            packed=True,
+            packed_buffer_size_bytes=packed_buffer_size_bytes,
+        ),
+        client=HTTPVLLMWeightSyncClient(base_url=BASE_URL),
+        source=ModuleSource(train_model),
     )
-    update_thread.start()
 
     # Broadcast all weights from trainer to vLLM workers
     logger.info("Broadcasting weights via HCCL...")
-    trainer_args = HCCLTrainerSendWeightsArgs(
-        group=model_update_group,
-        packed=True,
-        packed_buffer_size_bytes=packed_buffer_size_bytes,
-    )
-    HCCLWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
-    )
-
-    # Wait for update_weights to complete
-    update_thread.join()
-
-    # Finish weight update (finalizes layerwise reload on the vLLM server)
-    finish_weight_update(BASE_URL)
+    engine.send_weights()
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)

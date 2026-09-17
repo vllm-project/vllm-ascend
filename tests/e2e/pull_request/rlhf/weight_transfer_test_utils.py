@@ -233,6 +233,28 @@ def pytest_model_cases() -> list[Any]:
     return [pytest.param(case, id=case.id, marks=pytest.mark.e2e_model(case.model)) for case in MODEL_CASES]
 
 
+_ENGINES_REGISTERED = False
+
+
+def register_engines_once() -> None:
+    """Register the Ascend weight transfer engines exactly once per process.
+
+    ``register_engine()`` is not idempotent: the underlying factories raise
+    ``ValueError: Weight transfer trainer engine 'hccl' is already registered``
+    when a backend name is registered twice. Every test module that needs the
+    engines must therefore share this process-wide guard instead of keeping a
+    per-module flag, which would raise as soon as two modules run in the same
+    pytest session (e.g. the NPU IPC and HCCL suites).
+    """
+    global _ENGINES_REGISTERED
+    if _ENGINES_REGISTERED:
+        return
+    from vllm_ascend.distributed.weight_transfer import register_engine
+
+    register_engine()
+    _ENGINES_REGISTERED = True
+
+
 def _apply_hf_overrides(config, overrides: dict[str, Any]) -> None:
     for name, value in overrides.items():
         current = getattr(config, name, None)

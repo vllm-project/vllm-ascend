@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -149,6 +150,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # Set from the trainer-supplied init info at the handshake; defaults
         # are only for the (unreachable) receive-before-init case.
         self.packed = False
+        # One importer per engine: every chunk of a packed transfer must reuse
+        # the same mapping so torch's cross-process refcount is decremented once
+        # per export instead of once per chunk (see NPUPackedBufferImporter).
+        self._packed_importer = NPUPackedBufferImporter()
 
     def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
         """Record the trainer-supplied wire params so the worker decodes
@@ -168,6 +173,8 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         )
 
         finalize_layerwise_reload(self.model, self.model_config)
+        # Release the packed import mapping held for this transfer.
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -195,6 +202,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -228,7 +236,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
+        self._packed_importer.close()
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):

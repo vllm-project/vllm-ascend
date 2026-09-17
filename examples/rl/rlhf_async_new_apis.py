@@ -23,11 +23,13 @@ The example performs the following steps:
   on a separate NPU using vLLM's AsyncLLMEngine with Ray as the
   distributed executor backend.
 * Set up an HCCL-based weight transfer channel between the trainer
-  and the inference engine.
+  and the inference engine. The training actor builds an
+  ``HCCLTrainerWeightTransferEngine``, which opens the HCCL group and drives
+  the inference-side init/update calls through a Ray weight-sync client.
 * Submit generation requests for a batch of prompts.
 * Pause generation once any request reaches a token threshold.
-* Broadcast the training model's weights to the inference engine
-  via the HCCL weight transfer engine, replacing the base weights.
+* Broadcast the training model's weights to the inference engine with
+  ``engine.send_weights()``, replacing the base weights.
 * Resume generation and collect results, noting which tokens were
   generated before vs. after the weight swap.
 * Validate correctness by launching a fresh vLLM instance loaded
@@ -45,7 +47,6 @@ import asyncio
 import logging
 import os
 import uuid
-from dataclasses import asdict
 
 import ray
 import torch
@@ -53,19 +54,8 @@ import vllm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
-
-from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-    HCCLTrainerSendWeightsArgs,
-    HCCLWeightTransferEngine,
-    HCCLWeightTransferInitInfo,
-    HCCLWeightTransferUpdateInfo,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,40 +136,34 @@ class TrainModel:
         self.port = get_open_port()
         self.master_address = get_ip()
 
-    def get_master_address_and_port(self):
-        return self.master_address, self.port
+    def init_weight_transfer_group(self, inference_handle, world_size):
+        """Build the trainer-side HCCL engine for this actor.
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes and shapes for weight transfer."""
-        names = []
-        dtype_names = []
-        shapes = []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
+        The engine owns the HCCL endpoint (this actor is rank 0) and drives the
+        inference-side control plane through the Ray weight-sync client, so the
+        driver never has to touch the init/start/update/finish RPCs itself.
+        """
+        from vllm.distributed.weight_transfer.base import ModuleSource
+        from vllm.distributed.weight_transfer.clients import RayVLLMWeightSyncClient
+        from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
-    def init_weight_transfer_group(self, world_size):
-        """Initialize the HCCL process group for weight transfer."""
-        self.model_update_group = HCCLWeightTransferEngine.trainer_init(
-            dict(
+        from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            HCCLTrainerInitInfo(
+                rank=0,
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                packed=True,
             ),
+            client=RayVLLMWeightSyncClient(inference_handle),
+            source=ModuleSource(self.model),
         )
 
-    def broadcast_weights(self, packed: bool = True):
-        """Broadcast weights to the inference engine via HCCL."""
-        trainer_args = HCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        HCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Run one full weight-update transaction over HCCL."""
+        self.engine.send_weights()
 
     @torch.inference_mode()
     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
@@ -251,32 +235,15 @@ batch_prompt_token_ids = [tokenizer.encode(prompt, add_special_tokens=False) for
 
 
 # Set up the communication channel between the training process and the
-# inference engine.
-master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
-
+# inference engine. The training actor owns the HCCL endpoint (rank 0) and
+# drives the inference-side init/update RPCs over Ray, so only one call is
+# needed here.
 world_size = 2  # 1 trainer + 1 inference worker
-inference_handle = llm.init_weight_transfer_engine.remote(
-    WeightTransferInitRequest(
-        init_info=asdict(
-            HCCLWeightTransferInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=1,
-                world_size=world_size,
-            )
-        )
-    )
-)
-
-# Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(world_size)
-ray.get([train_handle, inference_handle])
+train_handle = train_model.init_weight_transfer_group.remote(llm, world_size)
+ray.get(train_handle)
 
 
 N_NEW_TOKENS = 100
-
-# Collect weight metadata once
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # -- Phase 1: concurrent requests with weight sync --------------------
 logger.info("\n%s", "=" * 50)
@@ -291,24 +258,9 @@ gen_futures = [llm.do_generate.remote(ptids, sampling_params) for ptids in batch
 
 ray.get(llm.pause_after_n_tokens.remote())
 
-ray.get(llm.start_weight_update.remote())
-
-inference_handle = llm.update_weights.remote(
-    WeightTransferUpdateRequest(
-        update_info=asdict(
-            HCCLWeightTransferUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=True,
-            )
-        )
-    )
-)
-train_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([train_handle, inference_handle])
-
-ray.get(llm.finish_weight_update.remote())
+# send_weights() owns the complete START -> broadcast -> FINISH transaction,
+# including the concurrent update_weights call on the inference engine.
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)

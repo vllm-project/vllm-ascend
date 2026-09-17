@@ -195,11 +195,14 @@ def test_finish_weight_update():
     engine.model = MagicMock()
     engine.model_config = MagicMock()
     mock_finalize = MagicMock()
+    engine._packed_importer = MagicMock()
 
     with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
     mock_finalize.assert_called_once_with(engine.model, engine.model_config)
+    # The per-transfer packed import mapping is released on finish.
+    engine._packed_importer.close.assert_called_once_with()
 
 
 def test_receive_packed_weights_loads_model():
@@ -216,6 +219,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -234,5 +238,6 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)

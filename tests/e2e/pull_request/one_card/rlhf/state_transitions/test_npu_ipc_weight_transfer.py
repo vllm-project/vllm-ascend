@@ -27,6 +27,7 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     generation_signature,
     packed_buffer_size_for,
     pytest_model_cases,
+    register_engines_once,
 )
 
 INFERENCE_DEVICE_INDEX = 0
@@ -37,26 +38,6 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
     response = requests.post(server.url_for(route), json=json, timeout=timeout)
     response.raise_for_status()
     return response
-
-
-_ENGINES_REGISTERED = False
-
-
-def _register_engines_once() -> None:
-    """Register the Ascend weight transfer engines exactly once per process.
-
-    ``register_engine()`` is not idempotent: it registers ``hccl`` and
-    ``npu_ipc`` and the underlying factory raises ``ValueError: Weight transfer
-    engine 'hccl' is already registered`` on a second call. Registering inside
-    the test body therefore fails every parametrisation after the first.
-    """
-    global _ENGINES_REGISTERED
-    if _ENGINES_REGISTERED:
-        return
-    from vllm_ascend.distributed.weight_transfer import register_engine
-
-    register_engine()
-    _ENGINES_REGISTERED = True
 
 
 @pytest.mark.skipif(
@@ -115,7 +96,7 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
 
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
-        _register_engines_once()
+        register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             NPUIPCTrainerInitInfo(
                 rank=0,
