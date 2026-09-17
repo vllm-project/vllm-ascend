@@ -122,7 +122,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -429,26 +429,6 @@ INFO:     Started server process
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
-
-### 5.2 Service Verification
-
-After the service is fully started, send a request to verify that the service is working correctly:
-
-```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "qwen3.8",
-        "messages": [
-            {"role": "user", "content": "The future of AI is"}
-        ],
-        "max_tokens": 1024,
-        "temperature": 1.0,
-        "top_p": 0.95
-    }'
-```
-
-Expected Result: The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text.
 
 ## 6 Functional Verification
 
