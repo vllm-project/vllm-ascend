@@ -119,7 +119,6 @@ class VisionEncoderCostEstimator:
         self.hidden_size = hidden_size
         self.feedforward = feedforward
         self.alpha = 4 * hidden_size + 5 * attn_heads
-        
         # TODO: there may be more kinds of compute ways
         model_type = getattr(hf_config, "model_type", None)
         if model_type == "qwen3_5":
