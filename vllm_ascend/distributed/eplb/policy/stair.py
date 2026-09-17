@@ -131,95 +131,156 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def _allocate_extra_replicas(
-        risk: np.ndarray,
-        replicas: np.ndarray,
+        expert_risks: np.ndarray,
+        replica_counts: np.ndarray,
         extra_slots: int,
         num_ranks: int,
-        experts: tuple[int, ...],
+        eligible_experts: tuple[int, ...],
     ) -> np.ndarray | None:
-        result = replicas.copy()
+        """Greedily allocate slots by descending risk per existing replica."""
+        allocated_counts = replica_counts.copy()
         for _ in range(extra_slots):
-            candidates = [expert for expert in experts if result[expert] < num_ranks]
-            if not candidates:
+            allocatable_experts = [expert for expert in eligible_experts if allocated_counts[expert] < num_ranks]
+            if not allocatable_experts:
                 return None
-            expert = min(candidates, key=lambda item: (-risk[item] / result[item], item))
-            result[expert] += 1
-        return result
+            expert = max(
+                allocatable_experts,
+                key=lambda expert_id: (expert_risks[expert_id] / allocated_counts[expert_id], -expert_id),
+            )
+            allocated_counts[expert] += 1
+        return allocated_counts
 
     @staticmethod
-    def _nearby_budgets(center: int, lower: int, upper: int, radius: int) -> list[int]:
+    def _candidate_group_budgets(center_budget: int, min_budget: int, max_budget: int, budget_radius: int) -> list[int]:
+        """Enumerate valid budgets from nearest to farthest from the center."""
         budgets = []
-        for distance in range(radius + 1):
-            values = (center,) if distance == 0 else (center - distance, center + distance)
-            budgets.extend(value for value in values if lower <= value <= upper)
+        for distance in range(budget_radius + 1):
+            values = (center_budget,) if distance == 0 else (center_budget - distance, center_budget + distance)
+            budgets.extend(value for value in values if min_budget <= value <= max_budget)
         return budgets
+
+    @classmethod
+    def _expand_replica_search_stage(
+        cls,
+        expert_risks: np.ndarray,
+        search_beam: list[_ReplicaSearchState],
+        current_experts: tuple[int, ...],
+        later_experts: tuple[int, ...],
+        *,
+        num_ranks: int,
+        budget_radius: int,
+        beam_size: int,
+    ) -> list[_ReplicaSearchState]:
+        """Expand and prune one stage using a cheap replica-risk score."""
+        stage_expansions = []
+        eligible_experts = current_experts + later_experts
+        for replica_counts, unallocated_slots in search_beam:
+            baseline_completion = cls._allocate_extra_replicas(
+                expert_risks, replica_counts, unallocated_slots, num_ranks, eligible_experts
+            )
+            if baseline_completion is None:
+                continue
+            center_budget = int(
+                np.sum(baseline_completion[list(current_experts)] - replica_counts[list(current_experts)])
+            )
+            current_capacity = sum(num_ranks - replica_counts[expert] for expert in current_experts)
+            later_capacity = sum(num_ranks - replica_counts[expert] for expert in later_experts)
+            min_budget = max(0, unallocated_slots - later_capacity)
+            max_budget = min(unallocated_slots, current_capacity)
+            for budget in cls._candidate_group_budgets(center_budget, min_budget, max_budget, budget_radius):
+                stage_replica_counts = cls._allocate_extra_replicas(
+                    expert_risks, replica_counts, budget, num_ranks, current_experts
+                )
+                if stage_replica_counts is None:
+                    continue
+                candidate_completion = cls._allocate_extra_replicas(
+                    expert_risks,
+                    stage_replica_counts,
+                    unallocated_slots - budget,
+                    num_ranks,
+                    later_experts,
+                )
+                if candidate_completion is not None:
+                    stage_expansions.append((stage_replica_counts, unallocated_slots - budget, candidate_completion))
+
+        unique_expansions = {
+            tuple(stage_counts): (stage_counts, unallocated_slots, completion)
+            for stage_counts, unallocated_slots, completion in stage_expansions
+        }
+
+        def screening_key(expansion):
+            stage_counts, _, candidate_completion = expansion
+            max_per_replica_risk = float(np.max(expert_risks / candidate_completion))
+            # Lexicographic vectors make equal-risk screening deterministic.
+            return max_per_replica_risk, tuple(candidate_completion), tuple(stage_counts)
+
+        ranked_expansions = sorted(unique_expansions.values(), key=screening_key)
+        return [
+            (stage_counts, unallocated_slots) for stage_counts, unallocated_slots, _ in ranked_expansions[:beam_size]
+        ]
 
     @classmethod
     def replica_candidates(
         cls,
-        risk: np.ndarray,
+        expert_risks: np.ndarray,
         total_slots: int,
         num_ranks: int,
         *,
         num_stages: int,
-        radius: int,
+        budget_radius: int,
         beam_size: int,
-        score: Callable[[np.ndarray], float],
+        candidate_score: Callable[[np.ndarray], float],
     ) -> list[np.ndarray]:
-        """Return a bounded FlashTree-style beam of replica-count vectors."""
-        values = np.asarray(risk, dtype=np.float64)
-        num_experts = values.size
-        integer_inputs = (total_slots, num_ranks, num_stages, radius, beam_size)
-        if (
-            values.ndim != 1
-            or num_experts == 0
-            or not np.all(np.isfinite(values))
-            or np.any(values < 0)
-            or any(not isinstance(value, int) or isinstance(value, bool) for value in integer_inputs)
-            or num_ranks < 1
-            or not num_experts <= total_slots <= num_experts * num_ranks
-            or total_slots % num_ranks != 0
-            or num_stages < 1
-            or radius < 0
-            or beam_size < 1
-            or not callable(score)
-        ):
-            raise ValueError("Invalid STAIR replica search input")
+        """Return at most ``beam_size`` unique candidates, best score first.
 
-        order = sorted(range(num_experts), key=lambda expert: (-values[expert], expert))
+        ``candidate_score`` is lower-is-better and runs only on final candidates.
+        """
+        risks = np.asarray(expert_risks, dtype=np.float64)
+        num_experts = risks.size
+        if risks.ndim != 1 or num_experts == 0 or not np.all(np.isfinite(risks)) or np.any(risks < 0):
+            raise ValueError("expert_risks must be a finite non-negative vector")
+        integer_controls = (
+            ("total_slots", total_slots),
+            ("num_ranks", num_ranks),
+            ("num_stages", num_stages),
+            ("budget_radius", budget_radius),
+            ("beam_size", beam_size),
+        )
+        for name, value in integer_controls:
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+        if num_ranks < 1 or num_stages < 1 or budget_radius < 0 or beam_size < 1:
+            raise ValueError("num_ranks, num_stages, and beam_size must be positive; budget_radius cannot be negative")
+        if not num_experts <= total_slots <= num_experts * num_ranks or total_slots % num_ranks != 0:
+            raise ValueError("total_slots must form an equal-capacity rank placement")
+        if not callable(candidate_score):
+            raise ValueError("candidate_score must be callable")
+
+        experts_by_descending_risk = sorted(range(num_experts), key=lambda expert: (-risks[expert], expert))
         stage_count = min(num_stages, num_experts)
-        groups = [tuple(group) for group in np.array_split(order, stage_count)]
-        beam = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
+        expert_groups = [tuple(group) for group in np.array_split(experts_by_descending_risk, stage_count)]
+        search_beam: list[_ReplicaSearchState] = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
 
-        for group_index, group in enumerate(groups[:-1]):
-            later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
-            expanded = []
-            for replicas, remaining in beam:
-                greedy = cls._allocate_extra_replicas(values, replicas, remaining, num_ranks, group + later)
-                if greedy is None:
-                    continue
-                center = int(np.sum(greedy[list(group)] - replicas[list(group)]))
-                group_capacity = sum(num_ranks - replicas[expert] for expert in group)
-                later_capacity = sum(num_ranks - replicas[expert] for expert in later)
-                lower = max(0, remaining - later_capacity)
-                upper = min(remaining, group_capacity)
-                for budget in cls._nearby_budgets(center, lower, upper, radius):
-                    partial = cls._allocate_extra_replicas(values, replicas, budget, num_ranks, group)
-                    if partial is None:
-                        continue
-                    complete = cls._allocate_extra_replicas(values, partial, remaining - budget, num_ranks, later)
-                    if complete is not None:
-                        expanded.append((partial, remaining - budget, complete))
-            unique = {tuple(partial): (partial, remaining, complete) for partial, remaining, complete in expanded}
-            ranked = sorted(
-                unique.values(),
-                key=lambda item: (float(np.max(values / item[2])), tuple(item[2]), tuple(item[0])),
+        for group_index, current_experts in enumerate(expert_groups[:-1]):
+            later_experts = tuple(expert for later_group in expert_groups[group_index + 1 :] for expert in later_group)
+            search_beam = cls._expand_replica_search_stage(
+                risks,
+                search_beam,
+                current_experts,
+                later_experts,
+                num_ranks=num_ranks,
+                budget_radius=budget_radius,
+                beam_size=beam_size,
             )
-            beam = [(partial, remaining) for partial, remaining, _ in ranked[:beam_size]]
 
-        complete = {}
-        for replicas, remaining in beam:
-            candidate = cls._allocate_extra_replicas(values, replicas, remaining, num_ranks, groups[-1])
+        final_candidates_by_counts = {}
+        for replica_counts, unallocated_slots in search_beam:
+            candidate = cls._allocate_extra_replicas(
+                risks, replica_counts, unallocated_slots, num_ranks, expert_groups[-1]
+            )
             if candidate is not None:
-                complete[tuple(candidate)] = candidate
-        return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:beam_size]
+                final_candidates_by_counts[tuple(candidate)] = candidate
+        return sorted(
+            final_candidates_by_counts.values(),
+            key=lambda candidate: (candidate_score(candidate), tuple(candidate)),
+        )[:beam_size]
