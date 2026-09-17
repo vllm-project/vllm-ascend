@@ -42,14 +42,14 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            npu_available = torch.npu.is_available()
-        except RuntimeError:
-            # CPU-only builds raise instead of returning False
-            npu_available = False
-        if not npu_available:
-            raise unittest.SkipTest("NPU not available")
-        torch.npu.config.allow_internal_format = True
-        torch.npu.set_device(0)
+            if not torch.npu.is_available():
+                raise unittest.SkipTest("NPU not available")
+            torch.npu.config.allow_internal_format = True
+            torch.npu.set_device(0)
+        except RuntimeError as e:
+            # CPU-only CI builds: npu calls raise
+            # "PyTorch is not linked with support for npu devices"
+            raise unittest.SkipTest("NPU not available") from e
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="packed_nz_ut_")
