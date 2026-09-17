@@ -583,7 +583,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
                     patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=legacy),
                     patch(
-                        "vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5
+                        "vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A5
                     ),
                     patch("vllm_ascend.worker.model_runner_v1.get_kv_cache_tensor_layers", return_value=names),
                 ):
@@ -632,7 +632,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 with (
                     patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value={name: layer}),
                     patch(
-                        "vllm_ascend.worker.model_runner_v1.get_ascend_device_type",
+                        "vllm_ascend.core.kv_cache_interface.get_ascend_device_type",
                         return_value=AscendDeviceType.A5,
                     ),
                 ):
@@ -659,7 +659,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         with (
             patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
-            patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch("vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A3),
         ):
             # Non-A5 devices have no token-strided cache operators: the gate
             # must fall back to the legacy separate NoPE/RoPE allocation.
@@ -1345,7 +1345,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertEqual(k_cache.shape, (2, 4, 2, 3))
             self.assertEqual(v_cache.shape, (2, 4, 2, 3))
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch("vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(
@@ -1411,7 +1411,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(raw_parent.numel(), 2 * 16 * (512 + 64) * 2)
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch("vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_indexer_allocates_separate_replicated_cache_tensor(

@@ -432,8 +432,7 @@ def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> b
     config = get_current_vllm_config()
     if (
         not enable_sfa(config)
-        or not should_use_sfa_kv_parent_layout(config.kv_transfer_config)
-        or get_ascend_device_type() != AscendDeviceType.A5
+        or not should_use_sfa_kv_parent_layout(config)
         or not isinstance(spec, AscendMLAAttentionSpec)
         or bool(getattr(spec, "cache_sparse_sfa_c8", False))
         or "cache_only_layers" in layer_name
