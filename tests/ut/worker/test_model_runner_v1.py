@@ -500,6 +500,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
+        attn_module.num_heads = 64
         attn_module.impl = SimpleNamespace(fa_quant_layer=False)
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
         runner.kernel_block_sizes = [[128]]
@@ -511,15 +512,29 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
 
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
+        for q_heads in (64, 96):
+            with self.subTest(q_heads=q_heads):
+                attn_module.num_heads = q_heads
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                    return_value=flash_profile,
+                ):
+                    fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+                self.assertIsInstance(fused, torch.Tensor)
+                self.assertEqual(fused.shape, (6, 128, 1, 576))
+                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+
+        # A5 FlashMLA does not support arbitrary query-head counts. Keep these
+        # models on the FIA-compatible component-major layout.
+        attn_module.num_heads = 48
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,
         ):
-            fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+            a5_fallback = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
-        self.assertIsInstance(fused, torch.Tensor)
-        self.assertEqual(fused.shape, (6, 128, 1, 576))
-        self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+        self.assertIsInstance(a5_fallback, tuple)
 
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",

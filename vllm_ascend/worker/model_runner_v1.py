@@ -139,6 +139,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBu
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
     using_paged_attention,
@@ -5223,7 +5224,10 @@ class NPUModelRunner(GPUModelRunner):
                             kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
                         )
-                        if get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
+                        if (
+                            get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                            and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                        ):
                             # A5每个kernel slot内按token交错存储[nope|rope]：
                             # token0[nope|rope], token1[nope|rope], ...。
                             fused_cache = torch.as_strided(

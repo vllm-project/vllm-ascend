@@ -47,6 +47,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
 )
@@ -1141,6 +1142,7 @@ def _reshape_kv_cache_v2(
                 single_raw_mla_cache = raw_cache[0]
 
             if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
+                attn_module = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])[layer_name]
                 typed_raw = single_raw_mla_cache.view(kv_cache_spec.dtype)
                 element_size = torch.empty((), dtype=kv_cache_spec.dtype).element_size()
                 kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
@@ -1153,7 +1155,10 @@ def _reshape_kv_cache_v2(
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
 
-                if get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                    and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                ):
                     # Preserve the V1 A5 protocol: one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = torch.as_strided(

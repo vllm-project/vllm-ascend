@@ -152,6 +152,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
     torch.nn.Module.__init__(attn_module)
     attn_module.kv_lora_rank = 512
     attn_module.qk_rope_head_dim = 64
+    attn_module.num_heads = 64
     attn_module.impl = SimpleNamespace(fa_quant_layer=False)
     backend = MagicMock()
     backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
@@ -194,9 +195,9 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
     )
     flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
     component_profile = SimpleNamespace(supports=lambda capability: False)
-    for profile, expected_tensor_count in ((flash_profile, None), (component_profile, 2)):
-        monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda profile=profile: profile)
-        cache = attn_utils._reshape_kv_cache_v2(
+
+    def reshape():
+        return attn_utils._reshape_kv_cache_v2(
             attn_groups=[attn_group],
             kv_cache_raw_tensors=raw_caches,
             cache_dtype="auto",
@@ -205,18 +206,29 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware(monkeypatch):
             kv_cache_config=kv_cache_config,
         )[layer_name]
 
-        if expected_tensor_count is None:
-            assert isinstance(cache, torch.Tensor)
-            assert cache.shape == (6, 128, 1, 576)
-            assert cache.stride() == (81408, 576, 576, 1)
-        else:
-            nope, rope = cache
-            assert nope.shape == (6, 128, 1, 512)
-            assert nope.stride() == (81408, 512, 512, 1)
-            assert rope.shape == (6, 128, 1, 64)
-            assert rope.stride() == (81408, 64, 64, 1)
-            assert rope.storage_offset() - nope.storage_offset() == 65536
-            assert nope.untyped_storage() is rope.untyped_storage()
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
+    for q_heads in (64, 96):
+        attn_module.num_heads = q_heads
+        fused = reshape()
+        assert isinstance(fused, torch.Tensor)
+        assert fused.shape == (6, 128, 1, 576)
+        assert fused.stride() == (81408, 576, 576, 1)
+
+    # Even on A5, FlashMLA-incompatible query-head counts use the
+    # FIA-compatible component-major layout.
+    attn_module.num_heads = 48
+    a5_fallback = reshape()
+    assert isinstance(a5_fallback, tuple)
+
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
+    cache = reshape()
+    nope, rope = cache
+    assert nope.shape == (6, 128, 1, 512)
+    assert nope.stride() == (81408, 512, 512, 1)
+    assert rope.shape == (6, 128, 1, 64)
+    assert rope.stride() == (81408, 64, 64, 1)
+    assert rope.storage_offset() - nope.storage_offset() == 65536
+    assert nope.untyped_storage() is rope.untyped_storage()
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="V2 single raw MLA follows the main allocation contract")
