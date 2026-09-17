@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import AbstractContextManager, contextmanager
 
 import numpy as np
@@ -257,10 +258,13 @@ class NPUModelRunner(GPUModelRunner):
         if vllm_version_is("0.28.0"):
             kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(
-                kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
-            )
+            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
+            # kv_cache_allocation_context. Only forward it when the parent
+            # signature includes the sleep-mode allocation pool.
+            parent_kwargs = {}
+            if "kv_cache_allocation_context" in inspect.signature(GPUModelRunner.initialize_kv_cache).parameters:
+                parent_kwargs["kv_cache_allocation_context"] = kv_cache_allocation_context
+            super().initialize_kv_cache(kv_cache_config, **parent_kwargs)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config

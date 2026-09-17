@@ -557,6 +557,39 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 
+def test_initialize_kv_cache_omits_allocation_context_when_upstream_lacks_it():
+    runner = _make_runner()
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    captured: dict[str, object] = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super_without_context(self, kv_cache_config):
+        captured["called"] = True
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super_without_context),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ),
+    ):
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=object())
+
+    assert captured.get("called") is True
+
+
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
 def test_profile_run_dummy_reserves_mc2(moe_type):
     runner = _make_runner()
