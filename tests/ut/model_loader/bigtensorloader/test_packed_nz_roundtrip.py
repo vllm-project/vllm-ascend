@@ -46,10 +46,13 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
                 raise unittest.SkipTest("NPU not available")
             torch.npu.config.allow_internal_format = True
             torch.npu.set_device(0)
-        except RuntimeError as e:
-            # CPU-only CI builds: npu calls raise
-            # "PyTorch is not linked with support for npu devices"
-            raise unittest.SkipTest("NPU not available") from e
+            # is_available() can be a false positive on no-device CI
+            # builds; probe with a real device allocation
+            torch.zeros(1, device="npu")
+        except unittest.SkipTest:
+            raise
+        except Exception as e:
+            raise unittest.SkipTest(f"NPU not available: {e}") from e
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="packed_nz_ut_")
