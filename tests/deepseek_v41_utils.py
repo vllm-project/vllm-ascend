@@ -23,19 +23,17 @@ from vllm_ascend.core.deepseek_v41_kv_cache import (
     pool_bytes_per_block,
     reshape_cache,
 )
-from vllm_ascend.models.deepseek_v41.compressor import _read, text_config_of
 from vllm_ascend.models.deepseek_v41.model import build_layer_plan
 
 
 def build_v41_cache_specs(config: Any, vllm_config: Any, prefix: str = "model"):
     """Describe the source-shared cache graph for allocation tests."""
-    config = text_config_of(config)
     block_size = vllm_config.cache_config.block_size
     if block_size <= 0 or block_size % 2:
         raise ValueError("V4.1 logical block_size must be a positive multiple of two")
-    width = _read(config, "head_dim")
-    index_width = _read(config, "index_head_dim")
-    window = _read(config, "sliding_window")
+    width = config.head_dim
+    index_width = config.index_head_dim
+    window = config.sliding_window
     specs = {}
     for role in build_layer_plan(config).layers:
         attn_prefix = f"{prefix}.layers.{role.layer_idx}.self_attn"
@@ -271,7 +269,7 @@ def hc_post_reference(x, residual, post, comb):
 
 
 def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=128, draft_layers=0):
-    config = dict(
+    config = SimpleNamespace(
         num_hidden_layers=40,
         compress_ratios=[0, 0] + [2] * 18 + [1] * 20,
         kv_source_layer_ids=[2, 8, 14, 20],
@@ -293,7 +291,7 @@ def make_cache_config(num_blocks, *, block_size=128, head_size=512, index_size=1
             num_kv_heads=1,
             head_size=head_size,
             dtype=torch.bfloat16,
-            sliding_window=config["sliding_window"],
+            sliding_window=config.sliding_window,
             cache_dtype_str="bfloat16",
             model_version="deepseek_v4",
         )

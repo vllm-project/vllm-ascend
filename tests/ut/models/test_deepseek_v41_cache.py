@@ -3,12 +3,13 @@
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, set_current_vllm_config
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -59,12 +60,17 @@ def mock_npu_rms_norm(monkeypatch):
 
     monkeypatch.setattr(torch_npu, "npu_rms_norm", rms_norm)
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    vllm_config = MagicMock()
+    vllm_config.compilation_config.custom_ops = ["all"]
+    vllm_config.quant_config = None
+    with set_current_vllm_config(vllm_config):
+        yield
 
 
 @pytest.fixture
 def config():
     # Deliberately small parameter dimensions; source topology matches the backbone.
-    return dict(
+    return SimpleNamespace(
         num_hidden_layers=40,
         compress_ratios=[0, 0] + [2] * 18 + [1] * 20 + [0] * 3,
         kv_source_layer_ids=[2, 8, 14, 20],
@@ -116,8 +122,22 @@ def collect_specs(runtime, prefix="model"):
     return build_v41_cache_specs(runtime.model_config.hf_text_config, runtime, prefix)
 
 
+def test_compressor_registers_state_cache_and_preserves_norm_weights(config, runtime):
+    runtime.scheduler_config.max_num_batched_tokens = 8
+    compressor = DeepseekV41Compressor(config, 2, runtime, prefix="compressor")
+    state = compressor.state_cache
+    assert type(state) is DeepseekV41CacheLayer
+    assert runtime.compilation_config.static_forward_context["compressor.state_cache"] is state
+    spec = state.get_kv_cache_spec(runtime)
+    assert spec.dtype == torch.float32
+    assert spec.block_size == 32
+    assert spec.head_size == 2 * config.head_dim
+    assert compressor.norm.weight.dtype == torch.bfloat16
+    assert set(compressor.state_dict()) == {"wkv.weight", "wgate.weight", "norm.weight"}
+
+
 def test_owner_counts_nested_config_and_source_resolution(config, runtime):
-    topology = build_layer_plan({"text_config": config})
+    topology = build_layer_plan(DeepseekV41Config(text_config=vars(config)))
     specs = collect_specs(runtime)
     assert len(specs) == 51
     assert topology.kv_consumers(2) == tuple(range(2, 8))
@@ -168,7 +188,7 @@ def test_twelve_groups_share_four_layer_slots(config, runtime):
 
 def test_production_layout_matches_design(config, runtime):
     runtime.cache_config.block_size = 128
-    specs = build_v41_cache_specs(dict(config, head_dim=512, index_head_dim=128), runtime)
+    specs = build_v41_cache_specs(SimpleNamespace(**(vars(config) | {"head_dim": 512, "index_head_dim": 128})), runtime)
     groups = make_cache_groups(group_cache_specs(specs))
     assert len(groups) == 12
     assert [g.kv_cache_spec.page_size_bytes for g in groups] == [540928, 393216] + [540928] * 10

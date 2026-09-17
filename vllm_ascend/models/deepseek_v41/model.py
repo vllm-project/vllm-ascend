@@ -68,9 +68,13 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
-from vllm_ascend.utils import enable_custom_op, enable_dsa_cp, normalize_deepseek_v41_config
+from vllm_ascend.utils import (
+    enable_custom_op,
+    enable_dsa_cp,
+    normalize_deepseek_v41_config,
+)
 
-from .compressor import DeepseekV41Compressor, _read, text_config_of
+from .compressor import DeepseekV41Compressor
 from .engram_gate import engram_gate
 from .engram_hash import PagedNgramHistory
 from .engram_hbm import EngramQueryGroup, NodeShardedEngram
@@ -477,11 +481,6 @@ class DeepseekV41SharedAttentionState:
         return None
 
 
-def _as_int_tuple(config: Any, name: str) -> tuple[int, ...]:
-    value = _read(config, name)
-    return tuple(value)
-
-
 def _latest_source(layer_idx: int, sources: tuple[int, ...]) -> int | None:
     return next((source for source in reversed(sources) if source <= layer_idx), None)
 
@@ -489,21 +488,20 @@ def _latest_source(layer_idx: int, sources: tuple[int, ...]) -> int | None:
 def build_layer_plan(config: Any) -> DeepseekV41Topology:
     """Build and validate the V4.1 layer-sharing graph from a text config.
 
-    ``config`` may be a Transformers config object or the raw ``text_config``
-    dictionary.  Extra compression ratios for speculative layers are allowed,
+    ``config`` is the parsed text-model config. Extra compression ratios for
+    speculative layers are allowed,
     but only the first ``num_hidden_layers`` entries describe the backbone.
     """
 
-    config = text_config_of(config)
-    num_layers = int(_read(config, "num_hidden_layers"))
-    ratios = _as_int_tuple(config, "compress_ratios")
-    kv_sources = _as_int_tuple(config, "kv_source_layer_ids")
-    index_sources = _as_int_tuple(config, "index_source_layer_ids")
-    engram_layers = _as_int_tuple(config, "engram_layer_ids")
-    candidate_source = int(_read(config, "candidate_source_layer_id"))
-    candidate_topk_blocks = int(_read(config, "candidate_topk_blocks"))
-    candidate_block_size = int(_read(config, "candidate_block_size"))
-    index_topk = int(_read(config, "index_topk"))
+    num_layers = int(config.num_hidden_layers)
+    ratios = tuple(config.compress_ratios)
+    kv_sources = tuple(config.kv_source_layer_ids)
+    index_sources = tuple(config.index_source_layer_ids)
+    engram_layers = tuple(config.engram_layer_ids)
+    candidate_source = int(config.candidate_source_layer_id)
+    candidate_topk_blocks = int(config.candidate_topk_blocks)
+    candidate_block_size = int(config.candidate_block_size)
+    index_topk = int(config.index_topk)
 
     ratios = ratios[:num_layers]
 
@@ -671,7 +669,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         reduce_results=True,
         need_gather_q_kv=False,
     ):
-        config = text_config_of(config)
         validate_cache_runtime(vllm_config)
         layer_idx = int(prefix.split(".")[-2])
         topology = build_layer_plan(config)
@@ -693,7 +690,7 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
-        width = _read(config, "head_dim")
+        width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
             self.long_kv_cache = DeepseekV41CacheLayer(

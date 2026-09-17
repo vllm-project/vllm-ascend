@@ -2,61 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP32 C2 ring compressor, ratio-1 path, and fused RMS normalization."""
 
-from typing import Any
-
 import torch
-import torch_npu
 from torch import nn
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 from vllm_ascend.core.deepseek_v41_kv_cache import STATE_RING_ROWS, DeepseekV41CompressorStateSpec
-
-
-def _read(config: Any, name: str) -> Any:
-    if isinstance(config, dict):
-        return config[name]
-    return getattr(config, name)
-
-
-def text_config_of(config: Any) -> Any:
-    if isinstance(config, dict):
-        return config.get("text_config", config)
-    return getattr(config, "text_config", config)
-
-
-class DeepseekV41CompressorStateCache(DeepseekV41CacheLayer):
-    """State-cache module owning one packed FP32 circular page per request.
-
-    Pass kv_cache[0].squeeze(-2) and the state's block table to the compressor.
-    The V4 constructor itself cannot be reused: it asserts ratio in (4, 128).
-    """
-
-    def __init__(self, vllm_config, prefix, spec):
-        super().__init__(vllm_config, prefix, spec)
-        self.state_dim = spec.head_size
-        self.dtype = spec.dtype
-        self.compress_ratio = 2  # Pooling ratio; spec storage ratio remains one.
-        self.block_size = spec.block_size
-
-
-class DeepseekV41RMSNorm(nn.Module):
-    def __init__(self, width, eps):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(width, dtype=torch.bfloat16))
-        self.eps = eps
-
-    def forward(self, x):
-        return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.eps)[0]
 
 
 class DeepseekV41Compressor(nn.Module):
     def __init__(self, config, ratio, vllm_config=None, prefix="compressor"):
         super().__init__()
         self.ratio = ratio
-        self.width = _read(config, "head_dim")
-        dim = _read(config, "hidden_size")
+        self.width = config.head_dim
+        dim = config.hidden_size
         self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.float32 if ratio == 2 else torch.bfloat16)
-        self.norm = DeepseekV41RMSNorm(self.width, _read(config, "rms_norm_eps"))
+        self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
             self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.float32)
             # Allocate persistent output before memory profiling, so its footprint
@@ -70,7 +31,7 @@ class DeepseekV41Compressor(nn.Module):
                 )
             # Standalone unfused-reference tests may supply pages explicitly.
             if vllm_config is not None:
-                self.state_cache = DeepseekV41CompressorStateCache(
+                self.state_cache = DeepseekV41CacheLayer(
                     vllm_config,
                     f"{prefix}.state_cache",
                     DeepseekV41CompressorStateSpec(

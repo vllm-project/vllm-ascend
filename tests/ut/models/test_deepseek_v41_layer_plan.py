@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SharedAttentionState,
@@ -11,21 +12,23 @@ from vllm_ascend.models.deepseek_v41.model import (
 
 
 @pytest.fixture
-def text_config() -> dict:
-    return {
-        "num_hidden_layers": 40,
-        "compress_ratios": [0, 0] + [2] * 18 + [1] * 20 + [0] * 3,
-        "kv_source_layer_ids": [2, 8, 14, 20],
-        "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
-        "candidate_source_layer_id": 20,
-        "candidate_topk_blocks": 2048,
-        "candidate_block_size": 8,
-        "index_topk": 512,
-        "engram_layer_ids": [1, 14],
-    }
+def text_config() -> DeepseekV41Config:
+    return DeepseekV41Config(
+        text_config={
+            "num_hidden_layers": 40,
+            "compress_ratios": [0, 0] + [2] * 18 + [1] * 20 + [0] * 3,
+            "kv_source_layer_ids": [2, 8, 14, 20],
+            "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+            "candidate_source_layer_id": 20,
+            "candidate_topk_blocks": 2048,
+            "candidate_block_size": 8,
+            "index_topk": 512,
+            "engram_layer_ids": [1, 14],
+        }
+    )
 
 
-def test_builds_expected_source_groups(text_config: dict):
+def test_builds_expected_source_groups(text_config: DeepseekV41Config):
     topology = build_layer_plan(text_config)
 
     assert topology.kv_consumers(2) == tuple(range(2, 8))
@@ -38,7 +41,7 @@ def test_builds_expected_source_groups(text_config: dict):
     assert topology.index_consumers(36) == tuple(range(36, 40))
 
 
-def test_layer_26_resolves_layer_20_kv_and_layer_24_index(text_config: dict):
+def test_layer_26_resolves_layer_20_kv_and_layer_24_index(text_config: DeepseekV41Config):
     topology = build_layer_plan(text_config)
     role = topology.layer(26)
     assert role.kv_source_layer == 20
@@ -48,7 +51,7 @@ def test_layer_26_resolves_layer_20_kv_and_layer_24_index(text_config: dict):
     assert role.uses_candidate_filter
 
 
-def test_source_roles_and_engram_slots(text_config: dict):
+def test_source_roles_and_engram_slots(text_config: DeepseekV41Config):
     topology = build_layer_plan(text_config)
 
     assert topology.layer(2).is_kv_source

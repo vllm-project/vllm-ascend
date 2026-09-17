@@ -5,6 +5,7 @@
 import torch
 import torch_npu
 from torch import nn
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from vllm_ascend.attention.dsa_v41 import (
@@ -18,8 +19,6 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
 )
-
-from .compressor import DeepseekV41RMSNorm, _read
 
 
 class DeepseekV41Indexer(nn.Module):
@@ -41,14 +40,14 @@ class DeepseekV41Indexer(nn.Module):
         super().__init__()
         self.owns_k = owns_k
         self.compress_ratio = compress_ratio
-        self.n_heads = int(_read(config, "index_n_heads"))
-        self.width = int(_read(config, "index_head_dim"))
-        self.rope_width = int(_read(config, "qk_rope_head_dim"))
-        self.index_topk = int(_read(config, "index_topk"))
+        self.n_heads = int(config.index_n_heads)
+        self.width = int(config.index_head_dim)
+        self.rope_width = int(config.qk_rope_head_dim)
+        self.index_topk = int(config.index_topk)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
         self.wq_b = ReplicatedLinear(
-            _read(config, "q_lora_rank"),
+            config.q_lora_rank,
             self.n_heads * self.width,
             bias=False,
             quant_config=quant_config,
@@ -56,7 +55,7 @@ class DeepseekV41Indexer(nn.Module):
             return_bias=False,
         )
         self.weights_proj = ReplicatedLinear(
-            _read(config, "hidden_size"),
+            config.hidden_size,
             self.n_heads,
             bias=False,
             quant_config=None,
@@ -65,12 +64,12 @@ class DeepseekV41Indexer(nn.Module):
         )
         if owns_k:
             self.wk = nn.Linear(
-                _read(config, "head_dim"),
+                config.head_dim,
                 self.width,
                 bias=False,
                 dtype=torch.bfloat16,
             )
-            self.k_norm = DeepseekV41RMSNorm(self.width, _read(config, "rms_norm_eps"))
+            self.k_norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
