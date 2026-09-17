@@ -41,7 +41,12 @@ class _PackedModel(torch.nn.Module):
 class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not torch.npu.is_available():
+        try:
+            npu_available = torch.npu.is_available()
+        except RuntimeError:
+            # CPU-only builds raise instead of returning False
+            npu_available = False
+        if not npu_available:
             raise unittest.SkipTest("NPU not available")
         torch.npu.config.allow_internal_format = True
         torch.npu.set_device(0)
