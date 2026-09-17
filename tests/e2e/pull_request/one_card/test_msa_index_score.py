@@ -24,7 +24,6 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env(include_vendor_lib=True)
@@ -58,6 +57,13 @@ def _prefix_sum(lengths: tuple[int, ...]) -> torch.Tensor:
     return torch.tensor(values, dtype=torch.int32)
 
 
+def _is_ascend_950() -> bool:
+    try:
+        return "950" in torch.npu.get_device_name(0)
+    except Exception:
+        return False
+
+
 def _discrete_random(shape: tuple[int, ...], generator: torch.Generator) -> torch.Tensor:
     # Binary fractions keep independent CPU and NPU reductions deterministic.
     return torch.randint(-8, 9, shape, generator=generator, dtype=torch.int32).float() / 8.0
@@ -70,8 +76,8 @@ def _run_case(
     table_width: int,
     page_axis_gap: int,
 ) -> None:
-    if dtype == torch.float8_e4m3fn and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-        pytest.skip("FLOAT8_E4M3FN MsaIndexScore requires FP8 attention support")
+    if dtype == torch.float8_e4m3fn and not _is_ascend_950():
+        pytest.skip("FLOAT8_E4M3FN MsaIndexScore requires Ascend 950")
 
     generator = torch.Generator().manual_seed(2026)
     total_q = sum(q_lens)
