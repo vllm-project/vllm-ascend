@@ -720,6 +720,77 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
+    @patch_distributed_groups(dcp_size=2, needs_mocks=False)
+    def test_ascend_sfa_metadata_builder_keeps_padded_token_dimension(
+        self,
+        mock_get_cos_and_sin_mla,
+        mock_get_current_vllm_config,
+    ):
+        cfg = MagicMock()
+        cfg.model_config = MagicMock()
+        cfg.model_config.hf_text_config = MagicMock()
+        mock_get_current_vllm_config.return_value = cfg
+
+        kv_cache_spec = MagicMock()
+        kv_cache_spec.block_size = 128
+        layer_names = ["layer1", "layer2"]
+        vllm_config = MagicMock()
+        vllm_config.cache_config.block_size = 16
+        vllm_config.scheduler_config.max_num_seqs = 16
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.model_config.max_model_len = 1024
+        vllm_config.model_config.get_head_size.return_value = 64
+        vllm_config.model_config.dtype = torch.float16
+        vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        speculative_config = MagicMock()
+        speculative_config.num_speculative_tokens = 4
+        vllm_config.speculative_config = speculative_config
+
+        builder = AscendSFAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=layer_names,
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 1
+        common_attn_metadata.num_actual_tokens = 97
+        common_attn_metadata.num_input_tokens = 104
+        common_attn_metadata.query_start_loc = torch.tensor([0, 97], dtype=torch.int32)
+        common_attn_metadata.query_start_loc_cpu = common_attn_metadata.query_start_loc.cpu()
+        common_attn_metadata.slot_mapping = torch.randn(104, 4, 1024)
+        common_attn_metadata.seq_lens = torch.tensor([97], dtype=torch.int32)
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        common_attn_metadata._seq_lens_cpu = None
+        common_attn_metadata.positions = torch.arange(104)
+        common_attn_metadata.attn_mask = None
+        common_attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        common_attn_metadata.block_table_tensor = torch.randn(1, 4)
+        common_attn_metadata.cos = None
+        common_attn_metadata.sin = None
+
+        mock_get_cos_and_sin_mla.return_value = (
+            torch.randn(104, 1, 1, 64),
+            torch.randn(104, 1, 1, 64),
+        )
+
+        metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
+
+        assert metadata.num_actual_tokens == 97
+        assert metadata.num_input_tokens == 104
+        assert metadata.positions.shape == (104,)
+        assert metadata.slot_mapping.shape == (104, 4, 1024)
+        assert metadata.cos.shape == (104, 1, 1, 64)
+        assert metadata.sin.shape == (104, 1, 1, 64)
+        mock_get_cos_and_sin_mla.assert_called_once()
+        assert mock_get_cos_and_sin_mla.call_args.args[0].shape == (104,)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
+    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm.distributed.parallel_state.get_tp_group")
     @patch_distributed_groups(dcp_size=2, needs_mocks=False)
     def test_ascend_sfa_metadata_builder_build_for_graph_capture(

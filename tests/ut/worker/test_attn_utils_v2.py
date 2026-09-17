@@ -703,6 +703,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     [
         ("default", None, False, 1, 5),
         ("model_state", CUDAGraphMode.NONE, False, 1, 5),
+        ("model_state", CUDAGraphMode.PIECEWISE, False, 1, 8),
         ("model_state", CUDAGraphMode.FULL, False, 1, 8),
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),

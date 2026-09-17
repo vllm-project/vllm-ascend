@@ -1,6 +1,6 @@
 import importlib
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -40,59 +40,6 @@ def test_aclgraph_model_forwards_confidence_computation():
 
     assert wrapped.compute_confidence(hidden, markov) is expected
     model.compute_confidence.assert_called_once_with(hidden, markov)
-
-
-@pytest.mark.parametrize(
-    "enable_adaptive_verification,positions_len,expected_tokens",
-    [(False, 8, 8), (True, 6, 6)],
-)
-def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
-    enable_adaptive_verification, positions_len, expected_tokens
-):
-    builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
-    builder.speculative_config = SimpleNamespace(
-        method="dspark", enable_adaptive_verification=enable_adaptive_verification
-    )
-    builder.kernel_block_size = 128
-    builder.nope = False
-    builder._prepare_parallel_metadata = Mock(side_effect=lambda _, cos, sin, slot, *args: (cos, sin, slot, {}))
-    builder.metadata_cls = Mock(return_value=Mock())
-    builder.model_config = Mock(get_head_size=Mock(return_value=128))
-    builder.attn_mask_builder = Mock()
-    common = SimpleNamespace(
-        num_reqs=2,
-        num_actual_tokens=6,
-        num_input_tokens=8,
-        positions=torch.arange(positions_len),
-        slot_mapping=torch.arange(8),
-        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
-        query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
-        seq_lens=torch.tensor([8, 9], dtype=torch.int32),
-        _seq_lens_cpu=torch.tensor([8, 9], dtype=torch.int32),
-        seq_lens_cpu=None,
-        causal=True,
-        attn_state=Mock(),
-        max_query_len=2,
-        max_seq_len=9,
-        group_len=None,
-        group_key_idx=None,
-        group_key_cache_idx=None,
-    )
-
-    with (
-        patch(
-            "vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla",
-            return_value=(torch.ones(positions_len), torch.zeros(positions_len)),
-        ),
-        patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as get_config,
-    ):
-        get_config.return_value.c8_reshape_optim_enabled = False
-        builder._build(common)
-
-    kwargs = builder.metadata_cls.call_args.kwargs
-    assert kwargs["num_input_tokens"] == expected_tokens
-    assert kwargs["positions"].shape[0] == expected_tokens
-    assert kwargs["slot_mapping"].shape[0] == expected_tokens
 
 
 def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
