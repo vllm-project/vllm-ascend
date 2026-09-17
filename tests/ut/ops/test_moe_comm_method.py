@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -5,12 +6,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.activation import SituActivationConfig
+from vllm_ascend.ops.fused_moe import comm_utils
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
     FusedMC2CommImpl,
     MC2CommImpl,
-    MoECommMethod,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -29,7 +30,7 @@ class TestMoECommMethod(TestBase):
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
         self.mock_ascend_config.enable_fused_mc2 = False
-        self.mock_ascend_config.mega_moe_max_tokens = 65536
+        self.mock_ascend_config.mega_moe_max_tokens = 6144
         self.mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         self._patch_get_ascend_config = patch(
             "vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_config",
@@ -112,8 +113,27 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
         mock_warning_once.assert_not_called()
 
-    def test_fused_mc2_situ_falls_back_to_decomposed_mc2_pipeline(self):
+    def test_cann_mega_moe_maps_kimi_situ_activation(self):
+        activation, params = comm_utils.get_cann_mega_moe_activation_settings(
+            SituActivationConfig(beta=4.0, linear_beta=25.0)
+        )
+
+        self.assertEqual(activation, "situglu")
+        self.assertEqual(params, {"beta": 4.0, "linear_beta": 25.0})
+
+    def test_cann_mega_moe_forwards_kimi_situ_to_operator(self):
         comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.token_dispatcher = MagicMock(spec=TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.global_bs = 1
+        comm_impl.token_dispatcher.max_num_tokens_per_rank = 2
+        comm_impl.mega_moe_symm_buffer = SimpleNamespace(
+            dispatch_quant_mode=0,
+            dispatch_quant_out_dtype=None,
+        )
+        comm_impl._mega_moe_supports_situ = True
+        expected = torch.randn(2, 4)
+        expert_tokens = torch.ones(2, dtype=torch.int32)
+        comm_impl.mega_moe = MagicMock(return_value=(expected, expert_tokens))
         fused_input = MoEFusedExpertsInput(
             hidden_states=torch.randn(2, 4),
             topk_weights=torch.ones(2, 1),
@@ -131,13 +151,63 @@ class TestMoECommMethod(TestBase):
             quant=MoEQuantParams(),
             activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
         )
-        expected = object()
 
-        with patch.object(MoECommMethod, "fused_experts", return_value=expected) as mock_decomposed:
-            result = comm_impl.fused_experts(fused_input)
+        result, result_expert_tokens = comm_impl._apply_cann_mega_moe(
+            fused_input,
+            fused_input.topk_ids,
+            is_decode_only_node=False,
+        )
 
         self.assertIs(result, expected)
-        mock_decomposed.assert_called_once_with(fused_input)
+        self.assertIs(result_expert_tokens, expert_tokens)
+        call = comm_impl.mega_moe.call_args
+        self.assertEqual(call.kwargs["activation"], "situglu")
+        self.assertEqual(call.kwargs["activation_params"], {"beta": 4.0, "linear_beta": 25.0})
+        self.assertIsNone(call.kwargs["l1_weights_sf"])
+        self.assertIsNone(call.kwargs["l2_weights_sf"])
+
+    def test_cann_mega_moe_maps_default_silu_to_swiglu(self):
+        self.assertEqual(comm_utils.get_cann_mega_moe_activation_settings("silu"), ("swiglu", None))
+
+    def test_cann_mega_moe_preserves_swigluoai_default(self):
+        self.assertEqual(
+            comm_utils.get_cann_mega_moe_activation_settings("swigluoai_uninterleave"),
+            ("swiglu", None),
+        )
+
+    def test_cann_mega_moe_accepts_unquantized_weights(self):
+        self.assertEqual(comm_utils._get_cann_mega_moe_quant_settings(QuantType.NONE), (0, None, None))
+
+    def test_cann_mega_moe_detects_situ_api(self):
+        def mega_moe(*args, activation="swiglu", activation_params=None):
+            return activation, activation_params
+
+        def legacy_mega_moe(*args, activation_clamp=None):
+            return activation_clamp
+
+        self.assertTrue(comm_utils.cann_mega_moe_supports_situ(mega_moe))
+        self.assertFalse(comm_utils.cann_mega_moe_supports_situ(legacy_mega_moe))
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
+    def test_cann_mega_moe_caps_max_recv_tokens(self, mock_get_mc2_group):
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.moe_config = self.moe_config
+        comm_impl.moe_config.num_experts = 384
+        comm_impl.moe_config.experts_per_token = 8
+        comm_impl.moe_config.hidden_dim = 4096
+        comm_impl.moe_config.intermediate_size_per_partition = 1024
+        comm_impl.token_dispatcher = MagicMock(spec=TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.global_bs = 32768
+        comm_impl.token_dispatcher.ep_world_size = 64
+        comm_impl.token_dispatcher.ep_rank_id = 0
+        comm_impl.get_symm_buffer_for_mega_moe = MagicMock(return_value=object())
+        mock_get_mc2_group.return_value.device_group = MagicMock()
+
+        comm_impl._init_mega_moe_symm_buffer(2, torch.int8, is_decode_only_node=False)
+
+        call = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call.args[2], 512)
+        self.assertEqual(call.kwargs["max_recv_token_num"], 6144)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
