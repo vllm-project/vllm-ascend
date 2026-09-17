@@ -328,10 +328,17 @@ class FixedRandomWeightSource(WeightSource):
         torch.manual_seed(seed)
         torch.npu.manual_seed(seed)
         if not dtype.is_floating_point:
-            # Token -> expert tables: values outside [0, n_routed_experts) make
-            # the router gather the wrong (or out-of-bounds) experts.
+            # Token -> expert tables (DeepSeek-V4's hash router). Values must
+            # stay inside [0, n_routed_experts) *and* be unique within a row:
+            # the MC2 dispatch/combine kernels assume a token never routes to
+            # the same expert twice, which is also why the served model
+            # initialises this table duplicate-free (#16485). Sampling top-k
+            # over per-expert scores guarantees both invariants while still
+            # differing from the model's own table.
             assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
-            return torch.randint(0, self._num_experts, shape, dtype=dtype, device=self._device)
+            assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
+            scores = torch.rand(shape[0], self._num_experts, device=self._device)
+            return scores.topk(shape[1], dim=1).indices.to(dtype)
         tensor = torch.empty(shape, dtype=dtype, device=self._device)
         if name.endswith("norm.weight"):
             return tensor.uniform_(0.9, 1.1)
