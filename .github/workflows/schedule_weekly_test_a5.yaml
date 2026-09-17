@@ -77,7 +77,8 @@ on:
         required: false
         default: '{}'
   pull_request:
-      branches: [ weekly_a5 ]
+    branches:
+          - main
 permissions:
   contents: read
   pull-requests: read
