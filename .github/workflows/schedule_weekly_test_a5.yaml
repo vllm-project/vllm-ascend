@@ -208,9 +208,29 @@ jobs:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
+  calc-ref:
+    name: calc vllm_ascend_ref
+    needs: [setup-vars, parse-trigger]
+    runs-on: ubuntu-latest
+    if: >-
+      always() &&
+      needs.parse-trigger.outputs.run == 'true'
+    outputs:
+      ref_val: ${{ steps.resolve_ref.outputs.ref }}
+    steps:
+      - name: Resolve ref
+        id: resolve_ref
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            val="${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}"
+            echo "ref=${val}" >> $GITHUB_OUTPUT
+          fi
+
   multi-node-tests:
     name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
+    needs: [setup-vars, parse-trigger, build-image, calc-ref]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -234,7 +254,7 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: "${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref) }}"
+      vllm_ascend_ref: ${{ needs.calc-ref.outputs.ref_val }}
       request_id: ${{ inputs.request_id || '' }}
       aop_multi_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
@@ -262,7 +282,7 @@ jobs:
 
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
+    needs: [setup-vars, parse-trigger, build-image, multi-node-tests, calc-ref]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -293,7 +313,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ case(github.event_name == 'pull_request', github.sha, inputs.vllm_ascend_ref || '') }}
+      vllm_ascend_ref: ${{ needs.calc-ref.outputs.ref_val }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
