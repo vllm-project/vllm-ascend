@@ -112,7 +112,9 @@ class AscendEplbState(_eplb_state.EplbState):
         super().add_model(model, model_config)
         policy = getattr(self, "_ascend_v2_policy", None)
         if policy is None:
-            policy = AscendV2EplbPolicy()
+            policy = AscendV2EplbPolicy(
+                ep_rank=get_ep_group().rank_in_group,
+            )
             self._ascend_v2_policy = policy
         self.policy = policy
 

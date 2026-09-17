@@ -31,6 +31,11 @@ def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
         "add_model",
         upstream_add_model,
     )
+    monkeypatch.setattr(
+        eplb_state,
+        "get_ep_group",
+        lambda: SimpleNamespace(rank_in_group=3),
+    )
     monkeypatch.setattr(eplb_state, "AscendV2EplbPolicy", policy_factory)
     state = AscendEplbState.__new__(AscendEplbState)
 
@@ -38,7 +43,7 @@ def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
     state.add_model(object(), object())
 
     assert state.policy is policy
-    policy_factory.assert_called_once_with()
+    policy_factory.assert_called_once_with(ep_rank=3)
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
