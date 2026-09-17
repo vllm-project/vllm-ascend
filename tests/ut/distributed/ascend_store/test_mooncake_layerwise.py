@@ -45,7 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 
 def make_token_database() -> ChunkedTokenDatabase:
-    database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0, 0)], [16], None)
+    database = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0)], [16], None)
     database.set_group_buffers(
         {0: [1000, 2000, 3000]},
         {0: [10, 20, 30]},

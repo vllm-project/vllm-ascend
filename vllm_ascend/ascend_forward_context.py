@@ -58,10 +58,9 @@ def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
         return False
 
     scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
-    # Actual semantics of `recompute_scheduler_enable`:
-    # - Enabled: when preemption occurs on the decode node, the request is sent back
-    #     to the P node to redo prefill, so the decode node only ever decodes;
-    # - Disabled: prefill is executed locally on the decode node.
+    # RecomputeScheduler is enabled only on D. It first tries to preserve the
+    # preempted KV through offload; if that fails, the request is sent back to
+    # P to redo prefill instead of running prefill locally on D.
     return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 

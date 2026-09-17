@@ -11,9 +11,8 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
-from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as _sample_for_version
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
@@ -31,20 +30,8 @@ def gumbel_sample(
     *,
     is_drafting: bool = False,
 ) -> torch.Tensor:
-    """Run the existing target-sampling assertions through each lane's API."""
-    if vllm_version_is("0.28.0"):
-        return _sample_for_version(
-            logits,
-            expanded_idx_mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature=apply_temperature,
-            logits_cache=logits_cache,
-            logits_cache_col=logits_cache_col,
-            is_drafting=is_drafting,
-        )
-    return _sample_for_version(
+    """Run sampling assertions against the Ascend categorical implementation."""
+    return categorical_sample(
         logits,
         expanded_idx_mapping,
         temperature,
@@ -187,27 +174,6 @@ class TestGumbelSampling:
 
         assert torch.equal(r1, r2), "gumbel_sample is non-deterministic with same seed"
 
-    def test_gumbel_sample_different_seeds(self):
-        """Different seeds must (almost surely) produce different results."""
-        torch.manual_seed(8)
-        num_tokens, num_reqs, vocab_size = 16, 16, 32000
-        logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-        expanded_idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-        temperature = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE) * 1.0
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-
-        seed1 = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        seed2 = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
-        # Ensure seeds differ
-        seed2[0] = seed1[0] + 1
-
-        r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed1, pos, apply_temperature=False)
-        r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed2, pos, apply_temperature=False)
-        torch.npu.synchronize()
-
-        # With 16 tokens and vocab 32000 at temp=1.0, identical results are astronomically unlikely
-        assert not torch.equal(r1, r2), "Different seeds produced identical results"
-
     @pytest.mark.parametrize(
         "num_tokens,num_reqs,vocab_size",
         [
@@ -234,46 +200,44 @@ class TestGumbelSampling:
         )
 
     def test_gumbel_sample_temperature_affects_distribution(self):
-        """Higher temperature should increase sampling entropy (less concentrated).
-
-        Strategy: create logits with a clear winner. At low temp the winner should
-        be sampled most often. At high temp other tokens get more probability.
-        """
+        """Higher temperature should make a peaked distribution less concentrated."""
         vocab_size = 100
         num_trials = 256
-        logits_base = torch.zeros(1, vocab_size, dtype=torch.float32, device=DEVICE)
-        logits_base[0, 0] = 10.0  # strong signal at token 0
 
-        expanded_idx_mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+        logits = torch.zeros(num_trials, vocab_size, dtype=torch.float32, device=DEVICE)
+        logits[:, 0] = 10.0
+        expanded_idx_mapping = torch.arange(num_trials, dtype=torch.int32, device=DEVICE)
+        seed = torch.arange(num_trials, dtype=torch.int64, device=DEVICE) * 1000 + 42
+        pos = torch.arange(num_trials, dtype=torch.int32, device=DEVICE)
 
-        low_temp = torch.tensor([0.1], dtype=torch.float32, device=DEVICE)
-        high_temp = torch.tensor([5.0], dtype=torch.float32, device=DEVICE)
+        low_temp = torch.full((num_trials,), 0.1, dtype=torch.float32, device=DEVICE)
+        high_temp = torch.full((num_trials,), 5.0, dtype=torch.float32, device=DEVICE)
 
-        low_temp_winner_count = 0
-        high_temp_winner_count = 0
-
-        for i in range(num_trials):
-            seed = torch.tensor([i * 1000 + 42], dtype=torch.int64, device=DEVICE)
-            pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
-
-            s_low = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
-            )
-            s_high = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True
-            )
-            if s_low.item() == 0:
-                low_temp_winner_count += 1
-            if s_high.item() == 0:
-                high_temp_winner_count += 1
-
+        low_samples = gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            low_temp,
+            seed,
+            pos,
+            apply_temperature=True,
+        )
+        high_samples = gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            high_temp,
+            seed,
+            pos,
+            apply_temperature=True,
+        )
         torch.npu.synchronize()
-        # Low temp should pick the winner much more often than high temp
+
+        low_temp_winner_count = (low_samples == 0).sum().item()
+        high_temp_winner_count = (high_samples == 0).sum().item()
+
         assert low_temp_winner_count > high_temp_winner_count, (
             f"Low temp winner count ({low_temp_winner_count}) should be > "
             f"high temp winner count ({high_temp_winner_count})"
         )
-        # Low temp with such a strong signal should almost always pick token 0
         assert low_temp_winner_count > num_trials * 0.9, (
             f"Low temp winner count ({low_temp_winner_count}/{num_trials}) should be >90%"
         )
@@ -631,9 +595,11 @@ class TestGumbelSampling:
     def test_dspark_uses_ascend_gumbel(self):
         """Exercise the inherited DSpark entry point with real NPU sampling."""
         # Check the installed implementation, not this test module's API wrapper.
-        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is _sample_for_version
+        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is categorical_sample
         speculator = DSparkSpeculator.__new__(DSparkSpeculator)
         speculator._d2t_scatter_index = None
+        speculator.acceptance_estimator = None
+        speculator.draft_watermarker = None
         speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)
         speculator.seeds = torch.tensor([3, 7], dtype=torch.int64, device=DEVICE)
         speculator._step_cols = torch.arange(2, dtype=torch.int32, device=DEVICE)

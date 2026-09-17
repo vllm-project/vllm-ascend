@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Scheduler-side manager for recompute CPU offloading."""
+"""Scheduler-side manager for preempt offloading."""
 
 import contextlib
 from collections.abc import Iterable
@@ -21,9 +21,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
-    RecomputeCPUOffloadMetadata,
-    RecomputeCPUOffloadWorkerMetadata,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (
+    PreemptOffloadMetadata,
+    PreemptOffloadWorkerMetadata,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
@@ -54,7 +54,7 @@ class PreemptedRequestState:
     finished: bool = False
 
 
-class RecomputeCPUOffloadScheduler:
+class PreemptOffloadScheduler:
     """Preserve preempted requests' KV blocks in CPU memory.
 
     When offload prefix caching is enabled, full hashed blocks share CPU
@@ -65,8 +65,9 @@ class RecomputeCPUOffloadScheduler:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
-        cpu_capacity_bytes: int,
+        cpu_capacity_bytes: int | None,
         enable_offload_prefix_caching: bool = True,
+        offload_host_memory_ratio: float = 1,
     ):
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
@@ -74,7 +75,11 @@ class RecomputeCPUOffloadScheduler:
         self.num_spec_tokens = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
-        self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
+        self.cpu_kv_cache_config = self._derive_cpu_config(
+            kv_cache_config,
+            cpu_capacity_bytes,
+            offload_host_memory_ratio,
+        )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
         self._group_is_mamba = self._get_group_is_mamba(kv_cache_config)
@@ -83,9 +88,9 @@ class RecomputeCPUOffloadScheduler:
         )
 
         logger.info(
-            "RecomputeCPUOffloadScheduler: allocating %d CPU blocks (%.2f GB) for recompute offload, prefix caching=%s",
+            "PreemptOffloadScheduler: allocating %d CPU blocks (%.2f GB) for preempt offload, prefix caching=%s",
             self.num_cpu_blocks,
-            cpu_capacity_bytes / (1024**3),
+            sum(t.size for t in self.cpu_kv_cache_config.kv_cache_tensors) / (1024**3),
             self.enable_offload_prefix_caching,
         )
 
@@ -96,7 +101,7 @@ class RecomputeCPUOffloadScheduler:
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
-            max_num_batched_tokens=(vllm_config.scheduler_config.max_num_batched_tokens),
+            max_in_flight_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             use_eagle=False,
             enable_caching=self.enable_offload_prefix_caching,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -147,7 +152,11 @@ class RecomputeCPUOffloadScheduler:
         return group_is_mamba
 
     @staticmethod
-    def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
+    def _derive_cpu_config(
+        gpu_config: "KVCacheConfig",
+        cpu_capacity_bytes: int | None,
+        offload_host_memory_ratio: float = 1,
+    ) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -158,12 +167,17 @@ class RecomputeCPUOffloadScheduler:
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        if cpu_capacity_bytes is None:
+            num_cpu_blocks = max(1, int(offload_host_memory_ratio * num_gpu_blocks))
+        else:
+            num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         if vllm_version_is("0.28.0"):
             cpu_tensors = [
                 KVCacheTensor(
                     size=t.size // num_gpu_blocks * num_cpu_blocks,
                     shared_by=list(t.shared_by),
+                    offset=t.offset,
+                    block_stride=t.block_stride,
                 )
                 for t in gpu_kv_cache_tensors
             ]
@@ -323,7 +337,7 @@ class RecomputeCPUOffloadScheduler:
             return False
         if num_needed > self.cpu_block_pool.get_num_free_blocks():
             logger.warning(
-                "Skip recompute offload for request %s: CPU cache has %d free blocks, but %d new blocks are required.",
+                "Skip preempt offload for request %s: CPU cache has %d free blocks, but %d new blocks are required.",
                 req_id,
                 self.cpu_block_pool.get_num_free_blocks(),
                 num_needed,
@@ -379,7 +393,7 @@ class RecomputeCPUOffloadScheduler:
             ready=not waiting_for_store,
         )
         logger.info(
-            "Created recompute offload state for request %s: "
+            "Created preempt offload state for request %s: "
             "computed_tokens=%d, cpu_blocks=%d, store_blocks=%d, "
             "ready=%s.",
             req_id,
@@ -492,7 +506,7 @@ class RecomputeCPUOffloadScheduler:
         self._gpu_block_pool.touch([self._gpu_block_pool.blocks[block_id] for block_id in gpu_block_ids])
         state.load_transfer_meta = TransferMeta(gpu_block_ids, cpu_block_ids)
         logger.info(
-            "Prepared recompute offload H2D load for request %s: tokens=[%d, %d), blocks=%d.",
+            "Prepared preempt offload H2D load for request %s: tokens=[%d, %d), blocks=%d.",
             request.request_id,
             load_start_tokens,
             load_end_tokens,
@@ -503,7 +517,7 @@ class RecomputeCPUOffloadScheduler:
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> RecomputeCPUOffloadMetadata:
+    ) -> PreemptOffloadMetadata:
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self._prepare_preempt_store_specs()
         if store_gpu:
@@ -533,7 +547,7 @@ class RecomputeCPUOffloadScheduler:
                 self._preempted_req_states[req_id].load_event = load_event
             self._preempt_load_event_to_reqs[load_event] = load_req_ids
 
-        return RecomputeCPUOffloadMetadata(
+        return PreemptOffloadMetadata(
             need_flush=bool(scheduler_output.preempted_req_ids),
             preempt_store_event=store_event,
             preempt_store_gpu_blocks=store_gpu,
@@ -550,7 +564,7 @@ class RecomputeCPUOffloadScheduler:
                 self._cleanup_preempt_load_request(req_id)
 
         meta = connector_output.kv_connector_worker_meta
-        if not isinstance(meta, RecomputeCPUOffloadWorkerMetadata):
+        if not isinstance(meta, PreemptOffloadWorkerMetadata):
             return
         for event_idx, count in meta.completed_store_events.items():
             total = self._store_event_pending_counts.get(event_idx, 0) + count
@@ -594,7 +608,7 @@ class RecomputeCPUOffloadScheduler:
     def reset_cache(self) -> bool:
         if self.has_pending_transfers():
             logger.warning(
-                "Failed to reset recompute offload cache because transfers or request states are still pending."
+                "Failed to reset preempt offload cache because transfers or request states are still pending."
             )
             return False
         for req_id in list(self._preempted_req_states):

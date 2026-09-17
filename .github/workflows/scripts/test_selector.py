@@ -23,7 +23,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 
 import regex as re
 
@@ -40,11 +41,17 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 # Minimum affected lines threshold
 MIN_AFFECTED_LINES = 1
 
+TEST_ROOTS = ("tests/e2e/pull_request/", "tests/ut/")
+
+
+def is_selectable_test(path: str) -> bool:
+    return path.startswith(TEST_ROOTS) and fnmatchcase(PurePosixPath(path).name, "test_*.py")
+
 
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
-    Test files must be in tests/ directory and start with test_
+    Test files must be under TEST_ROOTS and match test_*.py.
 
     Args:
         diff_file: Path to the PR diff file
@@ -61,20 +68,17 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
         return test_files_found
 
-    # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
-    # In diff output:
-    #   - +++ b/tests/ut/core/test_xxx.py (new/modified test file)
-    #   - rename to tests/ut/attention/test_xxx.py (renamed test file)
-    # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
-    test_file_pattern = re.compile(
-        r"^(?:\+\+\+ [ab]/|rename to )((?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py))",
-        re.MULTILINE,
-    )
-
     changed_test_files = set()
-    for match in test_file_pattern.finditer(diff_content):
-        test_file_path = match.group(1)
-        changed_test_files.add(test_file_path)
+    for line in diff_content.splitlines():
+        if line.startswith("+++ b/"):
+            test_file_path = line.removeprefix("+++ b/")
+        elif line.startswith("rename to "):
+            test_file_path = line.removeprefix("rename to ")
+        else:
+            continue
+
+        if is_selectable_test(test_file_path):
+            changed_test_files.add(test_file_path)
 
     if not changed_test_files:
         return test_files_found
@@ -119,7 +123,7 @@ def _has_csrc_changes(diff_file: str) -> bool:
 def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
-    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    Test files must be under TEST_ROOTS and match test_*.py.
 
     Args:
         diff_file: Path to the PR diff file
@@ -137,17 +141,14 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list
         print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
         return deleted_test_files
 
-    # Pattern to match deleted test files: tests/e2e/pull_request/ or tests/ut/ directory
-    # Match --- a/tests/... followed by +++ /dev/null (deleted file marker)
-    deleted_pattern = re.compile(
-        r"^--- a/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null|"
-        r"^--- a/(tests/ut(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null",
-        re.MULTILINE,
-    )
+    lines = diff_content.splitlines()
+    for old_line, new_line in zip(lines, lines[1:]):
+        if not old_line.startswith("--- a/") or new_line != "+++ /dev/null":
+            continue
 
-    for match in deleted_pattern.finditer(diff_content):
-        test_file_path = match.group(1) or match.group(2)
-        deleted_test_files.append(test_file_path)
+        test_file_path = old_line.removeprefix("--- a/")
+        if is_selectable_test(test_file_path):
+            deleted_test_files.append(test_file_path)
 
     if deleted_test_files:
         print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")

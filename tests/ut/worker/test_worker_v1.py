@@ -1,7 +1,7 @@
 import importlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
@@ -1802,10 +1802,16 @@ class TestNPUWorker(TestBase):
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
 
-            # Verify calls
+            # Verify the kv_cache pool is created but not entered by the worker.
+            # Model runners enter it only around backing cache allocation.
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            mock_context.__enter__.assert_not_called()
+            mock_context.__exit__.assert_not_called()
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=mock_context,
+            )
 
     def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
         from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
@@ -1886,7 +1892,10 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_initializes_kv_block_zeroer_for_mrv2_mamba(self, mock_ensure_kv_transfer):
@@ -1906,7 +1915,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1929,7 +1941,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1952,7 +1967,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")

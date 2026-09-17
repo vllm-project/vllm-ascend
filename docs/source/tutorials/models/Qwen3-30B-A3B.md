@@ -20,11 +20,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
-| Model                | Hardware Requirement                                                                             | Download                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Model                | Hardware Requirement                                                 | Download                                                                 |
+| -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)        |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                   | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) |
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 **Quantized Versions for Atlas 300I DUO:**
 
@@ -231,6 +233,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
         --served-model-name qwen3 \
         --trust-remote-code \
@@ -254,7 +257,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path  \
         --host 127.0.0.1 \
         --port 8000 \
