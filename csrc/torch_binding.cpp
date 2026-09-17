@@ -45,6 +45,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
@@ -2585,6 +2586,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
         "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
     ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
+
+    ops.def(
+        "attn_res_fwd(Tensor prefix_sum, Tensor block_residual, Tensor proj_weight, "
+        "Tensor norm_weight, float norm_eps=1e-5) -> Tensor output");
+    ops.impl("attn_res_fwd", torch::kPrivateUse1, &vllm_ascend::attn_res_fwd);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
