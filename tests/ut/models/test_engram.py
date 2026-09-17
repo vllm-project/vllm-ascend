@@ -34,10 +34,11 @@ def load_module(module_name, path):
 
 ENGRAM = ROOT / "vllm_ascend/models/deepseek_v41/engram"
 npu = load_module("engram_npu", ENGRAM / "npu.py")
+common = None
+_missing_upstream = ""
 try:
     common = load_module("engram_common", ENGRAM / "common.py")
 except ImportError as error:  # the hashing itself comes from upstream's V4.1 module
-    common = None
     _missing_upstream = str(error)
 
 requires_upstream_hash = pytest.mark.skipif(
