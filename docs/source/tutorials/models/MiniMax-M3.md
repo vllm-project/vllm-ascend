@@ -169,9 +169,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
           "fuse_norm_quant": false
           },
           "multistream_overlap_shared_expert": true,
-          "weight_nz_mode": 2,
-          "enable_flashcomm1": true,
-          "enable_reduce_sample": true
+          "weight_nz_mode": 2
       }' \
       --port 11223 > ${LOG_PATH} 2>&1 &
     ```
@@ -208,9 +206,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
             },
         "multistream_overlap_shared_expert": true,
         "enable_shared_expert_dp": true,
-        "weight_nz_mode": 2,
-        "enable_flashcomm1": true,
-        "enable_reduce_sample": true
+        "weight_nz_mode": 2
     }' \
     --port 11223 > ${LOG_PATH} 2>&1 &
     ```
@@ -249,7 +245,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```
@@ -374,7 +370,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
       --port 11223 > ${LOG_PATH} 2>&1 &
     ```
 
@@ -413,7 +409,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
       --port 11223 > ${LOG_PATH} 2>&1 &
     ```
 
@@ -601,8 +597,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --gpu-memory-utilization 0.85 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_reduce_sample":false,"enable_fused_mc2":0}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -662,8 +658,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_reduce_sample":false,"enable_fused_mc2":0}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -776,7 +772,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --safetensors-load-strategy prefetch \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -825,7 +821,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --kv-cache-dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -1084,8 +1080,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --trust-remote-code \
         --gpu-memory-utilization 0.85 \
         --reasoning-parser minimax_m3 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_reduce_sample":false,"enable_fused_mc2":0}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
     ```
@@ -1138,8 +1134,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_reduce_sample":false,"enable_fused_mc2":0}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"enforce_eager":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
     ```
@@ -1202,7 +1198,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --safetensors-load-strategy prefetch \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
     ```
@@ -1259,7 +1255,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --kv-cache-dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
     ```
