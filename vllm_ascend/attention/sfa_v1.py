@@ -50,6 +50,7 @@ from vllm_ascend.memcache_comm_fence import (
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
+from vllm_ascend.ops.triton.sfa_indexer_store import can_fuse_store, store_indexer_key_scale
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -1396,6 +1397,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        defer_scale_cast: bool = False,
     ):
         if not self.has_indexer:
             raise RuntimeError(
@@ -1433,7 +1435,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAImpl.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            if not defer_scale_cast:
+                k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
             k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
@@ -1851,6 +1854,22 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
         output_padded = output
+        fuse_indexer_store = (
+            self.has_indexer
+            and self.enable_sparse_li_c8
+            and not self.enable_sparse_sfa_c8
+            and not self.enable_dsa_cp
+            and getattr(self, "dcp_size", 1) == 8
+            and not self._use_li_c8_reshape_optim()
+            and attn_metadata.attn_state in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
+            and kv_cache is not None
+            and can_fuse_store(
+                kv_cache[self.kv_cache_indexer_k_idx],
+                kv_cache[self.kv_cache_indexer_scale_idx],
+                slot_mapping,
+                num_input_tokens,
+            )
+        )
 
         # Asynchronously all-gather o_proj for DSA-CP prefill. This applies to
         # both a mixed-role instance and a PD-disaggregated P node.
@@ -1882,7 +1901,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
             if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+                k_li, k_li_scale = self.indexer_select_pre_process(
+                    x=hidden_states, cos=cos, sin=sin, defer_scale_cast=fuse_indexer_store
+                )
             else:
                 k_li, k_li_scale = None, None
             wait_for_kv_layer_from_connector(layer_name)
@@ -1924,6 +1945,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     x=hidden_states,
                     cos=cos,
                     sin=sin,
+                    defer_scale_cast=fuse_indexer_store,
                 )
             else:
                 k_li, k_li_scale = None, None
@@ -1984,7 +2006,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             dsa_k_cache_idx = self.kv_cache_indexer_k_idx
             dsa_k_scale_cache_idx = self.kv_cache_indexer_scale_idx
 
-            if use_li_c8_reshape_optim:
+            if fuse_indexer_store:
+                assert k_li_scale is not None
+                store_indexer_key_scale(
+                    k_li, k_li_scale, slot_mapping, kv_cache[dsa_k_cache_idx], kv_cache[dsa_k_scale_cache_idx]
+                )
+            elif use_li_c8_reshape_optim:
                 torch.ops._C_ascend.store_kv_block(
                     k_li,
                     kv_cache[dsa_k_cache_idx],
@@ -1999,7 +2026,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     slot_mapping.view(-1, 1),
                     k_li.view(-1, k_li.shape[-1]),
                 )  # b, s, n, d
-            if self.enable_sparse_li_c8:
+            if self.enable_sparse_li_c8 and not fuse_indexer_store:
                 assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
                 if k_li_scale is not None:
                     if use_li_c8_reshape_optim:
