@@ -1,5 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+"""Workarounds for mixed Full/SWA DFlash caches on Ascend V2.
+
+REMOVAL GUIDE
+=============
+This module is self-contained: deleting it together with the marked call
+sites below removes the workaround entirely. Every call site carries the
+marker comment ``# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND`` so a single
+``git grep DFLASH-MIXED-WINDOW-CACHE-WORKAROUND`` lists all touchpoints:
+
+- ``vllm_ascend/attention/attention_v1.py`` — ``_mask_dflash_cache_slots``
+  and its two call sites (null-block masking on both write paths).
+- ``vllm_ascend/worker/v2/attn_utils.py`` — ``align_dflash_cache_specs`` in
+  ``get_kv_cache_spec``; view validation and null-block attributes in
+  ``_reshape_kv_cache_v2``.
+- ``vllm_ascend/patch/platform/patch_kv_cache_utils.py`` — the planner
+  wrapper registration at the bottom of the file, plus its documentation
+  entry in ``vllm_ascend/patch/__init__.py``.
+
+Re-evaluate — do not blindly keep — on every upstream vLLM bump:
+
+1. The block-size realignment is unnecessary once the upstream hybrid KV
+   cache manager stops sharing one backing and one ``num_blocks`` across
+   Full and SWA groups, or the Ascend allocator stops materializing
+   contiguous per-component planes.
+2. The FIA address guard is unnecessary once the CANN FIA operator is fixed
+   above 2**16 kernel blocks / 2**32 plane elements. Rerun the NPU probe
+   from docs/diagnostics/dflash_mixed_window_cache.md before removing it.
+3. The null-block masking is unnecessary once upstream stops inserting null
+   block IDs into sliding-window block tables, or DFlash stops prewriting
+   context K/V for all target tokens.
+
+The ``tests/ut/worker/test_dflash_cache*.py`` suites encode the upstream
+layout contract; if they start failing after an upstream bump, that is the
+tripwire to revisit this module.
+"""
 
 import copy
 import math

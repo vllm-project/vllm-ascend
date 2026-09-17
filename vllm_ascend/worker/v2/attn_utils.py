@@ -50,6 +50,8 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
 )
+
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: remove this import with dflash_cache.py.
 from vllm_ascend.core.dflash_cache import (
     align_dflash_cache_specs,
     uses_mixed_dflash_cache,
@@ -222,6 +224,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
         kv_cache_spec.update(mamba_specs)
 
+    # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: identity for non-mixed configs;
+    # remove with dflash_cache.py.
     return align_dflash_cache_specs(vllm_config, kv_cache_spec)
 
 
@@ -1228,6 +1232,8 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: validation is a no-op for
+    # non-mixed configs; remove this block with dflash_cache.py.
     validate_dflash_cache_views(vllm_config, kv_cache_config, kv_cache_raw_tensors, kv_caches)
     if uses_mixed_dflash_cache(vllm_config) and any(isinstance(s, MambaSpec) for s in layer_kv_cache_spec.values()):
         layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)

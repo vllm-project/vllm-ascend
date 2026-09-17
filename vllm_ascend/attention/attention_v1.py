@@ -37,6 +37,9 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: PAD_SLOT_ID is only used by
+# _mask_dflash_cache_slots; remove this import with dflash_cache.py.
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -1633,10 +1636,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value=value,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
+            # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: no-op unless the mixed
+            # Full/SWA DFlash null block was reserved; see dflash_cache.py.
             slot_mapping=self._mask_dflash_cache_slots(slot_mapping),
             use_bnsd=self.use_bnsd_kv_cache,
         )
 
+    # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: remove with dflash_cache.py.
     def _mask_dflash_cache_slots(self, slots: torch.Tensor) -> torch.Tensor:
         null_block_size = getattr(self, "_dflash_null_block_size", 0)
         if not null_block_size:
@@ -1662,6 +1668,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
+            # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: no-op unless the mixed
+            # Full/SWA DFlash null block was reserved; see dflash_cache.py.
             slots = self._mask_dflash_cache_slots(attn_metadata.slot_mapping)
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             key_to_cache = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
