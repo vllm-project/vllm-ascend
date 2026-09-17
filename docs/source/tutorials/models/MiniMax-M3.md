@@ -720,8 +720,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --decoder-hosts \
         $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
     --decoder-ports \
-        31060 31061 31062 31063 \
-    --max-retries 3
+        31060 31061 31062 31063
     ```
 
     The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
@@ -729,15 +728,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 === "950DT products"
 
     Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
-
-    Both Prefill and Decode use `DP2 TP4 PP1`. Each node launches one API process per DP rank: 2 Prefill ranks on ports 31050/31051 and 2 Decode ranks on ports 31060/31061. Both roles use `PP=1` (no pipeline parallel), so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in `kv_connector_extra_config`:
-
-    ```json
-    {
-      "prefill": {"dp_size": 2, "tp_size": 4, "pp_size": 1},
-      "decode": {"dp_size": 2, "tp_size": 4, "pp_size": 1}
-    }
-    ```
 
     1. Prefill node
 
