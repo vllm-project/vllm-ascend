@@ -20,7 +20,7 @@ from vllm.models.deepseek_v4_1.common.mm_preprocess import (
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
-from vllm_ascend.models.deepseek_v41.engram_hash import (
+from vllm_ascend.models.deepseek_v41.engram.common import (
     valid_engram_token_mask,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM

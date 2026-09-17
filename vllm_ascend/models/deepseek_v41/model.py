@@ -75,10 +75,14 @@ from vllm_ascend.utils import (
 )
 
 from .compressor import DeepseekV41Compressor
-from .engram_gate import engram_gate
-from .engram_hash import PagedNgramHistory
-from .engram_hbm import EngramQueryGroup, NodeShardedEngram
-from .engram_host_uva import eng_cpu_offload, engram_enabled
+from .engram import (
+    EngramQueryGroup,
+    NodeShardedEngram,
+    PagedNgramHistory,
+    engram_cpu_offload,
+    engram_enabled,
+    engram_gate,
+)
 from .indexer import DeepseekV41Indexer
 
 
@@ -992,12 +996,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 layer.self_attn.shared_state = self.shared_attention_state
         self.engram_root = vllm_config.model_config.model
         config = self.config
-        # Target storage is a loader/runtime choice.  Checkpoint metadata is
-        # used only by load_checkpoint to validate the source representation.
-        # Read the storage choice after AscendConfig validation.
-        ascend_config = get_ascend_config()
         self.engram_weight_root = self.engram_root
-        storage_format = "int8"
+        # The table is INT8 with group-32 scales; whether it lives in host
+        # memory is vLLM's EngramConfig choice.
+        cpu_offload = engram_cpu_offload(vllm_config)
         if engram_enabled(config):
             query_group = EngramQueryGroup.from_vllm(vllm_config.parallel_config)
             for layer_id, rows in zip(config.engram_layer_ids, config.engram_num_embeddings):
@@ -1005,8 +1007,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     rows,
                     config.engram_head_dim,
                     query_group,
-                    storage_format=storage_format,
-                    cpu_offload=eng_cpu_offload(vllm_config),
+                    cpu_offload=cpu_offload,
                 )
         self.engram_history = None
         self._engram_input_buffers = None

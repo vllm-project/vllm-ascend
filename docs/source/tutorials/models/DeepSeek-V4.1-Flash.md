@@ -351,14 +351,16 @@ The response must contain a model entry whose `id` is `deepseek-v41`.
 
 ### 5.3 Single A3 with Engram Host Offload
 
-Rebuild the native extension after updating the source. Keep the INT8 Engram
-weights and their scale tensors available in the checkpoint. `--safetensors-load-strategy lazy`
+Keep the INT8 Engram weights and their scale tensors available in the
+checkpoint. `--safetensors-load-strategy lazy`
 is required to avoid eagerly materializing the entire table on each rank.
 
 For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
 DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
 Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
-Use INT8 Engram tables and turn the offload on through vLLM's Engram config:
+Use INT8 Engram tables and turn the offload on through vLLM's Engram config.
+This needs a vLLM that provides `--engram-config`; without it the tables stay
+on the device:
 
 ```bash
 --engram-config '{"cpu_offload": true}'
