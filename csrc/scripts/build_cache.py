@@ -297,9 +297,7 @@ def _snapshot_compatibility(
         }
     else:
         machine = {"x64": "x86_64", "arm64": "aarch64"}[canonical_architecture]
-        metadata = Path(
-            f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/ascend_toolkit_install.info"
-        )
+        metadata = Path(f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/ascend_toolkit_install.info")
         if not metadata.is_file():
             raise ValueError("CANN metadata is unavailable; toolchain-image is required")
 

@@ -1543,9 +1543,7 @@ def test_snapshot_compatibility_explicit_image_overrides_outer_runtime(monkeypat
 
 def test_snapshot_compatibility_separates_runtime_operating_systems(monkeypatch):
     engine = _load_engine("build_cache_engine_snapshot_runtime_test")
-    metadata = Path(
-        "/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info"
-    )
+    metadata = Path("/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info")
     original_is_file = engine.Path.is_file
 
     def expose_runtime_files(path):
