@@ -481,72 +481,92 @@ __aicore__ inline void ReduceSumARAPerf(const LocalTensor<float> &output, const 
     PipeBarrier<PIPE_V>();
 }
 
-// Batched column helpers for the fixed 4x4 sinkhorn stage.
-// Matrix layout per token: [4 rows][8 floats] (4 valid cols padded to block), token stride 32 floats.
-// Column-sum layout per token: [8 floats] (4 valid cols), token stride 8 floats.
-// Instruction count is O(1) per call instead of O(tokenNum).
+// Batched column helpers for the sinkhorn stage. They keep the per-token matrix
+// layout the rest of the operator uses, [hcMult rows][one block] with hcMult valid
+// columns, and open the repeat over tokens instead of over rows, so one column
+// stage costs O(1) instructions regardless of how many tokens are staged. One
+// matrix row per block means hcMult <= BLOCK_SIZE / sizeof(float), which the host
+// enforces when it reads hc_mult.
 
-// out[t][c] = in[t][0][c] + in[t][1][c] + in[t][2][c] + in[t][3][c], t in [0, tokenNum)
-// Accumulation order matches ReduceSumARAPerf(dim0=tokenNum, dim1=4, dim2=4): ((r0+r1)+r2)+r3.
-__aicore__ inline void ColSum4x4Batch(const LocalTensor<float> &output, const LocalTensor<float> &input,
-                                      const uint32_t tokenNum)
+// out[t][c] = sum over r of in[t][r][c], t in [0, tokenNum), one Add per matrix row.
+// Accumulation order matches ReduceSumARAPerf(dim0=tokenNum, dim1=hcMult, dim2=hcMult),
+// i.e. ((r0+r1)+r2)+..., so both produce bit-identical column sums.
+__aicore__ inline void ColSumBlockRowBatch(const LocalTensor<float> &output, const LocalTensor<float> &input,
+                                           const uint32_t hcMult, const uint32_t tokenNum)
 {
-    constexpr uint32_t ELEMS_PER_BLOCK = BLOCK_SIZE / sizeof(float); // 8
+    constexpr uint32_t ELEMS_PER_BLOCK = BLOCK_SIZE / sizeof(float);
     BinaryRepeatParams sumParams;
     sumParams.dstBlkStride = 1;
-    sumParams.dstRepStride = 1;
-    sumParams.src0BlkStride = 4; // row blocks are 4 blocks apart within one token
-    sumParams.src0RepStride = 4; // next token starts 4 blocks later
-    sumParams.src1BlkStride = 4;
-    sumParams.src1RepStride = 4;
-    Add(output, input[0], input[ELEMS_PER_BLOCK], ELEMS_PER_BLOCK, tokenNum, sumParams);
-    // The following Adds read output in place. Keep the three accumulation
-    // stages ordered; short repeat counts otherwise expose a V-pipe RAW hazard.
+    sumParams.dstRepStride = 1; // one column-sum block per token
+    sumParams.src0BlkStride = hcMult;
+    sumParams.src0RepStride = hcMult; // next token starts hcMult row blocks later
+    sumParams.src1BlkStride = hcMult;
+    sumParams.src1RepStride = hcMult;
+    Add(output, input, input[ELEMS_PER_BLOCK], hcMult, tokenNum, sumParams);
+    // The following Adds read output in place. Keep the accumulation stages
+    // ordered; short repeat counts otherwise expose a V-pipe RAW hazard.
     PipeBarrier<PIPE_V>();
     BinaryRepeatParams accParams;
     accParams.dstBlkStride = 1;
     accParams.dstRepStride = 1;
     accParams.src0BlkStride = 1;
     accParams.src0RepStride = 1;
-    accParams.src1BlkStride = 4;
-    accParams.src1RepStride = 4;
-    Add(output, output, input[NUM_TWO * ELEMS_PER_BLOCK], ELEMS_PER_BLOCK, tokenNum, accParams);
-    PipeBarrier<PIPE_V>();
-    Add(output, output, input[NUM_TWO * ELEMS_PER_BLOCK + ELEMS_PER_BLOCK], ELEMS_PER_BLOCK, tokenNum, accParams);
-    PipeBarrier<PIPE_V>();
+    accParams.src1BlkStride = hcMult;
+    accParams.src1RepStride = hcMult;
+    for (uint32_t row = NUM_TWO; row < hcMult; row++) {
+        Add(output, output, input[row * ELEMS_PER_BLOCK], hcMult, tokenNum, accParams);
+        PipeBarrier<PIPE_V>();
+    }
 }
 
-// colSum is [token][8 floats] with only the first four lanes valid. Add epsilon
-// to those four lanes for every token instead of treating it as packed [token][4].
-__aicore__ inline void AddEps4x4Batch(const LocalTensor<float> &output, const LocalTensor<float> &input,
-                                      const float eps, const uint32_t tokenNum)
+// colSum is [token][one block] with only the first hcMult lanes valid. Add epsilon
+// to those lanes for every token instead of treating the buffer as a packed
+// [token][hcMult] array, which would skip the later tokens.
+__aicore__ inline void AddEpsColSumBatch(const LocalTensor<float> &output, const LocalTensor<float> &input,
+                                         const float eps, const uint32_t hcMult, const uint32_t tokenNum)
 {
     UnaryRepeatParams epsParams;
     epsParams.dstBlkStride = 1;
     epsParams.srcBlkStride = 1;
-    epsParams.dstRepStride = 1;
+    epsParams.dstRepStride = 1; // one column-sum block per token
     epsParams.srcRepStride = 1;
-    Adds(output, input, eps, NUM_TWO * NUM_TWO, tokenNum, epsParams);
+    Adds(output, input, eps, hcMult, tokenNum, epsParams);
     PipeBarrier<PIPE_V>();
 }
 
-// mat[t][r][c] /= colSum[t][c], r in [0,4), element-wise; layout as above.
-__aicore__ inline void ColDiv4x4Batch(const LocalTensor<float> &output, const LocalTensor<float> &input0,
-                                      const LocalTensor<float> &input1, const uint32_t tokenNum)
+// out[t][r][c] = in0[t][r][c] / in1[t][c] for every row r; layout as above.
+__aicore__ inline void ColDivBlockRowBatch(const LocalTensor<float> &output, const LocalTensor<float> &input0,
+                                           const LocalTensor<float> &input1, const uint32_t hcMult,
+                                           const uint32_t tokenNum)
 {
-    constexpr uint32_t ELEMS_PER_BLOCK = BLOCK_SIZE / sizeof(float); // 8
+    constexpr uint32_t ELEMS_PER_BLOCK = BLOCK_SIZE / sizeof(float);
     BinaryRepeatParams divParams;
     divParams.dstBlkStride = 1;
-    divParams.dstRepStride = 4; // token stride: 4 row blocks
+    divParams.dstRepStride = hcMult; // token stride: hcMult row blocks
     divParams.src0BlkStride = 1;
-    divParams.src0RepStride = 4;
+    divParams.src0RepStride = hcMult;
     divParams.src1BlkStride = 1;
-    divParams.src1RepStride = 1; // colSum token stride: 1 block
-    for (uint32_t row = 0; row < NUM_TWO * NUM_TWO; row++) {
-        Div(output[row * ELEMS_PER_BLOCK], input0[row * ELEMS_PER_BLOCK], input1[0],
-            ELEMS_PER_BLOCK, tokenNum, divParams);
+    divParams.src1RepStride = 1; // colSum token stride: one block
+    for (uint32_t row = 0; row < hcMult; row++) {
+        Div(output[row * ELEMS_PER_BLOCK], input0[row * ELEMS_PER_BLOCK], input1, hcMult, tokenNum, divParams);
     }
     PipeBarrier<PIPE_V>();
+}
+
+// Column stage of one sinkhorn iteration over tokenNum staged matrices, each laid
+// out as [hcMult rows][one block]:
+//     colSum[t][c] = sum over r of input[t][r][c] + eps
+//     output[t][r][c] = input[t][r][c] / colSum[t][c]
+// output may alias input. Touches only the hcMult valid lanes, and accumulates in
+// the same order as ReduceSumARAPerf, so it agrees bit for bit with the per-token
+// reduction it replaces.
+__aicore__ inline void SinkhornColStage(const LocalTensor<float> &output, const LocalTensor<float> &input,
+                                        const LocalTensor<float> &colSum, const uint32_t tokenNum,
+                                        const uint32_t hcMult, const float eps)
+{
+    ColSumBlockRowBatch(colSum, input, hcMult, tokenNum);
+    AddEpsColSumBatch(colSum, colSum, eps, hcMult, tokenNum);
+    ColDivBlockRowBatch(output, input, colSum, hcMult, tokenNum);
 }
 
 template <typename T0, typename T1>
@@ -637,7 +657,8 @@ template <typename T>
 __aicore__ inline void DivABABrcInline(const LocalTensor<T> &output, const LocalTensor<T> &input0,
                                        const LocalTensor<T> &input1, const uint32_t dim0, const uint32_t dim1,
                                        const uint32_t dim2)
-{    uint32_t elemInOneBlock = BLOCK_SIZE / sizeof(T);
+{
+    uint32_t elemInOneBlock = BLOCK_SIZE / sizeof(T);
     uint32_t elemInOneRepeat = REPEAT_SIZE / sizeof(T);
     uint32_t dim2Align = RoundUp<T>(dim2);
     uint32_t dim2RepeatTimes = dim2 / elemInOneRepeat;

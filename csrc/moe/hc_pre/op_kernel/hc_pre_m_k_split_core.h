@@ -20,15 +20,6 @@
 #include "hc_pre_base.h"
 #include "hc_pre_cube_compute.h"
 
-// tokens per core below this threshold keep the original inline comb path
-#ifndef HC_PRE_COMB_BATCH_MIN_TOKENS
-#define HC_PRE_COMB_BATCH_MIN_TOKENS 8
-#endif
-// tokens processed per batched sinkhorn group
-#ifndef HC_PRE_COMB_ROW_FACTOR
-#define HC_PRE_COMB_ROW_FACTOR 32
-#endif
-
 namespace HcPre {
 using namespace AscendC;
 template <typename T>
@@ -253,7 +244,7 @@ public:
         pipe->InitBuffer(postQue, NUM_TWO,
             tilingData->stage2RowFactor * tilingData->hcMultAlign * sizeof(float));
         pipe->InitBuffer(combFragQue, NUM_TWO,
-            HC_PRE_COMB_ROW_FACTOR * tilingData->hcMult *
+            tilingData->combRowFactor * tilingData->hcMult *
             tilingData->hcMultAlign * sizeof(float));
     }
 
@@ -266,10 +257,10 @@ public:
         pipe->InitBuffer(rowBrcbBuf0,
             RoundUp<float>(tilingData->stage2RowFactor) * BLOCK_SIZE);
         pipe->InitBuffer(hcBrcbBuf1,
-            RoundUp<float>(HC_PRE_COMB_ROW_FACTOR *
+            RoundUp<float>(tilingData->combRowFactor *
             tilingData->hcMultAlign) * BLOCK_SIZE);
         pipe->InitBuffer(reduceBuf,
-            HC_PRE_COMB_ROW_FACTOR * tilingData->hcMultAlign * sizeof(float));
+            tilingData->combRowFactor * tilingData->hcMultAlign * sizeof(float));
         pipe->InitBuffer(mixes01ReduceBuf, tilingData->stage2RowFactor *
             tilingData->hcMultAlign * NUM_TWO * sizeof(float));
         pipe->InitBuffer(mixes02ReduceBuf, tilingData->stage2RowFactor *
@@ -347,14 +338,12 @@ public:
             int64_t rowOuterLoop =
                 (stage2BlockIdx == stage2UsedCoreNum - 1) ?
                 tilingData->rowLoopOfTailBlock : tilingData->rowLoopOfFormerBlock;
-            // small-batch/decode keeps the original inline comb path; large batch
-            // accumulates initialized comb fragments and runs sinkhorn in batches
-            bool combInline = tilingData->rowOfFormerBlock < HC_PRE_COMB_BATCH_MIN_TOKENS;
             int64_t tailRowFactor = (stage2BlockIdx == stage2UsedCoreNum - 1) ? tilingData->tailRowFactorOfTailBlock :
                                                                         tilingData->tailRowFactorOfFormerBlock;
             int64_t xGmBlockBaseOffsetPart2 = stage2BlockIdx *
             tilingData->rowOfFormerBlock * tilingData->hcMult * tilingData->d;
 
+            // rows of comb fragment staged so far, and the first bs row they belong to
             int64_t stagedRows = 0;
             int64_t chunkStartRow = stage2BlockIdx * tilingData->rowOfFormerBlock;
             for (int64_t rowOuterIdx = 0; rowOuterIdx < rowOuterLoop; rowOuterIdx++) {
@@ -386,6 +375,7 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                 Duplicate(rowBrcbLocal0, static_cast<float>(1.0f), curRowFactor);
                 PipeBarrier<PIPE_V>();
                 Div(rsqrtLocal, rowBrcbLocal0, rsqrtLocal, curRowFactor);
+
                 mixes01Local = mixesQue01.AllocTensor<float>();
 
                 uint64_t mixBaseOffset = workspaceSize1 +
@@ -465,8 +455,15 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                         curRowFactor, tilingData->hcMult);
                 postQue.FreeTensor(postLocal);
 
-                // combFrag
-                if (combInline) {
+                // combFrag: the init part (softmax and the first column normalization)
+                // stays in this per-row loop so it keeps overlapping the x/y copies, and
+                // writes its result into the sinkhorn staging tensor. Once combRowFactor
+                // rows are staged, the remaining iterations run in place across all of
+                // them, which is where the batching pays off: their column stage costs
+                // the same handful of instructions for one row or for many.
+                if (stagedRows == 0) {
+                    combFragLocal = combFragQue.AllocTensor<float>();
+                }
                 mixes2Local = mixesQue2.AllocTensor<float>();
                 for (int64_t i = 0; i < stage1UsedCoreNum; ++i) {
                     for (int64_t j = 0; j < curRowFactor; ++j) {
@@ -483,8 +480,6 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                 mixes2Local = mixesQue2.DeQue<float>();
                 ReduceSumARAPerf(mixes02ReduceLocal, mixes2Local, 1, stage1UsedCoreNum,
                 curRowFactor * tilingData->hcMult * tilingData->hcMultAlign);
-                combFragLocal = combFragQue.AllocTensor<float>();
-
                 MulABLastDimBrcInline<float, false>(mixes02ReduceLocal, mixes02ReduceLocal,
                 rsqrtLocal, rowBrcbLocal0, curRowFactor,
                 tilingData->hcMult * tilingData->hcMultAlign);
@@ -495,109 +490,39 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                                                 tilingData->hcMult * tilingData->hcMultAlign);
                 SoftmaxFP32Perf(mixes02ReduceLocal, mixes02ReduceLocal, reduceLocal, hcBrcbLocal1,
                 curRowFactor * tilingData->hcMult, tilingData->hcMult, tilingData->hcEps);
-                ReduceSumARAPerf(reduceLocal, mixes02ReduceLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
-                PipeBarrier<PIPE_V>();
-                DivABABrcInline(combFragLocal, mixes02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult,
-                                tilingData->hcMult);
-                for (int64_t iter = 0; iter < tilingData->iterTimes - 1; iter++) {
-                    LastDimReduceSumPerf(reduceLocal, combFragLocal,
-                    curRowFactor * tilingData->hcMult, tilingData->hcMult);
-                    Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                    curRowFactor * tilingData->hcMult);
-                    PipeBarrier<PIPE_V>();
-                    DivABLastDimBrcInline<float, true>(combFragLocal, combFragLocal,
-                    reduceLocal, hcBrcbLocal1, curRowFactor * tilingData->hcMult,
-                    tilingData->hcMult);
-                    ReduceSumARAPerf(reduceLocal, combFragLocal, curRowFactor,
-                    tilingData->hcMult, tilingData->hcMult);
-                    Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                    curRowFactor * tilingData->hcMult);
-                    PipeBarrier<PIPE_V>();
-                    DivABABrcInline(combFragLocal, combFragLocal, reduceLocal,
-                    curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                }
+                SinkhornColStage(combFragLocal[stagedRows * tilingData->hcMult * tilingData->hcMultAlign],
+                    mixes02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult, tilingData->hcEps);
                 mixesQue2.FreeTensor(mixes2Local);
-
-                combFragQue.EnQue(combFragLocal);
-                combFragLocal = combFragQue.DeQue<float>();
-                CopyOut(combFragLocal,
-                        combFragGm[stage2BlockIdx * tilingData->rowOfFormerBlock *
-                        tilingData->hcMult * tilingData->hcMult +
-                        rowOuterIdx * tilingData->stage2RowFactor * tilingData->hcMult *
-                        tilingData->hcMult], curRowFactor * tilingData->hcMult,
-                        tilingData->hcMult);
-                combFragQue.FreeTensor(combFragLocal);
-                } // end inline comb path
-                else {
-                    // comb init (softmax + first column normalization) writes directly
-                    // into the batched sinkhorn staging tensor at [t][4][8]; once a
-                    // HC_PRE_COMB_ROW_FACTOR chunk is staged, run the remaining sinkhorn
-                    // iterations in place and flush via the VECOUT queue.
-                    if (stagedRows == 0) {
-                        combFragLocal = combFragQue.AllocTensor<float>();
-                    }
-                    mixes2Local = mixesQue2.AllocTensor<float>();
-                    for (int64_t i = 0; i < stage1UsedCoreNum; ++i) {
-                        for (int64_t j = 0; j < curRowFactor; ++j) {
-                            CopyIn(workspaceGm[workspaceSize1 + i * tilingData->bs * mmLastAxisSize +
-                            j * mmLastAxisSize +
-                            stage2BlockIdx * tilingData->rowOfFormerBlock * mmLastAxisSize +
-                            rowOuterIdx * tilingData->stage2RowFactor * mmLastAxisSize +
-                            tilingData->hcMult * NUM_TWO],
-                            mixes2Local[(i * curRowFactor + j) * tilingData->hcMult * tilingData->hcMultAlign],
-                            tilingData->hcMult, tilingData->hcMult);
-                        }
-                    }
-                    mixesQue2.EnQue(mixes2Local);
-                    mixes2Local = mixesQue2.DeQue<float>();
-                    ReduceSumARAPerf(mixes02ReduceLocal, mixes2Local, 1, stage1UsedCoreNum,
-                    curRowFactor * tilingData->hcMult * tilingData->hcMultAlign);
-                    MulABLastDimBrcInline<float, false>(mixes02ReduceLocal, mixes02ReduceLocal,
-                        rsqrtLocal, rowBrcbLocal0, curRowFactor, tilingData->hcMult * tilingData->hcMultAlign);
-                    Muls(mixes02ReduceLocal, mixes02ReduceLocal, hcScaleGm.GetValue(NUM_TWO),
-                        curRowFactor * tilingData->hcMult * tilingData->hcMultAlign);
-                    PipeBarrier<PIPE_V>();
-                    AddBAFirstDimBrcInline<float>(mixes02ReduceLocal, mixes02ReduceLocal, hcBase2Local, curRowFactor,
-                        tilingData->hcMult * tilingData->hcMultAlign);
-                    SoftmaxFP32Perf(mixes02ReduceLocal, mixes02ReduceLocal, reduceLocal, hcBrcbLocal1,
-                        curRowFactor * tilingData->hcMult, tilingData->hcMult, tilingData->hcEps);
-                    ReduceSumARAPerf(reduceLocal, mixes02ReduceLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                    Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
-                    PipeBarrier<PIPE_V>();
-                    DivABABrcInline(combFragLocal[stagedRows * tilingData->hcMult * tilingData->hcMultAlign],
-                        mixes02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                    mixesQue2.FreeTensor(mixes2Local);
-                    stagedRows += curRowFactor;
-                    if (stagedRows >= HC_PRE_COMB_ROW_FACTOR || rowOuterIdx == rowOuterLoop - 1) {
-                        PipeBarrier<PIPE_V>();
-                        for (int64_t it = 0; it < tilingData->iterTimes - 1; it++) {
-                            LastDimReduceSumPerf(reduceLocal, combFragLocal,
-                                stagedRows * tilingData->hcMult, tilingData->hcMult);
-                            Adds(reduceLocal, reduceLocal, tilingData->hcEps,
-                                stagedRows * tilingData->hcMult);
-                            PipeBarrier<PIPE_V>();
-                            DivABLastDimBrcInline<float, true>(combFragLocal, combFragLocal,
-                                reduceLocal, hcBrcbLocal1, stagedRows * tilingData->hcMult,
-                                tilingData->hcMult);
-                            ColSum4x4Batch(reduceLocal, combFragLocal, stagedRows);
-                            AddEps4x4Batch(reduceLocal, reduceLocal, tilingData->hcEps, stagedRows);
-                            ColDiv4x4Batch(combFragLocal, combFragLocal, reduceLocal, stagedRows);
-                        }
-                        combFragQue.EnQue(combFragLocal);
-                        combFragLocal = combFragQue.DeQue<float>();
-                        CopyOut(combFragLocal,
-                                combFragGm[chunkStartRow * tilingData->hcMult * tilingData->hcMult],
-                                stagedRows * tilingData->hcMult,
-                                tilingData->hcMult);
-                        combFragQue.FreeTensor(combFragLocal);
-                        chunkStartRow += stagedRows;
-                        stagedRows = 0;
-                    }
-                }
                 squareSumQue.template FreeTensor(squareSumOutLocal);
+
+                // Host sizes combRowFactor as a whole multiple of stage2RowFactor, so a
+                // full chunk lands on the bound exactly; the tail row group is the last
+                // iteration and flushes with whatever it has staged.
+                stagedRows += curRowFactor;
+                if (stagedRows >= tilingData->combRowFactor || rowOuterIdx == rowOuterLoop - 1) {
+                    for (int64_t iter = 0; iter < tilingData->iterTimes - 1; iter++) {
+                        LastDimReduceSumPerf(reduceLocal, combFragLocal,
+                        stagedRows * tilingData->hcMult, tilingData->hcMult);
+                        Adds(reduceLocal, reduceLocal, tilingData->hcEps,
+                        stagedRows * tilingData->hcMult);
+                        PipeBarrier<PIPE_V>();
+                        DivABLastDimBrcInline<float, true>(combFragLocal, combFragLocal,
+                        reduceLocal, hcBrcbLocal1, stagedRows * tilingData->hcMult,
+                        tilingData->hcMult);
+                        SinkhornColStage(combFragLocal, combFragLocal, reduceLocal, stagedRows,
+                            tilingData->hcMult, tilingData->hcEps);
+                    }
+                    combFragQue.EnQue(combFragLocal);
+                    combFragLocal = combFragQue.DeQue<float>();
+                    CopyOut(combFragLocal,
+                            combFragGm[chunkStartRow * tilingData->hcMult * tilingData->hcMult],
+                            stagedRows * tilingData->hcMult,
+                            tilingData->hcMult);
+                    combFragQue.FreeTensor(combFragLocal);
+                    chunkStartRow += stagedRows;
+                    stagedRows = 0;
+                }
             }
-            (void)stagedRows; (void)chunkStartRow;
         }
     }
 
