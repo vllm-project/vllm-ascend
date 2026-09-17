@@ -187,6 +187,7 @@ TITLES = {
     "tutorials/models/Qwen3.6-35B-A3B.md": {"en": "Qwen3.6-35B-A3B", "zh": "Qwen3.6-35B-A3B"},
     "tutorials/models/Qwen3-Embedding.md": {"en": "Qwen3-Embedding", "zh": "Qwen3-Embedding"},
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
+    "tutorials/models/Step3.7.md": {"en": "Step-3.7-Flash", "zh": "Step-3.7-Flash"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
     "user_guide/configuration/encoder_cache_manager.md": {

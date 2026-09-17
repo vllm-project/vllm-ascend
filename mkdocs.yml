@@ -243,6 +243,7 @@ nav:
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
+        - tutorials/models/Step3.7.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md

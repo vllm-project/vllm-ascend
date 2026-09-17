@@ -23,6 +23,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |DeepSeek V4-Pro|✅|Native mixed MXFP8/MXFP4 weights||Ascend 950 Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)|
     |DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
     |GLM-5.1|✅| |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅||✅|200k||[GLM-5.1](../../tutorials/models/GLM5.md) |
+    |Step-3.7-Flash|✅| |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|||✅|200k||[GLM-5.1](../../tutorials/models/GLM5.md) |
 
 === "A2/A3"
 
