@@ -64,9 +64,9 @@ class TestStairLoadStatistics(unittest.TestCase):
     def test_replica_search_is_bounded_and_deterministic(self):
         kwargs = dict(
             num_stages=3,
-            radius=2,
+            budget_radius=2,
             beam_size=4,
-            score=lambda value: float(np.square(value - 2).sum()),
+            candidate_score=lambda value: float(np.square(value - 2).sum()),
         )
 
         first = StairEplbPolicy.replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 3, **kwargs)
@@ -84,9 +84,9 @@ class TestStairLoadStatistics(unittest.TestCase):
             3,
             3,
             num_stages=3,
-            radius=2,
+            budget_radius=2,
             beam_size=4,
-            score=lambda value: float(value.sum()),
+            candidate_score=lambda value: float(value.sum()),
         )
 
         self.assertEqual(len(candidates), 1)
@@ -98,9 +98,9 @@ class TestStairLoadStatistics(unittest.TestCase):
             6,
             3,
             num_stages=1,
-            radius=0,
+            budget_radius=0,
             beam_size=1,
-            score=lambda value: float(value.max()),
+            candidate_score=lambda value: float(value.max()),
         )
 
         np.testing.assert_array_equal(candidates[0], [3, 3])
@@ -121,9 +121,9 @@ class TestStairLoadStatistics(unittest.TestCase):
                             total_slots,
                             num_ranks,
                             num_stages=4,
-                            radius=2,
+                            budget_radius=2,
                             beam_size=8,
-                            score=lambda value: float(np.square(value).sum()),
+                            candidate_score=lambda value: float(np.square(value).sum()),
                         )
                         self.assertTrue(candidates)
                         self.assertTrue(
@@ -141,20 +141,25 @@ class TestStairLoadStatistics(unittest.TestCase):
             16,
             4,
             num_stages=4,
-            radius=4,
+            budget_radius=4,
             beam_size=8,
-            score=lambda value: calls.append(tuple(value)) or float(np.square(value).sum()),
+            candidate_score=lambda value: calls.append(tuple(value)) or float(np.square(value).sum()),
         )
 
         self.assertEqual(len(calls), len(candidates))
         self.assertLessEqual(len(calls), 8)
 
     def test_replica_search_rejects_invalid_topology_and_controls(self):
-        kwargs = dict(num_stages=2, radius=1, beam_size=4, score=lambda value: float(value.sum()))
+        kwargs = dict(
+            num_stages=2,
+            budget_radius=1,
+            beam_size=4,
+            candidate_score=lambda value: float(value.sum()),
+        )
         with self.assertRaises(ValueError):
             StairEplbPolicy.replica_candidates(np.ones(3), 4, 3, **kwargs)
         with self.assertRaises(ValueError):
-            StairEplbPolicy.replica_candidates(np.ones(3), 6, 3, **(kwargs | {"radius": 1.0}))
+            StairEplbPolicy.replica_candidates(np.ones(3), 6, 3, **(kwargs | {"budget_radius": 1.0}))
 
     def test_zero_radius_matches_greedy_replica_allocation(self):
         risk = np.array([8.0, 4.0, 2.0])
@@ -165,9 +170,9 @@ class TestStairLoadStatistics(unittest.TestCase):
             6,
             3,
             num_stages=3,
-            radius=0,
+            budget_radius=0,
             beam_size=4,
-            score=lambda value: float(value.max()),
+            candidate_score=lambda value: float(value.max()),
         )
 
         self.assertEqual(len(candidates), 1)
