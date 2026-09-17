@@ -184,7 +184,7 @@ jobs:
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             IMAGE="${SWR_TEMP_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
           else
-            IMAGE="${SWR_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
+            IMAGE="${SWR_REGISTRY}:${FULL_TAG}"
           fi
 
           BUILD_ARGS=(
@@ -240,11 +240,8 @@ jobs:
           PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
           FULL_TAG="${{ steps.build.outputs.full_tag }}"
           if [ "${{ inputs.build_type }}" = "release" ]; then
-            # release mode: create a stable tag without arch info pointing to the
-            # arch-suffixed image already pushed by the build step (buildx build --push).
-            docker buildx imagetools create \
-              -t "${PUSH_REGISTRY}:${FULL_TAG}" \
-              "${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
+            # release mode: the stable (no-arch) tag was already pushed by the build step.
+            echo "release stable tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}"
           else
             # daily mode: arch-suffixed tags were already pushed by the build step.
             echo "daily arch-suffixed tag pushed by build step: ${PUSH_REGISTRY}:${FULL_TAG}-${{ matrix.arch_name }}"
