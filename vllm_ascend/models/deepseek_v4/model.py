@@ -937,7 +937,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)  # TODO: support PP with dsacp.
+            # Non-first PP ranks receive None input_ids (the embedding was
+            # done upstream); only shard on the rank that owns the tokens.
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
