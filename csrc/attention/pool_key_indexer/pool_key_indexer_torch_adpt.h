@@ -18,6 +18,71 @@
 
 namespace vllm_ascend {
 
+namespace {
+
+// PoolKeyIndexer accepts device sequence lengths through its Tensor workspace
+// API, while execution still uses aclnnPoolKeyIndexer. Keep this pairing local
+// to the operator instead of changing the shared EXEC_NPU_CMD dispatch.
+template <typename... Args>
+void ExecutePoolKeyIndexer(Args&... args)
+{
+    static const auto workspace_func_addr =
+        GetOpApiFuncAddr("aclnnPoolKeyIndexerTensorGetWorkspaceSize");
+    static const auto execute_func_addr = GetOpApiFuncAddr("aclnnPoolKeyIndexer");
+    static const auto init_mem = reinterpret_cast<InitHugeMemThreadLocal>(
+        GetOpApiFuncAddr("InitHugeMemThreadLocal"));
+    static const auto uninit_mem = reinterpret_cast<UnInitHugeMemThreadLocal>(
+        GetOpApiFuncAddr("UnInitHugeMemThreadLocal"));
+    static const auto release_mem = reinterpret_cast<ReleaseHugeMem>(
+        GetOpApiFuncAddr("ReleaseHugeMem"));
+    TORCH_CHECK(workspace_func_addr != nullptr && execute_func_addr != nullptr,
+                "aclnnPoolKeyIndexerTensorGetWorkspaceSize or aclnnPoolKeyIndexer not found in ",
+                GetOpApiLibName());
+
+    auto stream = c10_npu::getCurrentNPUStream().stream(false);
+    uint64_t workspace_size = 0;
+    uint64_t* workspace_size_addr = &workspace_size;
+    aclOpExecutor* executor = nullptr;
+    aclOpExecutor** executor_addr = &executor;
+    if (init_mem) {
+        init_mem(nullptr, false);
+    }
+    auto converted_params = ConvertTypes(args..., workspace_size_addr, executor_addr);
+    static const auto workspace_func =
+        ConvertToOpApiFunc(converted_params, workspace_func_addr);
+    auto workspace_status = call(workspace_func, converted_params);
+    TORCH_CHECK(workspace_status == 0,
+                "call aclnnPoolKeyIndexerTensorGetWorkspaceSize failed, detail:",
+                aclGetRecentErrMsg());
+
+    at::Tensor workspace;
+    if (workspace_size != 0) {
+        auto options = at::TensorOptions(torch_npu::utils::get_npu_device_type());
+        workspace = at::empty({static_cast<int64_t>(workspace_size)}, options.dtype(kByte));
+    }
+    auto acl_call = [converted_params, workspace, workspace_size, executor, stream]() -> int {
+        using ExecuteFunc = int (*)(void*, uint64_t, aclOpExecutor*, const aclrtStream);
+        auto execute_func = reinterpret_cast<ExecuteFunc>(execute_func_addr);
+        void* workspace_addr = workspace.defined() ? workspace.data_ptr() : nullptr;
+        auto status = execute_func(workspace_addr, workspace_size, executor, stream);
+        TORCH_CHECK(status == 0, "call aclnnPoolKeyIndexer failed, detail:", aclGetRecentErrMsg());
+        ReleaseConvertTypes(converted_params);
+        if (release_mem) {
+            release_mem(nullptr, false);
+        }
+        return status;
+    };
+    at_npu::native::OpCommand cmd;
+    cmd.Name("aclnnPoolKeyIndexer");
+    cmd.SetCustomHandler(acl_call);
+    cmd.Run();
+    if (uninit_mem) {
+        uninit_mem(nullptr, false);
+    }
+}
+
+}  // namespace
+
 constexpr int64_t POOL_KEY_INDEXER_SIZE = 8;
 constexpr int64_t POOL_KEY_INDEXER_DIM_0 = 0;
 constexpr int64_t POOL_KEY_INDEXER_DIM_1 = 1;
@@ -237,9 +302,7 @@ std::tuple<at::Tensor, at::Tensor> npu_pool_key_indexer(
     // Keep sequence lengths on device during eager execution and ACLGraph
     // replay. The host-array workspace API has a different ABI.
     int64_t k_descale_stride0 = -1;
-    EXEC_NPU_CMD_WITH_WORKSPACE(aclnnPoolKeyIndexer,
-                 aclnnPoolKeyIndexerTensorGetWorkspaceSize,
-                 query, pool_key, weights, pool_tail_k,
+    ExecutePoolKeyIndexer(query, pool_key, weights, pool_tail_k,
                  actual_seq_q, actual_seq_k, block_table, q_descale, k_descale,
                  topk, pool_size, query_layout_ptr, key_layout_ptr, mask_mode,
                  quant_mode, return_value, key_stride0, k_descale_stride0, sparse_indices_out,
