@@ -556,6 +556,13 @@ jobs:
         id: cache-targets
         env:
           SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+          # The a5 suite consumes the same csrc cache mechanism as the main
+          # matrix (see _selected_tests.yaml), but its device target is only
+          # selected by the a5 curation, so it must be merged in here. Gate on
+          # the ready-a5 label so ready-precise / ready-all runs never spend
+          # CPU time building an a5 cache nothing will restore.
+          HAS_A5_TESTS: ${{ steps.scope-a5.outputs.has_tests || steps.noop-a5.outputs.has_tests }}
+          HAS_READY_A5: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           python3 - <<'PY'
           import json
@@ -563,6 +570,8 @@ jobs:
 
           target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
           target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
+          if os.environ.get("HAS_READY_A5") == "true" and os.environ.get("HAS_A5_TESTS") == "true":
+              target_ids = sorted(set(target_ids) | {"a5-arm64-ubuntu"})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
           PY
@@ -659,13 +668,17 @@ jobs:
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
 
   run-selected-tests-a5:
-    needs: [pre-commit, select-tests]
+    needs: [pre-commit, select-tests, prepare-csrc-cache]
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    # Waiting for prepare-csrc-cache matters now that the a5 device target is
+    # produced: without it the a5 tests can start restoring while the a5 cache
+    # is still being built and fall back to compiling on the NPU runner.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.prepare-csrc-cache.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-a5')

@@ -68,8 +68,8 @@ env:
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
-  UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  UV_CACHE_DIR: /tmp/uv-cache
 
 jobs:
   build:
@@ -164,6 +164,18 @@ jobs:
           yum install -y python3-pip net-tools jemalloc numactl patch clang
           pip install uv
 
+      - name: Restore uv wheel cache
+        # requirements-dev.txt installs the full build toolchain (torch,
+        # torch-npu, ...). Downloading ~2GB of wheels per build dominates the
+        # job wall time, so keep the uv cache across builds for the same
+        # dependency set and image.
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/uv-cache
+          key: uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ hashFiles('requirements-dev.txt', 'requirements.txt') }}
+          restore-keys: |
+            uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-
+
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
@@ -183,7 +195,18 @@ jobs:
           # UV_EXTRA_INDEX_URL. Passing --extra-index-url here would replace it.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          uv pip install -e .
+          # --no-deps: requirements-dev.txt already provides every runtime
+          # dependency. Resolving them again here re-walks the whole index tree
+          # and costs 10-30 minutes against the remote mirrors for zero
+          # effect on the compiled artifacts.
+          uv pip install -e . --no-deps
+
+      - name: Save uv wheel cache
+        if: always()
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/uv-cache
+          key: uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ hashFiles('requirements-dev.txt', 'requirements.txt') }}
 
       - name: Verify csrc artifacts
         run: |
