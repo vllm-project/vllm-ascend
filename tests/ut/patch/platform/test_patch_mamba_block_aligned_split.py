@@ -15,8 +15,10 @@
 import inspect
 from types import SimpleNamespace
 
+import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
+import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -27,9 +29,12 @@ from vllm_ascend.utils import vllm_version_is
 def _scheduler(
     *,
     is_kv_consumer: bool | None,
+    is_kv_producer: bool | None = None,
     uses_sparse_index_kpool: bool = False,
 ):
     kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
+    if kv_transfer_config is not None and is_kv_producer is not None:
+        kv_transfer_config.is_kv_producer = is_kv_producer
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
     # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split; v0.28.0
     # does not define it.
@@ -203,9 +208,95 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
 
 def test_patch_is_registered_with_upstream_signature():
     registered = scheduler_module.Scheduler._mamba_block_aligned_split
-    # The producer-role companion patch is loaded later and must stay
-    # outermost so this wrapper's sparse-index early-return path observes its
-    # temporary EAGLE-drop override.
-    assert getattr(registered, "_ascend_producer_no_eagle_drop", False)
-    assert registered.__wrapped__ is _mamba_block_aligned_split
+    # The producer/standalone EAGLE-backoff suppression is applied inline
+    # inside _mamba_block_aligned_split; no separate wrapper remains.
+    assert registered is _mamba_block_aligned_split
     assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)
+
+
+# ---------------------------------------------------------------------------
+# Inline producer/standalone suppression: the drop knobs are cleared for the
+# duration of the upstream call and restored afterwards. The original is
+# monkeypatched so the observed knobs are version-independent.
+# ---------------------------------------------------------------------------
+
+
+def _fake_original_recording(observed: dict):
+    def _fake_original(self, request, num_new_tokens, nlc=0, nec=0):
+        observed["use_eagle"] = self.use_eagle
+        observed["use_eagle_block_drop"] = getattr(self, "use_eagle_block_drop", None)
+        return 42
+
+    return _fake_original
+
+
+def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
+    assert result == 42
+    # The original sees the EAGLE drop disabled...
+    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
+    # ...and the scheduler's own knobs are restored afterwards.
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True
+
+
+def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
+    scheduler = _scheduler(is_kv_consumer=None)
+    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
+    assert result == 42
+    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True
+
+
+def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
+    # Decode consumer with a computed prefix: the verifier window is preserved
+    # by the early return, the original is never reached.
+    scheduler = _scheduler(is_kv_consumer=True)
+    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
+    assert result == 8
+    assert observed == {}
+
+    # Cold kv_both prefill reaches the original with the knobs untouched.
+    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True)
+    result = _mamba_block_aligned_split(
+        scheduler,
+        _request(num_computed_tokens=0),
+        num_new_tokens=8,
+    )
+    assert result == 42
+    assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
+
+
+def test_producer_restores_drop_knobs_on_exception(monkeypatch):
+    def _boom(self, request, num_new_tokens, nlc=0, nec=0):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _boom)
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    with pytest.raises(RuntimeError, match="boom"):
+        _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
+    assert scheduler.use_eagle is True
+    assert scheduler.use_eagle_block_drop is True
+
+
+def test_producer_handles_missing_drop_attributes(monkeypatch):
+    monkeypatch.setattr(
+        mod,
+        "_original_mamba_block_aligned_split",
+        lambda self, request, num_new_tokens, nlc=0, nec=0: 42,
+    )
+    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    del scheduler.use_eagle
+    del scheduler.use_eagle_block_drop
+    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
+    assert result == 42
+    assert not hasattr(scheduler, "use_eagle")
+    assert not hasattr(scheduler, "use_eagle_block_drop")

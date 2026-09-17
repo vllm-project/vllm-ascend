@@ -35,7 +35,6 @@ hits one full page (or entirely) short.
 
 import functools
 import inspect
-from typing import Any
 
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
@@ -66,63 +65,10 @@ def _mamba_block_aligned_split(
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
 ) -> int:
-    """Preserve PD windows and align sparse index-kpool cache groups."""
-    kv_transfer_config = self.vllm_config.kv_transfer_config
-    # A consumer only needs the unsplit verifier window after some prefix has
-    # already been computed locally or loaded from the connector.  ``kv_both``
-    # also handles cold prefills; bypassing alignment for those requests means
-    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
-    # pool can cache the prefix.
-    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
-        return num_new_tokens
+    """Preserve PD windows and align sparse index-kpool cache groups.
 
-    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
-        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
-        if num_computed_tokens < max(
-            request.num_prompt_tokens,
-            request.num_tokens - 1,
-        ):
-            block_size = self.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle:
-                last_cache_position = max(last_cache_position - block_size, 0)
-            scheduled_end = num_computed_tokens + num_new_tokens
-            if scheduled_end < last_cache_position:
-                chunked_tokens = num_new_tokens // block_size * block_size
-                if chunked_tokens > 0:
-                    num_new_tokens = chunked_tokens
-            elif num_computed_tokens < last_cache_position < scheduled_end:
-                num_new_tokens = last_cache_position - num_computed_tokens
-        return num_new_tokens
-
-    return _original_mamba_block_aligned_split(
-        self,
-        request,
-        num_new_tokens,
-        num_new_local_computed_tokens,
-        num_external_computed_tokens,
-    )
-
-
-current_parameters = tuple(inspect.signature(_original_mamba_block_aligned_split).parameters)
-if current_parameters != _EXPECTED_PARAMETERS:
-    raise RuntimeError(
-        "Cannot apply the PD consumer Mamba split patch: unexpected "
-        "Scheduler._mamba_block_aligned_split signature "
-        f"{current_parameters}"
-    )
-
-Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
-
-
-def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None) -> None:
-    """Suppress the EAGLE-block-drop backoff in ``_mamba_block_aligned_split``
-    on a PD prefill producer or a standalone instance.
-
-    This is the scheduler-side companion of the drop exemption in
-    ``AscendHybridKVCacheCoordinator`` above.
-
+    On a pure PD prefill producer or a standalone instance the EAGLE
+    one-block backoff of the last cacheable position is suppressed.
     ``Scheduler._mamba_block_aligned_split`` backs the last cacheable
     mamba-align page off by one block (and, on newer vLLM revisions, shifts
     the partial-tail checkpoint boundary) whenever the EAGLE block drop is
@@ -132,7 +78,7 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
     ``MambaManager.allocate_new_blocks``), so the suppressed split leaves the
     final full state page unhashed. Hybrid coordinator hits reconcile to the
     per-group minimum: even with the full-attention group fixed by the
-    coordinator exemption above, the mamba groups report one full page less
+    coordinator exemption, the mamba groups report one full page less
     (1600-token prompts -> 0 hit, 3200-token prompts -> 1536 with 1536-token
     align pages) - the observed MTP prefix-cache kill band.
 
@@ -145,77 +91,87 @@ def _install_producer_mamba_block_aligned_split_patch(scheduler_cls: Any = None)
     vLLM 0.28.x names the bit ``use_eagle``; newer revisions expose the
     dedicated ``use_eagle_block_drop`` knob.
 
-    The wrapper is installed unconditionally and self-gates at call time on
-    ``self.vllm_config.kv_transfer_config`` (the same PD role source used by
-    the coordinator and the neighboring mamba split patch; see
-    ``_skips_eagle_block_drop``), so consumers and ``kv_both`` instances pass
-    straight through with upstream behavior. Standalone instances (no
-    connector) suppress the backoff too: the coordinator never drops there,
-    so backing the split off would only erase cacheable hit length.
-
-    The producer wrapper is always installed around the method currently
-    registered on ``Scheduler``.  This ordering is important: the neighboring
-    consumer/sparse-index patch has early-return paths which never delegate to
-    its saved original.  An inner producer wrapper would therefore leave the
-    EAGLE drop enabled on those paths.
+    The suppression self-gates at call time on
+    ``self.vllm_config.kv_transfer_config`` via ``_skips_eagle_block_drop``
+    (the same PD role source used by the coordinator and the neighboring
+    mamba split logic), so consumers and ``kv_both`` instances pass straight
+    through with upstream behavior. Standalone instances (no connector)
+    suppress the backoff too: the coordinator never drops there, so backing
+    the split off would only erase cacheable hit length.
     """
-    if scheduler_cls is None:
-        from vllm.v1.core.sched.scheduler import Scheduler
+    kv_transfer_config = self.vllm_config.kv_transfer_config
+    # A consumer only needs the unsplit verifier window after some prefix has
+    # already been computed locally or loaded from the connector.  ``kv_both``
+    # also handles cold prefills; bypassing alignment for those requests means
+    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
+    # pool can cache the prefix.
+    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
+        return num_new_tokens
 
-        scheduler_cls = Scheduler
+    # Pure PD prefill producer or standalone instance: suppress the EAGLE
+    # one-block backoff (see the docstring). The check is placed before both
+    # split paths so the sparse index-kpool early-return path below observes
+    # it too (it previously ran under a temporary bit clear from the outer
+    # producer wrapper).
+    skip_eagle_drop = _skips_eagle_block_drop(
+        getattr(self.vllm_config, "kv_transfer_config", None)
+    )
 
-    if not hasattr(scheduler_cls, "_mamba_block_aligned_split"):
-        return
-    registered_split = scheduler_cls._mamba_block_aligned_split
-    if getattr(registered_split, "_ascend_producer_no_eagle_drop", False):
-        # Idempotent under module reload.
-        return
-
-    original_split = registered_split
-
-    @functools.wraps(original_split)
-    def _producer_mamba_block_aligned_split(
-        self,
-        request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        if not _skips_eagle_block_drop(
-            getattr(getattr(self, "vllm_config", None), "kv_transfer_config", None)
+    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
+        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+        if num_computed_tokens < max(
+            request.num_prompt_tokens,
+            request.num_tokens - 1,
         ):
-            return original_split(
-                self,
-                request,
-                num_new_tokens,
-                num_new_local_computed_tokens,
-                num_external_computed_tokens,
-            )
-        # vLLM 0.28.x and newer revisions use different names.  Some
-        # transitional scheduler implementations expose both and different
-        # wrapper layers consult different attributes, so clear every
-        # attribute that exists and restore all of them after the call.
-        drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
-        original_drop_values = {name: getattr(self, name) for name in drop_attrs}
-        for name in drop_attrs:
-            setattr(self, name, False)
-        try:
-            return original_split(
-                self,
-                request,
-                num_new_tokens,
-                num_new_local_computed_tokens,
-                num_external_computed_tokens,
-            )
-        finally:
-            for name, value in original_drop_values.items():
-                setattr(self, name, value)
+            block_size = self.block_size
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
+            if self.use_eagle and not skip_eagle_drop:
+                last_cache_position = max(last_cache_position - block_size, 0)
+            scheduled_end = num_computed_tokens + num_new_tokens
+            if scheduled_end < last_cache_position:
+                chunked_tokens = num_new_tokens // block_size * block_size
+                if chunked_tokens > 0:
+                    num_new_tokens = chunked_tokens
+            elif num_computed_tokens < last_cache_position < scheduled_end:
+                num_new_tokens = last_cache_position - num_computed_tokens
+        return num_new_tokens
 
-    _producer_mamba_block_aligned_split._ascend_producer_no_eagle_drop = True  # type: ignore[attr-defined]
-    scheduler_cls._mamba_block_aligned_split = _producer_mamba_block_aligned_split
+    if not skip_eagle_drop:
+        return _original_mamba_block_aligned_split(
+            self,
+            request,
+            num_new_tokens,
+            num_new_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+    # vLLM 0.28.x and newer revisions use different names.  Some
+    # transitional scheduler implementations expose both and different
+    # wrapper layers consult different attributes, so clear every
+    # attribute that exists and restore all of them after the call.
+    drop_attrs = tuple(name for name in ("use_eagle", "use_eagle_block_drop") if hasattr(self, name))
+    original_drop_values = {name: getattr(self, name) for name in drop_attrs}
+    for name in drop_attrs:
+        setattr(self, name, False)
+    try:
+        return _original_mamba_block_aligned_split(
+            self,
+            request,
+            num_new_tokens,
+            num_new_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+    finally:
+        for name, value in original_drop_values.items():
+            setattr(self, name, value)
 
 
-# The wrapper self-gates on the PD role at call time, so installation is
-# unconditional. It wraps the consumer/sparse-index wrapper registered just
-# above and must stay outermost (early-return paths never delegate).
-_install_producer_mamba_block_aligned_split_patch()
+current_parameters = tuple(inspect.signature(_original_mamba_block_aligned_split).parameters)
+if current_parameters != _EXPECTED_PARAMETERS:
+    raise RuntimeError(
+        "Cannot apply the PD consumer Mamba split patch: unexpected "
+        "Scheduler._mamba_block_aligned_split signature "
+        f"{current_parameters}"
+    )
+
+Scheduler._mamba_block_aligned_split = _mamba_block_aligned_split
