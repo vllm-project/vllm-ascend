@@ -111,20 +111,31 @@ class TestIsDefaultV2ModelRunnerModel:
 
         assert is_default_v2_model_runner_model(config) is True
 
-    def test_hybrid_model(self):
-        config = _make_vllm_config(model_config=_make_model_config(is_hybrid=True, architectures=[DEFAULT_V2_ARCH]))
-
-        assert is_default_v2_model_runner_model(config) is False
-
-    def test_qwen3_5_conditional_generation_is_whitelisted_even_if_hybrid(self):
-        config = _make_vllm_config(
-            model_config=_make_model_config(
-                is_hybrid=True,
-                architectures=["Qwen3_5ForConditionalGeneration"],
-            )
-        )
+    @pytest.mark.parametrize(
+        "architecture",
+        [
+            "Qwen3ForCausalLM",
+            "Qwen3MoeForCausalLM",
+            "MiniMaxM2ForCausalLM",
+            "DeepseekV3ForCausalLM",
+            "DeepseekV32ForCausalLM",
+            "GlmMoeDsaForCausalLM",
+            "DeepseekV4ForCausalLM",
+            "Qwen3_5MoeForCausalLM",
+            "Qwen3_5ForConditionalGeneration",
+        ],
+    )
+    def test_hybrid_does_not_block_whitelisted_architecture(self, architecture):
+        config = _make_vllm_config(model_config=_make_model_config(is_hybrid=True, architectures=[architecture]))
 
         assert is_default_v2_model_runner_model(config) is True
+
+    def test_hybrid_non_whitelisted_architecture_is_still_excluded(self):
+        config = _make_vllm_config(
+            model_config=_make_model_config(is_hybrid=True, architectures=["SomeModelForCausalLM"])
+        )
+
+        assert is_default_v2_model_runner_model(config) is False
 
     def test_attention_free_model(self):
         config = _make_vllm_config(
@@ -330,7 +341,11 @@ class TestUseV2ModelRunner:
 
         assert use_v2_model_runner(config) is False
 
-    def test_default_enabled_for_qwen3_5_hybrid(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "architecture",
+        [DEFAULT_V2_ARCH, "Qwen3_5ForConditionalGeneration"],
+    )
+    def test_default_enabled_for_hybrid_whitelisted_model(self, monkeypatch, architecture):
         monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
         monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
         monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", True)
@@ -338,7 +353,7 @@ class TestUseV2ModelRunner:
         config = _make_vllm_config(
             model_config=_make_model_config(
                 is_hybrid=True,
-                architectures=["Qwen3_5ForConditionalGeneration"],
+                architectures=[architecture],
             )
         )
 

@@ -84,6 +84,9 @@ def apply_v2_model_runner_config_patch() -> None:
 def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     """Model whitelist: enable V2 for default-V2 architectures.
 
+    Hybrid models (``is_hybrid=True``) are not excluded: a whitelisted
+    architecture still defaults to V2. Attention-free models remain on V1.
+
     Draft configs (``runner_type="draft"``) are built from a target that already
     passed this whitelist. Re-checking the draft architecture (for example
     ``DeepSeekV4MTPModel``) would fall back to V1 inside the V2 runner.
@@ -99,15 +102,10 @@ def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     if runner_type != "generate":
         return False
 
-    architectures = getattr(model_config, "architectures", [])
-
-    # Qwen3.5 dense/VL is GDN hybrid; keep it on the V2 model whitelist.
-    if getattr(model_config, "is_hybrid", False) and "Qwen3_5ForConditionalGeneration" not in architectures:
-        return False
-
     if getattr(model_config, "is_attention_free", False):
         return False
 
+    architectures = getattr(model_config, "architectures", [])
     return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
 
 
