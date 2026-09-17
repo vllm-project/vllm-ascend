@@ -93,6 +93,7 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+  - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4_extra.py
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
   - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py

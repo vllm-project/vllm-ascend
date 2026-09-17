@@ -16,9 +16,9 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-"""Compare the short outputs of HF and vLLM when using greedy sampling.
+"""Test additional DeepSeek-V4 DSpark speculative decoding configurations.
 
-Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py`.
+Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4_extra.py`.
 """
 
 import os
@@ -33,12 +33,33 @@ from tests.e2e.pull_request.utils import _run_speculative_decoding
 MODELS = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+# Confidence-based dynamic verify-length; keep in sync with
+# tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py (dspark).
+DSPARK_DYNAMIC_SPEC_CONFIG = {
+    "method": "dspark",
+    "method_params": {
+        "initial_verify_budget_per_req": 3,
+        "budget_update_interval": 1,
+        "budget_threshold": 0.7,
+    },
+}
+
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
-        pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
+        pytest.param(3.45, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
+        pytest.param(
+            3.35,
+            5,
+            {
+                "enable_flashcomm1": False,
+                "enable_dsa_cp": False,
+                "dynamic_spec_config": DSPARK_DYNAMIC_SPEC_CONFIG,
+            },
+            id="dspark-dynamic",
+        ),
     ],
 )
 @patch.dict(
@@ -68,7 +89,6 @@ def test_deepseek_v4_dspark_acceptance_tp4(
                 "enforce_eager": True,
             },
             expected_acceptance_length=expected_acceptance_length,
-            max_tokens=768,
             runner_kwargs={
                 "tensor_parallel_size": 4,
                 "max_model_len": 4096,
