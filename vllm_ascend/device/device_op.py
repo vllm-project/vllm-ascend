@@ -62,12 +62,15 @@ class BaseDeviceAdaptor:
 
         # npu_scatter_pa_kv_cache (#11713) adds host-side overhead that costs
         # ~9% end-to-end throughput on Atlas A3; see commit message for data.
+        # _npu_reshape_and_cache requires contiguous inputs. K/V/slot_mapping
+        # are often non-contiguous views after QKV split, PCP gather, or
+        # [:num_actual_tokens] slicing.
         torch_npu._npu_reshape_and_cache(
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             key_cache=key_cache,
             value_cache=value_cache,
-            slot_indices=slot_mapping,
+            slot_indices=slot_mapping.contiguous(),
         )
 
     @classmethod

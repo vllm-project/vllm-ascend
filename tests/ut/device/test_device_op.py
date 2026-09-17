@@ -6,22 +6,32 @@ from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 
 
 def test_reshape_and_cache_uses_legacy_reshape_op():
-    key = torch.randn(2, 3, 4)
-    value = torch.randn(2, 3, 4)
-    slot_mapping = torch.arange(4, dtype=torch.int32)
+    key = torch.randn(2, 3, 4).transpose(0, 1)
+    value = torch.randn(2, 3, 4).transpose(0, 1)
+    slot_mapping = torch.arange(8, dtype=torch.int32)[::2]
     key_cache = object()
     value_cache = object()
+
+    assert not key.is_contiguous()
+    assert not value.is_contiguous()
+    assert not slot_mapping.is_contiguous()
 
     with mock.patch("vllm_ascend.device.device_op.torch_npu._npu_reshape_and_cache") as mock_reshape:
         BaseDeviceAdaptor.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
 
     mock_reshape.assert_called_once()
     call_kwargs = mock_reshape.call_args.kwargs
-    assert call_kwargs["key"] is key
-    assert call_kwargs["value"] is value
+    assert call_kwargs["key"] is not key
+    assert call_kwargs["value"] is not value
+    assert call_kwargs["slot_indices"] is not slot_mapping
+    assert call_kwargs["key"].is_contiguous()
+    assert call_kwargs["value"].is_contiguous()
+    assert call_kwargs["slot_indices"].is_contiguous()
+    torch.testing.assert_close(call_kwargs["key"], key)
+    torch.testing.assert_close(call_kwargs["value"], value)
+    torch.testing.assert_close(call_kwargs["slot_indices"], slot_mapping)
     assert call_kwargs["key_cache"] is key_cache
     assert call_kwargs["value_cache"] is value_cache
-    assert call_kwargs["slot_indices"] is slot_mapping
 
 
 def test_base_reshape_and_cache_uses_custom_scatter_for_bnsd():
