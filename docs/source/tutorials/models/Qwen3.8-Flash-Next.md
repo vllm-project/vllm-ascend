@@ -458,3 +458,4 @@ The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond wi
   capacity for the target workload.
 - Text and multimodal input have been validated on A3 and 950DT. Add `--language-model-only` only for an optional text-only deployment.
 - The GPQA Diamond score in this tutorial was measured on A3 and must not be treated as a 950DT accuracy result.
+- This release is intended for early performance evaluation only. TTFT performance is currently limited and remains under active optimization.
