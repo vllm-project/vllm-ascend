@@ -13,7 +13,7 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.stair_policy import plan_rebalance, validate_plan
+from vllm_ascend.distributed.eplb.stair_policy import StairEplbPolicy, validate_plan
 
 
 def run_stair_planner(
@@ -42,7 +42,7 @@ def run_stair_planner(
             with stream:
                 bin_sums = stats.global_expert_load_window.cpu().numpy()
             logical_load = bin_sums / model_state._stair_sample_weights[:, None, None]
-            plan = plan_rebalance(
+            plan = StairEplbPolicy.plan_rebalance(
                 logical_load,
                 old,
                 model_state._stair_accepted_scores,

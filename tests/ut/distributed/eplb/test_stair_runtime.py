@@ -75,7 +75,11 @@ def test_planner_failure_broadcasts_noop(monkeypatch):
     def fail_planning(*_args, **_kwargs):
         raise ValueError
 
-    monkeypatch.setattr(stair_worker, "plan_rebalance", fail_planning)
+    monkeypatch.setattr(
+        stair_worker.StairEplbPolicy,
+        "plan_rebalance",
+        classmethod(lambda cls, *args, **kwargs: fail_planning(*args, **kwargs)),
+    )
     old = torch.tensor([[0, 1, 2, 3]])
     model_state = SimpleNamespace(
         eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 1, 4))),

@@ -1,10 +1,13 @@
 import numpy as np
 import pytest
+import torch
+from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb import stair_policy
 from vllm_ascend.distributed.eplb.stair_policy import (
     BalanceScore,
+    StairEplbPolicy,
     StairPlan,
     align_slots,
     assign_sources,
@@ -13,7 +16,6 @@ from vllm_ascend.distributed.eplb.stair_policy import (
     constrained_lpt,
     passes_hysteresis,
     placement_score,
-    plan_rebalance,
     replica_candidates,
     validate_plan,
     weighted_moments,
@@ -171,7 +173,7 @@ def test_plan_rebalance_filters_zero_and_balanced_layers():
     load = np.array([[[0, 0]], [[0, 0]]])
     old = np.array([[[0], [1]]])
 
-    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), StairConfig())
+    plan = StairEplbPolicy.plan_rebalance(load, old, np.array([np.nan]), (0, 0), StairConfig())
 
     np.testing.assert_array_equal(plan.placement, old)
     assert np.isnan(plan.accepted_scores[0])
@@ -188,7 +190,7 @@ def test_plan_rebalance_moves_an_imbalanced_layer():
         lpt_max_backtracks=64,
     )
 
-    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
+    plan = StairEplbPolicy.plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
 
     assert not np.array_equal(plan.placement, old)
     assert np.isfinite(plan.accepted_scores[0])
@@ -203,9 +205,37 @@ def test_plan_rebalance_swaps_experts_without_redundancy():
         lpt_max_backtracks=64,
     )
 
-    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
+    plan = StairEplbPolicy.plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
 
     assert not np.array_equal(plan.placement, old)
     np.testing.assert_array_equal(np.bincount(plan.placement.ravel()), np.ones(4, dtype=int))
     assert plan.accepted_scores[0] < placement_score(load[:, 0], np.ones(1), old[0]).mean
     validate_plan(old, plan, num_experts=4, pair_cap=1)
+
+
+def test_stair_policy_implements_upstream_contract(monkeypatch):
+    assert issubclass(StairEplbPolicy, AbstractEplbPolicy)
+    assert not StairEplbPolicy.__abstractmethods__
+    placement = np.array([[[0], [1]]])
+    rich_plan = StairPlan(
+        placement=placement,
+        source_rank=np.array([[[0], [1]]]),
+        source_slot=np.zeros_like(placement),
+        accepted_scores=np.array([1.0]),
+    )
+    monkeypatch.setattr(
+        StairEplbPolicy,
+        "plan_rebalance",
+        classmethod(lambda cls, *args, **kwargs: rich_plan),
+    )
+
+    result = StairEplbPolicy.rebalance_experts(
+        torch.tensor([[2, 1]]),
+        num_replicas=2,
+        num_groups=1,
+        num_nodes=1,
+        num_ranks=2,
+        old_global_expert_indices=torch.tensor([[0, 1]]),
+    )
+
+    torch.testing.assert_close(result, torch.tensor([[0, 1]]))
