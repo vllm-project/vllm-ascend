@@ -21,7 +21,6 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
-from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -32,6 +31,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
+from vllm_ascend.ops.triton.fla.l2norm import l2norm_qk_fwd
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
@@ -338,8 +338,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
+            query_spec, key_spec = l2norm_qk_fwd(query_spec, key_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             # The custom op extends dtype support (e.g. float32 state) and is
@@ -366,8 +365,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert beta_non_spec is not None
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode)
-            key_decode = l2norm_fwd(key_decode)
+            query_decode, key_decode = l2norm_qk_fwd(query_decode, key_decode)
             core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_decode.squeeze(0),
                 key=key_decode.squeeze(0),
@@ -422,8 +420,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            query_non_spec, key_non_spec = l2norm_qk_fwd(query_non_spec, key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
