@@ -10,11 +10,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    BatchExecutionDescriptor,
-    CudaGraphManager,
-    prepare_inputs_to_capture,
-)
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
@@ -82,47 +78,19 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     ) -> None:
         """Capture ACL graphs for autoregressive speculative decoding."""
 
-        with communicator_switch(), model_capture_wrapper(self.speculator, self.is_draft_model_prefill):
-            if self.is_draft_model_prefill:
-                super().capture(
-                    forward_fn,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    progress_bar_desc=progress_bar_desc,
-                )
-                return
-
-            def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
-                num_tokens = desc.num_tokens
-                num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
-                num_tokens_across_dp = (
-                    torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-                    if self.dp_size > 1
-                    else None
-                )
-                prepare_inputs_to_capture(
-                    num_reqs,
-                    num_tokens,
-                    model_state,
-                    input_buffers,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    full_cudagraph=(desc.cg_mode == CUDAGraphMode.FULL),
-                )
-                seq_lens_cpu_upper_bound = input_buffers.seq_lens_cpu[:num_reqs]
-                return lambda cg_mode: forward_fn(
-                    num_reqs,
-                    cg_mode == CUDAGraphMode.PIECEWISE,
-                    BatchExecutionDescriptor(cg_mode=cg_mode, num_tokens=num_tokens, num_reqs=num_reqs),
-                    num_tokens_across_dp,
-                    seq_lens_cpu_upper_bound,
-                )
-
-            CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
+        with (
+            communicator_switch(),
+            model_capture_wrapper(self.speculator, self.is_draft_model_prefill),
+        ):
+            super().capture(
+                forward_fn,
+                model_state,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+                progress_bar_desc=progress_bar_desc,
+            )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""

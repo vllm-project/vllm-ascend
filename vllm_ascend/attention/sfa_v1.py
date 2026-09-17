@@ -213,19 +213,24 @@ class SparseMLAMetadataState:
         torch.div(expanded[:, :: self.table_stride], self.table_stride, rounding_mode="floor", out=table)
         metadata.block_table = table
         metadata.block_size = self.block_size
-        if self.use_smla:
-            positions = metadata.positions
-            if positions.numel() > self.length_buffer.shape[0]:
-                raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
-            lengths = self.length_buffer[: positions.numel()]
-            counts = self.indexer.get_topk_lengths(positions)
-            valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
-            lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
-            metadata.smla_topk_length = lengths
-            build_smla_metadata(
-                metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
-            )
+        self.update(metadata)
         return metadata
+
+    def update(self, metadata):
+        """Refresh NoPE state derived from live fused-draft inputs."""
+        if not self.use_smla:
+            return
+        positions = metadata.positions
+        if positions.numel() > self.length_buffer.shape[0]:
+            raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
+        lengths = self.length_buffer[: positions.numel()]
+        counts = self.indexer.get_topk_lengths(positions)
+        valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
+        lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
+        metadata.smla_topk_length = lengths
+        build_smla_metadata(
+            metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
+        )
 
 
 # token count limits within bmm_transpose operator
@@ -408,6 +413,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             self.nope_indexer = layer.impl.indexer
 
         self.speculative_config = vllm_config.speculative_config
+        # CP/offload builders own derived layouts and retain the rebuild path.
+        self.supports_draft_decode_metadata_update = type(self) is AscendSFAMetadataBuilder
         self.decode_threshold = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
@@ -466,6 +473,35 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False
+
+    def update_draft_decode_metadata(self, metadata: AscendSFAMetadata) -> None:
+        """Refresh SFA tensors derived from live draft positions in place."""
+        assert metadata.positions is not None
+        # seq_lens and slot_mapping already alias the buffers updated by
+        # update_draft_inputs() and BlockTables.compute_slot_mappings(). RoPE
+        # is the only base-SFA input materialized into a separate persistent
+        # buffer, so emit its gather/copy for every fused substep.
+        if self.nope:
+            state = self.nope_states.get(None)
+            assert state is not None
+            state.update(metadata)
+        else:
+            assert metadata.cos is not None and metadata.sin is not None
+            cos, sin = get_cos_and_sin_mla(
+                metadata.positions[: metadata.num_input_tokens].long(),
+                use_cache=True,
+            )
+            metadata.cos.copy_(cos)
+            metadata.sin.copy_(sin)
+
+        if get_ascend_config().c8_reshape_optim_enabled:
+            torch.ops._C_ascend.store_kv_block_metadata(
+                metadata.slot_mapping,
+                metadata.group_len,
+                metadata.group_key_idx,
+                metadata.group_key_cache_idx,
+                metadata.block_size,
+            )
 
     def build(
         self,

@@ -222,6 +222,78 @@ def _make_cp_builder(compressor_ratio: int = 4) -> AscendDSACPMetadataBuilder:
     return builder
 
 
+@pytest.mark.parametrize("ratio", [1, 4, 128])
+def test_fused_draft_capability_is_native_swa_only(ratio):
+    builder = _make_builder(ratio, num_speculative_tokens=3)
+    assert builder.supports_draft_decode_metadata_update is (ratio == 1)
+    assert not _make_cp_builder(ratio).supports_draft_decode_metadata_update
+    if ratio > 1:
+        with pytest.raises(AssertionError, match="only support SWA"):
+            builder.update_draft_decode_metadata(None)
+
+
+def test_fused_swa_updates_live_inputs_across_block_boundary():
+    builder = _make_builder(1, num_speculative_tokens=3)
+    positions = torch.tensor([126, 254], dtype=torch.int64)
+    seq_lens = torch.tensor([127, 255], dtype=torch.int32)
+    raw_slots = positions.to(torch.int32)
+    slots = torch.zeros((2, 2), dtype=torch.int32)
+    req = AscendDSAReqMetadata(
+        block_table=torch.tensor([[0, 1], [1, 2]], dtype=torch.int32),
+        seq_lens=seq_lens,
+        slot_mapping=slots,
+        storage_block_size=128,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        positions=positions,
+        raw_slot_mapping=raw_slots,
+        max_seqlen_q=1,
+        max_seqlen_kv=512,
+        sas_metadata=builder.sas_metadata_buffer,
+    )
+    metadata = AscendDSAMetadata(
+        num_actual_tokens=2, num_decodes=2, num_decode_tokens=2, num_prefills=0, req_metadata=req
+    )
+    sas_ptr = req.sas_metadata.data_ptr()
+    slot_ptr = slots.data_ptr()
+    rope = torch.zeros(2, dtype=torch.int64)
+    plan = _mock_dsa_kv_plan()
+    plan.format_dsa_slot_mapping.side_effect = lambda s, b: torch.stack((s // b, s % b), dim=1)
+
+    def refresh_sas(**kwargs):
+        assert kwargs["metadata_cache"] == {}
+        assert kwargs["max_seqlen_q"] == 1
+        assert kwargs["max_seqlen_kv"] == 512
+        builder.sas_metadata_buffer[:2].copy_(kwargs["seq_lens"])
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa", side_effect=lambda p, **_: rope.copy_(p)),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv", return_value=None),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
+        patch.object(builder, "_build_sas_metadata", side_effect=refresh_sas) as sas,
+        patch.object(builder, "_build_qli_metadata") as qli,
+        patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out") as compressor,
+        patch("vllm_ascend.attention.dsa_v1.build_dspark_swa_indices") as dspark,
+    ):
+        for step in range(1, 4):
+            positions.add_(1)
+            seq_lens.add_(1)
+            raw_slots.add_(1)
+            builder.update_draft_decode_metadata(metadata)
+            assert rope.tolist() == [126 + step, 254 + step]
+            assert slots.tolist() == [
+                [(126 + step) // 128, (126 + step) % 128],
+                [(254 + step) // 128, (254 + step) % 128],
+            ]
+            assert req.sas_metadata[:2].tolist() == [127 + step, 255 + step]
+            assert slots.data_ptr() == slot_ptr
+            assert req.sas_metadata.data_ptr() == sas_ptr
+        assert sas.call_count == 3
+        qli.assert_not_called()
+        compressor.assert_not_called()
+        dspark.assert_not_called()
+
+
 def _build_draft_req_metadata(
     builder: AscendDSAMetadataBuilder,
     seq_lens: torch.Tensor,
