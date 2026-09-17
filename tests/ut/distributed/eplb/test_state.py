@@ -55,7 +55,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1),
+        lambda: SimpleNamespace(rank_in_group=1, world_size=2),
     )
     monkeypatch.setattr(
         eplb_state._eplb_ops,
@@ -75,6 +75,8 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
 
     assert captured_routing_table is old_routing_table
     assert layer_state.expert_replica_routing_table is captured_routing_table
+    assert layer_state.local_expert_start == 2
+    assert layer_state.local_expert_count == 2
     torch.testing.assert_close(captured_routing_table, new_routing_table)
 
 

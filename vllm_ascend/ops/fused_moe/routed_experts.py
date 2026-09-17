@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
@@ -323,6 +324,50 @@ def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> Simpl
         expert_map_path=eplb_config.expert_map_path,
         dynamic_eplb=eplb_config.dynamic_eplb,
         num_redundant_experts=num_redundant_experts,
+    )
+
+
+def _record_v2_eplb_load(
+    router: FusedMoERouter,
+    physical_topk_ids: torch.Tensor,
+    fused_experts_result: FusedExpertsResult,
+) -> None:
+    """Record V2 load from the compact counts produced by the MoE operator."""
+    eplb_state = router.eplb_state
+    if eplb_state is None:
+        return
+
+    expert_load_view = eplb_state.expert_load_view
+    record_enabled = eplb_state.should_record_tensor
+    if expert_load_view is None or record_enabled is None:
+        raise RuntimeError("V2 EPLB load-recording state is not initialized.")
+
+    expert_tokens = fused_experts_result.expert_tokens
+    if expert_tokens is not None:
+        local_expert_count = getattr(eplb_state, "local_expert_count", 0)
+        local_expert_start = getattr(eplb_state, "local_expert_start", 0)
+        if expert_tokens.numel() != local_expert_count:
+            raise RuntimeError(
+                "The MoE expert-token count does not match the local EPLB "
+                f"expert count: {expert_tokens.numel()} != {local_expert_count}."
+            )
+        torch.ops.vllm.ascend_eplb_record_expert_tokens(
+            expert_tokens,
+            expert_load_view,
+            record_enabled,
+            fused_experts_result.group_list_type,
+            local_expert_start,
+        )
+        return
+
+    num_unpadded_tokens_tensors = eplb_state.num_unpadded_tokens_tensors
+    if num_unpadded_tokens_tensors is None:
+        raise RuntimeError("V2 EPLB unpadded-token state is not initialized.")
+    torch.ops.vllm.ascend_eplb_record_physical_expert_load(
+        physical_topk_ids,
+        expert_load_view,
+        record_enabled,
+        num_unpadded_tokens_tensors[dbo_current_ubatch_id()],
     )
 
 
@@ -687,6 +732,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+
+        if self._use_v2_model_runner:
+            _record_v2_eplb_load(
+                self.router,
+                topk_ids,
+                fused_experts_results,
+            )
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

@@ -8,6 +8,8 @@ from vllm_ascend.ops.fused_moe.eplb import (
     build_expert_replica_routing_table,
     map_to_physical,
     map_to_physical_and_record,
+    record_expert_tokens,
+    record_physical_expert_load,
 )
 
 
@@ -103,6 +105,66 @@ def test_map_to_physical_and_record_gates_load_collection():
         record_enabled=torch.tensor(False),
         num_unpadded_tokens=torch.tensor(4, dtype=torch.int32),
     )
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([2, 1, 1, 2], dtype=torch.int32),
+    )
+
+
+def test_record_expert_tokens_updates_only_the_local_expert_slice():
+    expert_load = torch.zeros(6, dtype=torch.int32)
+
+    record_expert_tokens(
+        torch.tensor([2, 5], dtype=torch.int64),
+        expert_load,
+        record_enabled=torch.tensor(True),
+        group_list_type=1,
+        local_expert_start=2,
+    )
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([0, 0, 2, 5, 0, 0], dtype=torch.int32),
+    )
+
+    record_expert_tokens(
+        torch.tensor([3, 7], dtype=torch.int64),
+        expert_load,
+        record_enabled=torch.tensor(True),
+        group_list_type=0,
+        local_expert_start=2,
+    )
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([0, 0, 5, 9, 0, 0], dtype=torch.int32),
+    )
+
+    record_expert_tokens(
+        torch.tensor([10, 10], dtype=torch.int64),
+        expert_load,
+        record_enabled=torch.tensor(False),
+        group_list_type=1,
+        local_expert_start=2,
+    )
+    torch.testing.assert_close(
+        expert_load,
+        torch.tensor([0, 0, 5, 9, 0, 0], dtype=torch.int32),
+    )
+
+
+def test_record_physical_expert_load_fallback_ignores_padding():
+    physical_ids = torch.tensor(
+        [[0, 3], [2, 1], [0, 3], [2, 1]],
+        dtype=torch.int32,
+    )
+    expert_load = torch.zeros(4, dtype=torch.int32)
+
+    record_physical_expert_load(
+        physical_ids,
+        expert_load,
+        record_enabled=torch.tensor(True),
+        num_unpadded_tokens=torch.tensor(3, dtype=torch.int32),
+    )
+
     torch.testing.assert_close(
         expert_load,
         torch.tensor([2, 1, 1, 2], dtype=torch.int32),

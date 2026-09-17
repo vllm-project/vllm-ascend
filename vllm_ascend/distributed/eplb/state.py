@@ -31,6 +31,8 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
+        self.local_expert_start = 0
+        self.local_expert_count = 0
 
     @classmethod
     def from_upstream(
@@ -40,7 +42,20 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         ascend_state = cls()
         for field in fields(_eplb_state.EplbLayerState):
             setattr(ascend_state, field.name, getattr(state, field.name))
+        if ascend_state.expert_load_view is not None:
+            ascend_state._set_local_expert_range(ascend_state.expert_load_view)
         return ascend_state
+
+    def _set_local_expert_range(self, expert_load_view: torch.Tensor) -> None:
+        ep_group = get_ep_group()
+        ep_size = ep_group.world_size
+        num_physical_experts = expert_load_view.shape[-1]
+        if num_physical_experts % ep_size != 0:
+            raise ValueError(
+                "The number of physical experts must be divisible by EP size."
+            )
+        self.local_expert_count = num_physical_experts // ep_size
+        self.local_expert_start = ep_group.rank_in_group * self.local_expert_count
 
     def set_layer_state(
         self,
@@ -55,6 +70,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             logical_to_physical_map,
             logical_replica_count,
         )
+        self._set_local_expert_range(expert_load_view)
         self.refresh_expert_replica_routing_table()
 
     def refresh_expert_replica_routing_table(self) -> None:
