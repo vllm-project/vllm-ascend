@@ -80,6 +80,56 @@ class ScoreEncoderCacheConfig:
             )
 
 
+# Hardware throughput (FLOPs) assumed by the recomputation cost model.
+# TODO: read the actual value from the current hardware profile
+# (vllm_ascend/device/hardware_profile.py) once per-generation
+# throughput values are available.
+DEFAULT_HARDWARE_FLOPS = 4 * 1e14
+
+class VisionEncoderCostEstimator:
+    """Estimate the theoretical recomputation cost of a cached encoder output.
+
+    Used by the score-based encoder cache to weigh recomputation cost against
+    storage cost (see ScoreEncoderCacheManager.score). The estimate follows:
+
+        recomputation_cost = num_vision_layers * s * (alpha * s + beta)
+
+    where ``s`` is the number of embedding slots of the encoder output.
+    Storage cost is proportional to ``s``, so the per-slot ratio is
+    ``num_vision_layers * (alpha * s + beta)``, normalized by the hardware
+    throughput.
+
+    Coefficients are derived from the vision encoder config; the model-type
+    branch below carries the per-model layer count and feedforward
+    assumptions. Add a branch here when a new vision encoder needs
+    different coefficients.
+    """
+
+    def __init__(self, hf_config: Any, hardware_flops: float = DEFAULT_HARDWARE_FLOPS):
+        vision_config = hf_config.vision_config
+        attn_heads = getattr(vision_config, "num_attention_heads", None)
+        if attn_heads is None:
+            attn_heads = vision_config.num_heads
+        hidden_size = vision_config.hidden_size
+        feedforward = vision_config.intermediate_size
+
+        self.hardware_flops = hardware_flops
+        self.alpha = 4 * hidden_size + 5 * attn_heads
+        # TODO: there may be more kinds of compute ways
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type == "qwen3_5":
+            self.beta = hidden_size * (8 * hidden_size + 4 * feedforward + 10)
+            self.num_vision_layers = 27
+        else:
+            self.beta = hidden_size * (8 * hidden_size + 6 * feedforward + 14)
+            self.num_vision_layers = 32
+
+    def cost_per_slot(self, seq_len: int) -> float:
+        """Compute the theoretical recomputation cost per storage slot."""
+        recomputation_cost_per_storage_slot = self.num_vision_layers * (self.alpha * seq_len + self.beta)
+        return recomputation_cost_per_storage_slot / self.hardware_flops
+
+
 class ScoreEncoderCacheManager(EncoderCacheManager):
     """
     Score-based encoder cache manager.
@@ -148,26 +198,8 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.npu_freed: list[str] = []
         self.cpu_freed: list[str] = []
 
-        # ---------------- Load model config (used to estimate theoretical compute cost) ----------------
-        vision_config = vllm_config.model_config.hf_config.vision_config
-        self.attn_heads = getattr(vision_config, "num_attention_heads", None)
-        if self.attn_heads is None:
-            self.attn_heads = vision_config.num_heads
-        self.hidden_size = vision_config.hidden_size
-        self.feedforward = vision_config.intermediate_size
-
-        # Hardware throughput (FLOPs)
-        self.hardware_flops = 4 * 1e14
-
-        # TODO: there may be more kinds of compute ways
-        # Coefficients used to estimate the compute cost of encoder embeddings
-        mt = getattr(vllm_config.model_config.hf_config, "model_type", None)
-        self.alpha = 4 * self.hidden_size + 5 * self.attn_heads
-        if mt == "qwen3_5":
-            self.beta = self.hidden_size * (8 * self.hidden_size + 4 * self.feedforward + 10)
-        else:
-            self.beta = self.hidden_size * (8 * self.hidden_size + 6 * self.feedforward + 14)
-        self.num_vision_layers = 27 if mt == "qwen3_5" else 32
+        # ---------------- Theoretical recomputation cost of cached encoder outputs ----------------
+        self.cost_estimator = VisionEncoderCostEstimator(vllm_config.model_config.hf_config)
 
     def score(self, ent: CacheEntry, *, include_clock: bool = True) -> float:
         """Score an entry, including clock only for NPU residency."""
@@ -359,8 +391,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
           num_vision_layers * (alpha * s + beta), with s cancelled out
         """
 
-        recomputation_cost_per_storage_slot = self.num_vision_layers * (self.alpha * seq_len + self.beta)
-        return recomputation_cost_per_storage_slot / self.hardware_flops
+        return self.cost_estimator.cost_per_slot(seq_len)
 
     def allocate(self, request: Request, input_id: int) -> None:
         """
