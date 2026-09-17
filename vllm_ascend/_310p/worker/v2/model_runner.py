@@ -131,7 +131,6 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.next_prefill_tokens_cpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
-        # Persistent CPU/GPU metadata buffers avoid hot-path allocations.
         make_buffer = self._make_metadata_buffer
         self._decode_req_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
         self._decode_input_indices = make_buffer(self.max_num_reqs, torch.int64, pin_memory)
@@ -143,9 +142,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._logits_indices = make_buffer(self.max_num_tokens, torch.int64, pin_memory)
         self._num_sampled_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
         self._num_rejected_staging = make_buffer(self.max_num_reqs, torch.int32, pin_memory)
-        # PrefillCacheHit / ChunkedPrefill must not replay FULL mixed ACLGraphs
-        # FULL_DECODE_ONLY
-        # already keeps those batches eager via mixed_mode=NONE.
+        # Keep prefill and prefix-cache hits out of FULL mixed graphs.
         self._force_eager_pc_batch = False
         self._force_eager_spec_batch = False
         self._spec_dummy_capture = False
@@ -227,8 +224,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             scheduler_output.scheduled_spec_decode_tokens,
             self.decode_query_len,
         )
-        # CPU owns bookkeeping. Resolve scheduler rewinds/resumes first, then
-        # materialize one full request-count buffer for forward consumers.
+        # Resolve scheduler rewinds before materializing device state.
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens = np.fromiter(
@@ -261,8 +257,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         idx_mapping = self._idx_mapping.gpu[:num_reqs]
         self._idx_mapping.copy_to_gpu(num_reqs)
-        # Postprocess owns request bookkeeping on CPU. Preserve the
-        # exact batch order so it never has to copy indices/query lengths back.
+        # Preserve batch order for host-side postprocessing.
         self._postprocess_idx_mapping_np = idx_mapping_np
 
         num_draft_tokens_per_req = None
@@ -1084,9 +1079,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         draft_tokens_map = draft_tokens_map or {}
         active_draft_tokens_cpu = None
         if draft_tokens_map:
-            # scheduled_spec_decode_tokens carries scheduling placeholders
-            # (commonly -1), not the draft IDs produced by the speculator.
-            # Gather the real active rows from request-state storage once.
+            # Gather real drafts; scheduler values may be placeholders.
             active_draft_tokens_cpu = (
                 self.req_states.draft_tokens.index_select(0, idx_mapping.to(torch.int64))
                 .to(dtype=self.input_ids_cpu.dtype)
@@ -1304,8 +1297,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
-        # CPU mirrors were produced during sampling. Device arguments remain in
-        # the upstream signature for MTP proposer/output compatibility.
+        # Device arguments remain for upstream API compatibility.
         del num_sampled, num_rejected, query_start_loc
         if self._sampled_tokens_cpu is not None:
             assert self.rejection_sampler is not None
@@ -1320,13 +1312,11 @@ class NPUModelRunner310V2(NPUModelRunner):
             self._num_rejected_cpu,
             update_tokens=sampled_tokens_cpu is not None,
         )
-        # Sampled tokens remain device-resident. Chunked
-        # prefill rows have num_sampled=0 and must not overwrite prior state.
+        # Chunked-prefill rows have no sample and retain prior state.
         valid_batch_np = np.flatnonzero(self._num_sampled_cpu.numpy() > 0)
         if valid_batch_np.size:
             all_rows_valid = sampled_tokens_cpu is None and valid_batch_np.size == self._postprocess_idx_mapping_np.size
             if all_rows_valid:
-                # Pure decode: reuse device idx_mapping. No index H2D or gather.
                 valid_reqs = idx_mapping.to(torch.int64)
                 last_tokens = sampled_tokens[:, 0]
             else:
@@ -1371,12 +1361,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.req_states.req_id_to_index[req_id] for req_id in scheduler_output.scheduled_cached_reqs.req_ids
         ]
         if self.speculator is not None:
-            # Upstream update_requests overwrites num_computed_tokens_np with
-            # the scheduler's optimistic value (num_computed + num_scheduled).
-            # For MTP rejection sampling the scheduler has not yet subtracted
-            # rejected tokens, so this optimistic value is too high.
-            # Restore the accurate value that postprocess_sampled wrote into
-            # num_computed_tokens_cpu on the previous step.
+            # Restore post-rejection counts overwritten by the scheduler.
             for req_index in cached_req_indices:
                 correct_val = int(self.req_states.num_computed_tokens_cpu[req_index])
                 self.req_states.num_computed_tokens_np[req_index] = correct_val

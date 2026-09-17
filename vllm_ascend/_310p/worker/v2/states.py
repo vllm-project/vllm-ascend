@@ -61,8 +61,7 @@ class Ascend310PStagedWriteTensor:
             self.gpu = self._uva_buffer.uva
             self._dirty_indices.clear()
             return
-        # Non-UVA request vectors are small. One bulk H2D is cheaper on 310P
-        # than creating device indices plus IndexCopy for a few dirty rows.
+        # Small request vectors favor one bulk H2D.
         self.gpu.copy_(self.cpu, non_blocking=True)
         self._dirty_indices.clear()
 

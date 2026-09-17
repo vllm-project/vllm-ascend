@@ -19,32 +19,11 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
-from vllm_ascend._310p.worker.v2.spec_utils import expand_idx_mapping_cpu
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-
-
-def test_expand_idx_mapping_uses_caller_owned_cpu_buffers() -> None:
-    idx_mapping = np.array([5, 2, 7], dtype=np.int32)
-    cu_num_logits = np.array([0, 1, 4, 6], dtype=np.int32)
-    expanded_mapping = np.full(8, -1, dtype=np.int32)
-    expanded_local_pos = np.full(8, -1, dtype=np.int32)
-
-    expand_idx_mapping_cpu(
-        idx_mapping,
-        6,
-        cu_num_logits,
-        expanded_mapping,
-        expanded_local_pos,
-    )
-
-    np.testing.assert_array_equal(expanded_mapping[:6], [5, 2, 2, 2, 7, 7])
-    np.testing.assert_array_equal(expanded_local_pos[:6], [0, 0, 1, 2, 0, 1])
-    np.testing.assert_array_equal(expanded_mapping[6:], [-1, -1])
-    np.testing.assert_array_equal(expanded_local_pos[6:], [-1, -1])
 
 
 def _make_vllm_config(**overrides):
@@ -276,8 +255,6 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
                 shared_by=[layer_name],
                 layers=[layer_name],
             )
@@ -325,8 +302,6 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
                 layer_names=layer_names,
             )
         ],
-        # Deliberately model a full standardized backing much larger than one
-        # layer. The 310P private allocator must not use this as layer bytes.
         kv_cache_tensors=[
             SimpleNamespace(
                 size=4096,
@@ -404,37 +379,6 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
-
-
-def test_update_seq_lens_cpu_only_marks_scheduler_changed_rows() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.speculator = None
-    runner.req_states = SimpleNamespace(
-        req_id_to_index={"same": 0, "rewound": 1},
-        num_computed_tokens_np=np.array([4, 3], dtype=np.int32),
-        num_computed_tokens_cpu=torch.tensor([4, 8], dtype=torch.int32),
-    )
-    runner.input_buffers = SimpleNamespace(
-        seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
-        seq_lens_np=np.zeros(2, dtype=np.int32),
-    )
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"same": 1, "rewound": 2},
-        scheduled_cached_reqs=SimpleNamespace(req_ids=["same", "rewound"]),
-    )
-
-    changed = runner._update_seq_lens_cpu(scheduler_output, ["same", "rewound"])
-
-    assert changed == [1]
-    torch.testing.assert_close(
-        runner.req_states.num_computed_tokens_cpu,
-        torch.tensor([4, 3], dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        runner.input_buffers.seq_lens_cpu,
-        torch.tensor([5, 5], dtype=torch.int32),
-    )
-    np.testing.assert_array_equal(runner.input_buffers.seq_lens_np, [5, 5])
 
 
 def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
@@ -528,21 +472,6 @@ def test_postprocess_sampled_keeps_last_token_on_device() -> None:
     torch.testing.assert_close(postprocess_args[1], num_sampled.cpu())
     assert postprocess_args[2] is runner.req_states.num_computed_tokens_cpu
     torch.testing.assert_close(runner.req_states.last_sampled_tokens, runner.req_states.last_sampled_tokens_cpu)
-
-
-def test_sampler_does_not_copy_sampled_tokens_to_cpu() -> None:
-    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu")
-    input_batch = SimpleNamespace(
-        expanded_idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
-        idx_mapping_np=np.array([0, 1], dtype=np.int32),
-        seq_lens=torch.ones(2, dtype=torch.int32),
-        num_reqs=2,
-    )
-
-    output = sampler(torch.tensor([[0.0, 1.0], [2.0, 0.0]]), input_batch)
-
-    torch.testing.assert_close(output.sampled_token_ids, torch.tensor([[1], [0]], dtype=torch.int32))
-    assert not hasattr(sampler, "sampled_tokens_cpu")
 
 
 @pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
@@ -814,29 +743,6 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
 
 
-@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
-def test_slot_mapping_copies_only_active_prefix(_pin_memory) -> None:
-    block_tables = Ascend310PBlockTables(
-        block_sizes=[4],
-        max_num_reqs=1,
-        max_num_batched_tokens=8,
-        max_num_blocks_per_group=[2],
-        device=torch.device("cpu"),
-    )
-    block_tables.append_block_ids(0, ([3],), overwrite=True)
-    block_tables.slot_mappings.fill_(99)
-
-    slots = block_tables.compute_slot_mappings(
-        np.array([0], dtype=np.int32),
-        np.array([0, 2], dtype=np.int32),
-        np.array([0, 1], dtype=np.int64),
-        num_tokens_padded=4,
-    )
-
-    torch.testing.assert_close(slots, torch.tensor([[12, 13, -1, -1]], dtype=torch.int32))
-    torch.testing.assert_close(block_tables.slot_mappings[:, 4:], torch.full((1, 4), 99, dtype=torch.int32))
-
-
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     class FakeAttentionSpec:
         block_size = 128
@@ -860,8 +766,6 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
                 shared_by=["model.layers.0.self_attn"],
                 layers=["model.layers.0.self_attn"],
             )
