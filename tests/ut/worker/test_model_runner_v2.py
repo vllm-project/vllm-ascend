@@ -557,7 +557,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 
-def test_initialize_kv_cache_omits_allocation_context_when_upstream_lacks_it():
+@pytest.mark.parametrize("is_vllm_0_28_0", [True, False], ids=["v0.28.0", "newer"])
+def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm_0_28_0):
     runner = _make_runner()
     runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -566,28 +567,35 @@ def test_initialize_kv_cache_omits_allocation_context_when_upstream_lacks_it():
     runner.speculator = None
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
     captured: dict[str, object] = {}
+    allocation_context = object()
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],
         kv_cache_groups=[],
     )
 
-    def _super_without_context(self, kv_cache_config):
+    def _super(self, kv_cache_config, **kwargs):
         captured["called"] = True
+        captured["kwargs"] = kwargs
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
 
     with (
-        patch.object(GPUModelRunner, "initialize_kv_cache", _super_without_context),
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_0_28_0),
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(
             "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
             return_value="kvpp",
         ),
     ):
-        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=object())
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
     assert captured.get("called") is True
+    if is_vllm_0_28_0:
+        assert "kv_cache_allocation_context" not in captured["kwargs"]
+    else:
+        assert captured["kwargs"]["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
