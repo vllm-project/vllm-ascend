@@ -89,15 +89,12 @@ class SparseAttnIndexerKpool(nn.Module):
                     (0, 1, self.topk_tokens + index_kpool - 1), dtype=torch.int32, device=hidden_states.device
                 )
             )
-        if any(
-            value is None
-            for value in (
-                indexer_metadata.cum_query_lens,
-                indexer_metadata.query_start_loc,
-                indexer_metadata.start_pos,
-                indexer_metadata.pool_tail,
-                indexer_metadata.pooled_key_indices,
-            )
+        if (
+            indexer_metadata.cum_query_lens is None
+            or indexer_metadata.query_start_loc is None
+            or indexer_metadata.start_pos is None
+            or indexer_metadata.pool_tail is None
+            or indexer_metadata.pooled_key_indices is None
         ):
             raise ValueError("GLM KPool metadata requires CANN request boundaries and pooled-key row indices.")
         if indexer_cache.dtype != torch.bfloat16:
