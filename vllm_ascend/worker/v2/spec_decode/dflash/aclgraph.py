@@ -1,9 +1,7 @@
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
 from typing import Any
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as dflash_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -17,13 +15,11 @@ from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManag
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     update_full_graph_params,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper, build_draft_attn_metadata_factory
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -70,21 +66,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        is_mla = getattr(self.speculator, "attn_architecture", None) == "MLA"
-        with (
-            communicator_switch(),
-            model_capture_wrapper(self.speculator, False),
-            build_attn_metadata_wrapper(module=dflash_cudagraph) if is_mla else nullcontext(),
-            build_draft_attn_metadata_factory(
-                input_buffers.positions,
-                None,
-                None,
-                module=dflash_cudagraph,
-                attn_state=AscendAttentionState.ChunkedPrefill,
-            )
-            if is_mla
-            else nullcontext(),
-        ):
+        with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
                 forward_fn,
                 input_buffers,
