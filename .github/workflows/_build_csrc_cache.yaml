@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Allow callers in rollout mode to continue when this cache build fails.'
+    secrets:
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
 
 defaults:
   run:
@@ -77,6 +82,13 @@ env:
   INCREMENTAL_BUILD_CACHE_NAMESPACE: vllm-ascend-inc
   INCREMENTAL_BUILD_CACHE_TRANSPORT_EPOCH: v1
 
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
+
   VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS: "60"
   VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS: "120"
   VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS: "120"
@@ -88,6 +100,9 @@ jobs:
     # opts into tolerance only while NPU compilation remains the CI fallback.
     continue-on-error: ${{ inputs.continue_on_error }}
     runs-on: ${{ fromJSON(inputs.target).runner }}
+    env:
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     container:
       image: ${{ fromJSON(inputs.target).image }}
     steps:
@@ -355,15 +370,32 @@ jobs:
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
-        if: success() && fromJSON(inputs.target).incremental_cache == true
+        if: >-
+          ${{
+            success() &&
+            fromJSON(inputs.target).incremental_cache == true &&
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         continue-on-error: true
         uses: runs-on/cache/save@v5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           path: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
           key: ${{ steps.incremental-cache-key.outputs.primary_key }}
 
       - name: Save csrc cache
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: runs-on/cache/save@v5
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           path: |
             vllm_ascend/_cann_ops_custom

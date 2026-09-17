@@ -93,6 +93,9 @@ jobs:
     needs: select-full-tests
     if: ${{ needs.select-full-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    secrets:
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
     with:
       target_ids: ${{ needs.select-full-tests.outputs.csrc_cache_target_ids }}
       source_ref: ${{ needs.select-full-tests.outputs.vllm_ascend_ref }}
@@ -119,3 +122,5 @@ jobs:
     secrets:
       OBS_ACCESS_KEY_PRECISION: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_ACCESS_KEY_PRECISION: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+      HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+      HW_OBS_SK: ${{ secrets.HW_OBS_SK }}

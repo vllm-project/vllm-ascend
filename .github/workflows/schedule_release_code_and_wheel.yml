@@ -104,8 +104,8 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -171,7 +171,15 @@ jobs:
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
@@ -236,8 +244,8 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -303,7 +311,15 @@ jobs:
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
@@ -362,8 +378,8 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -429,7 +445,15 @@ jobs:
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
@@ -488,8 +512,8 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      AWS_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -556,7 +580,15 @@ jobs:
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
+        if: >-
+          ${{
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}

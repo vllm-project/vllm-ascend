@@ -67,6 +67,10 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
+      HW_OBS_AK:
+        required: false
+      HW_OBS_SK:
+        required: false
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -89,6 +93,15 @@ jobs:
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
+    env:
+      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+      AWS_S3_FORCE_PATH_STYLE: "false"
+      AWS_REGION: ap-southeast-1
+      RUNS_ON_RUNNER_NAME: ""
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -250,8 +263,18 @@ jobs:
           fi
 
       - name: Save incremental cache after NPU fallback
-        if: ${{ success() && matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: >-
+          ${{
+            success() &&
+            matrix.group.npu_type != 'cpu' &&
+            steps.cache-csrc.outputs.cache-hit != 'true' &&
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
           primary-key: ${{ steps.fallback-l1.outputs.primary-key }}

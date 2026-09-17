@@ -48,6 +48,12 @@ permissions:
 env:
   QUICKSTART_IMAGE_REPOSITORY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend
   INSTALLATION_IMAGE_REPOSITORY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
 
 defaults:
   run:
@@ -181,6 +187,9 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.installation) }}
     # All installation methods and operating systems are currently tested on A2.
     runs-on: linux-aarch64-a2b3-1
+    env:
+      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     timeout-minutes: 75
     container:
       image: ${{ matrix.image }}
@@ -212,8 +221,17 @@ jobs:
           bash "${GITHUB_WORKSPACE}/tests/e2e/doctests/scripts/run_doctests.sh" \
             installation "${{ matrix.method }}"
       - name: Save incremental cache for source installation
-        if: ${{ success() && matrix.method == 'source' }}
+        if: >-
+          ${{
+            success() &&
+            matrix.method == 'source' &&
+            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+          }}
         uses: ./.github/actions/csrc-l1-save
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
           primary-key: ${{ steps.doctest-l1.outputs.primary-key }}

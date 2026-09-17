@@ -89,6 +89,13 @@ env:
 jobs:
     e2e-upstream_pr:
         runs-on: linux-aarch64-a2b3-1
+        env:
+          RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+          RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+          RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+          AWS_S3_FORCE_PATH_STYLE: "false"
+          AWS_REGION: ap-southeast-1
+          RUNS_ON_RUNNER_NAME: ""
         strategy:
           fail-fast: false
           matrix:

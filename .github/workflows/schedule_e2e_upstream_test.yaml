@@ -41,6 +41,12 @@ env:
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+  AWS_S3_FORCE_PATH_STYLE: "false"
+  AWS_REGION: ap-southeast-1
+  RUNS_ON_RUNNER_NAME: ""
 
 jobs:
     resolve-tag:
@@ -56,12 +62,18 @@ jobs:
     ensure-csrc-cache:
         needs: resolve-tag
         uses: ./.github/workflows/_ensure_csrc_cache.yaml
+        secrets:
+          HW_OBS_AK: ${{ secrets.HW_OBS_AK }}
+          HW_OBS_SK: ${{ secrets.HW_OBS_SK }}
         with:
           source_ref: ${{ github.sha }}
           target_ids: '["a2-arm64-ubuntu"]'
 
     e2e-upstream_singlecard:
         runs-on: linux-aarch64-a2b3-1
+        env:
+          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -194,8 +206,17 @@ jobs:
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
 
           - name: Save incremental cache after upstream fallback
-            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            if: >-
+              ${{
+                success() &&
+                steps.cache-csrc.outputs.cache-hit != 'true' &&
+                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+              }}
             uses: ./.github/actions/csrc-l1-save
+            env:
+              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
             with:
               cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
               primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
@@ -213,6 +234,9 @@ jobs:
 
     e2e-upstream_multicard:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        env:
+          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -337,8 +361,17 @@ jobs:
               uv pip install tblib 
 
           - name: Save incremental cache after upstream fallback
-            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            if: >-
+              ${{
+                success() &&
+                steps.cache-csrc.outputs.cache-hit != 'true' &&
+                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+              }}
             uses: ./.github/actions/csrc-l1-save
+            env:
+              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
             with:
               cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
               primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
@@ -356,6 +389,9 @@ jobs:
               
     e2e-upstream_online:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
+        env:
+          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
+          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -481,8 +517,17 @@ jobs:
               uv pip install "runai-model-streamer[s3,gcs]"
 
           - name: Save incremental cache after upstream fallback
-            if: ${{ success() && steps.cache-csrc.outputs.cache-hit != 'true' }}
+            if: >-
+              ${{
+                success() &&
+                steps.cache-csrc.outputs.cache-hit != 'true' &&
+                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
+                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
+              }}
             uses: ./.github/actions/csrc-l1-save
+            env:
+              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
             with:
               cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
               primary-key: ${{ steps.fallback-l1.outputs.primary-key }}

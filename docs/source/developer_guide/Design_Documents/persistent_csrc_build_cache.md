@@ -112,6 +112,37 @@ The source build remains the control plane in both cases. L1 changes the
 implementation of an equivalent action, not which actions the build system
 requires.
 
+## Persistent transport and trust model
+
+The cache engine owns only the local content-addressed L1 directory. CI
+persists snapshots of that directory through `runs-on/cache`, backed by the
+project's Huawei OBS S3-compatible cache storage:
+
+```text
+local L1 directory
+  -> runs-on/cache
+  -> Huawei OBS
+```
+
+Bucket and endpoint selection are workflow concerns. Credentials and write
+authorization are also kept at that layer: possession of the write-capable
+`HW_OBS_AK` and `HW_OBS_SK` secrets authorizes publication to the shared cache.
+Trusted producer and selected schedule or release paths pass those secrets to
+save steps.
+Workflows without both secrets, including fork and other untrusted source
+paths, may restore through the runner's existing read-only OBS access but do
+not invoke shared cache save.
+
+This boundary prevents code from an untrusted source from publishing artifacts
+into a namespace later consumed by trusted jobs. There is no independent
+write-enable flag: the write credentials themselves are the authorization
+boundary. OBS settings and credentials are deliberately absent from
+`build_cache.py` and the reusable restore/save actions; cache identity remains
+independent of the persistence backend.
+
+An OBS restore or save failure is a performance degradation. The normal source
+build remains authoritative, and a verified final L0 artifact remains usable.
+
 ## Cache identity model
 
 An action's final key is the canonical hash of three independent identities:
@@ -301,8 +332,9 @@ implementation per workflow.
 ### Direct source consumers
 
 Selected tests, upstream E2E, doctest, and nightly jobs restore L1 before source
-installation and save it afterward. CMake enters the cache wrapper for every
-configured native action.
+installation. Trusted callers with OBS write credentials save the updated
+snapshot afterward; untrusted or credential-less callers remain restore-only.
+CMake enters the cache wrapper for every configured native action.
 
 ### Central producer
 
