@@ -27,7 +27,7 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
@@ -48,11 +48,12 @@ class AscendModelState(DefaultModelState):
         MRV1 provides these from its own host buffers; MRV2 keeps block
         tables device-side (StagedWriteTensor), so mirror the rows here —
         at the same eager boundary where engram syncs token and position
-        rows to the host.
+        rows to the host. Dummy runs skip the history feed entirely so
+        dummy tokens never pollute the n-gram store.
         """
         layer_name = getattr(self.model, "engram_cache_layer_name", None)
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        if layer_name is None or kv_cache_config is None:
+        if layer_name is None or kv_cache_config is None or ring_state_update_skipped():
             return None
         group_id, group = next(
             (group_id, group)
@@ -72,12 +73,14 @@ class AscendModelState(DefaultModelState):
         if prepare_engram_inputs is None:
             return model_inputs
         num_tokens = input_batch.num_tokens_after_padding
-        if self.kvpp_is_dummy_run:
-            # DP-peer and profile dummy batches carry no real tokens: expose
-            # the fixed capture buffers without the eager routing pass, so the
-            # n-gram history is never polluted by dummy tokens.
-            model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens))
-            return model_inputs
+        # Dummy batches (DP-peer, profile) must route too: engram routing
+        # joins a node-local collective spanning every DP group, so skipping
+        # it on idle ranks leaves the busy ranks spinning inside route_many's
+        # all_gather. History pollution is guarded inside
+        # _get_engram_history_inputs: dummy runs (kvpp_is_dummy_run /
+        # ring_state_update_skipped from execute_dummy_batch) feed
+        # history_inputs=None, which prepare_engram honors before touching
+        # the n-gram store.
         model_inputs.update(
             prepare_engram_inputs(
                 input_batch.input_ids[:num_tokens],

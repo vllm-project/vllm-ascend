@@ -3,10 +3,12 @@
 """AscendModelState engram injection hooks for MRV2 graph execution.
 
 `prepare_inputs` must refresh the fixed-address engram buffers before every
-real replay/eager step (building the Runner-side history inputs that the
-reworked prepare_engram contract expects), while dummy/profile batches only
-expose the capture buffers. `prepare_dummy_inputs` must bind those buffers
-during FULL graph capture so the eager prepare_engram path is never traced.
+replay/eager step (building the Runner-side history inputs that the reworked
+prepare_engram contract expects). Dummy/profile batches route too: engram
+routing joins a node-local collective spanning every DP group, so skipping
+it on idle ranks deadlocks the busy ranks inside route_many's all_gather.
+`prepare_dummy_inputs` must bind those buffers during FULL graph capture so
+the eager prepare_engram path is never traced.
 """
 
 from types import SimpleNamespace
@@ -92,15 +94,20 @@ def test_get_engram_history_inputs_skips_non_engram_models():
     assert state._get_engram_history_inputs(_batch()) is None
 
 
-def test_prepare_inputs_dummy_runs_only_expose_capture_buffers(monkeypatch):
+def test_prepare_inputs_dummy_runs_route_too(monkeypatch):
+    """Idle DP ranks must join the engram routing collective or busy ranks hang."""
     monkeypatch.setattr(DefaultModelState, "prepare_inputs", lambda self, batch, reqs: {})
     model = _v41_model()
     state = _state(model, kvpp_is_dummy_run=True)
+    batch = _batch(num_tokens=8)
 
-    result = state.prepare_inputs(_batch(num_tokens=8), req_states=None)
+    result = state.prepare_inputs(batch, req_states=None)
 
-    model.prepare_engram_graph_inputs.assert_called_once_with(8)
-    model.prepare_engram_inputs.assert_not_called()
+    model.prepare_engram_inputs.assert_called_once()
+    args, kwargs = model.prepare_engram_inputs.call_args
+    assert args[2] == 8
+    assert kwargs == {"history_inputs": None}
+    model.prepare_engram_graph_inputs.assert_not_called()
     assert "engram_lookups" in result
 
 
