@@ -38,7 +38,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
+from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group, get_markov_tp_group
 from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
 
@@ -61,7 +61,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
     ):
         nn.Module.__init__(self)
         self.forward_type = None
-        if lmhead_tp_enable() and "head" in prefix:
+        # markov must be checked before lmhead: the DSpark Markov head prefix
+        # ("markov_head.markov_w1/w2") contains "head", so it would otherwise
+        # be routed to the lmhead_tp group. The Markov head is always
+        # replicated (matching upstream vllm#49731): the causal-correction
+        # loop runs serially per draft position, so sharding markov_w1 /
+        # markov_w2 would add a per-step TP all-reduce and all-gather, while
+        # each rank holding the full V x r / r x V table computes the same
+        # result locally at ~150 MB extra HBM. The ReplicatedGroup is a pure
+        # world_size=1 stand-in (no hcclCommInitRootInfoConfig); tp_size=1
+        # makes shard_indices cover the full vocab and forward skip all comm.
+        if "markov" in prefix:
+            self.comm_group = get_markov_tp_group()
+        elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
@@ -244,8 +256,14 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            # Reduce across all the model parallel GPUs.
+            # maybe_pad_and_reduce uses the global TP group, so only call it
+            # when this layer is actually TP-sharded. A replicated layer (e.g.
+            # the DSpark Markov head) has tp_size==1 and already holds the
+            # full output locally.
+            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+        else:
+            output = output_parallel
         return output
 
 
@@ -302,7 +320,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
-        if lmhead_tp_enable():
+        # A replicated head (tp_size==1, e.g. the DSpark Markov w2) must take
+        # the normal path: the lmhead_tp path gathers hidden states / scatters
+        # logits across the finegrained group, which a replicated head must
+        # not participate in.
+        if lmhead_tp_enable() and lm_head.tp_size > 1:
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
@@ -335,8 +357,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
-        # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        # Gather logits for tensor parallel. _gather_logits uses the global TP
+        # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
+        # each rank already holds the full vocab logits locally and no
+        # all-gather is needed.
+        if not get_ascend_config().enable_reduce_sample and lm_head.tp_size > 1:
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
