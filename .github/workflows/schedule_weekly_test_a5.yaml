@@ -293,7 +293,7 @@ jobs:
           )
         }}
       request_id: ${{ inputs.request_id || '' }}
-      vllm_ascend_ref: ${{ github.event_name == 'pull_request' ? github.sha : (inputs.vllm_ascend_ref || '') }}
+      vllm_ascend_ref: ${{ case(github.event_name == 'pull_request', github.sha, inputs.vllm_ascend_ref || '') }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
