@@ -264,6 +264,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
+                self.pcp_manager.kv_cache_config = kv_cache_config
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -390,6 +391,7 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens_np,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
 
         # Get the number of draft tokens for each request.
