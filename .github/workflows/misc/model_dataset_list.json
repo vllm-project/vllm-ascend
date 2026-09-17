@@ -304,7 +304,8 @@
             "z-lab/Qwen3.6-35B-A3B-DFlash",
             "Ex0bit/Qwen3.6-27B-PRISM-EAGLE3",
             "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
-            "zai-org/GLM-Image"
+            "zai-org/GLM-Image",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a3": [
             "AI-ModelScope/AI21-Jamba-1.5-Mini",
@@ -577,7 +578,8 @@
             "zai-org/GLM-4.1V-9B-Thinking",
             "zai-org/GLM-Image",
             "Eco-Tech/DeepSeek-V4.1-Flash-w8a8",
-            "Eco-Tech/GLM-5.2-w8a8c8"
+            "Eco-Tech/GLM-5.2-w8a8c8",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

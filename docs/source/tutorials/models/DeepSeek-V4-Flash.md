@@ -21,11 +21,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
-
-- DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
+|  Weight Version                              | Hardware Requirements                                                      | Download Links |
+|----------------------------------------------|----------------------------------------------------------------------------|----------------|
+| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
+| `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -153,7 +156,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 133120 \
         --max-num-batched-tokens 8192 \
@@ -195,7 +199,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
@@ -233,6 +238,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
@@ -276,6 +282,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
@@ -506,6 +513,7 @@ Before you start, please:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -573,7 +581,8 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -655,6 +664,7 @@ Before you start, please:
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -722,7 +732,8 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -904,6 +915,7 @@ Before you start, please:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export TASK_QUEUE_ENABLE=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -979,6 +991,7 @@ Before you start, please:
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \

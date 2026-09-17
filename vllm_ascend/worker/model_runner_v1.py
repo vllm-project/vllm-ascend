@@ -23,7 +23,7 @@ import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -3046,9 +3046,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            if hasattr(self.model, "set_attn_backend"):
-                self.model.set_attn_backend(self.attn_backend)
 
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
@@ -4170,10 +4167,7 @@ class NPUModelRunner(GPUModelRunner):
             self.update_stream = torch.npu.Stream()
 
             if self.drafter is not None:
-                if hasattr(self.drafter, "set_update_stream"):
-                    self.drafter.set_update_stream(self.update_stream)
-                else:
-                    self.drafter.update_stream = self.update_stream
+                self.drafter.update_stream = self.update_stream
 
         with _torch_cuda_wrapper():
             if (
@@ -4201,7 +4195,6 @@ class NPUModelRunner(GPUModelRunner):
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
-                    update_stream=self.update_stream,
                 )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
@@ -4228,12 +4221,18 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
+            kv_cache_allocation_context: Sleep-mode pool used only for discardable
+            KV backing allocations.
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -4256,7 +4255,10 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
-        kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        kv_caches = self.initialize_kv_cache_tensors(
+            kv_cache_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
         # TODO: refactor the logic of attention
         if (
             self.speculative_config
@@ -4315,18 +4317,25 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
 
         Args:
             kv_cache_config: The KV cache config
+            kv_cache_allocation_context: Sleep-mode pool used only for discardable
+            KV backing allocations. Sharing, reshape, and bind stay outside.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        allocation_context = kv_cache_allocation_context or nullcontext()
+        with allocation_context:
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
 

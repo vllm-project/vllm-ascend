@@ -18,11 +18,15 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 ### 3.1 Model Weight
 
-- `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
-- `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
-- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+|  Weight Version    | Hardware Requirements              | Download Links |
+|--------------------|------------------------------------|----------------|
+| `MiniMax-M3`(BF16) | requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) |
+| `MiniMax-M3-W8A8`  | requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8)| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) |
+| `MiniMax-M3-MXFP8` (MXFP8)| used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D) |[ModelScope](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8)|
 
 It is recommended to place the model weight in a shared cache directory.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -107,7 +111,8 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     export HCCL_OP_EXPANSION_MODE="AIV"
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --served-model-name minimax-m3 \
       --trust-remote-code \
@@ -185,7 +190,8 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/op_api/lib/:${LD_LIBRARY_PATH}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_SERVER_DEV_MODE=1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --port 11223 \
@@ -237,6 +243,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --served-model-name minimax-m3 \
@@ -273,6 +280,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --served-model-name minimax-m3 \
@@ -311,7 +319,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --served-model-name minimax-m3 \
@@ -349,7 +358,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-
+    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --served-model-name minimax-m3 \
@@ -540,6 +549,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -601,7 +611,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -731,6 +742,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -781,7 +793,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
