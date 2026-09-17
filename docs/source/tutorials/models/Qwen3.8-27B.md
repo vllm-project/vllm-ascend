@@ -187,6 +187,12 @@ After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 ```
 
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
+```
+
 ### 4.2 Source Code Installation
 
 You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
@@ -415,6 +421,34 @@ Before starting the service:
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
         With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
+
+Wait until the engine finishes loading weights and graph capture. A successful startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
+### 5.2 Service Verification
+
+After the service is fully started, send a request to verify that the service is working correctly:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qwen3.8",
+        "messages": [
+            {"role": "user", "content": "The future of AI is"}
+        ],
+        "max_tokens": 1024,
+        "temperature": 1.0,
+        "top_p": 0.95
+    }'
+```
+
+Expected Result: The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text.
 
 ## 6 Functional Verification
 
