@@ -971,6 +971,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
+            # The next PP rank expects full-sequence hidden states; undo the
+            # sequence sharding applied above before crossing the PP boundary.
+            if self.use_sequence_parallel_moe:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
