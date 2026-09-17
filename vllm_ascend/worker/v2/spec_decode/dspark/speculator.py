@@ -26,11 +26,8 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
+
 from vllm_ascend.ascend_config import validate_additional_config_bool
-from vllm_ascend.worker.v2.spec_decode.dspark.greedy import (
-    sample_greedy_markov,
-    scratch_shape,
-)
 from vllm_ascend.utils import (
     get_rotation_path,
     vllm_version_is,
@@ -39,6 +36,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.dspark.greedy import (
+    sample_greedy_markov,
+    scratch_shape,
+)
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
@@ -46,9 +47,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(
-            vllm_config
-        )
+        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
@@ -66,18 +65,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         hf_config = self.draft_model_config.hf_config
         if getattr(hf_config, "model_type", None) != "deepseek_v4":
-            raise ValueError(
-                "enable_dspark_fused_greedy currently supports DeepSeek-V4 only"
-            )
-
-        if (
-            self._draft_topk is not None
-            or additional_config.get("deepseek_v4_dspark_topk") is not None
-        ):
-            raise ValueError(
-                "Disable DSpark top-k before enabling full-vocabulary "
-                "fused greedy reduction"
-            )
+            raise ValueError("enable_dspark_fused_greedy currently supports DeepSeek-V4 only")
 
         if self.draft_logits is not None:
             # Probabilistic drafting keeps the original implementation.
@@ -98,6 +86,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             dtype=torch.int32,
             device=device,
         )
+
     def _sample_sequential(
         self,
         num_reqs: int,
@@ -110,8 +99,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             or self.draft_logits is not None
             or self._draft_topk is not None
             or self.model.draft_id_to_target_id is not None
-            or self.use_acceptance_estimator
-            or self.draft_watermarker is not None
         ):
             super()._sample_sequential(num_reqs, head_hidden)
             return
@@ -124,7 +111,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
         base_logits = self.model.compute_draft_logits(sample_hidden)
-        base_logits = base_logits.view(num_reqs, n_spec, -1)
+        base_logits = base_logits.reshape(num_reqs, n_spec, -1)
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
@@ -135,7 +122,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
 
-            if self.use_confidence_head:
+            if self.enable_adaptive_verification:
                 confidence_markov_embeds.append(markov_embed)
 
             # Keep the original complete Markov projection.
@@ -146,8 +133,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             can_fuse = (
                 base_i.shape == bias.shape
                 and base_i.dtype == bias.dtype
-                and base_i.dtype
-                in (torch.float16, torch.bfloat16, torch.float32)
+                and base_i.dtype in (torch.float16, torch.bfloat16, torch.float32)
                 and base_i.stride(1) == 1
                 and bias.stride(1) == 1
             )
@@ -174,12 +160,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
             prev = draft_sampled_i
 
-        if self.use_confidence_head:
+        if self.enable_adaptive_verification:
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
             )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+            self.draft_token_confidence_probs[:num_reqs] = confidence.reshape(
                 num_reqs,
                 n_spec,
             )

@@ -78,11 +78,7 @@ def _partial_argmax(
     )
 
     # Match the rounding of a materialized source-dtype torch.add.
-    summed = (
-        (a.to(tl.float32) + b.to(tl.float32))
-        .to(base.dtype.element_ty)
-        .to(tl.float32)
-    )
+    summed = (a.to(tl.float32) + b.to(tl.float32)).to(base.dtype.element_ty).to(tl.float32)
     summed = tl.where(valid, summed, -float("inf"))
     indices = tl.where(valid, col, 2147483647)
 
@@ -118,7 +114,10 @@ def _finish_argmax(
     )
 
     _, result = _reduce_first_argmax(values, indices)
-    tl.store(output + row * output_stride, result)
+    tl.store(
+        output + row * output_stride,
+        result.to(output.dtype.element_ty),
+    )
 
 
 def scratch_shape(
@@ -144,10 +143,10 @@ def sample_greedy_markov(
     if base_logits.ndim != 2 or base_logits.shape != markov_bias.shape:
         raise ValueError("Base logits and Markov bias must have equal 2D shapes")
 
-    if (
-        base_logits.dtype != markov_bias.dtype
-        or base_logits.dtype
-        not in (torch.float16, torch.bfloat16, torch.float32)
+    if base_logits.dtype != markov_bias.dtype or base_logits.dtype not in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
     ):
         raise ValueError("Inputs must have matching FP16/BF16/FP32 dtypes")
 
@@ -174,11 +173,7 @@ def sample_greedy_markov(
         raise ValueError("Invalid or insufficient reduction scratch")
 
     if not (
-        base_logits.device
-        == markov_bias.device
-        == output.device
-        == partial_values.device
-        == partial_indices.device
+        base_logits.device == markov_bias.device == output.device == partial_values.device == partial_indices.device
     ):
         raise ValueError("All tensors must be on the same device")
 
@@ -202,5 +197,5 @@ def sample_greedy_markov(
         output,
         output.stride(0),
         parts,
-        triton.next_power_of_2(parts),
+        max(16, triton.next_power_of_2(parts)),
     )
