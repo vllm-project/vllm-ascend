@@ -19,10 +19,11 @@ from vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 
-# vLLM main added KVConnectorBlockState; v0.28.0 does not ship it.
-try:
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.28.0"):
     from vllm.v1.core.sched.output import KVConnectorBlockState
-except ImportError:  # pragma: no cover - exercised on v0.28.0
+else:
     KVConnectorBlockState = None  # type: ignore[misc, assignment]
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
@@ -860,7 +861,7 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
-                        and (scheduled_running_reqs and not prefill_scheduled)
+                        and not prefill_scheduled
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
                         if num_new_tokens > token_budget or num_computed_tokens + num_new_tokens > self.max_model_len:
@@ -1115,19 +1116,13 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         if KVConnectorBlockState is not None:
             boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
             if self.connector is not None:
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                # A scheduled request can finish a cache chunk without allocating
+                # new blocks. Resolve its current table only when the connector reads it.
+                block_state_req_ids = set(num_scheduled_tokens)
+                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
                 kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    req_ids=block_state_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
                     boundary_state_offloads=boundary_state_offloads,
                 )
 

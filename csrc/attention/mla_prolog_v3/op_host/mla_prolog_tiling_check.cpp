@@ -104,10 +104,26 @@ bool MlaPrologTilingCheck::CheckAttrsRange() const
 {
     if (std::strncmp(context_.opType, V3_OP_NAME, OP_NAME_LEN) == 0) {
         if (GetCurNpuArch() == NpuArch::DAV_3510) {
-            const std::unordered_set<uint32_t> supportedWeightQuantMode{0U, 1U, 2U, 3U, 4U, 5U};
+            const std::unordered_set<uint32_t> supportedWeightQuantMode{0U, 3U};
             OP_CHECK_IF(supportedWeightQuantMode.find(*context_.weightQuantMode) == supportedWeightQuantMode.end(),
                         OP_LOGE_FOR_INVALID_VALUE(context_.opName, "WeightQuantMode",
-                                                  std::to_string(*context_.weightQuantMode), "{0, 1, 2, 3, 4, 5}"),
+                                                  std::to_string(*context_.weightQuantMode), "{0, 3}"),
+                        return false);
+            std::unordered_set<uint32_t> supportedKvQuantMode{0U};
+            if (*context_.weightQuantMode == static_cast<int64_t>(WEIGHT_QUANT_MODE::MXFP8_FULL_QUANT)) {
+                supportedKvQuantMode = {0U, 1U};
+            }
+            OP_CHECK_IF(supportedKvQuantMode.find(*context_.kvQuantMode) == supportedKvQuantMode.end(),
+                        OP_LOGE_FOR_INVALID_VALUE(context_.opName, "KvQuantMode",
+                                                  std::to_string(*context_.kvQuantMode),
+                                                  ConvertContainerToStringV3(supportedKvQuantMode)),
+                        return false);
+            OP_CHECK_IF(*context_.kvQuantMode != *context_.queryQuantMode,
+                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                            context_.opName, "kvQuantMode/queryQuantMode",
+                            "kv=" + std::to_string(*context_.kvQuantMode) +
+                                ", query=" + std::to_string(*context_.queryQuantMode),
+                            "On DAV3510, kvQuantMode must equal queryQuantMode"),
                         return false);
         } else {
             const std::unordered_set<uint32_t> supportedWeightQuantMode{0U, 1U, 2U};
@@ -250,6 +266,28 @@ ge::graphStatus MlaPrologTilingCheck::CheckDims() const
 ge::graphStatus MlaPrologTilingCheck::CheckQuantMode() const
 {
     if (GetCurNpuArch() == NpuArch::DAV_3510) {
+        if (std::strncmp(context_.opType, V3_OP_NAME, OP_NAME_LEN) == 0) {
+            const std::set<uint32_t> supportedQuantModes{
+                static_cast<uint32_t>(QUANT_MODE::NO_QUANT),
+                static_cast<uint32_t>(QUANT_MODE::MXFP8_FULL_QUANT_KV_NO_QUANT),
+                static_cast<uint32_t>(QUANT_MODE::MXFP8_FULL_QUANT_KV_QUANT_PER_TENSOR)};
+            OP_CHECK_IF(supportedQuantModes.find(static_cast<uint32_t>(scenarioInfo_.quantMode_)) ==
+                            supportedQuantModes.end(),
+                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                            context_.opName, "quantMode", std::to_string(static_cast<uint32_t>(scenarioInfo_.quantMode_)),
+                            "On DAV3510, quantMode allows only " + ConvertContainerToStringV3(supportedQuantModes)),
+                        return ge::GRAPH_FAILED);
+            if (scenarioInfo_.quantMode_ == QUANT_MODE::MXFP8_FULL_QUANT_KV_NO_QUANT ||
+                scenarioInfo_.quantMode_ == QUANT_MODE::MXFP8_FULL_QUANT_KV_QUANT_PER_TENSOR) {
+                OP_CHECK_IF(scenarioInfo_.cacheMode_ != CACHE_MODE::PA_BSND,
+                            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                                context_.opName, "cacheMode",
+                                std::to_string(static_cast<uint32_t>(scenarioInfo_.cacheMode_)),
+                                "On DAV3510 MXFP8, cacheMode allows only PA_BSND"),
+                            return ge::GRAPH_FAILED);
+            }
+            return ge::GRAPH_SUCCESS;
+        }
         const std::set<uint32_t> supportedQuantModes{
             static_cast<uint32_t>(QUANT_MODE::NO_QUANT),
             static_cast<uint32_t>(QUANT_MODE::PARTIAL_QUANT_KV_NO_QUANT),

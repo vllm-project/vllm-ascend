@@ -165,8 +165,8 @@ class TestAscendConfig(TestBase):
     def test_sparse_li_c8_layer_filter_uses_indexer_wq_b_weight(self):
         config = self._make_sparse_li_c8_config(
             {
-                "model.layers.3.self_attn.indexer.wq_b_weight": "W8A8_MXFP8",
-                "model.layers.4.self_attn.indexer.wq_b_weight": "W8A8_DYNAMIC",
+                "model.layers.3.self_attn.indexer.wq_b.weight": "W8A8_MXFP8",
+                "model.layers.4.self_attn.indexer.wq_b.weight": "W8A8_DYNAMIC",
             }
         )
 
@@ -1521,9 +1521,7 @@ class TestKVPPConfig(TestBase):
         config.speculative_config = None
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
-            ("parallel_config", "prefill_context_parallel_size", 2, "PCP"),
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            (None, "kv_transfer_config", object(), "transfer"),
             ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),

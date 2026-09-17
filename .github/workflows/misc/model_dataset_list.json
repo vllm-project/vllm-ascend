@@ -140,6 +140,7 @@
             "RedHatAI/GLM-5.2-speculator.dspark",
             "RedHatAI/Qwen3-32B-speculator.eagle3",
             "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
             "Shanghai_AI_Laboratory/internlm-7b",
             "Shanghai_AI_Laboratory/internlm-chat-7b",
             "Shanghai_AI_Laboratory/internlm3-8b-instruct",
@@ -302,7 +303,8 @@
             "Eco-Tech/Kimi-K2.6-w4a8",
             "z-lab/Qwen3.6-35B-A3B-DFlash",
             "Ex0bit/Qwen3.6-27B-PRISM-EAGLE3",
-            "zai-org/GLM-Image"
+            "zai-org/GLM-Image",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a3": [
             "AI-ModelScope/AI21-Jamba-1.5-Mini",
@@ -445,6 +447,7 @@
             "RedHatAI/GLM-5.2-speculator.dspark",
             "RedHatAI/Qwen3-32B-speculator.eagle3",
             "RedHatAI/Qwen3-8B-speculator.eagle3",
+            "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
             "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
             "Tencent-Hunyuan/HunyuanOCR",
             "Tencent-Hunyuan/Hy3-preview",
@@ -573,7 +576,8 @@
             "z-lab/Qwen3-8B-DFlash-b16",
             "zai-org/GLM-4.1V-9B-Thinking",
             "zai-org/GLM-Image",
-            "Eco-Tech/GLM-5.2-w8a8c8"
+            "Eco-Tech/GLM-5.2-w8a8c8",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

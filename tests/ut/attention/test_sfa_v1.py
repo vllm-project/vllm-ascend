@@ -228,6 +228,25 @@ class TestAscendSFADeviceOperator(TestBase):
 
 
 class TestAscendSFACacheComposition(TestBase):
+    def test_nope_cache_normalization_with_runtime_shared_indexer(self):
+        for is_mtp in (False, True):
+            with self.subTest(is_mtp=is_mtp):
+                impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 0
+                impl.has_indexer = True
+                impl._is_mtp_layer = is_mtp
+                impl.skip_topk = True
+                latent_cache = torch.empty(1, 128, 1, 512)
+                empty_rope_cache = torch.empty(1, 128, 1, 0)
+
+                self.assertEqual(impl.runtime_has_indexer, is_mtp)
+                composed = impl._compose_sfa_kv_cache((latent_cache, empty_rope_cache))
+                self.assertEqual(len(composed), 1)
+                self.assertIs(composed[0], latent_cache)
+                self.assertIsNone(impl._compose_sfa_kv_cache(None))
+                with self.assertRaisesRegex(RuntimeError, "NoPE SFA requires one latent KV cache tensor"):
+                    impl._compose_sfa_kv_cache((latent_cache, torch.empty(1)))
+
     def test_compose_independent_sfa_and_li_c8_layouts(self):
         for enable_sfa_c8, enable_li_c8 in (
             (False, False),
@@ -240,6 +259,7 @@ class TestAscendSFACacheComposition(TestBase):
                 enable_li_c8=enable_li_c8,
             ):
                 impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 64
                 impl.layer_name = "model.layers.0.self_attn.attn"
                 impl.has_indexer = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
@@ -286,7 +306,7 @@ class TestAscendSFACacheComposition(TestBase):
         )
         mock_get_forward_context.return_value.attn_metadata = {"model.layers.0.indexer": own_metadata}
 
-        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(own_metadata), own_metadata)
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_missing_raises(self, mock_get_forward_context):
@@ -299,7 +319,7 @@ class TestAscendSFACacheComposition(TestBase):
         mock_get_forward_context.return_value.attn_metadata = {}
 
         with self.assertRaises(RuntimeError):
-            impl._get_indexer_attn_metadata()
+            impl._get_indexer_attn_metadata(SimpleNamespace())
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_falls_back_to_main_metadata(self, mock_get_forward_context):
@@ -315,7 +335,7 @@ class TestAscendSFACacheComposition(TestBase):
         main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
         mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
 
-        self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(main_metadata), main_metadata)
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
@@ -334,7 +354,7 @@ class TestAscendSFACacheComposition(TestBase):
             "model.layers.77.self_attn.indexer.k_cache": target_metadata
         }
 
-        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
+        self.assertIs(impl._get_indexer_attn_metadata(target_metadata), target_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
@@ -956,10 +976,13 @@ class TestAscendSFAImpl(TestBase):
             topk_num_tokens=2,
         )
         cases = (
-            (PreprocessType.NATIVE, True),
-            (PreprocessType.NATIVE, False),
-            (PreprocessType.PROLOG_V3, True),
-            (PreprocessType.MLAPO, True),
+            (PreprocessType.NATIVE, True, False),
+            (PreprocessType.NATIVE, False, False),
+            (PreprocessType.PROLOG_V3, True, False),
+            (PreprocessType.MLAPO, True, False),
+            # MTP skip_topk layers keep a runtime indexer cache, so their k
+            # path and cache write must still follow the KVPP wait.
+            (PreprocessType.NATIVE, True, True),
         )
         events: list[object] = []
 
@@ -968,12 +991,13 @@ class TestAscendSFAImpl(TestBase):
             return result
 
         width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
-        for preprocess_type, has_indexer in cases:
-            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer):
+        for preprocess_type, has_indexer, is_mtp in cases:
+            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer, is_mtp=is_mtp):
                 events.clear()
                 self.impl.preprocess_type = preprocess_type
                 self.impl.has_indexer = has_indexer
-                self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
+                self.impl._is_mtp_layer = is_mtp
+                self.impl._get_indexer_attn_metadata = lambda _: metadata if self.impl.has_indexer else None
                 self.impl.skip_topk = True
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
@@ -1013,7 +1037,9 @@ class TestAscendSFAImpl(TestBase):
                     self.assertTrue(torch.all(output == 1))
                     expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
                     expected.extend([("wait", "layer"), "cache"])
-                    if has_indexer:
+                    # Static shared-index layers own no runtime indexer cache;
+                    # only MTP skip_topk layers still write one.
+                    if self.impl.runtime_has_indexer:
                         expected.append("indexer_cache")
                     self.assertEqual(events, expected)
                     events.clear()
@@ -1179,17 +1205,17 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
-    def test_resolve_path_unquantized_c8_goes_prolog_v3(self):
-        """Unquantized + is_kv_consumer + C8 → PROLOG_V3 (blocked by reasons)."""
+    def test_resolve_path_unquantized_c8_goes_native(self):
+        """Unquantized + is_kv_consumer + C8 → NATIVE (blocked by reasons)."""
         self._set_quant(None)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
-        # Enters candidate but blocked by _get_fused_type_unsupported_reasons
-        # (unquantized + C8).  With _try_enable_type mocked to True, still
-        # returns PROLOG_V3 in the test.
-        self.assertEqual(path, PreprocessType.PROLOG_V3)
+        # The candidate is blocked by _get_fused_type_unsupported_reasons
+        # (unquantized + C8), so the path must fall back to NATIVE even when
+        # _try_enable_type is mocked to True.
+        self.assertEqual(path, PreprocessType.NATIVE)
 
     def test_resolve_path_no_mlapo_goes_native(self):
         """No quant + MLAPO disabled → NATIVE."""
@@ -1213,6 +1239,9 @@ class TestAscendSFAImpl(TestBase):
         """Minimal setup so unsupported-reasons checks can run."""
         self.impl.preprocess_type = PreprocessType.PROLOG_V3
         self.impl._quant_type = AscendW8A8DynamicLinearMethod
+        quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=quant_method)
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
         self.impl.q_a_layernorm = MagicMock()
@@ -1237,6 +1266,7 @@ class TestAscendSFAImpl(TestBase):
     def test_reasons_unquantized_c8_blocked(self):
         self._setup_prolog_v3_state()
         self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=None)
         self.impl.enable_sparse_sfa_c8 = True
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)

@@ -61,7 +61,6 @@ import time
 import torch
 import torch.distributed as dist
 import vllm.v1.core.sched.scheduler as _sched_mod
-import vllm.v1.engine.core as _engine_core_mod
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -72,20 +71,18 @@ from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
-# vLLM main added KVConnectorBlockState for connector block snapshots; v0.28.0
-# does not ship it. Import optionally so CI rebase onto main does not break the
-# release lane at module import time.
-try:
+if not vllm_version_is("0.28.0"):
     from vllm.v1.core.sched.output import KVConnectorBlockState
-except ImportError:  # pragma: no cover - exercised on v0.28.0
+else:
     KVConnectorBlockState = None  # type: ignore[misc, assignment]
 
 
@@ -786,19 +783,13 @@ class BalanceScheduler(Scheduler):
         if KVConnectorBlockState is not None:
             boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
             if self.connector is not None:
-                snapshot_req_ids = {req.req_id for req in new_reqs_data}
-                snapshot_req_ids.update(
-                    req_id
-                    for req_id, block_ids in zip(
-                        cached_reqs_data.req_ids,
-                        cached_reqs_data.new_block_ids,
-                        strict=True,
-                    )
-                    if block_ids
-                )
-                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                # A scheduled request can finish a cache chunk without allocating
+                # new blocks. Resolve its current table only when the connector reads it.
+                block_state_req_ids = set(num_scheduled_tokens)
+                block_state_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
                 kv_connector_block_state = KVConnectorBlockState(
-                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    req_ids=block_state_req_ids,
+                    resolve_block_ids=self.kv_cache_manager.get_block_ids,
                     boundary_state_offloads=boundary_state_offloads,
                 )
 
@@ -916,25 +907,4 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
 # scheduler_cls and correctly bypass this name.
 _sched_mod.Scheduler = BalanceScheduler
 
-# Activate BalanceDPEngineCoreProc ONLY when balance scheduling is enabled.
-# Upstream ``run_engine_core`` resolves ``DPEngineCoreProc`` via the
-# ``vllm.v1.engine.core`` module-global name whenever DP>1 + MoE, so an
-# unconditional swap would inject balance machinery into configs that don't use
-# it -- e.g. PD-disaggregated recompute, whose scheduler is AsyncRecomputeScheduler
-# and must not be touched by balance. A conditional swap at run_engine_core
-# entry (where vllm_config is available) restores the pre-refactor "balance off
-# => no involvement" invariant without copying run_engine_core's body.
-_OriginalDPEngineCoreProc = _engine_core_mod.DPEngineCoreProc
-_OriginalRunEngineCore = EngineCoreProc.run_engine_core
-
-
-def _balance_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    vllm_config = kwargs.get("vllm_config")
-    if _balance_scheduling_enabled(vllm_config):
-        _engine_core_mod.DPEngineCoreProc = BalanceDPEngineCoreProc
-    else:
-        _engine_core_mod.DPEngineCoreProc = _OriginalDPEngineCoreProc
-    return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
-
-
-EngineCoreProc.run_engine_core = staticmethod(_balance_run_engine_core)
+# The patch for engine core has been moved to patch_engine_core.py

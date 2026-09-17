@@ -12,10 +12,14 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
+|  Weight Version         | Download Links |
+|-------------------------|----------------|
+| `Qwen3-VL-Embedding-8B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B) |
+| `Qwen3-VL-Embedding-2B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -116,6 +120,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Embedding-2B  \
       --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
       --runner pooling \
@@ -129,6 +134,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Embedding-2B  \
       --served-model-name Qwen/Qwen3-VL-Embedding-2B  \
       --compilation-config '{"cudagraph_capture_sizes": [1024,512]}' \

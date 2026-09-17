@@ -65,7 +65,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -278,10 +278,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # since final block table tensor is not ready in __init__, it is delayed until dummy_run
         self.block_table_tensor_clone: torch.Tensor | None = None
 
-        self._runnable: Any = self._run_merged_draft
+        self._runnable = self._run_merged_draft
         if self.uses_mrope:
-            self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            num_dims = 3 if vllm_version_is("0.28.0") else self.draft_model_config.mrope_num_dims
+            self.mrope_positions = torch.zeros((num_dims, self.max_num_tokens + 1), dtype=torch.int32, device=device)
+        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
                 dtype=torch.int32,
@@ -618,26 +619,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 enable_enpu=self.enable_enpu,
             )
 
-    def set_update_stream(self, update_stream):
-        if hasattr(self._runnable, "set_update_stream"):
-            self._runnable.set_update_stream(update_stream)
-        self.update_stream = update_stream
-
-    def _maybe_update_metadata(self, att_backend, aclgraph_runtime_mode, multi_steps_attn_metadata):
-        if use_updatable_graph(att_backend):
-            update_params = []
-            for per_layer_metadata in multi_steps_attn_metadata:
-                metadata = next(iter(per_layer_metadata.values()))
-                update_params.append(
-                    {
-                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                        "actual_seq_lengths_kv": metadata.seq_lens_list,
-                        "block_table": metadata.block_tables,
-                    }
-                )
-            self._runnable.update_draft_model_metadata(update_params)  # type: ignore
-            self._runnable.set_attn_backend(att_backend)  # type: ignore
-
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
@@ -831,13 +812,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
-
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            self._maybe_update_metadata(
-                self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
-                multi_steps_attn_metadata,
-            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -1169,13 +1143,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            self._maybe_update_metadata(
-                self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
-                multi_steps_attn_metadata,
-            )
-
         active_device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
         )
@@ -1428,7 +1395,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "are in draft-vocab space and incompatible with target-space "
                         "rejection sampling. Falling back to greedy."
                     )
-                raw_logits = self.model.compute_logits(sample_hidden_states)
+                # Reduced-vocab drafters (e.g. Qwen3DSparkForCausalLM) must
+                # compute logits in draft-vocab space so that the Markov bias
+                # (draft_vocab_size) can be added; sampled draft ids are then
+                # remapped to target ids.
+                raw_logits = self.model.compute_draft_logits(sample_hidden_states)
                 if lmhead_tp_enable():
                     # Remove B_max - B communication padding.
                     raw_logits = raw_logits[:num_indices]
@@ -1450,7 +1421,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         if probs is not None:
                             dspark_probs_list.append(probs)
                     else:
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                        next_token_ids = logits[:, idx].argmax(dim=-1)
+                        if dspark_has_vocab_mapping:
+                            next_token_ids = self.model.map_draft_to_target(next_token_ids)
+                        draft_token_ids[:, idx + 1].copy_(next_token_ids)
                 if use_probabilistic and dspark_probs_list:
                     # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                     # [num_blk * K, V] to match early_exit view logic.
@@ -1708,7 +1682,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
-            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            if vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)

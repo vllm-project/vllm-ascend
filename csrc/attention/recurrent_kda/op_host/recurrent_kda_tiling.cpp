@@ -87,6 +87,20 @@ void CopyStateStrides(const StrideType *src, std::array<int64_t, RKDA_STATE_DIM_
     }
     hasStrides = true;
 }
+
+template <typename StrideType>
+void CopyQkvStrides(const StrideType *src, size_t expectedDimNum,
+                    std::array<int64_t, RKDA_RANK4_QKV_DIM_NUM> &dst, bool &hasStrides)
+{
+    if (src == nullptr || src->GetDimNum() != expectedDimNum ||
+        expectedDimNum > RKDA_RANK4_QKV_DIM_NUM) {
+        return;
+    }
+    for (size_t i = 0; i < expectedDimNum; ++i) {
+        dst[i] = src->GetStride(i);
+    }
+    hasStrides = true;
+}
 } // namespace
 
 RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
@@ -96,6 +110,12 @@ RecurrentKdaTilingContext RecurrentKdaTiling::BuildProcessorContext() const
     ctx.queryShape = context_->GetInputShape(QUERY_INDEX)->GetOriginShape();
     ctx.keyShape = context_->GetInputShape(KEY_INDEX)->GetOriginShape();
     ctx.valueShape = context_->GetInputShape(VALUE_INDEX)->GetOriginShape();
+    CopyQkvStrides(context_->GetInputStride(QUERY_INDEX), ctx.queryShape.GetDimNum(),
+                   ctx.queryStrides, ctx.hasQueryStrides);
+    CopyQkvStrides(context_->GetInputStride(KEY_INDEX), ctx.keyShape.GetDimNum(),
+                   ctx.keyStrides, ctx.hasKeyStrides);
+    CopyQkvStrides(context_->GetInputStride(VALUE_INDEX), ctx.valueShape.GetDimNum(),
+                   ctx.valueStrides, ctx.hasValueStrides);
     ctx.gateShape = context_->GetInputShape(GATE_INDEX)->GetOriginShape();
     ctx.betaShape = context_->GetInputShape(BETA_INDEX)->GetOriginShape();
     ctx.stateShape = context_->GetInputShape(STATE_INDEX)->GetOriginShape();
@@ -402,6 +422,18 @@ void RecurrentKdaTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "cuSeqlensDtype: [%u]", tilingData_.cuSeqlensDtype);
     OP_LOGD(context_->GetNodeName(), "ssmStateIndicesDtype: [%u]", tilingData_.ssmStateIndicesDtype);
     OP_LOGD(context_->GetNodeName(), "acceptedTokensDtype: [%u]", tilingData_.acceptedTokensDtype);
+    OP_LOGD(context_->GetNodeName(), "queryTokenStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.queryTokenStride));
+    OP_LOGD(context_->GetNodeName(), "queryHeadStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.queryHeadStride));
+    OP_LOGD(context_->GetNodeName(), "keyTokenStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.keyTokenStride));
+    OP_LOGD(context_->GetNodeName(), "keyHeadStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.keyHeadStride));
+    OP_LOGD(context_->GetNodeName(), "valueTokenStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.valueTokenStride));
+    OP_LOGD(context_->GetNodeName(), "valueHeadStride: [%llu]",
+            static_cast<unsigned long long>(tilingData_.valueHeadStride));
 }
 
 ge::graphStatus RecurrentKdaTiling::CalUbSize()

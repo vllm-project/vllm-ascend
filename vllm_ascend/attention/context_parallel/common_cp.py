@@ -8,27 +8,6 @@ from vllm.distributed import get_dcp_group
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
-def get_dcp_local_seq_lens(
-    seq_lens: torch.Tensor,
-    dcp_size: int,
-    interleave_size: int,
-) -> torch.Tensor:
-    """Return the interleave-aware KV length of every DCP rank."""
-    tiled = seq_lens.unsqueeze(-1)
-    rank_offsets = torch.arange(
-        dcp_size,
-        dtype=seq_lens.dtype,
-        device=seq_lens.device,
-    )
-    base = tiled // interleave_size // dcp_size * interleave_size
-    remainder = tiled - base * dcp_size
-    return base + torch.clamp(
-        remainder - rank_offsets * interleave_size,
-        0,
-        interleave_size,
-    )
-
-
 class DCPMetadataBuilderMixin:
     """Shared DCP metadata access for backend-specific metadata builders."""
 

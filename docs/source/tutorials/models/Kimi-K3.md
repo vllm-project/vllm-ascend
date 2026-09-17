@@ -37,6 +37,8 @@ The weight size is a storage requirement, not an estimate of runtime NPU memory;
 KV cache, activations, communication buffers, and the optional draft also need
 memory.
 
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
 ### 3.2 Verify Multi-Node Communication
 
 Before launching the four-node service, follow
@@ -135,6 +137,7 @@ Node 0 through the DP RPC address.
 Set these variables on every node:
 
 ```shell
+# Ensure the model path matches the directory recorded during download
 export MODEL_PATH="<KIMI_K3_FULL_W4A8_PATH>"
 export TOKENIZER_PATH="<KIMI_K3_TOKENIZER_PATH>"
 export LOCAL_IP="<CURRENT_NODE_IP>"

@@ -14,13 +14,19 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ## 3 Model Weight
 
-- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
-- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w8a8c8`(Quantized version): requires 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8). The weights have been verified and are recommended for use.
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+|  Weight Version          | Hardware Requirements                                             | Download Links |
+|--------------------------|-------------------------------------------------------------------|----------------|
+|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
+|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
+|  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+
+- `GLM-5.2-w8a8c8`(Quantized version): The weights have been verified and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -119,6 +125,7 @@ Run the following script to execute online inference.
 export HCCL_BUFFSIZE=200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
 --port 8077 \
@@ -175,7 +182,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -220,7 +228,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
@@ -269,7 +278,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
@@ -310,7 +320,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
@@ -435,9 +446,11 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -461,7 +474,7 @@ Before you start, please
             --max-num-seqs 64 \
             --quantization ascend \
             --gpu-memory-utilization 0.85 \
-            --api-server-count 1 \
+            --api-server-count 16 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -495,9 +508,11 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -546,7 +561,7 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         # d0: api server on this node; d1: --headless
-        server_role_args="--api-server-count 1"
+        server_role_args="--api-server-count 16"
 
         export HCCL_BUFFSIZE=256
         export HCCL_IF_IP=$local_ip
@@ -554,9 +569,11 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -611,9 +628,11 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -711,6 +730,11 @@ Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
+**API server and tokenizer configurations:**
+
+- `VLLM_USE_FASTOKENS=1`: Enables the `fastokens` backend for Hugging Face fast tokenizers to accelerate input tokenization and output detokenization. The `fastokens` package must be installed.
+- `--api-server-count 16`: Starts 16 API server processes for each API-facing `vllm serve` instance to improve frontend concurrency. It is configured on prefill node 0 (p0) and decode node 0 (d0); prefill node 1 (p1) and decode node 1 (d1) remain headless.
+
 **PP2 prefill node-specific configurations (p0/p1):**
 
 - `VLLM_PP_LAYER_PARTITION="41,37"` / `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank`: The prefill engine is split as PP2 over the two prefill nodes — the 78 layers are partitioned as `41/37`. `--node-rank` is `0` on prefill node 0 (p0) and `1` on prefill node 1 (p1).
@@ -767,6 +791,7 @@ export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
@@ -854,6 +879,7 @@ export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
@@ -1000,6 +1026,7 @@ export HCCL_BUFFSIZE=768
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
@@ -1046,6 +1073,7 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
@@ -1202,6 +1230,7 @@ prepare the script `run_dp_template.sh` on each node.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve <MODEL_PATH> \
         --host 0.0.0.0 \
         --port $2 \

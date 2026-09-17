@@ -53,19 +53,25 @@ def make_worker(
     use_mla=False,
     enable_kv_events=False,
     num_hidden_layers=None,
+    use_kvpp=False,
+    pcp_size=1,
+    pcp_rank=0,
+    dcp_size=1,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
-    pcp_group.return_value.world_size = 1
-    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=1)
+    pcp_group.return_value.world_size = pcp_size
+    pcp_group.return_value.rank_in_group = pcp_rank
+    start_patch(test, f"{module}.get_decode_context_model_parallel_world_size", return_value=dcp_size)
     start_patch(test, f"{module}.get_decode_context_model_parallel_rank", return_value=0)
     importlib = start_patch(test, f"{module}.importlib")
     importlib.import_module.return_value = MagicMock()
 
     config = MagicMock()
     config.model_config.model = "org/llama-7b"
+    config.model_config.max_model_len = 1024
     config.model_config.use_mla = use_mla
     config.model_config.hf_text_config = MagicMock(spec=[])
     if num_hidden_layers is not None:
@@ -75,6 +81,10 @@ def make_worker(
     config.parallel_config.data_parallel_rank = 0
     config.parallel_config.rank = 0
     config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
         "backend": "mooncake",
@@ -88,6 +98,71 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise)
+
+
+class TestPCPPoolWorker(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_replica_keys_geometry_and_thread_ownership(self, send_thread, recv_thread, event):
+        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
+            for pcp_rank in range(pcp_size):
+                with self.subTest(pcp_size=pcp_size, pcp_rank=pcp_rank, dcp_size=dcp_size):
+                    worker = make_worker(
+                        self,
+                        kv_role="kv_both",
+                        pcp_size=pcp_size,
+                        pcp_rank=pcp_rank,
+                        dcp_size=dcp_size,
+                        tp_size=dcp_size,
+                        extra_config={"load_async": True},
+                    )
+                    self.assertEqual(worker.grouped_block_size, [16 * dcp_size])
+                    self.assertEqual(worker.hash_block_size, 16 * dcp_size)
+                    key = worker.token_database._make_key_by_hash("h0").to_string()
+                    self.assertEqual(
+                        key,
+                        "llama-7b@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@h0",
+                    )
+                    worker._start_kv_transfer_threads()
+                    self.assertEqual(send_thread.call_args.args[5], pcp_rank)
+                    self.assertEqual(send_thread.call_args.args[6], pcp_size)
+                    self.assertIs(recv_thread.call_args.args[1], worker.token_database)
+                    self.doCleanups()
+
+
+class TestKVPPPoolWorker(unittest.TestCase):
+    def test_registers_persistent_layers_and_mtp(self):
+        import torch
+
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                worker = make_worker(self, tp_rank=rank, tp_size=2, num_layers=18, use_mla=True, use_kvpp=True)
+                worker.vllm_config = make_kvpp_config(2)
+                worker._transfer_threads_started = True
+                names = [layer_name(i) for i in (9, 10, 17)]
+                caches = {name: torch.zeros((4, 16, 8)) for name in names}
+                worker.register_kv_caches(caches)
+                expected = [names[rank], names[2]]
+                self.assertEqual(list(worker.kv_caches), expected)
+                self.assertEqual(worker.group_num_layers, {0: 2})
+                self.assertEqual(worker.num_layers, 18)
+                self.assertEqual(worker.group_kv_caches_base_addr[0], [caches[name].data_ptr() for name in expected])
+                self.assertEqual(worker.head_or_tp_rank, rank)
+                self.assertEqual(worker.put_step, 1)
+
+    def test_lookup_requires_every_tp_shard(self):
+        worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True)
+        for exists, expected in (([1, 1, 1, 1], 32), ([1, 1, 1, 0], 16), ([1, 1, 0, 0], 0)):
+            with self.subTest(exists=exists):
+                worker.m_store.exists.return_value = exists
+                self.assertEqual(worker.lookup_scheduler(32, ["h0", "h1"]), expected)
+                keys = worker.m_store.exists.call_args.args[0]
+                self.assertEqual(len(keys), 4)
+                self.assertTrue(all("@head_or_tp_rank:0" in key for key in keys[:2]))
+                self.assertTrue(all("@head_or_tp_rank:1" in key for key in keys[2:]))
 
 
 class _SparseSWAHitManager:
@@ -1868,6 +1943,40 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(len(sizes), 2)
         self.assertEqual(block_ids, [10, 10])
         self.assertTrue(keys[0].endswith(f"@{b'h1'.hex()}"))
+
+    def test_tp_mismatch_pcp_write_ownership(self):
+        for pcp_size in (1, 2, 4):
+            for tp_rank in (0, 1):
+                with self.subTest(pcp_size=pcp_size, tp_rank=tp_rank):
+                    written = []
+                    for pcp_rank in range(pcp_size):
+                        worker = self._make_strided_worker(tp_rank=tp_rank)
+                        worker.pcp_rank, worker.pcp_size = pcp_rank, pcp_size
+                        worker.enable_kv_events = True
+                        worker.kv_send_thread = MagicMock()
+                        worker.kv_send_thread.lookup.side_effect = lambda keys: [False] * len(keys)
+                        worker.m_store = MagicMock()
+                        req = ReqMeta(
+                            req_id="r1",
+                            token_len_chunk=8,
+                            block_ids=[10, 11],
+                            block_hashes=[b"h0", b"h1"],
+                            original_block_size=4,
+                        )
+                        worker._store_kv_tp_mismatch(req)
+                        expected_blocks = [i for i in range(2) if i % pcp_size == pcp_rank]
+                        if expected_blocks:
+                            keys = worker.m_store.put.call_args.args[0]
+                            self.assertEqual(len(keys), 2 * len(expected_blocks))
+                            written.extend(keys)
+                            events = worker.kv_send_thread.update_kv_event.call_args.args[0]
+                            self.assertEqual(len(events), len(req.block_hashes))
+                        else:
+                            worker.m_store.put.assert_not_called()
+                            worker.kv_send_thread.update_kv_event.assert_not_called()
+                        worker.kv_send_thread.dec_stored_request.assert_called_once_with("r1")
+                    self.assertEqual(len(written), 4)
+                    self.assertEqual(len(set(written)), 4)
 
     def test_load_kv_tp_mismatch_calls_backend_get(self):
         worker = self._make_strided_worker()
