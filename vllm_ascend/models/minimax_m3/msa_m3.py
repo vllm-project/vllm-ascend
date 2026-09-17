@@ -39,9 +39,10 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
-    minimax_m3_index_decode_a5,
+    minimax_m3_index_decode_replicated,
     minimax_m3_index_tp_block_parallel_decode,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
@@ -54,14 +55,13 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# The bundled MsaIndexScore supports A5 FP8. Use AscendC for both prefill and
-# decode; the A5 decode path scores the full local table without TP collectives.
+# The bundled MsaIndexScore supports FP8. Use AscendC for both prefill and
+# decode; FP8-capable hardware scores the full local table without TP collectives.
 _USE_ASCENDC_INDEX_SCORE_PREFILL = True
 _USE_ASCENDC_INDEX_SCORE_DECODE = True
 
-if get_ascend_device_type() == AscendDeviceType.A5:
+if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,
@@ -70,10 +70,13 @@ if get_ascend_device_type() == AscendDeviceType.A5:
 
 
 def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
-    # The A5 Triton decode kernel operates on the complete, replicated index-K
-    # cache on every TP rank. Keep the mainline block-sharded optimization for
-    # the other device families only.
-    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
+    # The FP8-capable decode backend scores the complete, replicated index-K
+    # cache on every TP rank. Other profiles retain TP block sharding.
+    return (
+        not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+        and tp_size > 1
+        and num_prefills == 0
+    )
 
 
 def _active_decode_num_reqs(
@@ -367,7 +370,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             )
             if (
                 _USE_ASCENDC_INDEX_SCORE_DECODE
-                and get_ascend_device_type() != AscendDeviceType.A5
+                and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
                 and self.tp_size > 1
                 and active_prefills == 0
             ):
@@ -513,13 +516,13 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE_DECODE:
-                if get_ascend_device_type() == AscendDeviceType.A5:
+                if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                     decode_start_loc = torch.div(
                         d.context_lens,
                         self.block_size,
                         rounding_mode="floor",
                     ).to(dtype=torch.int32)
-                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_a5(
+                    decode_topk, decode_select_num_idx = minimax_m3_index_decode_replicated(
                         decode_iq,
                         kv,
                         d.block_table,

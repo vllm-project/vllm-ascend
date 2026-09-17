@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -16,7 +16,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
@@ -55,7 +55,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _minimax_m3_index_score,
     _minimax_m3_sparse_attn_kv_gather_q,
     minimax_m3_index_decode,
-    minimax_m3_index_decode_a5,
+    minimax_m3_index_decode_replicated,
     minimax_m3_index_prefill,
     minimax_m3_index_tp_block_parallel_decode,
 )
@@ -547,9 +547,11 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
 
 def test_index_score_uses_ascendc_prefill_and_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
-    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
-    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
-    import_branches = module_source[a5_branch_start:a5_branch_end]
+    fp8_branch_start = module_source.index(
+        "if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):"
+    )
+    fp8_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", fp8_branch_start)
+    import_branches = module_source[fp8_branch_start:fp8_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
@@ -558,21 +560,115 @@ def test_index_score_uses_ascendc_prefill_and_decode() -> None:
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
     assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A5,
-    ):
-        assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
 
 
-def test_non_a5_decode_keeps_tp_block_sharding() -> None:
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A3,
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("supports_fp8", [False, True])
+def test_index_decode_sharding_uses_hardware_capability(
+    device_type: AscendDeviceType,
+    supports_fp8: bool,
+) -> None:
+    profile = get_hardware_profile(device_type)
+    capabilities = profile.capabilities - {HardwareCapability.FP8_ATTENTION}
+    if supports_fp8:
+        capabilities = capabilities | {HardwareCapability.FP8_ATTENTION}
+    with patch.object(
+        msa_m3_module,
+        "get_current_hardware_profile",
+        return_value=replace(profile, capabilities=capabilities),
     ):
-        assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
+        assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0) is not supports_fp8
         assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("supports_fp8", [False, True])
+@pytest.mark.parametrize("decode_query_len", [1, 2])
+def test_indexer_decode_metadata_and_forward_use_hardware_capability(
+    device_type: AscendDeviceType,
+    supports_fp8: bool,
+    decode_query_len: int,
+) -> None:
+    # Toggle the capability independently of the device family so a model-name
+    # check cannot accidentally satisfy the dispatch contract.
+    profile = get_hardware_profile(device_type)
+    capabilities = profile.capabilities - {HardwareCapability.FP8_ATTENTION}
+    if supports_fp8:
+        capabilities = capabilities | {HardwareCapability.FP8_ATTENTION}
+    device = torch.device("cpu")
+    common = _create_common_attn_metadata(
+        BatchSpec(seq_lens=[256 + decode_query_len], query_lens=[decode_query_len]),
+        block_size=128,
+        device=device,
+    )
+    builder = _make_indexer_builder(device, tp_size=4)
+    tp_group = SimpleNamespace(world_size=4, rank_in_group=0)
+    impl = object.__new__(AscendMiniMaxM3IndexerImpl)
+    torch.nn.Module.__init__(impl)
+    impl.num_index_heads = 1
+    impl.index_head_dim = 4
+    impl.block_size = 128
+    impl.topk_blocks = 2
+    impl.init_blocks = 1
+    impl.local_blocks = 1
+    impl.index_cache = SimpleNamespace(
+        prefix="layer.attn.index_cache",
+        kv_cache=torch.zeros(4, 128, 4),
+    )
+    expected_topk = torch.zeros(1, decode_query_len, 2, dtype=torch.int32)
+    expected_counts = torch.ones(1, decode_query_len, dtype=torch.int32)
+
+    with (
+        patch.object(
+            msa_m3_module,
+            "get_current_hardware_profile",
+            return_value=replace(profile, capabilities=capabilities),
+        ),
+        patch.object(msa_m3_module, "get_tp_group", return_value=tp_group),
+        patch.object(msa_m3_module, "split_decodes_and_prefills", return_value=(1, 0, decode_query_len, 0)),
+        patch.object(builder, "_build_tp_score_metadata", wraps=builder._build_tp_score_metadata) as mock_tp_metadata,
+        patch.object(msa_m3_module, "get_forward_context") as mock_context,
+        patch.object(
+            msa_m3_module,
+            "minimax_m3_index_decode_replicated",
+            return_value=(expected_topk, expected_counts),
+        ) as mock_replicated,
+        patch.object(
+            msa_m3_module,
+            "minimax_m3_index_tp_block_parallel_decode",
+            return_value=expected_topk,
+        ) as mock_sharded,
+    ):
+        metadata = builder.build(0, common)
+        mock_context.return_value = SimpleNamespace(attn_metadata={impl.index_cache.prefix: metadata})
+        actual, prefill, counts = impl.forward(torch.zeros(decode_query_len, 4))
+
+    assert actual is expected_topk
+    assert prefill is None
+    assert metadata.decode is not None
+    if supports_fp8:
+        mock_tp_metadata.assert_not_called()
+        assert metadata.decode.tp_score is None
+        mock_sharded.assert_not_called()
+        mock_replicated.assert_called_once()
+        args, kwargs = mock_replicated.call_args
+        assert args[1] is impl.index_cache.kv_cache
+        assert args[2] is metadata.decode.block_table
+        assert args[3] is metadata.decode.cu_seqlens_q
+        assert args[4] is metadata.decode.seq_lens
+        assert torch.equal(args[5], torch.tensor([2], dtype=torch.int32))
+        assert args[6] is metadata.causal_mask
+        assert kwargs == {"topk": 2, "init_blocks": 1, "local_blocks": 1, "decode_query_len": decode_query_len}
+        assert counts is expected_counts
+    else:
+        mock_tp_metadata.assert_called_once()
+        assert metadata.decode.tp_score is not None
+        mock_replicated.assert_not_called()
+        mock_sharded.assert_called_once()
+        assert mock_sharded.call_args.args[2] is metadata.decode.tp_score
+        assert mock_sharded.call_args.kwargs["tp_group"] is tp_group
+        assert counts is None
 
 
 def test_a5_indexer_forward_keeps_original_decode_path() -> None:
@@ -979,7 +1075,7 @@ def test_ascendc_index_score_forwards_block_forcing_when_enabled() -> None:
     assert kwargs["local_blocks"] == 3
 
 
-def test_a5_index_decode_uses_full_table_score_and_existing_topk_cleanup() -> None:
+def test_replicated_index_decode_uses_full_table_score_and_existing_topk_cleanup() -> None:
     score = torch.tensor([[[4.0, 3.0, 2.0, 1.0]]])
     with (
         patch(
@@ -995,7 +1091,7 @@ def test_a5_index_decode_uses_full_table_score_and_existing_topk_cleanup() -> No
             create=True,
         ) as mock_postprocess,
     ):
-        topk_indices, select_num_idx = minimax_m3_index_decode_a5(
+        topk_indices, select_num_idx = minimax_m3_index_decode_replicated(
             torch.zeros(1, 1, 128),
             torch.zeros(4, 128, 128),
             torch.tensor([[0, 1, 2, 3]], dtype=torch.int32),

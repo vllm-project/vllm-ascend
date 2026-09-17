@@ -208,7 +208,7 @@ def _minimax_m3_index_score(
 
 
 @torch.no_grad()
-def minimax_m3_index_decode_a5(
+def minimax_m3_index_decode_replicated(
     idx_q: torch.Tensor,
     index_kv_cache: torch.Tensor | tuple[torch.Tensor],
     block_table: torch.Tensor,
@@ -222,7 +222,7 @@ def minimax_m3_index_decode_a5(
     local_blocks: int,
     decode_query_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run A5 AscendC scoring with fused block forcing and TopK cleanup."""
+    """Score the full replicated table with fused block forcing and TopK cleanup."""
     assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
     score = _minimax_m3_index_score(
         idx_q,
