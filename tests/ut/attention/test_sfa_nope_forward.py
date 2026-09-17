@@ -157,6 +157,11 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     with (
         patch.object(sparse_mla, "get_current_vllm_config", return_value=config),
         patch.object(sparse_mla, "get_ascend_config", return_value=ascend_config),
+        # `AscendSFAImpl.__init__` asks `vllm_ascend.utils` whether RL pushes
+        # weights into the live model, and that module holds its own reference
+        # to the config singleton, so patching the `sfa_v1` name alone leaves
+        # the predicate reading the real (uninitialised) config.
+        patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
         patch.object(sparse_mla, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(sparse_mla, "enable_sp", return_value=False),
     ):
