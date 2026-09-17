@@ -112,7 +112,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 730
-  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
+  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 650
+  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4_extra.py: 900
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/model_runner_v2/test_spec_pp_accuracy.py: 600
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
