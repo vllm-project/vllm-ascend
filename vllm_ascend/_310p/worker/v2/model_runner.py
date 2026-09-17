@@ -81,7 +81,7 @@ def _post_update_cpu(
             tokens = sampled_cpu[batch_idx, :count].to(dtype=req_states.all_token_ids.cpu.dtype)
             req_states.all_token_ids.cpu[req_idx, total_len : total_len + count].copy_(tokens)
             req_states.last_sampled_tokens_cpu[req_idx, 0] = tokens[-1]
-            req_states.total_len.np[req_idx] = total_len + count
+            req_states.total_len.stage_write_elem(req_idx, total_len + count)
         if not update_computed:
             continue
         query_len = (
@@ -92,7 +92,7 @@ def _post_update_cpu(
             req_states.num_computed_tokens_np[req_idx] += computed_delta
             value = int(req_states.num_computed_tokens_np[req_idx])
             req_states.num_computed_tokens_cpu[req_idx] = value
-            req_states.num_computed_tokens.cpu[req_idx] = value
+            req_states.num_computed_tokens.stage_write_elem(req_idx, value)
     return num_sampled_cpu
 
 
