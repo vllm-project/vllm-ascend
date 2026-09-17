@@ -494,10 +494,10 @@ class TestPackedNzSnapshotRoundtrip(unittest.TestCase):
                 super().__init__()
                 self.register_parameter("w", torch.nn.Parameter(torch.randn(4, 4), requires_grad=False))
 
-        with open(os.path.join(self._tmpdir, "0.snapshot.tmp"), "wb") as f:
-            f.write(b"junk-junk-junk")
-        with open(os.path.join(self._tmpdir, "0.json.tmp"), "w") as f:
-            f.write("{junk")
+        with open(os.path.join(self._tmpdir, "0.snapshot.tmp"), "wb") as bf:
+            bf.write(b"junk-junk-junk")
+        with open(os.path.join(self._tmpdir, "0.json.tmp"), "w") as jf:
+            jf.write("{junk")
 
         model = M().to("npu")
         self.loader._save_snapshot_async(model)
