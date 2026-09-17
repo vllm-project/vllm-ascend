@@ -95,7 +95,7 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       VLLM_LOGGING_LEVEL: "INFO"
       VLLM_USE_V2_MODEL_RUNNER: "1"
-      LCCL_DETERMINISTI: "1"
+      LCCL_DETERMINISTIC: "1"
       HCCL_DETERMINISTIC: "true"
       ATB_MATMUL_SHUFFLE_K_ENABLE: "0"
       CLOSE_MATMUL_K_SHIFT: "1"
@@ -127,5 +127,5 @@ test_cases:
         max_out_len: 8192
         batch_size: 32
         temperature: 0
-        baseline: [0.88, 0.77, 0.66]
+        baseline: [0.91, 0.81, 0.72]
         threshold: 0.05
