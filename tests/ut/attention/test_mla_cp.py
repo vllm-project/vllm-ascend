@@ -333,10 +333,10 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     history_lse = torch.zeros(2, 2 * dcp_size, 1)
     current_output = torch.full((2, 2, 4), 3.0)
     current_lse = torch.zeros(2, 2, 1)
-    transferred = torch.ones(dcp_size, 2, 2, 5)
-    transferred[..., 4] = 0.0
-    transferred[:, :, 1, :4] = float("nan")
-    transferred[:, :, 1, 4] = -torch.inf
+    transferred = torch.ones(2, 2, 5)
+    transferred[..., 4] = torch.log(torch.tensor(float(dcp_size)))
+    transferred[1, ..., :4] = float("nan")
+    transferred[1, ..., 4] = -torch.inf
     current_lse[1] = torch.inf
     current_output[1] = float("nan")
     expected = torch.full((2, 2, 4), (dcp_size + 3.0) / (dcp_size + 1.0))
@@ -400,29 +400,31 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         assert kwargs["sparse_mode"] == 3
         return current_output, current_lse
 
-    def communicate(out, lse, size, scatter_dim, group_name, defer_combine):
+    def communicate(out, lse, size, scatter_dim, group_name, return_lse):
         assert active[0] == "comm"
         assert out is history_output and lse is history_lse
-        assert size == dcp_size and scatter_dim == 1 and defer_combine
+        assert size == dcp_size and scatter_dim == 1 and return_lse
         assert group_name == ("dcp-test" if dcp_size > 1 else "")
         events.append("history_collective")
         return transferred
 
-    def merge(partials, head_dim, scatter_dim, local_output, local_lse):
+    def merge(partials, head_dim, scatter_dim):
         assert active[0] == "main"
         assert events[-1] == ("main_wait", "done")
-        assert partials is transferred
-        assert head_dim == 4 and scatter_dim == 1
-        assert local_output is current_output and local_lse is current_lse
+        assert partials.shape == (2, 2, 2, 5)
+        assert partials.dtype == torch.float32 and partials.is_contiguous()
+        assert head_dim == 4 and scatter_dim == 0
+        torch.testing.assert_close(partials[0], transferred, equal_nan=True)
+        torch.testing.assert_close(partials[1, ..., :4], current_output, equal_nan=True)
+        torch.testing.assert_close(partials[1, ..., 4:], current_lse)
         events.append("merge")
-        # Independent reference counts every history rank and current KV once.
-        history = partials.transpose(1, 2)
-        lses = torch.cat((history[..., 4:], local_lse.unsqueeze(0)), dim=0)
-        values = torch.cat((history[..., :4], local_output.unsqueeze(0)), dim=0)
+        # CPU reference for the fused kernel; invalid shards carry zero weight.
+        lses = partials[..., 4:]
         valid = torch.isfinite(lses)
         weights = torch.softmax(lses.masked_fill(~valid, -torch.inf), dim=0)
         weights = torch.nan_to_num(weights, nan=0.0)
-        return (torch.where(valid, values, 0.0) * weights).sum(0)
+        outputs = torch.where(valid, partials[..., :4], 0.0)
+        return (outputs * weights).sum(0)
 
     impl._run_dcp_mtp_split_attention_op = attention
     impl._v_up_proj_batch_major = Mock(side_effect=lambda x: x)
