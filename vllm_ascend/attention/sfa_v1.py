@@ -180,7 +180,9 @@ class SparseMLAMetadataState:
         if not self.use_smla and block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
             self.block_size = kernel_block_size
         self.table_stride = self.block_size // kernel_block_size
-        table_width = cdiv(vllm_config.model_config.max_model_len, block_size) * (block_size // self.block_size)
+        cache_block_size = vllm_config.cache_config.block_size
+        expand_factor = max(cache_block_size // kernel_block_size, 1)
+        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         self.block_table_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_seqs,
             table_width,
