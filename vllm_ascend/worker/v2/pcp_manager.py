@@ -77,7 +77,8 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
         )
 
-        # Match the normal Ascend block-table path before any graph capture.
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
         if block_tables is not None:
             slot_dtype = block_tables.slot_mappings.dtype
             if self._global_batch_slot_mappings is not None:
