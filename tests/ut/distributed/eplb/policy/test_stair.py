@@ -56,6 +56,123 @@ class TestStairLoadStatistics(unittest.TestCase):
             with self.subTest(placement=placement), self.assertRaises(ValueError):
                 StairEplbPolicy.replica_counts(placement, 3)
 
+    def test_expert_risk_uses_mean_and_variance(self):
+        risk = StairEplbPolicy.expert_risk(np.array([1.0, 2.0]), np.array([4.0, 0.0]), 0.5)
+
+        np.testing.assert_array_equal(risk, [2.0, 2.0])
+
+    def test_replica_search_is_bounded_and_deterministic(self):
+        kwargs = dict(
+            num_stages=3,
+            radius=2,
+            beam_size=4,
+            score=lambda value: float(np.square(value - 2).sum()),
+        )
+
+        first = StairEplbPolicy.replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 3, **kwargs)
+        second = StairEplbPolicy.replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 3, **kwargs)
+
+        self.assertTrue(first)
+        self.assertLessEqual(len(first), 4)
+        self.assertEqual([item.tolist() for item in first], [item.tolist() for item in second])
+        self.assertEqual(len({tuple(item) for item in first}), len(first))
+        self.assertTrue(all(item.sum() == 6 and np.all((item >= 1) & (item <= 3)) for item in first))
+
+    def test_replica_search_supports_zero_redundancy(self):
+        candidates = StairEplbPolicy.replica_candidates(
+            np.array([8.0, 4.0, 2.0]),
+            3,
+            3,
+            num_stages=3,
+            radius=2,
+            beam_size=4,
+            score=lambda value: float(value.sum()),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        np.testing.assert_array_equal(candidates[0], [1, 1, 1])
+
+    def test_replica_search_caps_each_expert_at_one_copy_per_rank(self):
+        candidates = StairEplbPolicy.replica_candidates(
+            np.array([8.0, 3.0]),
+            6,
+            3,
+            num_stages=1,
+            radius=0,
+            beam_size=1,
+            score=lambda value: float(value.max()),
+        )
+
+        np.testing.assert_array_equal(candidates[0], [3, 3])
+
+    def test_replica_search_covers_small_valid_topologies(self):
+        for num_experts in range(1, 6):
+            for num_ranks in range(1, 4):
+                for total_slots in range(num_ranks, num_experts * num_ranks + 1, num_ranks):
+                    if total_slots < num_experts:
+                        continue
+                    with self.subTest(
+                        num_experts=num_experts,
+                        num_ranks=num_ranks,
+                        total_slots=total_slots,
+                    ):
+                        candidates = StairEplbPolicy.replica_candidates(
+                            np.arange(num_experts, 0, -1),
+                            total_slots,
+                            num_ranks,
+                            num_stages=4,
+                            radius=2,
+                            beam_size=8,
+                            score=lambda value: float(np.square(value).sum()),
+                        )
+                        self.assertTrue(candidates)
+                        self.assertTrue(
+                            all(
+                                candidate.sum() == total_slots and np.all((candidate >= 1) & (candidate <= num_ranks))
+                                for candidate in candidates
+                            )
+                        )
+
+    def test_replica_search_scores_only_final_candidates(self):
+        calls = []
+
+        candidates = StairEplbPolicy.replica_candidates(
+            np.arange(8.0, 0.0, -1.0),
+            16,
+            4,
+            num_stages=4,
+            radius=4,
+            beam_size=8,
+            score=lambda value: calls.append(tuple(value)) or float(np.square(value).sum()),
+        )
+
+        self.assertEqual(len(calls), len(candidates))
+        self.assertLessEqual(len(calls), 8)
+
+    def test_replica_search_rejects_invalid_topology_and_controls(self):
+        kwargs = dict(num_stages=2, radius=1, beam_size=4, score=lambda value: float(value.sum()))
+        with self.assertRaises(ValueError):
+            StairEplbPolicy.replica_candidates(np.ones(3), 4, 3, **kwargs)
+        with self.assertRaises(ValueError):
+            StairEplbPolicy.replica_candidates(np.ones(3), 6, 3, **(kwargs | {"radius": 1.0}))
+
+    def test_zero_radius_matches_greedy_replica_allocation(self):
+        risk = np.array([8.0, 4.0, 2.0])
+        expected = StairEplbPolicy._allocate_extra_replicas(risk, np.ones(3, dtype=np.int64), 3, 3, (0, 1, 2))
+
+        candidates = StairEplbPolicy.replica_candidates(
+            risk,
+            6,
+            3,
+            num_stages=3,
+            radius=0,
+            beam_size=4,
+            score=lambda value: float(value.max()),
+        )
+
+        self.assertEqual(len(candidates), 1)
+        np.testing.assert_array_equal(candidates[0], expected)
+
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
         with self.assertRaises(ValueError):
