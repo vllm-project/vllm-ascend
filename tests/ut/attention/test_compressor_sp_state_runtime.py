@@ -126,6 +126,35 @@ class TestDrainLifecycle:
         assert rt.pending_refs == [] and rt.last_done_event is None
         assert rt.layers_submitted == 0
 
+    def test_deferred_apply_attaches_on_demand(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_ASCEND_COMPRESSOR_SP_STATE_DEBUG", 0, raising=False)
+        rt = self._runtime(monkeypatch)
+
+        attached = []
+
+        class _FakeExecutor:
+            def attach_sp_state(self, deferred, apply_stream):
+                ev = _FakeEvent()
+                attached.append((deferred, apply_stream, ev))
+                return ev
+
+        @dataclass
+        class _Deferred:
+            work: object
+            sp_metadata: object
+            state_cache: object
+
+        d1, d2 = _Deferred(object(), object(), object()), _Deferred(object(), object(), object())
+        rt.submit_deferred(_FakeExecutor(), d1)
+        rt.submit_deferred(_FakeExecutor(), d2)
+        assert rt.layers_submitted == 2 and rt.pending_applies
+        rt.attach_pending()
+        assert len(attached) == 2 and not rt.pending_applies
+        assert rt.last_done_event is attached[-1][2]
+        rt.drain()
+        assert attached[-1][2].synchronized == 1
+        assert rt.pending_refs == [] and rt.last_done_event is None
+
     def test_drain_noop_without_submissions(self, monkeypatch):
         rt = self._runtime(monkeypatch)
         rt.drain()  # must not raise

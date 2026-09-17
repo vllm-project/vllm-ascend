@@ -648,6 +648,26 @@ def rotate_activation(
     )
 
 
+@dataclass
+class CompressorSPStateDeferred:
+    """Gather-side half of one deferred state replication chain.
+
+    :meth:`CompressorExecutor.launch_sp_state` only enqueues the state read
+    and the async all-gather and returns this handle. The apply half
+    (:meth:`CompressorExecutor.attach_sp_state`) is attached one layer later
+    by the runtime: attaching immediately after TopK means the Work.wait()
+    inside the apply-stream context can host-block on a backlogged gather
+    while the compute queue is empty (observed as rare 1-2.7 ms device
+    blanks after TopK). By the next layer's forward entry the host has
+    already enqueued SWA/attention/o_proj/MoE, so the same wait can no
+    longer starve the compute stream.
+    """
+
+    work: Any
+    sp_metadata: CompressorSPMetadata
+    state_cache: torch.Tensor
+
+
 class CompressorExecutor:
     """Execute one main or LI Compressor and preserve non-SP cache semantics.
 
@@ -960,6 +980,73 @@ class CompressorExecutor:
         """All-gather fixed-capacity raw rows before global owner reorder."""
         return self._launch_sp_output(compressed_kv, sp_metadata).wait()
 
+    def launch_sp_state(
+        self,
+        state_cache: torch.Tensor,
+        sp_metadata: CompressorSPMetadata,
+        state_stream: Any | None = None,
+        state_ready_event: Any | None = None,
+        runtime: Any | None = None,
+    ) -> CompressorSPStateDeferred | None:
+        """Replicate the complete non-SP state write-set on every TP rank.
+
+        Synchronizing only request tails would make internal prefix-cache
+        checkpoints invalid on ranks that did not compute those tokens.
+
+        With ``state_stream`` only the gather half runs now: read this
+        rank's state rows and launch the async all-gather on the dedicated
+        state stream / state process group. The apply half (Work.wait ->
+        where -> scatter -> done event) is attached later via
+        :meth:`attach_sp_state`; see :class:`CompressorSPStateDeferred`
+        for why the split exists. The chain first waits
+        ``state_ready_event`` (recorded right behind the Compressor
+        kernel), never the whole compute stream.
+        """
+        if state_stream is None:
+            self._sync_sp_state_inline(state_cache, sp_metadata)
+            return None
+
+        if state_ready_event is None:
+            raise ValueError("Deferred state replication requires a producer event")
+        state_stream.wait_event(state_ready_event)
+        with torch_npu.npu.stream(state_stream):
+            self._state_read_send_buffer(state_cache, sp_metadata)
+            work = dist.all_gather_into_tensor(
+                sp_metadata.gathered_state_buffer,
+                sp_metadata.state_send_buffer,
+                group=self.state_group,
+                async_op=True,
+            )
+        deferred = CompressorSPStateDeferred(
+            work=work,
+            sp_metadata=sp_metadata,
+            state_cache=state_cache,
+        )
+        if runtime is not None:
+            runtime.submit_deferred(self, deferred)
+        return deferred
+
+    def attach_sp_state(
+        self,
+        deferred: CompressorSPStateDeferred,
+        state_apply_stream: Any,
+    ) -> Any:
+        """Attach the apply half of one deferred state chain.
+
+        Work.wait() is the sentinel-proven deterministic join (non-blocking
+        stream-dependency insertion on this torch_npu build); calling it
+        inside the apply-stream context orders where/scatter after the
+        gather without blocking the host whenever the gather has already
+        retired. Returns the chain-done event, which fires only after the
+        final scatter: the next step consumes the scattered state.
+        """
+        with torch_npu.npu.stream(state_apply_stream):
+            deferred.work.wait()
+            self._state_mask_scatter(deferred.state_cache, deferred.sp_metadata)
+            state_done_event = torch.npu.Event()
+            state_done_event.record(state_apply_stream)
+        return state_done_event
+
     def _sync_sp_state(
         self,
         state_cache: torch.Tensor,
@@ -969,65 +1056,24 @@ class CompressorExecutor:
         runtime: Any | None = None,
         state_apply_stream: Any | None = None,
     ) -> Any:
-        """Replicate the complete non-SP state write-set on every TP rank.
+        """Launch and immediately attach one deferred state chain.
 
-        Synchronizing only request tails would make internal prefix-cache
-        checkpoints invalid on ranks that did not compute those tokens.
-
-        With ``state_stream`` the whole chain is queued on the dedicated state
-        stream (and the dedicated state process group) and NOT joined here:
-        the state cache has no reader inside the forward that wrote it, so the
-        only regular join is the next ``execute_model`` entry drain. The chain
-        covers gather -> all-gather -> where -> scatter; the returned
-        ``state_done_event`` fires only after the final scatter, because the
-        next step consumes the scattered state, not the gathered rows.
-
-        The chain first waits ``state_ready_event`` (recorded right behind the
-        Compressor kernel) instead of the whole compute stream, so it does not
-        serialize behind finalize/TopK work.
+        Kept for callers that want the original eager-attach behaviour
+        (tests, connector edge paths); the production forward path uses
+        :meth:`launch_sp_state` + a later :meth:`attach_sp_state`.
         """
-        if state_stream is None:
-            self._sync_sp_state_inline(state_cache, sp_metadata)
+        deferred = self.launch_sp_state(
+            state_cache,
+            sp_metadata,
+            state_stream=state_stream,
+            state_ready_event=state_ready_event,
+            runtime=None,
+        )
+        if deferred is None:
             return None
-
-        if state_ready_event is None:
-            raise ValueError("Deferred state replication requires a producer event")
         if state_apply_stream is None:
             raise ValueError("Deferred state replication requires an apply stream")
-        # Producer dependency: this rank's Compressor kernel has written its
-        # state rows; the read below must not observe them early.
-        state_stream.wait_event(state_ready_event)
-        with torch_npu.npu.stream(state_stream):
-            self._state_read_send_buffer(state_cache, sp_metadata)
-            # async_op=True: async_op=False may host-block on the
-            # multi-millisecond state all-gather.
-            work = dist.all_gather_into_tensor(
-                sp_metadata.gathered_state_buffer,
-                sp_metadata.state_send_buffer,
-                group=self.state_group,
-                async_op=True,
-            )
-        # Sentinel verdict (torch_npu 2.10.0.post2): same-stream successors of
-        # an async HCCL collective are not ordered behind it (event self-wait
-        # included), and stream-recorded events are not reliable coverage when
-        # multiple async collectives are stacked. Work.wait() is the
-        # deterministic primitive: on this build it is NON-blocking and
-        # inserts a completion dependency onto the CURRENT stream. Calling it
-        # inside the apply-stream context therefore orders where/scatter
-        # after the gather without blocking the host.
-        with torch_npu.npu.stream(state_apply_stream):
-            work.wait()
-            self._state_mask_scatter(state_cache, sp_metadata)
-            state_done_event = torch.npu.Event()
-            state_done_event.record(state_apply_stream)
-        if runtime is not None:
-            runtime.submit(
-                state_done_event=state_done_event,
-                work=work,
-                sp_metadata=sp_metadata,
-                state_cache=state_cache,
-            )
-        return state_done_event
+        return self.attach_sp_state(deferred, state_apply_stream)
 
     def _state_read_send_buffer(
         self,

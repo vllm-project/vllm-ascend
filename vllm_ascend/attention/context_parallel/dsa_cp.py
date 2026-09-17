@@ -96,14 +96,15 @@ class CompressorSPStateRuntime:
         # Sentinel verdict (torch_npu 2.10.0.post2): kernels enqueued on the
         # SAME stream after an async HCCL all-gather are NOT ordered behind
         # the collective -- not even via a same-stream event self-wait. Only
-        # a CROSS-stream wait_event on an event recorded behind the gather
-        # reliably covers completion. Therefore the state chain runs on two
-        # streams: the gather on ``state_stream``, the where/scatter epilogue
-        # on ``state_apply_stream`` waiting the gather's done event.
+        # a CROSS-stream wait on the collective's Work reliably covers
+        # completion. Therefore the state chain runs on two streams: the
+        # gather on ``state_stream``, the where/scatter epilogue on
+        # ``state_apply_stream`` joined via Work.wait().
         self.state_apply_stream = torch_npu.npu.Stream()
         self.state_group = _create_compressor_sp_state_group(tp_group)
         self.last_done_event: torch.npu.Event | None = None
         self.pending_refs: list[Any] = []
+        self.pending_applies: list[Any] = []
         self.layers_submitted = 0
         self.layers_submitted_total = 0
 
@@ -118,6 +119,35 @@ class CompressorSPStateRuntime:
         self.pending_refs.append((sp_metadata, state_cache, work, state_done_event))
         self.layers_submitted += 1
         self.layers_submitted_total += 1
+
+    def submit_deferred(self, executor: Any, deferred: Any) -> None:
+        """Queue the gather half now; the apply half attaches one layer later."""
+        self.pending_applies.append((executor, deferred))
+        self.pending_refs.append((deferred.sp_metadata, deferred.state_cache, deferred.work, None))
+        self.layers_submitted += 1
+        self.layers_submitted_total += 1
+
+    def attach_pending(self) -> None:
+        """Attach queued apply halves.
+
+        The production forward calls this at the NEXT layer's entry: by then
+        SWA/attention/o_proj/MoE kernels are already enqueued, so a
+        Work.wait() that degenerates to a host block on a backlogged gather
+        can no longer starve an empty compute stream (the rare 1-2.7 ms
+        post-TopK blanks observed in profiling).
+        """
+        if not self.pending_applies:
+            return
+        for executor, deferred in self.pending_applies:
+            done = executor.attach_sp_state(deferred, self.state_apply_stream)
+            # Replace the placeholder ref entry with the real event so the
+            # buffers stay owned until the chain completes.
+            for i, ref in enumerate(self.pending_refs):
+                if ref[2] is deferred.work and ref[3] is None:
+                    self.pending_refs[i] = (ref[0], ref[1], ref[2], done)
+                    break
+            self.last_done_event = done
+        self.pending_applies.clear()
 
     def drain(self) -> None:
         """Physically complete every in-flight state chain before returning.
@@ -149,6 +179,7 @@ class CompressorSPStateRuntime:
         # Host-side completion is proven; buffers owned by the chains can now
         # be recycled and the step bookkeeping starts fresh.
         self.pending_refs.clear()
+        self.pending_applies.clear()
         self.last_done_event = None
         self.layers_submitted = 0
 
@@ -258,7 +289,17 @@ def reset_compressor_sp_state_runtimes() -> None:
 def drain_compressor_sp_state() -> None:
     """Public drain hook for ``execute_model``/``_dummy_run`` entry points."""
     for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
+        # The final layer of a step has no "next layer" to attach its apply
+        # half; attach it here before waiting, so the done event exists and
+        # the scattered state is complete for the next step's readers.
+        runtime.attach_pending()
         runtime.drain()
+
+
+def attach_compressor_sp_state_pending() -> None:
+    """Attach last layer's deferred state applies before publishing caches."""
+    for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
+        runtime.attach_pending()
 
 
 def dsv4_swa_overlap_stream() -> torch.npu.Stream:
@@ -1735,12 +1776,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         if self.compress_ratio > 1 and self.multistream_dsv4_dsa_overlap and has_kv_transfer_group():
             # A KV connector may export this layer's caches right after this
-            # forward, including the state group. Wait exactly THIS layer's
-            # state chain completion event -- structurally the last chain
-            # submitted by this layer's _forward -- and never the mutable
-            # runtime tail, so capture/inline/no-SP paths and future
-            # scheduling changes cannot wait on a stale or unrelated event.
+            # forward, including the state group. Attach this layer's
+            # deferred applies (the last submitted chain is structurally this
+            # layer's) and wait its done event -- never the mutable runtime
+            # tail, so capture/inline/no-SP paths and future scheduling
+            # changes cannot wait on a stale or unrelated event.
+            attach_compressor_sp_state_pending()
             layer_event = getattr(self, "_compressor_sp_layer_state_event", None)
+            if layer_event is None and _COMPRESSOR_SP_STATE_RUNTIMES:
+                for runtime in _COMPRESSOR_SP_STATE_RUNTIMES.values():
+                    if runtime.last_done_event is not None:
+                        layer_event = runtime.last_done_event
             if layer_event is not None:
                 layer_event.synchronize()
                 self._compressor_sp_layer_state_event = None
@@ -1937,10 +1983,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         # on SDMA/AICPU vs compute on cube/vector cores). Graph capture cannot
         # host-join deferred handles, so it stays inline.
         #
-        # There is deliberately NO per-layer entry join any more: row
-        # all-gathers are consumed inside their own layer through per-
-        # collective done events, and deferred state replication lives on the
-        # dedicated state stream drained once at the execute_model entry.
+        # Attach the PREVIOUS layer's deferred state applies now: by this
+        # point SWA/attention/o_proj/MoE kernels are already enqueued, so the
+        # Work.wait() inside attach cannot starve an empty compute stream
+        # even when it degenerates to a host block on a backlogged gather.
+        attach_compressor_sp_state_pending()
         compressor_sp_comm = None
         if self.multistream_dsv4_dsa_overlap and not torch.npu.is_current_stream_capturing():
             compressor_sp_comm = dsv4_overlap_stream("compressor_sp_comm")
@@ -2050,40 +2097,34 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 )
 
             if sp_comm is not None and main_compressor_sp_metadata is not None and main_pending is not None:
-                # Queue the complete state write-set replication on the
-                # dedicated state stream (and state process group) without
-                # joining it. Each chain waits only the producer event
-                # recorded behind its Compressor kernel. The only regular
-                # join is the next execute_model entry drain; a KV connector
-                # joins this layer's chain at the end of forward instead.
+                # Launch the GATHER half only: read this rank's state rows and
+                # start the async state all-gather on the dedicated state
+                # stream / group, waiting just the producer event recorded
+                # behind the Compressor kernel. The apply half attaches at the
+                # next layer's forward entry (or execute_model drain for the
+                # last layer), so the Work.wait() involved can never stall an
+                # empty compute stream.
                 state_runtime = compressor_sp_state_runtime(self.tp_group)
                 main_state_cache = DeviceOperator.unpack_dsa_forward_kv_cache(
                     kv_cache, self.compress_ratio
                 )[2]
-                main_state_done_event = self.compressor_executor._sync_sp_state(
+                self.compressor_executor.launch_sp_state(
                     main_state_cache,
                     main_compressor_sp_metadata,
                     state_stream=state_runtime.state_stream,
                     state_ready_event=main_pending.state_ready_event,
                     runtime=state_runtime,
-                    state_apply_stream=state_runtime.state_apply_stream,
                 )
-                layer_state_done_event = main_state_done_event
                 if self.compress_ratio == 4 and indexer_pending is not None:
                     assert indexer_compressor_sp_metadata is not None
                     indexer_state_cache = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0]
-                    layer_state_done_event = self.indexer_compressor_executor._sync_sp_state(
+                    self.indexer_compressor_executor.launch_sp_state(
                         indexer_state_cache,
                         indexer_compressor_sp_metadata,
                         state_stream=state_runtime.state_stream,
                         state_ready_event=indexer_pending.state_ready_event,
                         runtime=state_runtime,
-                        state_apply_stream=state_runtime.state_apply_stream,
                     )
-                # Layer-local tail: the LAST chain of THIS layer (indexer's
-                # when present). forward() waits exactly this event before a
-                # connector publish, never the mutable global stream tail.
-                self._compressor_sp_layer_state_event = layer_state_done_event
 
         # SWA does not depend on preprocessing communication, so it is scheduled
         # after the Compressor section and its all-gather is issued last.
