@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -149,6 +150,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # Set from the trainer-supplied init info at the handshake; defaults
         # are only for the (unreachable) receive-before-init case.
         self.packed = False
+        self._packed_importer = NPUPackedBufferImporter()
 
     def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
         """Record the trainer-supplied wire params so the worker decodes
@@ -156,12 +158,21 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        """Restore checkpoint-format parameters before loading new weights."""
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        """Rebuild runtime weight representations after loading completes."""
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.vllm_config.model_config)
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -176,7 +187,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # device is not guaranteed to match ``self.device``. The IPC tensors
         # must be rebuilt on the device the model lives on.
         device_index = self.device.index
-        physical_npu_id = npu_generate_uuid()
+        physical_npu_id = npu_generate_uuid(device_index)
 
         if self.packed:
             assert update_info.tensor_sizes is not None
@@ -189,6 +200,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -219,10 +231,15 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        with disable_mtp_completeness_check():
             self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
+        self._packed_importer.close()
 
 
 class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):

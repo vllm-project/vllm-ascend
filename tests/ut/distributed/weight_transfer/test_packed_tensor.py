@@ -25,6 +25,7 @@ data correctness is verified end-to-end.
 
 from __future__ import annotations
 
+import sys
 import types
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -574,6 +576,24 @@ def test_packed_npu_ipc_consumer_truncates_to_content_size():
             device_index=0,
         )
     assert torch.equal(weights[0][1].cpu(), torch.tensor([1.0], dtype=torch.float32))
+
+
+def test_npu_packed_buffer_importer_reuses_mapping_and_closes():
+    packed = torch.zeros(4, dtype=torch.uint8)
+    patcher = _install_fake_rebuild_npu_tensor(packed)
+    importer = NPUPackedBufferImporter()
+    args = ["uuid", 4, 0, 0, 0, 0, 1, None]
+
+    with patcher:
+        first = importer.rebuild(args)
+        second = importer.rebuild(args)
+        fake_mod = sys.modules["torch_npu.multiprocessing.reductions"]
+        fake_rebuild = fake_mod.rebuild_npu_tensor  # type: ignore[attr-defined]
+
+    assert first is second
+    fake_rebuild.assert_called_once_with(*args)
+    importer.close()
+    assert importer._entry is None
 
 
 # ---------------------------------------------------------------------------

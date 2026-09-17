@@ -33,6 +33,7 @@ These cover two bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
 import inspect
 import sys
 import types
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -59,6 +60,27 @@ def _patch_rebuild_npu_tensor(rebuild_func):
             "torch_npu.multiprocessing": types.ModuleType("torch_npu.multiprocessing"),
             "torch_npu.multiprocessing.reductions": fake_mod,
         },
+    )
+
+
+def _patch_reload_module(*, initialize=None, finalize=None):
+    """Provide lazy reload helpers without importing the model stack."""
+    fake_mod = types.ModuleType("vllm.model_executor.model_loader.reload")
+    fake_mod.initialize_layerwise_reload = initialize or MagicMock()  # type: ignore[attr-defined]
+    fake_mod.finalize_layerwise_reload = finalize or MagicMock()  # type: ignore[attr-defined]
+    return patch.dict(
+        sys.modules,
+        {"vllm.model_executor.model_loader.reload": fake_mod},
+    )
+
+
+def _patch_mtp_validation_module():
+    """Provide the MTP guard without importing the full model loader."""
+    fake_mod = types.ModuleType("vllm.model_executor.model_loader.mtp_validation")
+    fake_mod.disable_mtp_completeness_check = nullcontext  # type: ignore[attr-defined]
+    return patch.dict(
+        sys.modules,
+        {"vllm.model_executor.model_loader.mtp_validation": fake_mod},
     )
 
 
@@ -147,15 +169,17 @@ def test_receive_weights_rebuilds_with_rebuild_npu_tensor():
     engine.model = MagicMock()
     engine.device = MagicMock(index=device_index)
     engine.packed = False
+    engine._packed_importer = MagicMock()
     engine.model.load_weights.side_effect = lambda weights: received.update(weights=weights)
 
     with (
         _patch_rebuild_npu_tensor(fake_rebuild),
+        _patch_mtp_validation_module(),
         patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid) as mock_uuid,
     ):
         engine.receive_weights(update_info)
 
-    mock_uuid.assert_called_once_with()
+    mock_uuid.assert_called_once_with(device_index)
     assert received["weights"][0][0] == "model.weight"
     assert torch.equal(received["weights"][0][1], rebuilt_weight)
     # Index 6 (device index) overwritten with the receiver's device.
@@ -166,18 +190,69 @@ def test_start_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
 
-    with patch("vllm.model_executor.model_loader.reload.initialize_layerwise_reload") as mock_init:
+    mock_init = MagicMock()
+    with _patch_reload_module(initialize=mock_init):
         engine.start_weight_update()
 
-    mock_init.assert_not_called()
+    mock_init.assert_called_once_with(engine.model)
 
 
 def test_finish_weight_update():
     engine = object.__new__(NPUIPCWeightTransferEngine)
     engine.model = MagicMock()
-    engine.model_config = MagicMock()
+    engine.vllm_config = MagicMock()
+    engine._packed_importer = MagicMock()
 
-    with patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload") as mock_finalize:
+    mock_finalize = MagicMock()
+    with _patch_reload_module(finalize=mock_finalize):
         engine.finish_weight_update()
 
-    mock_finalize.assert_not_called()
+    mock_finalize.assert_called_once_with(engine.model, engine.vllm_config.model_config)
+    engine._packed_importer.close.assert_called_once_with()
+
+
+def test_receive_packed_weights_loads_model():
+    npu_uuid = "node-1"
+    device_index = 1
+    weights = [("model.weight", torch.ones(2))]
+    update_info = NPUIPCWeightTransferEngine.update_info_cls(
+        names=["model.weight"],
+        dtype_names=["float32"],
+        shapes=[[2]],
+        ipc_handles={npu_uuid: (None,) * 8},
+        tensor_sizes=[8],
+    )
+
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=device_index)
+    engine.packed = True
+    engine._packed_importer = MagicMock()
+
+    with (
+        _patch_mtp_validation_module(),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
+        patch(f"{_MODULE}.packed_npu_ipc_consumer", return_value=weights) as consumer,
+    ):
+        engine.receive_weights(update_info)
+
+    consumer.assert_called_once_with(
+        ipc_handle=update_info.ipc_handles,
+        physical_npu_id=npu_uuid,
+        names=update_info.names,
+        shapes=update_info.shapes,
+        dtype_names=update_info.dtype_names,
+        tensor_sizes=update_info.tensor_sizes,
+        device_index=device_index,
+        importer=engine._packed_importer,
+    )
+    engine.model.load_weights.assert_called_once_with(weights)
+
+
+def test_shutdown_closes_packed_importer():
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine._packed_importer = MagicMock()
+
+    engine.shutdown()
+
+    engine._packed_importer.close.assert_called_once_with()

@@ -268,6 +268,35 @@ def packed_npu_ipc_producer(
         }
 
 
+class NPUPackedBufferImporter:
+    """Cache the consumer-side mapping of one packed NPU IPC buffer.
+
+    A packed transfer exports one reusable buffer and sends the same rebuild
+    arguments with every chunk. Rebuilding that export for every chunk would
+    release the cross-process reference once per chunk, rather than once per
+    export. Keep the rebuilt mapping alive across chunks and release it when a
+    new export replaces it or the owning engine closes the importer.
+    """
+
+    def __init__(self) -> None:
+        self._entry: tuple[tuple, torch.Tensor] | None = None
+
+    def rebuild(self, list_args: list) -> torch.Tensor:
+        # Lazy import: ``rebuild_npu_tensor`` is unavailable on CPU-only hosts.
+        from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
+        key = tuple(list_args)
+        if self._entry is not None and self._entry[0] == key:
+            return self._entry[1]
+        packed = rebuild_npu_tensor(*list_args)
+        self._entry = (key, packed)
+        return packed
+
+    def close(self) -> None:
+        """Release the held mapping exactly once for the current export."""
+        self._entry = None
+
+
 def packed_npu_ipc_consumer(
     ipc_handle: dict[str, tuple],
     physical_npu_id: str,
@@ -276,6 +305,7 @@ def packed_npu_ipc_consumer(
     dtype_names: list[str],
     tensor_sizes: list[int],
     device_index: int,
+    importer: NPUPackedBufferImporter | None = None,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -293,11 +323,10 @@ def packed_npu_ipc_consumer(
         dtype_names: Parameter dtype name strings (e.g. "float16").
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
+        importer: Import cache shared across all chunks of one packed export.
+            ``None`` creates an ephemeral importer and is only safe for a
+            single-chunk transfer.
     """
-    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
-    # imported at module load time on non-NPU hosts.
-    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
-
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
@@ -308,7 +337,9 @@ def packed_npu_ipc_consumer(
     # Index 6 of the args from reduce_tensor is the device_index.
     # Overwrite it with the receiver's device index.
     list_args[6] = device_index
-    packed = rebuild_npu_tensor(*list_args)
+    if importer is None:
+        importer = NPUPackedBufferImporter()
+    packed = importer.rebuild(list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]
