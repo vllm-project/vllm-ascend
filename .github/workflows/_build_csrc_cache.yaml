@@ -86,10 +86,6 @@ env:
   AWS_REGION: ap-southeast-1
   RUNS_ON_RUNNER_NAME: ""
 
-  VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS: "60"
-  VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS: "120"
-  VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS: "120"
-
 jobs:
   build:
     name: build-${{ fromJSON(inputs.target).id }}-cache
@@ -188,7 +184,6 @@ jobs:
 
       - name: Restore incremental build cache
         id: incremental-cache-restore
-        if: fromJSON(inputs.target).incremental_cache == true
         uses: ./.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
@@ -229,96 +224,15 @@ jobs:
             exit 1
           fi
 
-      - name: Summarize incremental build cache
-        if: always() && fromJSON(inputs.target).incremental_cache == true
-        continue-on-error: true
-        env:
-          EVENT_LOG: ${{ env.VLLM_ASCEND_BUILD_CACHE_EVENT_LOG }}
-          RESTORE_HIT: ${{ steps.incremental-cache-restore.outputs.cache-hit }}
-          RESTORE_MATCHED_KEY: ${{ steps.incremental-cache-restore.outputs.cache-matched-key }}
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PYCODE'
-          import collections
-          import json
-          import os
-          from pathlib import Path
-
-          event_path = Path(os.environ["EVENT_LOG"])
-          events = []
-          if event_path.is_file():
-              for line in event_path.read_text(encoding="utf-8").splitlines():
-                  if line.strip():
-                      events.append(json.loads(line))
-
-          starts = collections.Counter(
-              e.get("domain")
-              for e in events
-              if e.get("event") == "action_start"
-          )
-          results = collections.Counter(
-              (e.get("domain"), e.get("status"))
-              for e in events
-              if e.get("event") == "cache_result"
-          )
-
-          op_hit = results[("custom_operator", "HIT")]
-          op_miss = results[("custom_operator", "MISS")]
-          op_bypass = results[("custom_operator", "BYPASS")]
-          tp_hit = results[("third_party", "HIT")]
-          tp_miss = results[("third_party", "MISS")]
-          tp_bypass = results[("third_party", "BYPASS")]
-          lock_timeout = sum(
-              e.get("event") == "lock_timeout" for e in events
-          )
-          index_skipped = sum(
-              e.get("event") == "index_skipped" for e in events
-          )
-
-          lines = [
-              "## Incremental csrc build cache",
-              f"- restore exact hit: `{os.environ.get('RESTORE_HIT', '') or 'false'}`",
-              f"- restore matched key: `{os.environ.get('RESTORE_MATCHED_KEY', '') or '<none>'}`",
-              (
-                  "- custom_operator: "
-                  f"actions={starts['custom_operator']}, "
-                  f"HIT={op_hit}, MISS={op_miss}, BYPASS={op_bypass}"
-              ),
-              (
-                  "- third_party: "
-                  f"actions={starts['third_party']}, "
-                  f"HIT={tp_hit}, MISS={tp_miss}, BYPASS={tp_bypass}"
-              ),
-              f"- lock_timeout={lock_timeout}, index_skipped={index_skipped}",
-          ]
-
-          print("\n".join(lines))
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary:
-              with open(summary, "a", encoding="utf-8") as stream:
-                  stream.write("\n".join(lines) + "\n")
-          PYCODE
-
-          du -sh "$INCREMENTAL_BUILD_CACHE_DIR" || true
-
       # L1 transport failure is a performance degradation, not a correctness
       # failure. The verified final L0 artifact can still be published.
       - name: Save incremental build cache
-        if: >-
-          ${{
-            success() &&
-            fromJSON(inputs.target).incremental_cache == true &&
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
         uses: ./.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
           primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}
+          access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+          secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
 
       - name: Save csrc cache
         if: >-

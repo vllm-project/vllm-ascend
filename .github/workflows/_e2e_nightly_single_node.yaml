@@ -157,14 +157,6 @@ jobs:
     container:
       image: ${{ inputs.image }}
     env:
-      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-      AWS_S3_FORCE_PATH_STYLE: "false"
-      AWS_REGION: ap-southeast-1
-      RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
       HF_HUB_OFFLINE: 1
       VLLM_USE_MODELSCOPE: True
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
@@ -208,7 +200,6 @@ jobs:
           path: .incremental-cache-workflow
           sparse-checkout: |
             .github/actions/csrc-l1-restore
-            .github/actions/csrc-l1-save
           sparse-checkout-cone-mode: false
       - name: Restore incremental cache for source checkout
         id: source-l1
@@ -242,21 +233,6 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install -e .
 
-      - name: Save incremental cache for source checkout
-        if: >-
-          ${{
-            success() &&
-            inputs.request_id != '' &&
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
-        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-        with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          primary-key: ${{ steps.source-l1.outputs.primary-key }}
       - name: Uninstall Triton for 310P tests
         if: ${{ inputs.soc_version == '310P' }}
         run: |

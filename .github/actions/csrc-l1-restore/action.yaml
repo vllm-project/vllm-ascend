@@ -7,7 +7,7 @@ inputs:
     description: Directory exported as VLLM_ASCEND_BUILD_CACHE_DIR.
   architecture:
     required: true
-    description: Build architecture, normalized by this action (for example X64 or ARM64).
+    description: Build architecture (x64 or arm64; common runner aliases are accepted).
   soc-version:
     required: true
     description: Target SOC or device family, normalized by this action.
@@ -63,22 +63,6 @@ runs:
         fi
         echo "supported=true" >> "$GITHUB_OUTPUT"
 
-        schema="$(python3 - "$engine" <<'PYCODE'
-        import ast
-        import sys
-        from pathlib import Path
-
-        tree = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id == "SCHEMA_VERSION":
-                        print(ast.literal_eval(node.value))
-                        raise SystemExit(0)
-        raise SystemExit("SCHEMA_VERSION not found")
-        PYCODE
-        )"
-
         if [ -n "$CALLER_CSRC_HASH" ]; then
           csrc_hash="$CALLER_CSRC_HASH"
         else
@@ -91,82 +75,22 @@ runs:
           fi
         fi
 
-        compat_digest="$(python3 - \
-          "$CACHE_ARCHITECTURE" \
-          "$CACHE_SOC_VERSION" \
-          "$CACHE_TOOLCHAIN_IMAGE" <<'PYCODE'
-        import hashlib
-        import json
-        import sys
-        from pathlib import Path
-
-        architecture_aliases = {
-            "x64": "x64",
-            "x86_64": "x64",
-            "amd64": "x64",
-            "arm64": "arm64",
-            "aarch64": "arm64",
-        }
-        soc_aliases = {
-            "a2": "ascend910b1",
-            "910b": "ascend910b1",
-            "ascend910b1": "ascend910b1",
-            "a3": "ascend910_9391",
-            "ascend910_9391": "ascend910_9391",
-            "310p": "ascend310p1",
-            "ascend310p1": "ascend310p1",
-            "a5": "ascend950dt_9582",
-            "950": "ascend950dt_9582",
-            "ascend950dt_9582": "ascend950dt_9582",
-        }
-
-        architecture = architecture_aliases.get(sys.argv[1].strip().lower())
-        if architecture is None:
-            raise SystemExit(f"unsupported cache architecture: {sys.argv[1]!r}")
-
-        soc_input = sys.argv[2].strip().lower()
-        soc_version = soc_aliases.get(soc_input, soc_input)
-        toolchain_image = sys.argv[3].strip()
-        machine = {
-            "x64": "x86_64",
-            "arm64": "aarch64",
-        }[architecture]
-        metadata = Path(
-            f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/"
-            "ascend_toolkit_install.info"
+        unique_suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)-$$-${RANDOM}"
+        readarray -t key_parts < <(
+          python3 "$engine" snapshot-key \
+            --architecture "$CACHE_ARCHITECTURE" \
+            --soc-version "$CACHE_SOC_VERSION" \
+            --toolchain-image "$CACHE_TOOLCHAIN_IMAGE" \
+            --csrc-hash "$csrc_hash" \
+            --unique-suffix "$unique_suffix"
         )
-        if metadata.is_file():
-            toolchain = {
-                "kind": "cann-metadata",
-                "sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
-            }
-        elif toolchain_image:
-            toolchain = {
-                "kind": "container-image",
-                "value": toolchain_image,
-            }
-        else:
-            raise SystemExit(
-                "CANN metadata is unavailable; toolchain-image fallback is required"
-            )
-        if not soc_version:
-            raise SystemExit("SOC version must be non-empty")
-
-        descriptor = json.dumps(
-            {
-                "architecture": architecture,
-                "soc_version": soc_version,
-                "toolchain": toolchain,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        print(hashlib.sha256(descriptor.encode("utf-8")).hexdigest())
-        PYCODE
-        )"
-        compat_prefix="vllm-ascend-inc-v1-schema${schema}-${compat_digest}-"
-        same_csrc_prefix="${compat_prefix}${csrc_hash}-"
-        primary_key="${same_csrc_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)-$$-${RANDOM}"
+        if [ "${#key_parts[@]}" -ne 3 ]; then
+          echo "::error::snapshot-key returned an invalid response"
+          exit 1
+        fi
+        primary_key="${key_parts[0]}"
+        same_csrc_prefix="${key_parts[1]}"
+        compat_prefix="${key_parts[2]}"
 
         {
           echo "primary_key=$primary_key"
@@ -178,9 +102,6 @@ runs:
         {
           echo "VLLM_ASCEND_BUILD_CACHE_DIR=$CACHE_DIR"
           echo "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG=${RUNNER_TEMP}/csrc-l1-${GITHUB_JOB}.jsonl"
-          echo "VLLM_ASCEND_BUILD_CACHE_ENTRY_LOCK_TIMEOUT_SECONDS=60"
-          echo "VLLM_ASCEND_BUILD_CACHE_ACTION_LOCK_TIMEOUT_SECONDS=120"
-          echo "VLLM_ASCEND_BUILD_CACHE_PUBLISH_LOCK_TIMEOUT_SECONDS=120"
         } >> "$GITHUB_ENV"
 
     - name: Restore L1 snapshot
@@ -188,6 +109,13 @@ runs:
       if: steps.key.outputs.supported == 'true'
       continue-on-error: true
       uses: runs-on/cache/restore@v5
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+        RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+        AWS_S3_FORCE_PATH_STYLE: "false"
+        AWS_REGION: ap-southeast-1
+        RUNS_ON_RUNNER_NAME: ""
       with:
         path: ${{ inputs.cache-dir }}
         key: ${{ steps.key.outputs.primary_key }}
@@ -195,33 +123,11 @@ runs:
           ${{ steps.key.outputs.same_csrc_prefix }}
           ${{ steps.key.outputs.compat_prefix }}
 
-    - name: Record restored L1 entries
+    - name: Reset L1 update marker
       if: steps.key.outputs.supported == 'true'
       shell: bash
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
       run: |
         set -euo pipefail
-        baseline="${RUNNER_TEMP}/csrc-l1-${GITHUB_JOB}-baseline.json"
-        python3 - "$CACHE_DIR" "$baseline" <<'PYCODE'
-        import hashlib
-        import json
-        import sys
-        from pathlib import Path
-
-        cache_root = Path(sys.argv[1])
-        records = []
-        if cache_root.is_dir():
-            for manifest in sorted(cache_root.rglob("manifest.json")):
-                records.append(
-                    [
-                        manifest.relative_to(cache_root).as_posix(),
-                        hashlib.sha256(manifest.read_bytes()).hexdigest(),
-                    ]
-                )
-        Path(sys.argv[2]).write_text(
-            json.dumps(records, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        PYCODE
-        echo "VLLM_ASCEND_BUILD_CACHE_BASELINE=$baseline" >> "$GITHUB_ENV"
+        rm -f "$CACHE_DIR/.updated"

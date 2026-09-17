@@ -11,8 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-ENGINE = REPO_ROOT / "csrc" / "scripts" / "build_cache.py"
+from .build_cache_test_utils import build_cache_command, run_command
 
 
 def _builder(tmp_path: Path) -> Path:
@@ -58,59 +57,29 @@ def _command(
     artifact: str,
     recipe: str,
 ) -> list[str]:
-    return [
-        sys.executable,
-        str(ENGINE),
-        "run",
-        "--cache-root",
-        str(cache),
-        "--domain",
-        "custom_operator",
-        "--unit",
-        "test_unit",
-        "--output-dir",
-        str(stage),
-        "--publish-dir",
-        str(publish),
-        "--publish-state-dir",
-        str(state),
-        "--prepared-input",
-        str(prepared),
-        "--recipe-value",
-        recipe,
-        "--environment-value",
-        "abi=test",
-        "--environment-profile",
-        "ascendc",
-        "--environment-tool",
-        sys.executable,
-        "--soc",
-        "ascend910b",
-        "--operator",
-        "test_operator",
-        "--action",
-        action,
-        "--operator-source",
-        str(source),
-        "--",
-        sys.executable,
-        str(builder),
-        str(stage),
-        str(counter),
-        artifact,
-    ]
-
-
-def _run(command: list[str], env: dict[str, str] | None = None):
-    merged = os.environ.copy()
-    if env:
-        merged.update(env)
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        env=merged,
-        check=False,
+    return build_cache_command(
+        cache_root=cache,
+        domain="custom_operator",
+        unit="test_unit",
+        output_dir=stage,
+        environment_profile="ascendc",
+        prepared_inputs=[prepared],
+        recipe_values=[recipe],
+        environment_values=["abi=test"],
+        environment_tools=[sys.executable],
+        soc="ascend910b",
+        operator="test_operator",
+        action=action,
+        operator_source=source,
+        publish_dir=publish,
+        publish_state_dir=state,
+        build_command=[
+            sys.executable,
+            str(builder),
+            str(stage),
+            str(counter),
+            artifact,
+        ],
     )
 
 
@@ -135,7 +104,7 @@ def _seed_one(tmp_path: Path):
         artifact="A.o",
         recipe="recipe=A",
     )
-    first = _run(command)
+    first = run_command(command)
     assert first.returncode == 0, first.stdout + first.stderr
     assert "[build-cache] MISS" in first.stdout
     assert counter.read_text() == "1"
@@ -155,27 +124,6 @@ def _read_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_index_lock_is_nonblocking_on_hit(tmp_path: Path):
-    _, _, _, cache, _, _, _, counter, command = _seed_one(tmp_path)
-    event_log = tmp_path / "events.jsonl"
-    lock = _hold_lock(cache / "custom_operator" / "cache_index.json.lock")
-    try:
-        start = time.monotonic()
-        hit = _run(
-            command,
-            {"VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log)},
-        )
-        elapsed = time.monotonic() - start
-    finally:
-        lock.close()
-
-    assert hit.returncode == 0, hit.stdout + hit.stderr
-    assert "[build-cache] HIT" in hit.stdout
-    assert elapsed < 2.0
-    assert counter.read_text() == "1"
-    assert any(e["event"] == "index_skipped" for e in _read_events(event_log))
-
-
 def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
     _, _, _, cache, _, _, _, counter, command = _seed_one(tmp_path)
     manifest = next((cache / "custom_operator").rglob("manifest.json"))
@@ -186,7 +134,7 @@ def test_entry_lock_timeout_bypasses_cache(tmp_path: Path):
     lock = _hold_lock(lock_path)
     try:
         start = time.monotonic()
-        bypass = _run(
+        bypass = run_command(
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
@@ -212,7 +160,7 @@ def test_publish_lock_timeout_fails_fast(tmp_path: Path):
     lock = _hold_lock(state / ".publish.lock")
     try:
         start = time.monotonic()
-        failed = _run(
+        failed = run_command(
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
@@ -238,7 +186,7 @@ def test_action_lock_timeout_fails_fast(tmp_path: Path):
     lock = _hold_lock(action_lock)
     try:
         start = time.monotonic()
-        failed = _run(
+        failed = run_command(
             command,
             {
                 "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG": str(event_log),
@@ -279,7 +227,7 @@ def test_many_parallel_hits_complete_without_hang(tmp_path: Path):
             artifact=f"{index}.o",
             recipe=f"recipe={index}",
         )
-        seeded = _run(command)
+        seeded = run_command(command)
         assert seeded.returncode == 0, seeded.stdout + seeded.stderr
         commands.append((command, counter))
 

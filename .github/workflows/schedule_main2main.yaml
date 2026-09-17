@@ -260,7 +260,6 @@ jobs:
           path: .incremental-cache-workflow
           sparse-checkout: |
             .github/actions/csrc-l1-restore
-            .github/actions/csrc-l1-save
           sparse-checkout-cone-mode: false
       - name: Install dependencies
         run: |
@@ -515,21 +514,6 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
-      - name: Save incremental cache after Main2Main fallback
-        if: >-
-          ${{
-            success() &&
-            steps.cache-csrc.outputs.cache-hit != 'true' &&
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
-        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-        with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          primary-key: ${{ steps.main2main-l1.outputs.primary-key }}
       - name: Save vllm-ascend csrc cache
         # Persist the on-runner build for the next dispatch.
         if: >-

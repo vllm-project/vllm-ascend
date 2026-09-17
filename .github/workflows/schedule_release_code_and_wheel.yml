@@ -97,15 +97,6 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     runs-on: ${{ matrix.os }}
-    env:
-      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-      AWS_S3_FORCE_PATH_STYLE: "false"
-      AWS_REGION: ap-southeast-1
-      RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -142,7 +133,7 @@ jobs:
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
-          soc-version: a2
+          soc-version: ascend910b1
           toolchain-image: quay.io/ascend/manylinux:9.1.0-910b-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
@@ -160,31 +151,18 @@ jobs:
 
       - name: Export incremental cache from wheel image
         run: |
-          case "$GITHUB_JOB" in
-            build_and_release_wheel) image="wheel:v1" ;;
-            build_and_release_wheel_a3) image="wheel-a3:v1" ;;
-            build_and_release_wheel_310p) image="wheel-310p:v1" ;;
-            build_and_release_wheel_a5) image="wheel-a5:v1" ;;
-            *) echo "::error::unknown wheel job: $GITHUB_JOB"; exit 1 ;;
-          esac
           .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
-            "$image" \
+            "wheel:v1" \
             "$GITHUB_WORKSPACE/build_cache" \
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
-        if: >-
-          ${{
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -239,15 +217,6 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     runs-on: ${{ matrix.os }}
-    env:
-      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-      AWS_S3_FORCE_PATH_STYLE: "false"
-      AWS_REGION: ap-southeast-1
-      RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -284,7 +253,7 @@ jobs:
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
-          soc-version: a3
+          soc-version: ascend910_9391
           toolchain-image: quay.io/ascend/manylinux:9.1.0-a3-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
@@ -302,31 +271,18 @@ jobs:
 
       - name: Export incremental cache from wheel image
         run: |
-          case "$GITHUB_JOB" in
-            build_and_release_wheel) image="wheel:v1" ;;
-            build_and_release_wheel_a3) image="wheel-a3:v1" ;;
-            build_and_release_wheel_310p) image="wheel-310p:v1" ;;
-            build_and_release_wheel_a5) image="wheel-a5:v1" ;;
-            *) echo "::error::unknown wheel job: $GITHUB_JOB"; exit 1 ;;
-          esac
           .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
-            "$image" \
+            "wheel-a3:v1" \
             "$GITHUB_WORKSPACE/build_cache" \
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
-        if: >-
-          ${{
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -375,15 +331,6 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     runs-on: ${{ matrix.os }}
-    env:
-      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-      AWS_S3_FORCE_PATH_STYLE: "false"
-      AWS_REGION: ap-southeast-1
-      RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -420,7 +367,7 @@ jobs:
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
-          soc-version: 310p
+          soc-version: ascend310p1
           toolchain-image: quay.io/ascend/manylinux:9.1.0-310p-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
@@ -438,31 +385,18 @@ jobs:
 
       - name: Export incremental cache from wheel image
         run: |
-          case "$GITHUB_JOB" in
-            build_and_release_wheel) image="wheel:v1" ;;
-            build_and_release_wheel_a3) image="wheel-a3:v1" ;;
-            build_and_release_wheel_310p) image="wheel-310p:v1" ;;
-            build_and_release_wheel_a5) image="wheel-a5:v1" ;;
-            *) echo "::error::unknown wheel job: $GITHUB_JOB"; exit 1 ;;
-          esac
           .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
-            "$image" \
+            "wheel-310p:v1" \
             "$GITHUB_WORKSPACE/build_cache" \
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
-        if: >-
-          ${{
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -511,15 +445,6 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     runs-on: ${{ matrix.os }}
-    env:
-      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-      AWS_S3_FORCE_PATH_STYLE: "false"
-      AWS_REGION: ap-southeast-1
-      RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     steps:
       - name: checkout vllm-ascend
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -556,7 +481,7 @@ jobs:
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
-          soc-version: a5
+          soc-version: ascend950dt_9582
           toolchain-image: quay.io/ascend/manylinux:9.1.0-950-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
@@ -575,31 +500,18 @@ jobs:
 
       - name: Export incremental cache from wheel image
         run: |
-          case "$GITHUB_JOB" in
-            build_and_release_wheel) image="wheel:v1" ;;
-            build_and_release_wheel_a3) image="wheel-a3:v1" ;;
-            build_and_release_wheel_310p) image="wheel-310p:v1" ;;
-            build_and_release_wheel_a5) image="wheel-a5:v1" ;;
-            *) echo "::error::unknown wheel job: $GITHUB_JOB"; exit 1 ;;
-          esac
           .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
-            "$image" \
+            "wheel-a5:v1" \
             "$GITHUB_WORKSPACE/build_cache" \
             "/workspace/vllm-ascend/build_cache"
 
       - name: Save incremental cache for wheel build
-        if: >-
-          ${{
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
           cache-dir: ${{ github.workspace }}/build_cache
           primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:

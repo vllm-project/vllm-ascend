@@ -71,9 +71,6 @@ jobs:
 
     e2e-upstream_singlecard:
         runs-on: linux-aarch64-a2b3-1
-        env:
-          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -206,21 +203,6 @@ jobs:
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
 
-          - name: Save incremental cache after upstream fallback
-            if: >-
-              ${{
-                success() &&
-                steps.cache-csrc.outputs.cache-hit != 'true' &&
-                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-              }}
-            uses: ./.github/actions/csrc-l1-save
-            env:
-              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -235,9 +217,6 @@ jobs:
 
     e2e-upstream_multicard:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
-        env:
-          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -362,21 +341,6 @@ jobs:
               fi
               uv pip install tblib 
 
-          - name: Save incremental cache after upstream fallback
-            if: >-
-              ${{
-                success() &&
-                steps.cache-csrc.outputs.cache-hit != 'true' &&
-                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-              }}
-            uses: ./.github/actions/csrc-l1-save
-            env:
-              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
@@ -391,9 +355,6 @@ jobs:
               
     e2e-upstream_online:
         runs-on: linux-aarch64-a2b3-${{ matrix.num_npus }}
-        env:
-          OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-          OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
         needs: [resolve-tag, ensure-csrc-cache]
         strategy:
           fail-fast: false
@@ -519,21 +480,6 @@ jobs:
               uv pip install tblib 
               uv pip install "runai-model-streamer[s3,gcs]"
 
-          - name: Save incremental cache after upstream fallback
-            if: >-
-              ${{
-                success() &&
-                steps.cache-csrc.outputs.cache-hit != 'true' &&
-                env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-                env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-              }}
-            uses: ./.github/actions/csrc-l1-save
-            env:
-              AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-              AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:

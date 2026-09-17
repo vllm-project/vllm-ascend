@@ -100,8 +100,6 @@ function help_info() {
                 echo "    --experimental         Build experimental version"
                 echo "    --cann_3rd_lib_path=<PATH>"
                 echo "                           Set ascend third_party package install path, default ./third_party"
-                echo "    --build-cache-dir=<PATH>"
-                echo "                           Set local incremental build cache directory"
                 echo "    --oom                  Build with oom mode on the kernel side, with options: '-g --cce-enable-oom'"
                 echo $dotted_line
                 echo "Examples:"
@@ -301,7 +299,6 @@ function help_info() {
     echo "    --cov When building uTest locally, count the coverage."
     echo "    --noexec Only compile ut, do not execute the compiled executable file"
     echo "    --make_clean Clean build artifacts"
-    echo "    --build-cache-dir=<PATH> Set local incremental build cache directory"
     echo "    --disable_asan Disable ASAN (Address Sanitizer)"
     echo "    --valgrind run ut with valgrind. This option will disable asan, noexec and run utest by valgrind"
     echo "    --ops Compile specified operator, use snake name, like: --ops=add,add_lora, use ',' to separate different operator"
@@ -1164,11 +1161,6 @@ while [[ $# -gt 0 ]]; do
     --cann_3rd_lib_path=*)
         OPTARG=$1
         CANN_3RD_LIB_PATH="$(realpath ${OPTARG#*=})"
-        shift
-        ;;
-    --build-cache-dir=*)
-        OPTARG=$1
-        BUILD_CACHE_DIR="${OPTARG#*=}"
         shift
         ;;
     --oom)

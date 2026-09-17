@@ -100,8 +100,6 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: "false"
       AWS_REGION: ap-southeast-1
       RUNS_ON_RUNNER_NAME: ""
-      OBS_CACHE_WRITE_ACCESS_KEY_ID: ${{ secrets.HW_OBS_AK }}
-      OBS_CACHE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.HW_OBS_SK }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -263,22 +261,6 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
-      - name: Save incremental cache after NPU fallback
-        if: >-
-          ${{
-            success() &&
-            matrix.group.npu_type != 'cpu' &&
-            steps.cache-csrc.outputs.cache-hit != 'true' &&
-            env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-            env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-          }}
-        uses: ./.github/actions/csrc-l1-save
-        env:
-          AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
-        with:
-          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          primary-key: ${{ steps.fallback-l1.outputs.primary-key }}
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |

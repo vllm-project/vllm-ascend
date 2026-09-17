@@ -8,7 +8,7 @@
 #   recipe_hash               - how is it compiled?
 #   compiler_environment_hash - what compiles it?
 # The canonical hash of those three values is the final action key.
-# operator_text_hash only namespaces custom-operator entries and history.
+# operator_text_hash namespaces custom-operator entries.
 #
 # The cache engine owns no static operator or third-party unit list.
 
@@ -35,6 +35,7 @@ ARTIFACT_MODEL_BY_DOMAIN = {"third_party": 1, "custom_operator": 2}
 PUBLISH_STATE_SCHEMA = 1
 CHUNK_SIZE = 1024 * 1024
 EVENT_LOG_ENV = "VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
+UPDATED_MARKER = ".updated"
 LOCK_POLL_SECONDS = 0.05
 LOCK_WAIT_EVENT_SECONDS = 1.0
 DEFAULT_ENTRY_LOCK_TIMEOUT_SECONDS = 60.0
@@ -89,10 +90,6 @@ class _LockTimeoutError(Exception):
         super().__init__(f"{kind} lock timeout after {waited_seconds:.3f}s: {path}")
 
 
-class _IndexLockBusy(RuntimeError):
-    pass
-
-
 def _env_float(name: str, default: float) -> float:
     value = os.environ.get(name)
     if value is None:
@@ -144,30 +141,7 @@ def _emit_event(event: str, **fields) -> None:
         pass
 
 
-def _measure_phase(
-    phase: str,
-    function,
-    *args,
-    event_fields: dict | None = None,
-    **kwargs,
-):
-    fields = event_fields or {}
-    _emit_event("phase_start", phase=phase, **fields)
-    start = time.monotonic()
-    try:
-        return function(*args, **kwargs)
-    finally:
-        _emit_event(
-            "phase_end",
-            phase=phase,
-            seconds=round(time.monotonic() - start, 6),
-            **fields,
-        )
-
-
 def _lock_kind(path: Path) -> str:
-    if path.name == "cache_index.json.lock":
-        return "index"
     if path.name == ".publish.lock":
         return "publish"
     if path.parent.name == ".action_locks":
@@ -279,6 +253,80 @@ def _canonical_hash(records: Iterable[tuple[str, str]]) -> str:
         digest.update(len(value_bytes).to_bytes(8, "big"))
         digest.update(value_bytes)
     return digest.hexdigest()
+
+
+def _snapshot_compatibility(
+    architecture: str,
+    soc_version: str,
+    toolchain_image: str,
+) -> str:
+    architecture_aliases = {
+        "x64": "x64",
+        "x86_64": "x64",
+        "amd64": "x64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+    soc_aliases = {
+        "a2": "ascend910b1",
+        "910b": "ascend910b1",
+        "ascend910b1": "ascend910b1",
+        "a3": "ascend910_9391",
+        "ascend910_9391": "ascend910_9391",
+        "310p": "ascend310p1",
+        "ascend310p1": "ascend310p1",
+        "a5": "ascend950dt_9582",
+        "950": "ascend950dt_9582",
+        "ascend950dt_9582": "ascend950dt_9582",
+    }
+
+    canonical_architecture = architecture_aliases.get(architecture.strip().lower())
+    if canonical_architecture is None:
+        raise ValueError(f"unsupported cache architecture: {architecture!r}")
+
+    canonical_soc = soc_aliases.get(soc_version.strip().lower(), soc_version.strip().lower())
+    if not canonical_soc:
+        raise ValueError("SOC version must be non-empty")
+
+    machine = {"x64": "x86_64", "arm64": "aarch64"}[canonical_architecture]
+    metadata = Path(f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/ascend_toolkit_install.info")
+    if metadata.is_file():
+        toolchain = {
+            "kind": "cann-metadata",
+            "sha256": _sha256_file(metadata),
+        }
+    elif toolchain_image.strip():
+        toolchain = {
+            "kind": "container-image",
+            "value": toolchain_image.strip(),
+        }
+    else:
+        raise ValueError("CANN metadata is unavailable; toolchain-image fallback is required")
+
+    descriptor = json.dumps(
+        {
+            "architecture": canonical_architecture,
+            "soc_version": canonical_soc,
+            "toolchain": toolchain,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _sha256_bytes(descriptor.encode("utf-8"))
+
+
+def snapshot_key(args: argparse.Namespace) -> int:
+    compatibility = _snapshot_compatibility(
+        args.architecture,
+        args.soc_version,
+        args.toolchain_image,
+    )
+    compatibility_prefix = f"vllm-ascend-inc-v1-schema{SCHEMA_VERSION}-{compatibility}-"
+    same_csrc_prefix = f"{compatibility_prefix}{args.csrc_hash}-"
+    print(f"{same_csrc_prefix}{args.unique_suffix}")
+    print(same_csrc_prefix)
+    print(compatibility_prefix)
+    return 0
 
 
 def _is_excluded(relative_path: str, excludes: Sequence[str]) -> bool:
@@ -829,29 +877,12 @@ def _file_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as stream:
         kind = _lock_kind(path)
-        if kind == "index":
-            try:
-                fcntl.flock(
-                    stream.fileno(),
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN):
-                    raise
-                _emit_event(
-                    "index_skipped",
-                    lock="index",
-                    path=str(path),
-                    reason="lock_busy",
-                )
-                raise _IndexLockBusy(str(path)) from None
-        else:
-            _acquire_timed_lock(
-                stream,
-                path,
-                kind=kind,
-                timeout_seconds=_lock_timeout_seconds(kind),
-            )
+        _acquire_timed_lock(
+            stream,
+            path,
+            kind=kind,
+            timeout_seconds=_lock_timeout_seconds(kind),
+        )
         try:
             yield
         finally:
@@ -1206,25 +1237,6 @@ def _publish_action_artifacts(
         _atomic_write_json(action_state_path, action_state)
 
 
-def _safe_update_index(*args, **kwargs) -> None:
-    try:
-        _update_index(*args, **kwargs)
-    except _IndexLockBusy:
-        # Index metadata is observational only. A busy index must never
-        # serialize or delay the build/cache correctness path.
-        return
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(
-            f"[build-cache] WARNING index update failed: {exc}",
-            flush=True,
-        )
-        _emit_event(
-            "warning",
-            component="index",
-            message=str(exc),
-        )
-
-
 def _run_build_command(
     args: argparse.Namespace,
     command: Sequence[str],
@@ -1239,86 +1251,6 @@ def _run_build_command(
         close_fds=False,
     )
     return process.returncode, time.monotonic() - start
-
-
-def _logical_status(
-    domain: str,
-    previous_key: str | None,
-    current_key: str,
-    previous_operator_text_hash: str | None,
-    operator_text_hash: str | None,
-) -> str:
-    if previous_key is None:
-        return "NEW"
-    if domain == "custom_operator":
-        return "UNCHANGED" if previous_operator_text_hash == operator_text_hash else "MODIFIED"
-    return "UNCHANGED" if previous_key == current_key else "MODIFIED"
-
-
-def _update_index(
-    cache_root: Path,
-    domain: str,
-    unit: str,
-    final_key: str,
-    prepared_input_hash: str,
-    recipe_hash: str,
-    environment_hash: str,
-    cache_status: str,
-    operator_text_hash: str | None,
-    soc: str | None,
-    operator: str | None,
-    action: str | None,
-) -> None:
-    domain_root = cache_root / domain
-    index_path = domain_root / "cache_index.json"
-    lock_path = domain_root / "cache_index.json.lock"
-
-    with _file_lock(lock_path):
-        index = _load_json(
-            index_path,
-            {"schema": SCHEMA_VERSION, "units": {}},
-        )
-        if index.get("schema") != SCHEMA_VERSION:
-            index = {"schema": SCHEMA_VERSION, "units": {}}
-
-        if domain == "third_party":
-            unit_key = unit
-        else:
-            unit_key = f"{soc}/{operator}/{action}"
-
-        state = index["units"].setdefault(unit_key, {})
-        previous_key = state.get("current_key")
-        previous_operator_text_hash = state.get("operator_text_hash")
-        logical_status = _logical_status(
-            domain,
-            previous_key,
-            final_key,
-            previous_operator_text_hash,
-            operator_text_hash,
-        )
-
-        state["previous_key"] = previous_key
-        state["current_key"] = final_key
-        state["operator_text_hash"] = operator_text_hash
-        state["prepared_input_hash"] = prepared_input_hash
-        state["recipe_hash"] = recipe_hash
-        state["compiler_environment_hash"] = environment_hash
-        state["logical_status"] = logical_status
-        state["cache_status"] = cache_status
-        state["updated_at"] = int(time.time())
-
-        history = state.setdefault("history", {})
-        history[final_key] = {
-            "operator_text_hash": operator_text_hash,
-            "prepared_input_hash": prepared_input_hash,
-            "recipe_hash": recipe_hash,
-            "compiler_environment_hash": environment_hash,
-            "logical_status": logical_status,
-            "cache_status": cache_status,
-            "updated_at": int(time.time()),
-        }
-
-        _atomic_write_json(index_path, index)
 
 
 def _parse_set_env(values: Sequence[str]) -> dict[str, str]:
@@ -1339,7 +1271,6 @@ def run(args: argparse.Namespace) -> int:
         "action": args.action,
         "soc": args.soc,
     }
-    _emit_event("action_start", **event_fields)
     prepared_inputs = [Path(value) for value in args.prepared_input]
     recipe_files = [Path(value) for value in args.recipe_file]
     environment_files = [Path(value) for value in args.environment_file]
@@ -1365,44 +1296,32 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("missing build command after --")
 
     excludes = tuple(DEFAULT_EXCLUDES) + tuple(args.exclude)
-    prepared_input_hash, prepared_manifest = _measure_phase(
-        "hash_prepared_inputs",
-        _hash_prepared_inputs,
+    prepared_input_hash, prepared_manifest = _hash_prepared_inputs(
         prepared_inputs,
         excludes,
         normalize_paths,
-        event_fields=event_fields,
     )
 
     operator_text_hash: str | None = None
     operator_text_manifest: list[dict] = []
     if args.domain == "custom_operator":
         repo_root = Path(args.repo_root) if args.repo_root else None
-        operator_text_hash, operator_text_manifest = _measure_phase(
-            "hash_operator_text",
-            _hash_operator_text,
+        operator_text_hash, operator_text_manifest = _hash_operator_text(
             Path(args.operator_source),
             repo_root,
-            event_fields=event_fields,
         )
 
-    recipe_hash, recipe_manifest = _measure_phase(
-        "hash_recipe",
-        _hash_recipe,
+    recipe_hash, recipe_manifest = _hash_recipe(
         recipe_files,
         args.recipe_value,
         command,
         normalize_paths,
-        event_fields=event_fields,
     )
-    environment_hash, environment_manifest = _measure_phase(
-        "hash_compiler_environment",
-        _hash_compiler_environment,
+    environment_hash, environment_manifest = _hash_compiler_environment(
         args.environment_profile,
         environment_files,
         args.environment_value,
         args.environment_tool,
-        event_fields=event_fields,
     )
     final_key = _canonical_hash(
         [
@@ -1443,35 +1362,16 @@ def run(args: argparse.Namespace) -> int:
         "compiler_environment": environment_manifest,
     }
 
-    def update_index(cache_status: str) -> None:
-        _safe_update_index(
-            cache_root,
-            args.domain,
-            args.unit,
-            final_key,
-            prepared_input_hash,
-            recipe_hash,
-            environment_hash,
-            cache_status,
-            operator_text_hash,
-            args.soc,
-            args.operator,
-            args.action,
-        )
-
     def publish_custom(artifacts: Sequence[dict]) -> None:
         assert publish_dir is not None
         assert publish_state_dir is not None
         action_identity = f"{args.unit}/{args.action}"
-        _measure_phase(
-            "publish",
-            _publish_action_artifacts,
+        _publish_action_artifacts(
             source_root=output_dir,
             publish_dir=publish_dir,
             publish_state_dir=publish_state_dir,
             action_identity=action_identity,
             artifacts=artifacts,
-            event_fields=event_fields,
         )
 
     def build_without_cache(reason: str) -> int:
@@ -1526,26 +1426,12 @@ def run(args: argparse.Namespace) -> int:
         if lock_error is not None:
             return build_without_cache(f"cache lock unavailable: {lock_error}")
 
-        manifest = _measure_phase(
-            "validate_entry",
-            _validate_entry,
-            entry,
-            final_key,
-            args.domain,
-            event_fields=event_fields,
-        )
+        manifest = _validate_entry(entry, final_key, args.domain)
         if manifest is not None:
             try:
                 if args.domain == "custom_operator":
                     _reset_private_output(output_dir)
-                _measure_phase(
-                    "restore_entry",
-                    _restore_entry,
-                    entry,
-                    output_dir,
-                    manifest,
-                    event_fields=event_fields,
-                )
+                _restore_entry(entry, output_dir, manifest)
                 if args.domain == "custom_operator":
                     publish_custom(manifest["artifacts"])
                 print(
@@ -1558,7 +1444,6 @@ def run(args: argparse.Namespace) -> int:
                     key=final_key,
                     **event_fields,
                 )
-                update_index("HIT")
                 return 0
             except (OSError, RuntimeError) as exc:
                 print(
@@ -1610,7 +1495,6 @@ def run(args: argparse.Namespace) -> int:
             # succeed. Cache persistence remains an optimization.
             publish_custom(artifacts)
 
-        cache_saved = False
         try:
             _save_entry(
                 entry,
@@ -1621,7 +1505,15 @@ def run(args: argparse.Namespace) -> int:
                     "build_seconds": elapsed,
                 },
             )
-            cache_saved = True
+            try:
+                (cache_root / UPDATED_MARKER).touch()
+            except OSError as exc:
+                _emit_event(
+                    "warning",
+                    component="snapshot_marker",
+                    message=str(exc),
+                    **event_fields,
+                )
             print(
                 f"[build-cache] SAVED domain={args.domain} "
                 f"unit={args.unit} key={final_key} "
@@ -1652,7 +1544,6 @@ def run(args: argparse.Namespace) -> int:
                 **event_fields,
             )
 
-        update_index("MISS_BUILT" if cache_saved else "MISS_UNCACHED")
         return 0
 
 
@@ -1694,14 +1585,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--working-directory")
     run_parser.add_argument("command", nargs=argparse.REMAINDER)
 
+    key_parser = subparsers.add_parser("snapshot-key")
+    key_parser.add_argument("--architecture", required=True)
+    key_parser.add_argument("--soc-version", required=True)
+    key_parser.add_argument("--toolchain-image", default="")
+    key_parser.add_argument("--csrc-hash", required=True)
+    key_parser.add_argument("--unique-suffix", required=True)
+
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.subcommand != "run":
-        parser.error(f"unsupported subcommand: {args.subcommand}")
+    if args.subcommand == "snapshot-key":
+        return snapshot_key(args)
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     try:

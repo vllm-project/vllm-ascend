@@ -6,6 +6,12 @@ inputs:
     required: true
   primary-key:
     required: true
+  access-key-id:
+    required: false
+    default: ''
+  secret-access-key:
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -16,50 +22,34 @@ runs:
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
         PRIMARY_KEY: ${{ inputs.primary-key }}
-        BASELINE: ${{ env.VLLM_ASCEND_BUILD_CACHE_BASELINE }}
       run: |
         set -euo pipefail
-
-        updated="$(python3 - "$CACHE_DIR" "$BASELINE" <<'PYCODE'
-        import hashlib
-        import json
-        import sys
-        from pathlib import Path
-
-        cache_root = Path(sys.argv[1])
-        baseline_path = Path(sys.argv[2]) if sys.argv[2] else None
-        baseline = None
-        if baseline_path and baseline_path.is_file():
-            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-
-        current = []
-        if cache_root.is_dir():
-            for manifest in sorted(cache_root.rglob("manifest.json")):
-                current.append(
-                    [
-                        manifest.relative_to(cache_root).as_posix(),
-                        hashlib.sha256(manifest.read_bytes()).hexdigest(),
-                    ]
-                )
-        print("true" if baseline is not None and current != baseline else "false")
-        PYCODE
-        )"
-
         if [ -n "$PRIMARY_KEY" ] \
           && [ -d "$CACHE_DIR" ] \
-          && find "$CACHE_DIR" -mindepth 1 -print -quit | grep -q . \
-          && [ "$updated" = "true" ]; then
+          && [ -f "$CACHE_DIR/.updated" ]; then
           echo "present=true" >> "$GITHUB_OUTPUT"
           du -sh "$CACHE_DIR" || true
         else
           echo "present=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::L1 entry manifests are unchanged; shared cache save is skipped."
+          echo "::notice::The local L1 cache did not gain an entry; shared save is skipped."
         fi
 
     - name: Save L1 snapshot
-      if: steps.inspect.outputs.present == 'true'
+      if: >-
+        steps.inspect.outputs.present == 'true' &&
+        inputs.access-key-id != '' &&
+        inputs.secret-access-key != ''
       continue-on-error: true
       uses: runs-on/cache/save@v5
+      env:
+        RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+        RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+        RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+        AWS_S3_FORCE_PATH_STYLE: "false"
+        AWS_REGION: ap-southeast-1
+        RUNS_ON_RUNNER_NAME: ""
+        AWS_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.secret-access-key }}
       with:
         path: ${{ inputs.cache-dir }}
         key: ${{ inputs.primary-key }}

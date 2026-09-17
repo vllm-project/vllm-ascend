@@ -15,9 +15,17 @@ from pathlib import Path
 import pytest
 import regex as re
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-ENGINE = REPO_ROOT / "csrc" / "scripts" / "build_cache.py"
+from .build_cache_test_utils import ENGINE, build_cache_command, run_command
+
 _KEY_RE = re.compile(r"\bkey=([0-9a-f]{64})\b")
+
+
+def _load_engine(name: str):
+    spec = importlib.util.spec_from_file_location(name, ENGINE)
+    assert spec is not None and spec.loader is not None
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    return engine
 
 
 def _sha256_file(path: Path) -> str:
@@ -95,79 +103,44 @@ def _run_cache(
         publish_state_dir = publish_state_dir or (output_dir.parent / "publish-state")
         actual_output = stage_dir
 
-    command = [
-        sys.executable,
-        str(ENGINE),
-        "run",
-        "--cache-root",
-        str(cache_root),
-        "--domain",
-        domain,
-        "--unit",
-        "test_unit",
-        "--output-dir",
-        str(actual_output),
-        "--environment-profile",
-        "ascendc" if domain == "custom_operator" else "host-cxx",
-        "--environment-tool",
-        sys.executable,
-    ]
-
-    for path in prepared_inputs:
-        command.extend(["--prepared-input", str(path)])
-
-    for value in recipe_values or ["recipe=stable"]:
-        command.extend(["--recipe-value", value])
-
-    for value in environment_values or ["abi=test"]:
-        command.extend(["--environment-value", value])
-
-    for path in normalize_paths or []:
-        command.extend(["--normalize-path", str(path)])
-
-    for pattern in artifact_includes or []:
-        command.extend(["--artifact-include", pattern])
-
+    custom_options = {}
     if domain == "custom_operator":
         if operator_source is None:
             operator_source = prepared_inputs[0]
         assert stage_dir is not None
         assert publish_state_dir is not None
-        command.extend(
-            [
-                "--soc",
-                "ascend910b",
-                "--operator",
-                "test_operator",
-                "--action",
-                action,
-                "--operator-source",
-                str(operator_source),
-                "--publish-dir",
-                str(output_dir),
-                "--publish-state-dir",
-                str(publish_state_dir),
-            ]
-        )
+        custom_options = {
+            "soc": "ascend910b",
+            "operator": "test_operator",
+            "action": action,
+            "operator_source": operator_source,
+            "publish_dir": output_dir,
+            "publish_state_dir": publish_state_dir,
+        }
 
-    command.extend(
-        [
-            "--",
+    command = build_cache_command(
+        cache_root=cache_root,
+        domain=domain,
+        unit="test_unit",
+        output_dir=actual_output,
+        environment_profile="ascendc" if domain == "custom_operator" else "host-cxx",
+        prepared_inputs=prepared_inputs,
+        recipe_values=recipe_values or ["recipe=stable"],
+        environment_values=environment_values or ["abi=test"],
+        environment_tools=[sys.executable],
+        normalize_paths=normalize_paths or [],
+        artifact_includes=artifact_includes or [],
+        build_command=[
             sys.executable,
             str(builder),
             str(actual_output),
             str(counter),
             builder_mode,
             artifact_name,
-        ]
+        ],
+        **custom_options,
     )
-
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return run_command(command)
 
 
 def _assert_success(proc: subprocess.CompletedProcess[str]) -> None:
@@ -274,7 +247,7 @@ def test_custom_operator_miss_then_hit_and_restore(tmp_path: Path):
     assert (output / "kernel.o").read_text(encoding="utf-8") == "artifact-1"
 
 
-def test_prepared_input_change_invalidates_and_revert_hits_history(tmp_path: Path):
+def test_prepared_input_change_invalidates_and_revert_reuses_prior_entry(tmp_path: Path):
     source, prepared = _make_operator_inputs(tmp_path)
     output = tmp_path / "output"
     output.mkdir()
@@ -440,13 +413,7 @@ def test_prepared_path_outside_explicit_normalize_root_remains_sensitive(
 def test_recipe_normalizes_ephemeral_cmake_path_without_hiding_semantic_changes(
     tmp_path: Path,
 ):
-    spec = importlib.util.spec_from_file_location(
-        "build_cache_engine_recipe_path_test",
-        ENGINE,
-    )
-    assert spec is not None and spec.loader is not None
-    engine = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(engine)
+    engine = _load_engine("build_cache_engine_recipe_path_test")
 
     source = tmp_path / "source"
     source.mkdir()
@@ -896,9 +863,6 @@ def test_corrupted_cached_symlink_rebuilds(tmp_path: Path):
 
 
 def _spawn_cache(**kwargs) -> subprocess.Popen[str]:
-    # Build the exact command through a lightweight recorder by duplicating the
-    # helper's argument assembly. The returned process lets tests overlap two
-    # real cache-engine invocations.
     cache_root = kwargs["cache_root"]
     prepared_inputs = kwargs["prepared_inputs"]
     output_dir = kwargs["output_dir"]
@@ -913,48 +877,31 @@ def _spawn_cache(**kwargs) -> subprocess.Popen[str]:
     safe_action = re.sub(r"[^A-Za-z0-9_.-]", "_", action)
     stage_dir = kwargs.get("stage_dir") or (output_dir.parent / "private-stages" / safe_action)
 
-    command = [
-        sys.executable,
-        str(ENGINE),
-        "run",
-        "--cache-root",
-        str(cache_root),
-        "--domain",
-        "custom_operator",
-        "--unit",
-        "test_unit",
-        "--output-dir",
-        str(stage_dir),
-        "--publish-dir",
-        str(output_dir),
-        "--publish-state-dir",
-        str(publish_state_dir),
-        "--prepared-input",
-        str(prepared_inputs[0]),
-        "--recipe-value",
-        recipe_values[0],
-        "--environment-value",
-        "abi=test",
-        "--environment-profile",
-        "ascendc",
-        "--environment-tool",
-        sys.executable,
-        "--soc",
-        "ascend910b",
-        "--operator",
-        "test_operator",
-        "--action",
-        action,
-        "--operator-source",
-        str(operator_source),
-        "--",
-        sys.executable,
-        str(builder),
-        str(stage_dir),
-        str(counter),
-        builder_mode,
-        artifact_name,
-    ]
+    command = build_cache_command(
+        cache_root=cache_root,
+        domain="custom_operator",
+        unit="test_unit",
+        output_dir=stage_dir,
+        environment_profile="ascendc",
+        prepared_inputs=prepared_inputs,
+        recipe_values=recipe_values,
+        environment_values=["abi=test"],
+        environment_tools=[sys.executable],
+        soc="ascend910b",
+        operator="test_operator",
+        action=action,
+        operator_source=operator_source,
+        publish_dir=output_dir,
+        publish_state_dir=publish_state_dir,
+        build_command=[
+            sys.executable,
+            str(builder),
+            str(stage_dir),
+            str(counter),
+            builder_mode,
+            artifact_name,
+        ],
+    )
     return subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1449,13 +1396,7 @@ def test_save_entry_rolls_back_old_entry_if_publish_replace_fails(
     tmp_path: Path,
     monkeypatch,
 ):
-    spec = importlib.util.spec_from_file_location(
-        "build_cache_engine_atomic_save_test",
-        ENGINE,
-    )
-    assert spec is not None and spec.loader is not None
-    engine = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(engine)
+    engine = _load_engine("build_cache_engine_atomic_save_test")
 
     output = tmp_path / "output"
     output.mkdir()

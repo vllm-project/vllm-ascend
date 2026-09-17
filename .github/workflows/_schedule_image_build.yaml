@@ -446,19 +446,13 @@ jobs:
           "/vllm-workspace/vllm-ascend/build_cache"
 
     - name: Save incremental cache for image build
-      if: >-
-        ${{
-          steps.cache-csrc.outputs.cache-hit != 'true' &&
-          env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
-          env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
-        }}
+      if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
       uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
-      env:
-        AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
       with:
         cache-dir: ${{ github.workspace }}/build_cache
         primary-key: ${{ steps.image-l1.outputs.primary-key }}
+        access-key-id: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
+        secret-access-key: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
     - name: Tag digest to prevent GC
       if: ${{ inputs.should_push }}
       run: |
