@@ -3583,7 +3583,7 @@ class NPUModelRunner(GPUModelRunner):
 
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
+            mc2_tokens_capacity, self.vllm_config, in_profile_run=True
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
             # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
             with disable_compilation(self.get_model()):

@@ -1011,9 +1011,13 @@ class NPUPlatform(Platform):
 
         # NOTE: Must use max_tokens_across_dp instead of num_tokens for MoE comm method selection
         # to ensure consistent communication method across all DP ranks
+        _attn_meta = list(attn_metadata.values())[0] if attn_metadata else None
+        is_prefill = _attn_meta is not None and getattr(_attn_meta, "num_prefills", 0) > 0
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            attn_metadata=_attn_meta if is_prefill else None,
+            in_profile_run=in_profile_run,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 
