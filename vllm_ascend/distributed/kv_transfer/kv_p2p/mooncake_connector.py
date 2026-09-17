@@ -58,7 +58,6 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import (
-    AscendDCPReplicatedDraftAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
@@ -2282,8 +2281,8 @@ class MooncakeConnectorWorker:
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": serialized_kv_cache_spec,
         }
-        if isinstance(kv_cache_spec, AscendDCPReplicatedDraftAttentionSpec):
-            serialized["dcp_replication_size"] = kv_cache_spec.dcp_replication_size
+        serialized["dcp_sharded"] = kv_cache_spec.dcp_sharded
+        serialized["block_size"] = kv_cache_spec.block_size
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
         if isinstance(kv_cache_spec, MambaSpec):
@@ -2913,7 +2912,7 @@ class MooncakeConnectorWorker:
         # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
         group_kernel_params: dict[int, tuple[int, int, int]] = {}
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec["kv_cache_spec_type"] in ("MambaSpec", "AscendDCPReplicatedDraftAttentionSpec"):
+            if group_spec["kv_cache_spec_type"] == "MambaSpec" or is_replicated_draft_group(group_spec):
                 continue
             local_scale = self._get_kernel_block_scale(layer_indices)
             kernel_size = self.block_size // local_scale
@@ -2984,6 +2983,11 @@ class MooncakeConnectorWorker:
                 # KDA keeps the full sequence state for this TP rank's heads.
                 local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_kernel_block_ids(
                     layer_indices, meta, group_idx, group_spec
+                )
+                continue
+            if is_replicated_draft_group(group_spec):
+                local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_replicated_draft_block_ids(
+                    meta, group_idx, group_spec, layer_indices
                 )
                 continue
             if spec_type == "AscendSFAIndexerCacheSpec":
@@ -3265,10 +3269,7 @@ class MooncakeConnectorWorker:
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
 
-        has_replicated_draft = any(
-            spec["kv_cache_spec_type"] == "AscendDCPReplicatedDraftAttentionSpec"
-            for spec, _ in self.kv_group2layeridx.values()
-        )
+        has_replicated_draft = any(is_replicated_draft_group(spec) for spec, _ in self.kv_group2layeridx.values())
         if self.local_remote_block_port_mapping[meta.remote_engine_id] is None or has_replicated_draft:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings()
             if has_replicated_draft:
@@ -3294,7 +3295,7 @@ class MooncakeConnectorWorker:
             (
                 group_spec.get("kv_cache_group_id", group_idx)
                 for group_idx, (group_spec, _) in kv_group_items
-                if group_spec["kv_cache_spec_type"] not in ("MambaSpec", "AscendDCPReplicatedDraftAttentionSpec")
+                if group_spec["kv_cache_spec_type"] != "MambaSpec" and not is_replicated_draft_group(group_spec)
             ),
             0,
         )
@@ -3402,7 +3403,7 @@ class MooncakeConnectorWorker:
                         list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
                     )
                     continue
-                if group_spec["kv_cache_spec_type"] == "AscendDCPReplicatedDraftAttentionSpec":
+                if is_replicated_draft_group(group_spec):
                     # Filled on its matching TP source after target shard routing.
                     continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
@@ -3746,7 +3747,7 @@ class MooncakeConnectorWorker:
         prefill_tp_size = meta.remote_ptp_size or self._prefill_tp_size
         pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
         for spec, layers in self.kv_group2layeridx.values():
-            if spec["kv_cache_spec_type"] != "AscendDCPReplicatedDraftAttentionSpec" or not layers:
+            if not is_replicated_draft_group(spec) or not layers:
                 continue
             ranks_by_decode = self._get_remote_ranks_for_req(
                 req_id,
@@ -3776,11 +3777,11 @@ class MooncakeConnectorWorker:
         if not local_ids or meta.num_external_tokens <= 0:
             return [], []
         local_scale = self._get_kernel_block_scale(layer_indices)
-        local_page_tokens = self.block_size * group_spec["dcp_replication_size"]
+        local_page_tokens = group_spec["block_size"]
         if local_page_tokens % local_scale:
             raise ValueError("Replicated draft page size must be divisible by its physical block scale.")
         kernel_size = local_page_tokens // local_scale
-        remote_page_tokens = (meta.remote_block_size or self.block_size) * meta.remote_dcp_size
+        remote_page_tokens = meta.remote_block_size or self.block_size
         if remote_page_tokens % kernel_size:
             raise ValueError("Replicated draft P/D pages must use the same kernel block granularity.")
         remote_scale = remote_page_tokens // kernel_size
@@ -3826,7 +3827,7 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size = meta.remote_ptp_size or self._prefill_tp_size
         for group_idx, (spec, layers) in self.kv_group2layeridx.items():
-            if spec["kv_cache_spec_type"] != "AscendDCPReplicatedDraftAttentionSpec" or not layers:
+            if not is_replicated_draft_group(spec) or not layers:
                 continue
             local_ids, remote_ids = self._get_replicated_draft_block_ids(meta, group_idx, spec, layers)
             for shard in group_pulls:
@@ -4364,7 +4365,7 @@ def transfer_groups_need_independent_block_ids(
     """
     group_scales: dict[int, int] = {}
     for group_idx, (group_spec, layer_indices) in kv_group2layeridx.items():
-        if group_spec.get("kv_cache_spec_type") == "AscendDCPReplicatedDraftAttentionSpec":
+        if is_replicated_draft_group(group_spec):
             return True
         if group_spec.get("kv_cache_spec_type") == "MambaSpec":
             continue
@@ -4428,3 +4429,8 @@ def get_prefill_pp_indices(
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
         return (start_layer, end_layer)
+
+
+def is_replicated_draft_group(group_spec: dict[str, Any]) -> bool:
+    """Dense draft KV uses global token positions on every target DCP rank."""
+    return group_spec.get("kv_cache_spec_type") == "FullAttentionSpec" and not group_spec.get("dcp_sharded", True)

@@ -186,7 +186,6 @@ class AscendDSparkSpeculator(DCPDraftReplicatedMixin, DSparkSpeculator):
         dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
-        self._prepare_dcp_draft_batch(input_batch, dummy_run, skip_attn_for_dummy_run)
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
         if dummy_run and skip_attn_for_dummy_run:

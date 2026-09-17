@@ -19,6 +19,7 @@ from vllm_ascend.worker.v2.block_table import (
 )
 
 
+@pytest.mark.parametrize("replicated_draft", [False, True])
 @pytest.mark.parametrize(
     ("cp_size", "cp_rank", "cp_interleave"),
     [
@@ -28,8 +29,12 @@ from vllm_ascend.worker.v2.block_table import (
         pytest.param(4, 2, 128, id="cp4_logical_block_interleaved"),
     ],
 )
-def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_interleave: int) -> None:
+def test_compute_slot_mapping_npu_kernel_cp(
+    cp_size: int, cp_rank: int, cp_interleave: int, replicated_draft: bool
+) -> None:
     """Check the Ascend V2 kernel against the upstream kernel."""
+    if replicated_draft and vllm_version_is("0.28.0"):
+        pytest.skip("Replicated draft groups require the upstream dcp_sharded API.")
     device = "npu"
     max_num_tokens = 8192
     # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
@@ -51,6 +56,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     )
 
     num_groups = 2
+    sharded = torch.tensor([True, not replicated_draft], dtype=torch.bool, device=device)
     block_tables = [torch.randint(0, 320, (3, 320), dtype=torch.int32, device=device) for _ in range(num_groups)]
     block_table_ptrs = torch.tensor(
         [table.data_ptr() for table in block_tables],
@@ -97,6 +103,8 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         cp_rank,
         **kernel_kwargs,
         BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
+        dcp_sharded=sharded,
+        HAS_DCP_SHARDED=not vllm_version_is("0.28.0"),
     )
     if vllm_version_is("0.28.0"):
         # Release's reference kernel has no separate KV/kernel-size arguments.
@@ -128,7 +136,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
             )
             ref_slot_mappings[group_id, : positions.numel()].masked_fill_(~is_local, -1)
     else:
-        ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
+        ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device), sharded)
         ref_compute_slot_mappings_kernel[grid](
             *ref_args,
             ref_slot_mappings,
@@ -138,6 +146,8 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         )
 
     torch.testing.assert_close(slot_mappings, ref_slot_mappings)
+    if replicated_draft:
+        assert torch.all(slot_mappings[1, : positions.numel()] >= 0)
 
 
 def test_ascend_block_tables_compute_slot_mappings_out() -> None:
@@ -164,6 +174,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables._block_table_window_size = 512
     if not vllm_version_is("0.28.0"):
         block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
+        block_tables.dcp_sharded = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(

@@ -53,7 +53,6 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
-    AscendDCPReplicatedDraftAttentionSpec,
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -222,14 +221,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         kv_cache_spec.update(mamba_specs)
 
     for layer_name, layer in attn_layers.items():
-        if not getattr(layer, "_ascend_dcp_replicated_draft", False):
-            continue
-        spec = kv_cache_spec[layer_name]
-        if not isinstance(spec, FullAttentionSpec) or isinstance(spec, MLAAttentionSpec):
-            raise TypeError("Replicated GQA draft requires a full-attention KV spec.")
-        kv_cache_spec[layer_name] = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
-            spec, vllm_config.parallel_config.decode_context_parallel_size
-        )
+        if getattr(layer, "_ascend_dcp_replicated_draft", False):
+            spec = kv_cache_spec[layer_name]
+            if not isinstance(spec, FullAttentionSpec) or isinstance(spec, MLAAttentionSpec):
+                raise TypeError("Replicated GQA draft requires a full-attention KV spec.")
+            # P and D must assign the same cache groups even when P uses DCP=1.
+            kv_cache_spec[layer_name] = replace(spec, dcp_sharded=False)
     return kv_cache_spec
 
 
@@ -804,8 +801,6 @@ def _allocate_kv_cache(
             for layer_idx, layer_name in enumerate(shared_names):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
-                # Replicated draft planning emits one layer per descriptor;
-                # its layer stride is unused and may be zero.
                 if (
                     len(shared_names) > 1 and kv_cache_tensor.layer_stride != layer_size
                 ) or kv_cache_tensor.block_stride != layer_spec.page_size_bytes:
@@ -1199,8 +1194,6 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            if isinstance(kv_cache_spec, AscendDCPReplicatedDraftAttentionSpec):
-                num_blocks *= kv_cache_spec.dcp_replication_size
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
