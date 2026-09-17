@@ -29,7 +29,21 @@ class WeightUpdateModelCase:
     extra_server_args: tuple[str, ...] = ()
 
     def server_args(self) -> list[str]:
-        return ["--hf-overrides", json.dumps(self.hf_overrides), *self.extra_server_args]
+        # Run the worker out-of-process. With a single-process executor the
+        # worker shares the engine core's ``VllmConfig``, and ``EngineCoreProc``
+        # rewrites ``cache_config.block_size`` to the minimum block size across
+        # the KV cache groups before the worker recomputes the KV cache specs.
+        # DeepSeek-V4's block-size tables are keyed by the user-facing 32/64/128,
+        # so the rewritten value (8/4/2) raises ``KeyError`` on every lookup. An
+        # out-of-process worker gets its own config copy, taken before that
+        # rewrite, and the single-worker topology of these cases is unchanged.
+        return [
+            "--hf-overrides",
+            json.dumps(self.hf_overrides),
+            "--distributed-executor-backend",
+            "mp",
+            *self.extra_server_args,
+        ]
 
 
 # Qwen and GLM reduce only layer count. DeepSeek keeps the first four
