@@ -291,12 +291,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         gate = self.gate
         assert gate is not None
         # Models such as DeepSeek V4 opt into FP32 routing at weight loading.
-        # Other gates must retain their own dtype and forward implementation.
+        # Diagnostic arm: bypass the native gate wrapper while retaining its
+        # tensor dtype, to isolate wrapper effects from router precision.
         if hasattr(gate, "weight_fp32"):
             hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
             return F.linear(hidden_states_fp32, gate.weight_fp32)
-        gate_out = gate(hidden_states)
-        return gate_out[0] if isinstance(gate_out, tuple) else gate_out
+        return F.linear(hidden_states, gate.weight, gate.bias)
 
     def _prepare_router_and_milestones(
         self,

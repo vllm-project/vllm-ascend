@@ -2297,12 +2297,11 @@ def test_runner_preserves_gate_precision_policy(monkeypatch, precast_fp32_weight
 
 
 @pytest.mark.parametrize("shared_experts", [False, True])
-@pytest.mark.parametrize("returns_tuple", [False, True])
-def test_forward_impl_preserves_native_gate_without_fp32_cast(monkeypatch, shared_experts, returns_tuple):
+def test_forward_impl_direct_linear_without_fp32_cast(monkeypatch, shared_experts):
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
     gate = nn.Linear(4, 3, bias=True, dtype=torch.bfloat16)
     expected_logits = gate(hidden_states)
-    gate.forward = MagicMock(return_value=(expected_logits, None) if returns_tuple else expected_logits)
+    gate.forward = MagicMock(side_effect=AssertionError("unexpected native gate wrapper"))
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
     routed_out = torch.randn_like(hidden_states)
@@ -2322,7 +2321,7 @@ def test_forward_impl_preserves_native_gate_without_fp32_cast(monkeypatch, share
     monkeypatch.setattr(torch.Tensor, "float", MagicMock(side_effect=AssertionError("unexpected FP32 activation Cast")))
     result = runner._forward_impl(hidden_states, hidden_states, shared_experts_input=None)
 
-    gate.forward.assert_called_once_with(hidden_states)
+    gate.forward.assert_not_called()
     runner.routed_experts.forward_impl.assert_called_once_with(
         hidden_states=hidden_states,
         router_logits=expected_logits,
