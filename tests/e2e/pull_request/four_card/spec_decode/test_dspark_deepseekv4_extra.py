@@ -98,4 +98,4 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         )
     finally:
         elapsed = time.perf_counter() - start_time
-        print(f"[DSpark CI timing] case={request.node.name} elapsed={elapsed:.2f}s")
+        print(f"[DSpark Extra CI timing] case={request.node.name} elapsed={elapsed:.2f}s")
