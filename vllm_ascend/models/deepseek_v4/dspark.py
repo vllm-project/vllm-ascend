@@ -180,9 +180,13 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
-        k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
+        # npu_rotary_mul writes its result back to the input storage
+        # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
+        # can run in-place on the rope-segment view of kv; the previous
+        # split -> rope -> cat -> contiguous round-trip was a redundant copy.
+        k_pe = kv[:, attn.nope_head_dim:]
+        _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1))
+        return kv.view(-1, 1, attn.head_dim)
 
     def _store_standard_swa_kv(
         self,
