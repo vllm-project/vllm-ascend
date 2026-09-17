@@ -548,6 +548,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_sfa_parent_allocation_main_and_legacy(self):
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
         from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
+        from vllm_ascend.utils import AscendDeviceType
 
         for legacy, connector in (
             (False, None),
@@ -581,6 +582,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 with (
                     patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
                     patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=legacy),
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5
+                    ),
                     patch("vllm_ascend.worker.model_runner_v1.get_kv_cache_tensor_layers", return_value=names),
                 ):
                     raw = runner._allocate_kv_cache_tensors(config)
@@ -604,6 +608,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         from dataclasses import replace
 
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+        from vllm_ascend.utils import AscendDeviceType
 
         runner = self._build_runner()
         runner.use_sparse = True
@@ -624,10 +629,43 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 layer = SimpleNamespace(
                     get_attn_backend=lambda backend=backend: backend, has_indexer=has_indexer, skip_topk=skip_topk
                 )
-                with patch(
-                    "vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value={name: layer}
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value={name: layer}),
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.get_ascend_device_type",
+                        return_value=AscendDeviceType.A5,
+                    ),
                 ):
                     self.assertEqual(runner._uses_sfa_kv_parent(name, layer_spec), expected)
+
+    def test_sfa_parent_gate_falls_back_on_non_a5(self):
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+        from vllm_ascend.utils import AscendDeviceType
+
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner._get_attention_kv_cache_dims = lambda *a: (8, 4)
+        names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
+        spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+        config = KVCacheConfig(
+            num_blocks=3,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
+        )
+        config.kv_cache_tensors = [SimpleNamespace(size=3 * spec.page_size_bytes * 2, layers=names, shared_by=names)]
+        layers = {n: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for n in names}
+        runner._kv_cache_spec_attn_group_iterator = lambda spec=spec, names=names: iter(
+            [SimpleNamespace(kv_cache_spec=spec, backend=AscendSFABackend, layer_names=names)]
+        )
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
+            patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A3),
+        ):
+            # Non-A5 devices have no token-strided cache operators: the gate
+            # must fall back to the legacy separate NoPE/RoPE allocation.
+            self.assertFalse(runner._uses_sfa_kv_parent(names[0], spec))
+            raw = runner._allocate_kv_cache_tensors(config)
+        self.assertIsInstance(raw[names[0]], tuple)
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -1307,12 +1345,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             self.assertEqual(k_cache.shape, (2, 4, 2, 3))
             self.assertEqual(v_cache.shape, (2, 4, 2, 3))
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_layer_without_indexer_allocates_only_mla_kv_cache(
         self,
         mock_get_layers,
         _mock_has_ec_transfer,
+        _mock_device_type,
     ):
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 
@@ -1371,12 +1411,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(raw_parent.numel(), 2 * 16 * (512 + 64) * 2)
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_sparse_indexer_allocates_separate_replicated_cache_tensor(
         self,
         mock_get_layers,
         _mock_has_ec_transfer,
+        _mock_device_type,
     ):
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 

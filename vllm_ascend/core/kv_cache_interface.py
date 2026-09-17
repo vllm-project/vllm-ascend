@@ -90,6 +90,8 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
         return False
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
+
+
 # ---------------------------------------------------------------------------
 # Token-concatenated (parent) layout for unquantized SFA main caches.
 #
