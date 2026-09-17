@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
@@ -64,9 +65,11 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
+    AscendDeviceType,
     calc_split_factor,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
+    get_ascend_device_type,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
 )
@@ -427,6 +430,7 @@ def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> b
     if (
         not enable_sfa(config)
         or not should_use_sfa_kv_parent_layout(config.kv_transfer_config)
+        or get_ascend_device_type() != AscendDeviceType.A5
         or not isinstance(spec, AscendMLAAttentionSpec)
         or bool(getattr(spec, "cache_sparse_sfa_c8", False))
         or "cache_only_layers" in layer_name
@@ -657,6 +661,11 @@ def _allocate_kv_cache(
             name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
             for name, parts in caches.items()
         }
+    if enable_sfa(vllm_config) and get_ascend_device_type() != AscendDeviceType.A5:
+        logger.info(
+            "SFA parent KV layout disabled: token-strided cache operators are only "
+            "adapted on A5; falling back to separate NoPE/RoPE buffers."
+        )
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}

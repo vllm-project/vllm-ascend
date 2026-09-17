@@ -1159,12 +1159,15 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert forwarded["positions"].tolist() == [0, 1]
     assert forwarded["is_prefilling"] is True
     assert module.build_attn_metadata is stub
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("kernel_block_size", [2, 4])
 @pytest.mark.parametrize("connector", [None, "SfaRemoteD2HConnector", "MultiConnector"])
 def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_block_size, connector):
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
     from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
+    from vllm_ascend.utils import AscendDeviceType
 
     names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
     spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
@@ -1186,6 +1189,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *a, **kw: layers)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
+    monkeypatch.setattr(attn_utils, "get_ascend_device_type", lambda: AscendDeviceType.A5)
     monkeypatch.setattr(attn_utils, "vllm_version_is", lambda v: legacy)
     monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda d: names)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
@@ -1219,6 +1223,7 @@ def test_sfa_parent_reshape_rejects_invalid_geometry(monkeypatch, failure):
     from dataclasses import replace
 
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+    from vllm_ascend.utils import AscendDeviceType
 
     name = "model.layers.0.self_attn.attn"
     spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
@@ -1231,6 +1236,7 @@ def test_sfa_parent_reshape_rejects_invalid_geometry(monkeypatch, failure):
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vc)
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
+    monkeypatch.setattr(attn_utils, "get_ascend_device_type", lambda: AscendDeviceType.A5)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
     backend = AscendSFABackend
     if failure == "backend_shape":
@@ -1250,3 +1256,32 @@ def test_sfa_parent_reshape_rejects_invalid_geometry(monkeypatch, failure):
     groups = [SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=backend, layer_names=[name])]
     with pytest.raises(ValueError):
         attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [3 if failure == "kernel_ratio" else 4], {}, config)
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType._310P])
+def test_sfa_parent_gate_falls_back_on_non_a5(monkeypatch, device_type):
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+    names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
+    spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+    config = KVCacheConfig(
+        num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)]
+    )
+    config.kv_cache_tensors = [SimpleNamespace(size=3 * spec.page_size_bytes * 2, layers=names, shared_by=names)]
+    vc = SimpleNamespace(
+        kv_transfer_config=None,
+        quant_config=None,
+        additional_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+    )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for name in names}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vc)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *a, **kw: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
+    monkeypatch.setattr(attn_utils, "get_ascend_device_type", lambda: device_type)
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    # Non-A5 devices have no token-strided cache operators: fall back to the
+    # legacy separate NoPE/RoPE allocation instead of one parent tensor.
+    assert isinstance(raw[names[0]], tuple)

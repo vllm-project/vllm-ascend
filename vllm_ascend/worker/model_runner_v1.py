@@ -185,6 +185,7 @@ from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import (
+    AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
@@ -192,6 +193,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
+    get_ascend_device_type,
     get_c_env,
     get_kv_cache_tensor_layers,
     global_stream,
@@ -4727,6 +4729,7 @@ class NPUModelRunner(GPUModelRunner):
             or not should_use_sfa_kv_parent_layout(self.vllm_config.kv_transfer_config)
             or self.use_compress
             or self._uses_page_strided_kv_layout(spec)
+            or get_ascend_device_type() != AscendDeviceType.A5
             or self.hybrid_with_attn_and_mamba
             or self.sparse_kv_offload_enabled
             or not isinstance(spec, AscendMLAAttentionSpec)
@@ -4862,6 +4865,11 @@ class NPUModelRunner(GPUModelRunner):
         if self.ascend_config.kvpp_config.size > 1:
             self.hybrid_with_attn_and_mamba = False
             return allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
+        if self.use_sparse and get_ascend_device_type() != AscendDeviceType.A5:
+            logger.info(
+                "SFA parent KV layout disabled: token-strided cache operators are only "
+                "adapted on A5; falling back to separate NoPE/RoPE buffers."
+            )
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
