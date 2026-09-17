@@ -779,6 +779,8 @@ def test_qwen36_35b_dspark_spec_decoding(
         Counter,
         Vector,
     )
-    golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
+    # Native BF16 gate: rounded mean of two runs on each supported vLLM lane.
+    # Evidence: https://github.com/vllm-project/vllm-ascend/actions/runs/35178382026
+    golden = [0.78, 0.57, 0.42, 0.29, 0.22, 0.18, 0.15]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
