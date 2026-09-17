@@ -1,12 +1,12 @@
 # Hunyuan-A13B-Instruct
 
-## Introduction
+## 1 Introduction
 
 Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256k ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
 
-## Environment Preparation
+## 2 Environment Preparation
 
-### Model Weight
+### 2.1 Model Weight
 
 - `Hunyuan-A13B-Instruct`(BF16 version): [Download model weight](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct).
 
@@ -18,7 +18,9 @@ It is recommended to download the model weight to the shared directory of multip
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
-### Installation
+## 3 Installation
+
+### 3.1 Docker Image Installation
 
 Run docker container:
 
@@ -48,7 +50,7 @@ docker run --rm \
   -it $IMAGE bash
 ```
 
-Build from source:
+### 3.2 Source Code Installation
 
 ```bash
 # Install vLLM.
@@ -65,13 +67,13 @@ pip install -e .
 cd ..
 ```
 
-### Software Stack Version Verification
+### 3.3 Software Stack Version Verification
  <!-- TODO: update to Python 3.12 after verification -->
 The environment is based on CANN built into the GiteeAI platform, and successfully runs vLLM {{ vllm_ascend_version }}, and vLLM-Ascend:{{ vllm_ascend_version }} through the Python 3.11.6 Conda environment.
 
-## Deployment
+## 4 Deployment
 
-### Single-node Deployment (4-NPU)
+### 4.1 Single-node Deployment (4-NPU)
 
 ```bash
 export HCCL_INTRA_ROCE_ENABLE=1
@@ -90,7 +92,7 @@ vllm serve ${MODEL_PATH} \
     --gpu-memory-utilization 0.90
 ```
 
-### Key Performance Indicators
+### 4.2 Key Performance Indicators
 
 Based on verified CANN 8.5.1 test logs:
 
@@ -98,7 +100,7 @@ Based on verified CANN 8.5.1 test logs:
 - Graph compilation (ACL Graph): with PIECEWISE mode enabled, the system automatically captures the graph in approximately 18 seconds, which can significantly accelerate subsequent inference.
 - KV cache capacity: the remaining NPU memory can provide concurrent cache space for approximately 529,152 tokens.
 
-## Functional Verification
+## 5 Functional Verification
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -117,7 +119,7 @@ Expected output:
 {"id":"chatcmpl-9a60df2b23bb539f","object":"chat.completion","created":1774751760,"model":"Hunyuan","choices":[{"index":0,"message":{"role":"assistant","content":"<think>\nOkay, I need to write a short introduction to large language models. Let me start by recalling what I know. First, what are LLMs? They're machine learning models trained on vast amounts of text data. The key here is \"large\"—so they have a huge number of parameters. Maybe mention the scale, like billions or trillions of parameters.\n\nThen, how are they trained? They're trained on diverse text sources—books, websites, articles, etc. The","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null},"logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":12,"total_tokens":112,"completion_tokens":100,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}
 ```
 
-## Accuracy Evaluation
+## 6 Accuracy Evaluation
 
 On the GiteeAI platform, the model was tested and verified using the AISBench tool on the GSM8K benchmark set: Under the 7cd45e version configuration, the model achieved an accuracy of 94.77% in the accuracy generation mode.
 
@@ -146,9 +148,9 @@ The markdown formatted result is as follows:
 | --- | --- | --- | --- | --- |
 | gsm8k | 7cd45e | accuracy | gen | 94.77 |
 
-## Performance
+## 7 Performance Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 ```bash
 ais_bench --models vllm_api_stream_chat --datasets demo_gsm8k_gen_4_shot_cot_chat_prompt --summarizer default_perf --mode perf
@@ -157,7 +159,7 @@ ais_bench --models vllm_api_stream_chat --datasets demo_gsm8k_gen_4_shot_cot_cha
 output:
 
 ```bash
-[2026-04-08 05:27:40,180] [ais_bench] [INFO] Performance Results of task [vllm-api-stream-chat/demo_gsm8k]: 
+[2026-04-08 05:27:40,180] [ais_bench] [INFO] Performance Results of task [vllm-api-stream-chat/demo_gsm8k]:
 ╒══════════════════════════╤═════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════╕
 │ Performance Parameters   │ Stage   │ Average         │ Min             │ Max             │ Median          │ P75             │ P90             │ P99             │  N  │
 ╞══════════════════════════╪═════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════╡
@@ -206,7 +208,7 @@ output:
 ╘══════════════════════════╧═════════╧═══════════════════╛
 ```
 
-### Using vLLM Benchmark
+### 7.2 Using vLLM Benchmark
 
 Run performance evaluation of `Hunyuan-A13B-Instruct` as an example.
 

@@ -560,15 +560,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             draft_index,
         )
 
-        if get_ascend_config().c8_reshape_optim_enabled:
-            torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
-                block_size,
-            )
-
         metadata = self.metadata_cls(  # type: ignore
             num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -588,9 +579,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             **parallel_metadata,
         )
         if self.nope:
@@ -1585,31 +1573,31 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (*main_cache, *indexer_cache)
 
-    def _get_indexer_attn_metadata(self, attn_metadata: M) -> Any | None:
+    def _get_indexer_attn_metadata(self) -> Any | None:
         """Fetch the indexer cache layer's own metadata, built by the indexer
         backend's builder; ``None`` when this layer has no runtime indexer."""
         if not self.runtime_has_indexer:
             return None
-        prefix = self.indexer.k_cache.prefix
+        own_prefix = self.indexer.k_cache.prefix
+        prefixes = [own_prefix]
         kv_sharing_target = getattr(self, "kv_sharing_target_layer_name", None)
         if kv_sharing_target is not None:
-            # A KV-sharing layer (e.g. an MTP draft layer) owns no cache of
-            # its own, so no metadata is built under its own prefix; resolve
-            # to the sharing target's indexer cache prefix instead.
+            # Prefer the sharing target's cache view, but keep the draft
+            # indexer's own independently built metadata as a valid fallback.
+            # Some proposers register the draft indexer as its own metadata
+            # dependency even when the physical cache is shared.
             target_base = kv_sharing_target.removesuffix(".attn")
-            prefix = f"{target_base}.indexer.k_cache"
+            prefixes = [f"{target_base}.indexer.k_cache", own_prefix]
         forward_metadata = get_forward_context().attn_metadata
-        indexer_metadata = forward_metadata.get(prefix) if isinstance(forward_metadata, dict) else None
-        if indexer_metadata is None and isinstance(forward_metadata, dict):
-            # During MTP draft propose the proposer only builds metadata for
-            # the draft attention layers (keyed by layer name), so fall back
-            # to this layer's SFA attention metadata - the same metadata the
-            # pre-refactor inline indexer consumed (slot_mapping/block_table
-            # are identical for both caches).
-            indexer_metadata = forward_metadata.get(self.layer_name)
+        indexer_metadata = None
+        if isinstance(forward_metadata, dict):
+            for prefix in prefixes:
+                indexer_metadata = forward_metadata.get(prefix)
+                if indexer_metadata is not None:
+                    break
         if indexer_metadata is None:
             raise RuntimeError(
-                f"No metadata was built for the indexer cache layer prefix={prefix}. layer_name={self.layer_name}."
+                f"No metadata was built for the indexer cache layer prefixes={prefixes}. layer_name={self.layer_name}."
             )
         return indexer_metadata
 
@@ -1642,7 +1630,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         cos = attn_metadata.cos
         sin = attn_metadata.sin
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
-        indexer_attn_metadata = self._get_indexer_attn_metadata(attn_metadata)
+        indexer_attn_metadata = self._get_indexer_attn_metadata()
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = hidden_states.shape[0] if self.qk_rope_head_dim == 0 else attn_metadata.num_input_tokens
@@ -1766,20 +1754,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             # selection (the selection kernel reads the freshly written
             # cache). MTP skip_topk layers still run the k path and the write
             # (compute_topk=False) so their cache stays up to date, then
-            # reuse the shared top-k indices. The parallel-layout values the
-            # indexer needs ride on its own metadata: sequence lengths
-            # (sharded under DSA-CP) and the decode-token count the PCP
-            # cache-write gather splits on.
+            # reuse the shared top-k indices. Cache layout, RoPE, parallel
+            # sequence lengths, and decode count all come from the indexer's
+            # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
-            indexer_attn_metadata.actual_seq_lengths_query = parallel_context.actual_seq_lengths_query
-            indexer_attn_metadata.actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
-            indexer_attn_metadata.num_decode_tokens = attn_metadata.num_decode_tokens
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
-                cos,
-                sin,
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk,
