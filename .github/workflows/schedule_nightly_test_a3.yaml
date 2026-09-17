@@ -216,7 +216,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -266,7 +266,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -316,7 +316,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
@@ -358,7 +358,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}

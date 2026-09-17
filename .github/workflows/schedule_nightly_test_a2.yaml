@@ -217,7 +217,7 @@ jobs:
     with:
       soc_version: a2
       runner: linux-amd64-cpu-8-hk
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       request_id: ${{ inputs.request_id || '' }}
@@ -286,7 +286,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a2
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
@@ -372,7 +372,7 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -402,7 +402,7 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       model_list: ${{ toJson(matrix.test_config.model_list) }}
       model_filter: ${{ needs.parse-trigger.outputs.filter }}
-      image: 'swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a2'
       is_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' &&
