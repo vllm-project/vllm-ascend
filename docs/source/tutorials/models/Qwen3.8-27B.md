@@ -33,10 +33,6 @@ It is recommended to download the model weight to the shared directory of multip
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -126,7 +122,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -189,6 +185,12 @@ After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
 ```shell
 python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
+
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
 ```
 
 ### 4.2 Source Code Installation
@@ -420,6 +422,14 @@ Before starting the service:
         With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
 
+Wait until the engine finishes loading weights and graph capture. A successful startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
+
 ## 6 Functional Verification
 
 After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat/completions`. Use the `--served-model-name` you configured (`qwen3.8` for `Qwen3.8-27B`).
@@ -481,7 +491,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 Here is an accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -495,11 +505,11 @@ Here is an accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 

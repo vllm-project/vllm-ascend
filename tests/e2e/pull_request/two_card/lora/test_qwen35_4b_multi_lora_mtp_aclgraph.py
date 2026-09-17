@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Qwen3.5-27B named multi-LoRA + built-in MTP, eager (no ACL graph).
-# PR CI sets HF_HUB_OFFLINE=1 and VLLM_USE_MODELSCOPE=true. Public 27B
-# PEFT adapters are not on ModelScope, so this test synthesizes two
-# rank-8 adapters with Qwen3.5-27B MLP shapes. Override with MIX_LORA_A /
-# MIX_LORA_B to use local checkpoints.
+# Qwen3.5-4B named multi-LoRA + built-in MTP with ACL graph (FULL_DECODE_ONLY),
+# TP=2. Same serving scenario as the former Qwen3.5-27B four-card E2E, with a
+# smaller dense hybrid model so PR CI finishes faster.
+#
+# PR CI sets HF_HUB_OFFLINE=1 and VLLM_USE_MODELSCOPE=true. Public PEFT
+# adapters for this model are not assumed on ModelScope, so the test
+# synthesizes two rank-8 adapters with Qwen3.5-4B MLP shapes. Override
+# with MIX_LORA_A / MIX_LORA_B to use local checkpoints.
+#
+# Graph-mode capture is memory-heavy; use the locally validated footprint:
+# max-model-len=4096, max-num-batched-tokens=2048, max-num-seqs=4,
+# gpu-memory-utilization=0.85.
 
 from __future__ import annotations
 
@@ -21,12 +28,12 @@ from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 
-HUB_MODEL = "Qwen/Qwen3.5-27B"
-MODEL_PATH = os.environ.get("QWEN35_27B", HUB_MODEL)
-# Qwen3.5-27B text_config: hidden=5120, intermediate=17408, 64 layers.
-HIDDEN_SIZE = 5120
-INTERMEDIATE_SIZE = 17408
-NUM_LAYERS = 64
+HUB_MODEL = "Qwen/Qwen3.5-4B"
+MODEL_PATH = os.environ.get("QWEN35_4B", HUB_MODEL)
+# Qwen3.5-4B text_config: hidden=2560, intermediate=9216, 32 layers.
+HIDDEN_SIZE = 2560
+INTERMEDIATE_SIZE = 9216
+NUM_LAYERS = 32
 LORA_RANK = 8
 PROMPT = "你是谁？"
 
@@ -40,7 +47,7 @@ def _resolve_adapter_dir(root: str) -> str:
 
 
 def _write_dummy_lora(root: Path, seed: int) -> str:
-    """Write a PEFT adapter that vLLM can load onto Qwen3.5-27B.
+    """Write a PEFT adapter that vLLM can load onto Qwen3.5-4B.
 
     Keys follow the Qwen3.5 PEFT layout
     ``base_model.model.model.language_model.layers.*.mlp.down_proj``.
@@ -83,12 +90,12 @@ def _lora_dir(env_key: str, tmp_root: Path, seed: int) -> str:
 
 
 @pytest.fixture(scope="session")
-def qwen35_27b_lora_a_files(tmp_path_factory) -> str:
+def qwen35_4b_lora_a_files(tmp_path_factory) -> str:
     return _lora_dir("MIX_LORA_A", tmp_path_factory.mktemp("mix-lora-a"), seed=0)
 
 
 @pytest.fixture(scope="session")
-def qwen35_27b_lora_b_files(tmp_path_factory) -> str:
+def qwen35_4b_lora_b_files(tmp_path_factory) -> str:
     return _lora_dir("MIX_LORA_B", tmp_path_factory.mktemp("mix-lora-b"), seed=1)
 
 
@@ -111,25 +118,25 @@ def _chat(server: RemoteOpenAIServer, model_name: str) -> str:
     return content.strip()
 
 
-@pytest.mark.e2e_model("Qwen/Qwen3.5-27B")
+@pytest.mark.e2e_model("Qwen/Qwen3.5-4B")
 @pytest.mark.e2e_coverage(
     arch="dense",
-    feature="lora,multi_lora,fully_sharded_lora,mtp",
+    feature="lora,multi_lora,fully_sharded_lora,mtp,aclgraph",
     parallel="TP",
     deploy="pd_mix",
     hardware="A3",
     quantization="BF16",
-    graph_mode="eager",
+    graph_mode="aclgraph",
 )
 @wait_until_npu_memory_free()
-def test_qwen35_27b_named_multi_lora_mtp_eager(
-    qwen35_27b_lora_a_files,
-    qwen35_27b_lora_b_files,
+def test_qwen35_4b_named_multi_lora_mtp_aclgraph(
+    qwen35_4b_lora_a_files,
+    qwen35_4b_lora_b_files,
 ):
+    """Named multi-LoRA + MTP with FULL_DECODE_ONLY ACL graph capture."""
     port = get_open_port()
     server_args = [
         "--trust-remote-code",
-        "--enforce-eager",
         "--enable-lora",
         "--max-loras",
         "2",
@@ -138,12 +145,14 @@ def test_qwen35_27b_named_multi_lora_mtp_eager(
         "--fully-sharded-loras",
         "--max-model-len",
         "4096",
+        "--max-num-batched-tokens",
+        "2048",
         "--max-num-seqs",
         "4",
         "--gpu-memory-utilization",
-        "0.90",
+        "0.85",
         "--tensor-parallel-size",
-        "4",
+        "2",
         "--distributed-executor-backend",
         "mp",
         "--port",
@@ -153,21 +162,22 @@ def test_qwen35_27b_named_multi_lora_mtp_eager(
             {
                 "method": "qwen3_5_mtp",
                 "num_speculative_tokens": 3,
-                "enforce_eager": True,
             }
         ),
+        "--compilation-config",
+        json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY"}),
         "--lora-modules",
         json.dumps(
             {
                 "name": "mix-lora-a",
-                "path": qwen35_27b_lora_a_files,
+                "path": qwen35_4b_lora_a_files,
                 "base_model_name": HUB_MODEL,
             }
         ),
         json.dumps(
             {
                 "name": "mix-lora-b",
-                "path": qwen35_27b_lora_b_files,
+                "path": qwen35_4b_lora_b_files,
                 "base_model_name": HUB_MODEL,
             }
         ),
