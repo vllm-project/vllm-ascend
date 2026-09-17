@@ -6,7 +6,7 @@ vLLM Ascend builds native third-party libraries and many AscendC custom
 operators. An exact final-artifact cache is fast when it matches, but any
 source change invalidates the complete artifact. The persistent incremental
 csrc cache adds a second level that reuses individual compiler actions across
-CI jobs and workspaces.
+CI jobs, workspaces, and repeated local source builds.
 
 The two cache levels have different roles:
 
@@ -29,6 +29,8 @@ with previously verified artifacts.
 Goals:
 
 - reuse native build work across CI jobs;
+- reuse native build work across repeated local source builds without remote
+  transport;
 - invalidate only actions whose semantic inputs changed;
 - reuse entries across equivalent checkout and build roots;
 - persist local entries through the repository's cache transport;
@@ -247,9 +249,9 @@ Only roles that create canonical reusable domains publish L1:
 - release wheel builds for their container toolchains; and
 - image builds for their container toolchains.
 
-Selected tests, doctest, ordinary E2E, nightly, and historical-source jobs are
-restore-only consumers. Their local compilation remains correct but does not
-create shared snapshots.
+Selected tests, doctest, nightly, and historical-source jobs are restore-only
+consumers. Their local compilation remains correct but does not create shared
+snapshots.
 
 A writer publishes only after a successful build creates or replaces a local
 entry. OBS restore and save failures remain performance degradations.
@@ -276,8 +278,16 @@ contention. Observability is best effort and never serializes compilation.
 
 ### Direct source consumers
 
-Selected tests, upstream E2E, doctest, and nightly source replacement restore
-L1 before their existing source installation. They do not publish.
+Selected tests, doctest, and nightly source replacement restore L1 before their
+existing source installation. They do not publish. Scheduled upstream E2E uses
+the canonical producer's exact L0 output and does not add a second direct L1
+fallback.
+
+### Local source builds
+
+Ordinary local source builds use the same action cache in the repository's
+ignored `build_cache` directory. This is local-only acceleration: no OBS
+credentials or remote snapshot transport are involved.
 
 ### Central producer
 

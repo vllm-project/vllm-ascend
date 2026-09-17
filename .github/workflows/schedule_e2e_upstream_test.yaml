@@ -41,12 +41,6 @@ env:
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
-  RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
-  RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
-  RUNS_ON_S3_FORCE_PATH_STYLE: "false"
-  AWS_S3_FORCE_PATH_STYLE: "false"
-  AWS_REGION: ap-southeast-1
-  RUNS_ON_RUNNER_NAME: ""
 
 jobs:
     resolve-tag:
@@ -172,14 +166,6 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
-          - name: Restore incremental cache for upstream fallback
-            id: fallback-l1
-            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
-            uses: ./.github/actions/csrc-l1-restore
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              architecture: ${{ runner.arch }}
-              soc-version: a2
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -314,14 +300,6 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
-          - name: Restore incremental cache for upstream fallback
-            id: fallback-l1
-            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
-            uses: ./.github/actions/csrc-l1-restore
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              architecture: ${{ runner.arch }}
-              soc-version: a2
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -452,14 +430,6 @@ jobs:
               # Restore fail-on-cache-miss to true after the transition period.
               fail-on-cache-miss: false
 
-          - name: Restore incremental cache for upstream fallback
-            id: fallback-l1
-            if: ${{ steps.cache-csrc.outputs.cache-hit != 'true' }}
-            uses: ./.github/actions/csrc-l1-restore
-            with:
-              cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-              architecture: ${{ runner.arch }}
-              soc-version: a2
           - name: Install vllm-project/vllm-ascend with device
             env:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
