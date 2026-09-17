@@ -111,6 +111,18 @@ class NPUPlatform(Platform):
     def manual_seed_all(cls, seed: int) -> None:
         pass
 
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Resolve a bound runtime device ordinal to its host physical NPU ID.
+
+        Call after torch.npu.set_device. CANN resolves visibility reordering
+        and container remapping; device_id is not a vLLM local rank.
+        """
+        # Keep runtime initialization lazy and independent of compute-op flags.
+        bootstrap_custom_op_env()
+        import_module("vllm_ascend.vllm_ascend_C")
+        return torch.ops._C_ascend.get_physical_device_id(device_id)
+
     def is_sleep_mode_available(self) -> bool:
         return True
 
@@ -1258,6 +1270,9 @@ def _setup_worker_and_scheduler(
         vllm_config.scheduler_config.scheduler_cls = (
             "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
+        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
+        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
+        # has been moved to patch_engine_core.py.
         import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
 
     # Extend original scheduler_config to use BatchJobAwareScheduler.
@@ -1492,6 +1507,17 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:
         kvpp_config.validate(vllm_config)
+
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and vllm_config.model_config is spec_cfg.draft_model_config
+        and vllm_config.model_config is not spec_cfg.target_model_config
+    ):
+        return
 
     sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
     if sfa_dcp_replicated_indexer:

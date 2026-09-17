@@ -1,4 +1,4 @@
-# GLM-5.3-Flash
+# GLM-5.3-Flash (Experimental)
 
 ## 1 Introduction
 
@@ -23,6 +23,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -145,6 +149,10 @@ It is recommended to download the model weight to the shared directory of multip
 
 ## 5 Online Service Deployment
 
+!!! note
+
+    Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, otherwise the output quality may degrade.
+
 ### 5.1 Single-Node Online Deployment
 
 === "Ascend950DT series"
@@ -160,7 +168,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
-      --port 8011 \
+      --port 8000 \
       --data-parallel-size 1 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -194,7 +202,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
       --host 0.0.0.0 \
-      --port 8077 \
+      --port 8000 \
       --max-model-len 133120  \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
@@ -260,7 +268,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
@@ -309,7 +317,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --headless \
         --max-model-len 133120 \
         --data-parallel-size 2 \
@@ -416,3 +424,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+
+- **Q: Does GLM-5.3-Flash support `enable_thinking: false`?**
+
+  A: No, GLM-5.3-Flash does not support `enable_thinking`.

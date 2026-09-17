@@ -21,39 +21,39 @@ for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.manager import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager import (  # noqa: E402
     PreemptedRequestState,
-    RecomputeCPUOffloadScheduler,
+    PreemptOffloadScheduler,
     TransferMeta,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (  # noqa: E402
     INVALID_JOB_ID,
-    RecomputeCPUOffloadMetadata,
-    RecomputeCPUOffloadWorkerMetadata,
+    PreemptOffloadMetadata,
+    PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector import (  # noqa: E402
-    RecomputeCPUOffloadConnectorV1,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector import (  # noqa: E402
+    PreemptOffloadConnectorV1,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker import (  # noqa: E402
-    RecomputeCPUOffloadWorker,
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker import (  # noqa: E402
+    PreemptOffloadWorker,
 )
 
 for _module_name, _module in _saved_modules.items():
     sys.modules[_module_name] = _module
 
 
-def test_recompute_cpu_offload_worker_metadata_aggregate():
-    metadata = RecomputeCPUOffloadWorkerMetadata(completed_store_events={1: 1, 2: 2})
-    other = RecomputeCPUOffloadWorkerMetadata(completed_store_events={2: 3, 4: 1})
+def test_preempt_offload_connector_worker_metadata_aggregate():
+    metadata = PreemptOffloadWorkerMetadata(completed_store_events={1: 1, 2: 2})
+    other = PreemptOffloadWorkerMetadata(completed_store_events={2: 3, 4: 1})
 
     merged = metadata.aggregate(other)
 
-    assert isinstance(merged, RecomputeCPUOffloadWorkerMetadata)
+    assert isinstance(merged, PreemptOffloadWorkerMetadata)
     assert merged.completed_store_events == {1: 1, 2: 5, 4: 1}
 
 
-def test_recompute_cpu_offload_metadata_defaults_are_empty():
-    metadata = RecomputeCPUOffloadMetadata()
+def test_preempt_offload_connector_metadata_defaults_are_empty():
+    metadata = PreemptOffloadMetadata()
 
     assert metadata.need_flush is False
     assert metadata.preempt_store_event == INVALID_JOB_ID
@@ -65,8 +65,8 @@ def test_recompute_cpu_offload_metadata_defaults_are_empty():
     assert metadata.preempt_load_event_to_reqs == {}
 
 
-def test_recompute_cpu_offload_connector_scheduler_methods_forward():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
+def test_preempt_offload_connector_scheduler_methods_forward():
+    connector = PreemptOffloadConnectorV1.__new__(PreemptOffloadConnectorV1)
     scheduler_manager = MagicMock()
     scheduler_manager.get_num_new_matched_tokens.return_value = (8, True)
     scheduler_manager.update_state_before_preempt.return_value = True
@@ -78,6 +78,7 @@ def test_recompute_cpu_offload_connector_scheduler_methods_forward():
     blocks = MagicMock()
     block_ids = ([1, 2],)
 
+    assert connector.supports_divergent_local_hybrid_hits is True
     assert connector.get_num_new_matched_tokens(request, 4) == (8, True)
     connector.update_state_after_alloc(request, blocks, 8)
     assert connector.update_state_before_preempt(request, block_ids, 16) is True
@@ -89,16 +90,16 @@ def test_recompute_cpu_offload_connector_scheduler_methods_forward():
     scheduler_manager.update_state_before_preempt.assert_called_once_with(request, block_ids, 16)
 
 
-def test_recompute_cpu_offload_connector_worker_methods_forward():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
+def test_preempt_offload_connector_worker_methods_forward():
+    connector = PreemptOffloadConnectorV1.__new__(PreemptOffloadConnectorV1)
     worker_handler = MagicMock()
     worker_handler.get_finished.return_value = (None, {"req-1"})
-    worker_handler.build_connector_worker_meta.return_value = RecomputeCPUOffloadWorkerMetadata(
+    worker_handler.build_connector_worker_meta.return_value = PreemptOffloadWorkerMetadata(
         completed_store_events={3: 1}
     )
     connector.worker_handler = worker_handler
 
-    metadata = RecomputeCPUOffloadMetadata(preempt_load_event=3)
+    metadata = PreemptOffloadMetadata(preempt_load_event=3)
     connector.bind_connector_metadata(metadata)
     connector.handle_preemptions(metadata)
     connector.start_load_kv(MagicMock())
@@ -113,15 +114,15 @@ def test_recompute_cpu_offload_connector_worker_methods_forward():
     worker_handler.wait_for_layer_load.assert_called_once_with()
 
 
-def test_recompute_cpu_offload_connector_defaults_without_scheduler_manager():
-    connector = RecomputeCPUOffloadConnectorV1.__new__(RecomputeCPUOffloadConnectorV1)
+def test_preempt_offload_connector_defaults_without_scheduler_manager():
+    connector = PreemptOffloadConnectorV1.__new__(PreemptOffloadConnectorV1)
     connector.scheduler_manager = None
 
     assert connector.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
     assert connector.update_state_before_preempt(MagicMock(), ([],), 1) is False
     assert isinstance(
         connector.build_connector_meta(MagicMock()),
-        RecomputeCPUOffloadMetadata,
+        PreemptOffloadMetadata,
     )
     assert connector.request_finished(MagicMock(), []) == (False, None)
     assert connector.request_finished_all_groups(MagicMock(), ([],)) == (
@@ -134,8 +135,24 @@ def test_recompute_cpu_offload_connector_defaults_without_scheduler_manager():
     assert connector.reset_cache() is None
 
 
-def test_recompute_cpu_offload_scheduler_get_num_new_matched_tokens_states():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_capacity_priority():
+    resolve = PreemptOffloadConnectorV1._resolve_offload_capacity
+
+    assert resolve({}, 8) == (None, 1.0)
+    assert resolve({"offload_host_memory_ratio": 1.5}, 8) == (None, 1.5)
+    assert resolve({"cpu_bytes_to_use": 800, "offload_host_memory_ratio": 2}, 8) == (100, 2.0)
+    assert resolve(
+        {
+            "cpu_bytes_to_use_per_rank": 200,
+            "cpu_bytes_to_use": 800,
+            "offload_host_memory_ratio": 2,
+        },
+        8,
+    ) == (200, 2.0)
+
+
+def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._preempted_req_states = {}
     scheduler._cleanup_preempt_cache_request = MagicMock()
     request = SimpleNamespace(request_id="req-1", num_tokens=10)
@@ -159,8 +176,8 @@ def test_recompute_cpu_offload_scheduler_get_num_new_matched_tokens_states():
     scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
 
 
-def test_recompute_cpu_offload_scheduler_update_state_after_alloc_errors():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)
     request = SimpleNamespace(request_id="req-1")
     blocks = MagicMock()
@@ -179,8 +196,8 @@ def test_recompute_cpu_offload_scheduler_update_state_after_alloc_errors():
     scheduler._prepare_preempt_load_after_alloc.assert_called_once_with(request, ([1, 2],), 2)
 
 
-def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_aligns_sliding_window_blocks():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [True, False]
 
     assert scheduler._align_group_block_ids(0, [7, 8], 4) == [0, 0, 7, 8]
@@ -194,8 +211,143 @@ def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
     assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
 
 
-def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        shared_by=["layer.0"],
+        offset=32,
+        block_stride=64,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = PreemptOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=512,
+        )
+
+    assert cpu_config.num_blocks == 4
+    assert cpu_config.kv_cache_groups == ["group"]
+    assert vars(cpu_config.kv_cache_tensors[0]) == {
+        "size": 512,
+        "shared_by": ["layer.0"],
+        "offset": 32,
+        "block_stride": 64,
+    }
+
+
+def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        layers=["layer.0"],
+        layer_stride=512,
+        block_stride=64,
+        offset=32,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = PreemptOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=512,
+        )
+
+    assert cpu_config.num_blocks == 4
+    assert vars(cpu_config.kv_cache_tensors[0]) == {
+        "size": 512,
+        "layers": ["layer.0"],
+        "layer_stride": 512,
+        "block_stride": 64,
+        "offset": 32,
+    }
+
+
+def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
+    gpu_tensor = SimpleNamespace(
+        size=1024,
+        layers=["layer.0"],
+        layer_stride=512,
+        block_stride=64,
+        offset=0,
+    )
+    gpu_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_tensors=[gpu_tensor],
+        kv_cache_groups=["group"],
+    )
+
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
+            return_value=["layer.0"],
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheTensor",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+        patch(
+            "vllm.v1.kv_cache_interface.KVCacheConfig",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    ):
+        cpu_config = PreemptOffloadScheduler._derive_cpu_config(
+            gpu_config,
+            cpu_capacity_bytes=None,
+            offload_host_memory_ratio=1.5,
+        )
+
+    assert cpu_config.num_blocks == 12
+    assert cpu_config.kv_cache_tensors[0].size == 1536
+
+
+def test_preempt_offload_connector_scheduler_d2h_keeps_sliding_window_offsets():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
@@ -229,8 +381,8 @@ def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
     assert state.ready is False
 
 
-def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_h2d_skips_sliding_window_null_blocks():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
@@ -261,8 +413,8 @@ def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
     assert touched == ["gpu30", "gpu31"]
 
 
-def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_h2d_clips_mtp_tail_blocks():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._group_is_sliding_window = [False]
     scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
@@ -294,8 +446,8 @@ def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
     assert state.load_transfer_meta == TransferMeta([10, 11, 12], [1, 2, 3])
 
 
-def test_recompute_cpu_offload_scheduler_build_connector_meta_assigns_events():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._store_event_counter = 4
     scheduler._load_event_counter = 7
     scheduler._preempt_store_event_to_blocks = {}
@@ -336,15 +488,15 @@ def test_recompute_cpu_offload_scheduler_build_connector_meta_assigns_events():
     assert scheduler._pending_hash_blocks == {}
 
 
-def test_recompute_cpu_offload_scheduler_update_connector_output_marks_store_ready():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_update_connector_output_marks_store_ready():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._expected_worker_count = 2
     scheduler._store_event_pending_counts = {}
     scheduler._preempted_req_states = {}
     scheduler._process_preempt_store_event = MagicMock()
     output = KVConnectorOutput(
         finished_recving=set(),
-        kv_connector_worker_meta=RecomputeCPUOffloadWorkerMetadata(completed_store_events={5: 1}),
+        kv_connector_worker_meta=PreemptOffloadWorkerMetadata(completed_store_events={5: 1}),
     )
 
     scheduler.update_connector_output(output)
@@ -358,8 +510,8 @@ def test_recompute_cpu_offload_scheduler_update_connector_output_marks_store_rea
     scheduler._process_preempt_store_event.assert_called_once_with(5)
 
 
-def test_recompute_cpu_offload_scheduler_request_finished_ready_and_pending():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._preempted_req_states = {
         "ready": PreemptedRequestState(
             req_id="ready",
@@ -398,8 +550,8 @@ def test_recompute_cpu_offload_scheduler_request_finished_ready_and_pending():
     assert scheduler._preempted_req_states["loading"].finished is False
 
 
-def test_recompute_cpu_offload_scheduler_process_store_event_finishes_pending_req():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_process_store_event_finishes_pending_req():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     cpu_block = MagicMock()
     cpu_block.block_hash = None
     scheduler.cpu_block_pool = SimpleNamespace(blocks={4: cpu_block})
@@ -425,8 +577,8 @@ def test_recompute_cpu_offload_scheduler_process_store_event_finishes_pending_re
     assert scheduler._preempt_store_event_to_reqs == {}
 
 
-def test_recompute_cpu_offload_scheduler_pending_and_reset_cache_paths():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._store_event_pending_counts = {}
     scheduler._preempt_store_event_to_blocks = {}
     scheduler._preempted_req_states = {}
@@ -457,8 +609,8 @@ def test_recompute_cpu_offload_scheduler_pending_and_reset_cache_paths():
     assert scheduler._pending_hash_blocks == {}
 
 
-def test_recompute_cpu_offload_scheduler_cleanup_preempt_load_request():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._preempt_load_event_to_reqs = {2: ["req-1"]}
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
@@ -485,8 +637,8 @@ def test_recompute_cpu_offload_scheduler_cleanup_preempt_load_request():
     scheduler._cleanup_preempt_cache_request.assert_called_once_with("req-1")
 
 
-def test_recompute_cpu_offload_scheduler_cleanup_skips_null_cpu_blocks():
-    scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
+def test_preempt_offload_connector_scheduler_cleanup_skips_null_cpu_blocks():
+    scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
             req_id="req-1",
@@ -504,8 +656,8 @@ def test_recompute_cpu_offload_scheduler_cleanup_skips_null_cpu_blocks():
     assert freed == ["cpu4"]
 
 
-def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
-    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
+def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
     worker._connector_metadata = None
     worker._pending_load_event_indices = set()
     worker._submitted_load_event_indices = set()
@@ -515,7 +667,7 @@ def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
     worker.load_stream = None
     worker._load_stream_waited = False
 
-    metadata = RecomputeCPUOffloadMetadata(
+    metadata = PreemptOffloadMetadata(
         preempt_store_event=1,
         preempt_load_event=2,
         preempt_load_event_to_reqs={2: ["req-1"]},
@@ -536,12 +688,12 @@ def test_recompute_cpu_offload_worker_metadata_and_empty_transfers():
     assert worker._connector_metadata is None
 
 
-def test_recompute_cpu_offload_worker_preempt_and_load_entrypoints():
-    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
+def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
     worker._submit_transfer = MagicMock()
     worker._flush_and_sync_all = MagicMock()
     worker._connector_metadata = None
-    metadata = RecomputeCPUOffloadMetadata(
+    metadata = PreemptOffloadMetadata(
         need_flush=True,
         preempt_store_event=3,
         preempt_store_gpu_blocks=[1],
@@ -577,16 +729,16 @@ def test_recompute_cpu_offload_worker_preempt_and_load_entrypoints():
     )
 
 
-def test_recompute_cpu_offload_worker_wait_for_layer_load_once():
-    worker = RecomputeCPUOffloadWorker.__new__(RecomputeCPUOffloadWorker)
+def test_preempt_offload_connector_worker_wait_for_layer_load_once():
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
     stream = MagicMock()
     current_stream = MagicMock()
     worker.load_stream = stream
-    worker._connector_metadata = RecomputeCPUOffloadMetadata(preempt_load_event=1)
+    worker._connector_metadata = PreemptOffloadMetadata(preempt_load_event=1)
     worker._load_stream_waited = False
 
     with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.worker.torch.npu.current_stream",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker.torch.npu.current_stream",
         return_value=current_stream,
     ):
         worker.wait_for_layer_load()
@@ -613,7 +765,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
 
     scheduler._update_waiting_for_remote_kv(request)
 
-    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 8)
+    scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 9)
     assert request.num_computed_tokens == 8
     assert request.spec_token_ids == []
     assert scheduler.finished_recving_kv_req_ids == set()

@@ -17,6 +17,8 @@
 # mypy: ignore-errors
 
 
+from functools import wraps
+
 import torch
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
@@ -32,9 +34,10 @@ except ImportError:
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
+_GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -210,6 +213,14 @@ if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY)
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
+    _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
+
+    @wraps(_GDN_ORIGINAL_INIT)
+    def _gdn_init_with_packed_weight(self, *args, **kwargs):
+        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        initialize_packed_conv_weight(self)
+
+    _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels

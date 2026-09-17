@@ -124,14 +124,13 @@ class KVPoolScheduler:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        cp_scale = self.pcp_size * self.dcp_size
-        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
+        ) * self.dcp_size
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
@@ -276,29 +275,27 @@ class KVPoolScheduler:
             block_keys: list[str] = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
             pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
-            for pcp_rank in range(self.pcp_size):
-                for dcp_rank in range(self.dcp_size):
-                    for head_or_tp_rank in range(head_or_tp_ranks):
-                        for pp_rank in pp_ranks:
-                            pool_key = PoolKey(
-                                KeyMetadata(
-                                    self.model_name,
-                                    head_or_tp_rank,
-                                    pcp_rank,
-                                    dcp_rank,
-                                    pp_rank,
-                                    kv_cache_group_id=kv_cache_group_id,
-                                    cache_family=cache_family,
-                                ),
-                                chunk_hash,
+            for dcp_rank in range(self.dcp_size):
+                for head_or_tp_rank in range(head_or_tp_ranks):
+                    for pp_rank in pp_ranks:
+                        pool_key = PoolKey(
+                            KeyMetadata(
+                                self.model_name,
+                                head_or_tp_rank,
+                                dcp_rank,
+                                pp_rank,
+                                kv_cache_group_id=kv_cache_group_id,
+                                cache_family=cache_family,
+                            ),
+                            chunk_hash,
+                        )
+                        if include_layers:
+                            block_keys.extend(
+                                layer_key.to_string()
+                                for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
                             )
-                            if include_layers:
-                                block_keys.extend(
-                                    layer_key.to_string()
-                                    for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
-                                )
-                            else:
-                                block_keys.append(pool_key.to_string())
+                        else:
+                            block_keys.append(pool_key.to_string())
             keys_by_block.append(block_keys)
         return keys_by_block
 

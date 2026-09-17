@@ -217,14 +217,13 @@ class KVPoolWorker:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        cp_scale = self.pcp_size * self.dcp_size
-        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
+        ) * self.dcp_size
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
@@ -354,7 +353,6 @@ class KVPoolWorker:
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
                     group_tp_rank,
-                    self.pcp_rank,
                     self.dcp_rank,
                     self.pp_rank,
                     group_id,
@@ -726,6 +724,8 @@ class KVPoolWorker:
                     self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
+                    self.pcp_rank,
+                    self.pcp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -2604,6 +2604,8 @@ class KVPoolWorker:
         block_ids: list[int],
         token_len: int,
         mask_num: int = 0,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
     ) -> tuple[list[str], list[list[int]], list[list[int]], list[int]]:
         """Walk chunks x sub-keys; emit (keys, addrs, sizes, block_ids) for backend put/get.
 
@@ -2620,6 +2622,8 @@ class KVPoolWorker:
             block_hashes,
             block_ids,
             mask_num=mask_num,
+            shard_rank=shard_rank,
+            shard_size=shard_size,
         ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
@@ -2684,7 +2688,12 @@ class KVPoolWorker:
             token_len = req_meta.token_len_chunk
             block_ids = req_meta.block_ids_by_group[0]
             keys, addrs, sizes, _ = self._build_tp_mismatch_keys_and_addrs(
-                req_meta.block_hashes, block_ids, token_len, mask_num=0
+                req_meta.block_hashes,
+                block_ids,
+                token_len,
+                mask_num=0,
+                shard_rank=self.pcp_rank,
+                shard_size=self.pcp_size,
             )
             if not keys:
                 return
@@ -2904,7 +2913,7 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # All-rank KV pool lookup currently assumes PCP=1.
+        # PCP replicas share keys; expand only the physical KV partitions.
         expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match

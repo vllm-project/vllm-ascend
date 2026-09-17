@@ -264,6 +264,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -271,6 +277,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -1428,6 +1442,15 @@ def enable_dsa_cp() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_dsa_cp
+
+
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
 
 
 @lru_cache(maxsize=1)
