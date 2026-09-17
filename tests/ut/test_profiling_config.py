@@ -115,9 +115,11 @@ def test_generate_service_profiling_config_cleans_up_after_write_failure(
 
     @contextmanager
     def failing_temp_file(*args, **kwargs):
-        with original_factory(*args, **kwargs) as temp_file:
-            with patch.object(temp_file, "write", side_effect=OSError("disk full")):
-                yield temp_file
+        with (
+            original_factory(*args, **kwargs) as temp_file,
+            patch.object(temp_file, "write", side_effect=OSError("disk full")),
+        ):
+            yield temp_file
 
     with (
         patch.object(
