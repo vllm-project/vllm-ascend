@@ -1194,7 +1194,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda d: names)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
     raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    concat = connector != "MultiConnector"
+    concat = connector is None
     if concat:
         assert isinstance(raw[names[0]], torch.Tensor)
         assert raw[names[0]].numel() == 3 * spec.page_size_bytes

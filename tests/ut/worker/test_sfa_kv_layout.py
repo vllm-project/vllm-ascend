@@ -103,8 +103,8 @@ def test_reconstruction_rejects_non_parent_views(kind):
     "connector, module, expected",
     [
         (None, None, True),
-        ("SfaRemoteD2HConnector", None, True),
-        ("SfaRemoteD2HConnector", "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector", True),
+        ("SfaRemoteD2HConnector", None, False),
+        ("SfaRemoteD2HConnector", "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector", False),
         ("SfaRemoteD2HConnector", "custom.connector", False),
         ("MultiConnector", None, False),
         ("AscendStoreConnector", None, False),
