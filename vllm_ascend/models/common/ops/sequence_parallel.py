@@ -9,7 +9,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -29,22 +28,48 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
     return tensor_model_parallel_all_gather(x, 0)
 
 
-def sp_shard(x: torch.Tensor) -> torch.Tensor:
-    """Shard the token axis across TP ranks for sequence parallelism.
+def _ascend_sp_shard_impl(x: torch.Tensor) -> torch.Tensor:
+    """Pad the token axis (dim 0) to the TP multiple, then take this rank's chunk.
 
-    The pad+chunk shape math must stay opaque to dynamo: a plain Python
-    implementation gets baked into the compiled graph with the trace-time
-    shape, so graph capture at any other bucket size shards to a wrong row
-    count (input_ids keeps the warmup shard size while hidden states use the
-    real one, crashing the hash router with ``input_ids.numel() != x.rows``).
-    Route through the registered upstream ``sequence_parallel_chunk_impl``
-    whose fake impl derives ``cdiv(num_tokens, tp)`` dynamically. That op
-    pads the last dim only, so 1D inputs (input_ids, token_mask) go through
-    a [T, 1] view.
+    Supports arbitrary trailing dims. The upstream
+    ``sequence_parallel_chunk`` cannot be reused here: its
+    ``F.pad(x, (0, 0, 0, pad_len))`` pads the second-to-last dim, which for
+    the draft/MTP inputs ``[T, hc_mult, H]`` pads the hc_mult axis instead of
+    the token axis, so any ``T < tp_size`` (e.g. a 6-token dspark draft step
+    on TP8) shards to zero rows on every rank. Wrapped in a custom op so the
+    modulo padding stays invisible to dynamo (a plain Python implementation
+    gets baked into the compiled graph with the trace-time shape, so graph
+    capture at any other bucket size shards to a wrong row count).
     """
-    if x.ndim == 1:
-        return sequence_parallel_chunk(x.reshape(-1, 1)).reshape(-1)
-    return sequence_parallel_chunk(x)
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    sp_pad = (-x.shape[0]) % tp_size
+    pad_shape = list(x.shape)
+    pad_shape[0] = sp_pad
+    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
+    chunk = x.shape[0] // tp_size
+    return x[tp_rank * chunk : (tp_rank + 1) * chunk]
+
+
+def _ascend_sp_shard_fake(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    shape = list(x.shape)
+    shape[0] = cdiv(x.shape[0], tp_size)
+    return torch.empty(shape, dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="ascend_sp_shard_impl",
+    op_func=_ascend_sp_shard_impl,
+    mutates_args=[],
+    fake_impl=_ascend_sp_shard_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+def sp_shard(x: torch.Tensor) -> torch.Tensor:
+    """Shard the token axis across TP ranks for sequence parallelism."""
+    return torch.ops.vllm.ascend_sp_shard_impl(x)
 
 
 def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:
