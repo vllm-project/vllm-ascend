@@ -566,7 +566,8 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
     runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
-    captured: dict[str, object] = {}
+    called = False
+    captured_kwargs: dict[str, object] = {}
     allocation_context = object()
     kv_cache_config = KVCacheConfig(
         num_blocks=1,
@@ -575,8 +576,9 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
     )
 
     def _super(self, kv_cache_config, **kwargs):
-        captured["called"] = True
-        captured["kwargs"] = kwargs
+        nonlocal called
+        called = True
+        captured_kwargs.update(kwargs)
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
 
@@ -591,11 +593,11 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
     ):
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
-    assert captured.get("called") is True
+    assert called is True
     if is_vllm_0_28_0:
-        assert "kv_cache_allocation_context" not in captured["kwargs"]
+        assert "kv_cache_allocation_context" not in captured_kwargs
     else:
-        assert captured["kwargs"]["kv_cache_allocation_context"] is allocation_context
+        assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
