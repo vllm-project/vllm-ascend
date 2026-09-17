@@ -100,7 +100,8 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
-  tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
+  tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 480
+  tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py: 540
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_hccl_weight_transfer.py: 1800
   tests/e2e/pull_request/two_card/test_xlite.py: 740
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
