@@ -950,16 +950,25 @@ class AscendConfig:
             )
             return False
 
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None and is_minimax_m3:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
+        # MiniMax-M3 uses intermediate_size=3072 and a SwiGLU-OAI wrapper
+        # supporting the corresponding 6144-wide first projection.
+        supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
+        if is_minimax_m3:
+            supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
         intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in {1024, 2048, 3072, 4096, 7168}:
+        if intermediate_hidden not in supported_intermediate_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s"
-                " is not in {1024, 2048, 3072, 4096, 7168}",
+                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
                 intermediate_hidden,
+                sorted(supported_intermediate_sizes),
             )
             return False
 
