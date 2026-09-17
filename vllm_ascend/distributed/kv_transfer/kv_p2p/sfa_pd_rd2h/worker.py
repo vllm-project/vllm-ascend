@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     LayerMetadata,
+    NanoTailDest,
     SendTask,
     get_external_request_id,
     infer_sfa_component_group_ids,
@@ -147,6 +148,15 @@ class SFAPDRD2HConsumerWorker:
         self.request_map: dict[str, str] = {}
         # external_req_id -> (main CPU block ids, indexer HBM block ids).
         self._dest_blocks_by_req: dict[str, tuple[list[int], list[int]]] = {}
+        # Internal req_id -> early-bound nano top-k row used by the runner.
+        self.nano_slots_by_req: dict[str, int] = {}
+        # external_req_id -> circular-tail destination. Shared with the read thread.
+        self._nano_tail_by_req: dict[str, NanoTailDest] = {}
+        self._topk_k_bases: list[int] = []
+        self._topk_v_bases: list[int] = []
+        self._topk_row_tokens = 0
+        self._topk_hot_tokens = 0
+        self._nano_block_size = 128
         # External req ids whose DONE signal arrived before request_map
         # was seeded (see get_finished). Retried every step until mapped.
         self._pending_done: set[str] = set()
@@ -200,6 +210,16 @@ class SFAPDRD2HConsumerWorker:
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                pool_slot = getattr(req, "pool_slot", None)
+                if pool_slot is not None:
+                    self.nano_slots_by_req[req_id] = int(pool_slot)
+                    tail_tokens = int(getattr(req, "tail_tokens", 0) or 0)
+                    if tail_tokens > 0:
+                        self._nano_tail_by_req[ext_id] = NanoTailDest(
+                            pool_slot=int(pool_slot),
+                            tail_tokens=tail_tokens,
+                            tail_block_index=int(getattr(req, "tail_block_index", 0) or 0),
+                        )
 
     def save_kv_layer(
         self,
@@ -221,6 +241,8 @@ class SFAPDRD2HConsumerWorker:
             self._cpu_blocks_by_req.pop(req_id, None)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
+            getattr(self, "nano_slots_by_req", {}).pop(req_id, None)
+            getattr(self, "_nano_tail_by_req", {}).pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
@@ -324,6 +346,12 @@ class SFAPDRD2HConsumerWorker:
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
+            nano_tail_by_req=self._nano_tail_by_req,
+            topk_k_bases=self._topk_k_bases,
+            topk_v_bases=self._topk_v_bases,
+            topk_row_tokens=self._topk_row_tokens,
+            topk_hot_tokens=self._topk_hot_tokens,
+            block_size=self._nano_block_size,
         )
 
     def _register_memfabric_pull(
@@ -407,6 +435,7 @@ class SFAPDRD2HConsumerWorker:
 
         # Create memfabric engine (no registration)
         self._ensure_engine()
+        self._bind_nano_tail_destinations()
         read_state = self._build_consumer_read_state()
         # Start MembPullReadThread (ZMQ ROUTER + memfabric read)
         self._mf_read_thread = MembPullReadThread(
@@ -428,6 +457,30 @@ class SFAPDRD2HConsumerWorker:
             sum(t is not None for t in self._indexer_tensors),
             len(main_names),
         )
+
+    def _bind_nano_tail_destinations(self) -> None:
+        """Publish rank-local topk buffer bases for circular-tail D2D."""
+        manager = self.offload_manager
+        if manager is None or not getattr(manager, "use_nano", False):
+            self._topk_k_bases = []
+            self._topk_v_bases = []
+            self._topk_row_tokens = 0
+            self._topk_hot_tokens = 0
+            return
+        topk_k = manager.topk_buffers_k
+        topk_v = manager.topk_buffers_v
+        if not topk_k or not topk_v:
+            raise RuntimeError("nano PD tail D2D requires registered topk buffers")
+        self._topk_k_bases = [int(tensor.data_ptr()) for tensor in topk_k]
+        self._topk_v_bases = [int(tensor.data_ptr()) for tensor in topk_v]
+        self._nano_block_size = int(manager.block_size)
+        self._topk_row_tokens = int(topk_k[0].shape[1])
+        self._topk_hot_tokens = self._topk_row_tokens - 2 * self._nano_block_size
+        if self._topk_hot_tokens <= 0:
+            raise RuntimeError(
+                "nano topk row is missing circular tail slots: "
+                f"row_tokens={self._topk_row_tokens}, block_size={self._nano_block_size}"
+            )
 
     def shutdown(self) -> None:
         read_thread = getattr(self, "_mf_read_thread", None)

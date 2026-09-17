@@ -871,6 +871,8 @@ class SparseKVOffloadManager:
                 cpu_k_shape,
                 cpu_v_shape,
             )
+        if self.use_nano:
+            self._bind_nano_copy_bases()
 
         gvas_buffer_offset = 0
         gvas_buffer_size_bytes = self.max_num_topk_rows * self.topk * 2 * 8  # 2: k+v, 8: int64
@@ -1083,6 +1085,48 @@ class SparseKVOffloadManager:
         self.lru_miss_position_workspace_ptr = self.lru_miss_position_workspace.data_ptr()
         self.lru_epochs_ptr = self.lru_epochs.data_ptr()
         self.lru_physical_row_workspace_ptr = self.lru_physical_row_workspace.data_ptr()
+
+    def _bind_nano_copy_bases(self) -> None:
+        """Pin host/device row bases used by eager prefix-rollback tail restore."""
+        if not self.k_caches_cpu or not self.topk_buffers_k:
+            raise RuntimeError("nano tail restore requires host and device KV bases")
+        device = self.topk_buffers_k[0].device
+        descriptor_rows = 4 * (self.max_num_reqs + 2)
+        self.nano_copy_src = torch.empty(descriptor_rows, dtype=torch.int64, device=device)
+        self.nano_copy_dst = torch.empty_like(self.nano_copy_src)
+        self.nano_host_bases = []
+        self.nano_device_bases = []
+        for layer_id in range(len(self.topk_buffers_k)):
+            self.nano_host_bases.append(
+                torch.tensor(
+                    [self.k_caches_cpu[layer_id].data_ptr(), self.v_caches_cpu[layer_id].data_ptr()],
+                    dtype=torch.int64,
+                    device=device,
+                ).view(2, 1)
+            )
+            self.nano_device_bases.append(
+                torch.tensor(
+                    [self.topk_buffers_k[layer_id].data_ptr(), self.topk_buffers_v[layer_id].data_ptr()],
+                    dtype=torch.int64,
+                    device=device,
+                ).view(2, 1)
+            )
+
+    def restore_nano_tails(self, metadata) -> None:
+        """Copy the current tail descriptors for every layer. Used on prefix rollback."""
+        src_off = getattr(metadata, "nano_copy_src_offsets", None)
+        dst_off = getattr(metadata, "nano_copy_dst_offsets", None)
+        lengths = getattr(metadata, "nano_copy_lengths", None)
+        count = getattr(metadata, "nano_copy_count", None)
+        if src_off is None or dst_off is None or lengths is None or count is None:
+            return
+        if not getattr(self, "nano_host_bases", None):
+            raise RuntimeError("nano KV base addresses must be bound before tail restore")
+        n = src_off.numel()
+        for host_bases, device_bases in zip(self.nano_host_bases, self.nano_device_bases):
+            torch.add(src_off.view(2, -1), host_bases, out=self.nano_copy_src[:n].view(2, -1))
+            torch.add(dst_off.view(2, -1), device_bases, out=self.nano_copy_dst[:n].view(2, -1))
+            self.copy_nano_kv(self.nano_copy_src[:n], self.nano_copy_dst[:n], lengths, count)
 
     def copy_nano_kv(self, sources, destinations, lengths, count) -> None:
         """Enqueue bounded descriptor copies on the current compute stream."""

@@ -305,6 +305,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             metadata.nano_copy_dst_offsets = self.nano_copy_dst_offsets[draft_index, :descriptor_count]
             metadata.nano_copy_lengths = self.nano_copy_lengths[draft_index, :descriptor_count]
             metadata.nano_copy_count = self.nano_copy_count[draft_index]
+            metadata.nano_skip_tail_restore = self.is_pd_decode_consumer
             tokens = common_attn_metadata.num_input_tokens
             positions = self.nano_token_positions[:tokens]
             token_rows = torch.searchsorted(ends.contiguous(), positions.to(torch.int32), right=True).clamp_max(
@@ -714,7 +715,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             topk_misses = self.nano_reuse_topk_misses[:tokens]
             misses = self.nano_reuse_misses[:count]
         else:
-            self._nano_restore_tail(metadata, manager, layer_name)
+            if not metadata.nano_skip_tail_restore:
+                self._nano_restore_tail(metadata, manager, layer_name)
             cache_tokens = metadata.nano_cache_tokens
             logical_lens = metadata.nano_logical_lens
             topk_misses = owner.nano_topk_misses[:tokens]

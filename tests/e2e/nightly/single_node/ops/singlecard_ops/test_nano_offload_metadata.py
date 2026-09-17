@@ -84,7 +84,9 @@ def test_device_lengths_tail_geometry_and_rejection():
     assert metadata.nano_prefix_lens.cpu().tolist() == [10240, 8320]
     assert metadata.nano_cache_tokens.cpu().tolist() == [8192, 8192]
     assert metadata.nano_logical_lens.cpu().tolist() == [8323, 8193]
-    # Current query KV is scattered locally: H2D must restore only prior KV.
+    # Current query KV is scattered locally: descriptors still describe prior KV
+    # so prefix rollback can eager-restore. PD decode skips the graph H2D.
+    assert metadata.nano_skip_tail_restore is True
     assert metadata.nano_tail_lengths.cpu().tolist() == [[127, 0], [0, 0]]
     assert metadata.nano_copy_count.item() == 8
     assert metadata.nano_copy_lengths.cpu().tolist() == [127 * 1024, 0, 0, 0, 127 * 128, 0, 0, 0]
