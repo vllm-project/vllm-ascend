@@ -32,12 +32,12 @@ TRITON_POOL_SUB_TILE_SIZE = 128
 # Chunk tokens to limit the FP32 score buffer to this budget where possible.
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 
-# CANN's fused TopKV2 high_performance kernel faults (VEC 507035) on -inf cells
-# from a ragged mask at a non-aligned width. The fp32-lowest finite value orders
-# identically and avoids that path.
+# CANN's fused TopKV2 high_performance kernel faults (aicore VEC 507035) on -inf
+# cells produced by a ragged mask at a non-aligned width. The fp32-lowest finite
+# value orders identically -- no real score can reach it -- so the wrapper
+# rewrites the mask sentinel to it on the way into top-k. Producers keep using
+# -inf; the guard sits at the consumer that faults.
 NEG_INF_SENTINEL = torch.finfo(torch.float32).min
-_KERNEL_NEG_INF_SENTINEL = tl.constexpr(-3.4028234663852886e38)
-assert _KERNEL_NEG_INF_SENTINEL.value == NEG_INF_SENTINEL, "sentinel must match fp32 lowest"
 
 
 # Keep batch-varying inputs unspecialized to avoid recompiling per step.
@@ -91,7 +91,7 @@ def _glm5_next_lightning_indexer_score_kernel(
     chunk_start = chunk * BLOCK_POOL
     # Dynamic trip count: requests shorter than the static max pool length
     # skip their out-of-range sub-tiles even inside captured graphs. Cells
-    # beyond ``visible_pool_len`` keep the sentinel the wrapper initialized.
+    # beyond ``visible_pool_len`` keep the -inf the wrapper initialized.
     chunk_visible = tl.maximum(tl.minimum(visible_pool_len, chunk_start + BLOCK_POOL) - chunk_start, 0)
     num_subs = tl.cdiv(chunk_visible, SUB_POOL)
     for sub in tl.range(num_subs):
@@ -115,7 +115,7 @@ def _glm5_next_lightning_indexer_score_kernel(
         )
         k_tile = tl.load(indexer_cache_ptr + k_addrs, mask=valid_pool[:, None], other=0.0).to(tl.float32)
         scores = tl.sum(k_tile * qbar[None, :], axis=1)
-        scores = tl.where(valid_pool, scores, _KERNEL_NEG_INF_SENTINEL)
+        scores = tl.where(valid_pool, scores, float("-inf"))
         tl.store(scores_ptr + local_token_idx * max_pool_seq_len + pool_offsets, scores, mask=in_range)
 
 
@@ -177,10 +177,12 @@ def glm5_next_lightning_indexer_triton(
             .sum(dim=1)
             .contiguous()
         )
-        # Finite sentinel, not -inf: see NEG_INF_SENTINEL.
+        # -inf init: the kernel skips sub-tiles beyond a request's visible pools,
+        # and those cells must stay excluded from the top-k. The wrapper rewrites
+        # every -inf to NEG_INF_SENTINEL on the way into top-k.
         scores = torch.full(
             (rows, max_pool_seq_len),
-            NEG_INF_SENTINEL,
+            float("-inf"),
             dtype=torch.float32,
             device=query.device,
         )
@@ -209,6 +211,12 @@ def glm5_next_lightning_indexer_triton(
             TRITON_POOL_SUB_TILE_SIZE,
         )
 
+        # TopKV2 faults on -inf at a non-aligned width, so hand it the finite
+        # sentinel instead. In place: the scratch is not read again after the
+        # top-k, and a second full-size buffer on this path is real memory.
+        # NaN is mapped to the same sentinel so it can never outrank a valid
+        # score (the default rewrite to 0.0 could).
+        scores.nan_to_num_(nan=NEG_INF_SENTINEL, neginf=NEG_INF_SENTINEL)
         topk_vals, pool_ids = torch.topk(scores, topk, dim=1)
         pool_ids = torch.where(
             topk_vals <= NEG_INF_SENTINEL,
