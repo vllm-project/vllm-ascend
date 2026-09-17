@@ -832,7 +832,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
@@ -910,6 +910,7 @@ Key Parameter Descriptions:
 **Decode node-specific configurations:**
 
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
+- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The 950DT products launch does not set this flag and keeps prefix caching enabled.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
 
@@ -1264,7 +1265,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
         --kv-transfer-config \
