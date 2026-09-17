@@ -465,34 +465,35 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return [expert for _, expert, _ in copies]
 
 
-def unconstrained_lpt(
-    mean: np.ndarray,
-    moments: np.ndarray,
-    replicas: np.ndarray,
-    num_ranks: int,
-    z_score: float,
-) -> np.ndarray:
-    """Build the source-agnostic LPT placement used for screening."""
-    total_slots = int(np.sum(replicas))
-    if total_slots % num_ranks:
-        raise ValueError("STAIR physical slots must divide evenly across ranks")
-    slots_per_rank = total_slots // num_ranks
-    ranks: list[set[int]] = [set() for _ in range(num_ranks)]
-    for expert in StairEplbPolicy._ordered_copies(mean, moments, replicas, z_score):
-        candidates = [
-            rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
-        ]
-        if not candidates:
-            raise ValueError("STAIR replica vector has no duplicate-free placement")
-        rank = min(
-            candidates,
-            key=lambda item: (
-                StairEplbPolicy._post_insert_risk(ranks[item], expert, mean, moments, replicas, z_score),
-                item,
-            ),
-        )
-        ranks[rank].add(expert)
-    return np.asarray([sorted(row) for row in ranks], dtype=np.int64)
+    @classmethod
+    def unconstrained_lpt(
+        cls,
+        mean: np.ndarray,
+        moments: np.ndarray,
+        replicas: np.ndarray,
+        num_ranks: int,
+        z_score: float,
+    ) -> np.ndarray:
+        """Build the source-agnostic LPT placement used for screening."""
+        total_slots = int(np.sum(replicas))
+        if total_slots % num_ranks:
+            raise ValueError("STAIR physical slots must divide evenly across ranks")
+        slots_per_rank = total_slots // num_ranks
+        ranks: list[set[int]] = [set() for _ in range(num_ranks)]
+        for expert in cls._ordered_copies(mean, moments, replicas, z_score):
+            candidates = [
+                rank
+                for rank in range(num_ranks)
+                if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
+            ]
+            if not candidates:
+                raise ValueError("STAIR replica vector has no duplicate-free placement")
+            rank = min(
+                candidates,
+                key=lambda item: (cls._post_insert_risk(ranks[item], expert, mean, moments, replicas, z_score), item),
+            )
+            ranks[rank].add(expert)
+        return np.asarray([sorted(row) for row in ranks], dtype=np.int64)
 
 
 def constrained_lpt(
@@ -581,7 +582,7 @@ def _plan_layer(
 
     def screening(replicas: np.ndarray) -> float:
         try:
-            placement = unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
+            placement = StairEplbPolicy.unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
         except ValueError:
             return float("inf")
         return StairEplbPolicy.placement_score(samples, weights, placement).mean
