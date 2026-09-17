@@ -86,6 +86,7 @@ class ScoreEncoderCacheConfig:
 # throughput values are available.
 DEFAULT_HARDWARE_FLOPS = 4 * 1e14
 
+
 class VisionEncoderCostEstimator:
     """Estimate the theoretical recomputation cost of a cached encoder output.
 
