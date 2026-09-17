@@ -109,7 +109,6 @@ jobs:
       full_tag: ${{ steps.build.outputs.full_tag }}
       build_type: ${{ steps.build.outputs.build_type }}
       swr_logged_in: ${{ steps.build.outputs.swr_logged_in }}
-      date: ${{ steps.build.outputs.date }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -223,7 +222,6 @@ jobs:
           echo "tag_prefix=${TAG_PREFIX}"
           echo "full_tag=${FULL_TAG}"
           echo "build_type=${{ inputs.build_type }}"
-          echo "date=${DATE}"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             echo "push_registry=${SWR_TEMP_REGISTRY}"
           else
@@ -291,17 +289,35 @@ jobs:
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG=$(echo "$BRANCH_TAG" | tr '/' '-')
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-          DATE="${{ needs.build.outputs.date }}"
-          # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>
-          # The OS_MARK ("-openeuler") goes between the target and the cann suffix, matching
-          # how the build step composes FULL_TAG: daily-<branch>-<target>${OS_MARK}${TAG_SUFFIX}.
+          # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>,
+          # where <date> is the schedule daily base image date. Ubuntu and openeuler
+          # base images may be built on different days, so resolve the date per OS
+          # variant using the same backtracking logic as the build step.
           BASE_TAG="daily-${BRANCH_TAG}-${{ inputs.target }}"
-          TAG_SUFFIX="-cann${CANN_VERSION_LOWER}-${DATE}"
 
           MISSING_VARIANT=0
           MERGED_VARIANT=0
           for OS_MARK in "" "-openeuler"; do
-            TAG="${BASE_TAG}${OS_MARK}${TAG_SUFFIX}"
+            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              DATE=""
+              for i in $(seq 0 30); do
+                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
+                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                if docker buildx imagetools inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                  DATE="$CANDIDATE_DATE"
+                  break
+                fi
+              done
+            else
+              DATE="${{ inputs.base_image_date }}"
+            fi
+            if [ -z "$DATE" ]; then
+              echo "::warning::Skipping ${OS_MARK:-ubuntu}: no base image date found"
+              MISSING_VARIANT=1
+              continue
+            fi
+
+            TAG="${BASE_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${DATE}"
             MANIFEST_TAG="${MAIN_REGISTRY}:${TAG}"
             AMD64_TAG="${TEMP_REGISTRY}:${TAG}-amd64"
             ARM64_TAG="${TEMP_REGISTRY}:${TAG}-arm64"
