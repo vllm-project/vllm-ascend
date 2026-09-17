@@ -21,7 +21,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
 - `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
-- `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency (16× smaller draft KV cache) and compatibility with the target model. Applicable to all A2/A3 and 950DT deployment scenarios in this document. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
+- `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency and compatibility with the target model. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
 
 It is recommended to place the model weight in a shared cache directory.
 
