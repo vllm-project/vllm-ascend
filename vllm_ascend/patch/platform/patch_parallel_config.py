@@ -3,7 +3,8 @@
 
 from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import VllmConfig
-from vllm.config.parallel import ParallelConfig, current_platform, logger
+from vllm.config import parallel as parallel_config
+from vllm.config.parallel import ParallelConfig, logger
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -47,7 +48,7 @@ def _validate_parallel_config(self: ParallelConfig) -> ParallelConfig:
         raise ValueError("numa_bind_nodes and numa_bind_cpus require numa_bind=True.")
 
     if self.enable_eplb:
-        if not current_platform.is_cuda_alike():
+        if not parallel_config.current_platform.is_cuda_alike():
             raise ValueError("Expert parallelism load balancing is only supported on CUDA devices or ROCm devices now.")
         if not self.enable_expert_parallel:
             raise ValueError("enable_expert_parallel must be True to use EPLB.")
