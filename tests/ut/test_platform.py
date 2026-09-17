@@ -57,7 +57,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
         mock_ascend_config.enable_shared_expert_dp = False
