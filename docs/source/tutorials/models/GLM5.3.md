@@ -24,10 +24,15 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.3-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64G × 32).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8).
+|  Weight Version          | Hardware Requirements                                         | Download Links |
+|--------------------------|---------------------------------------------------------------|----------------|
+|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 32) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) |
+
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -173,6 +178,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_MLAPO=1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
         --port 8077 \
@@ -226,6 +232,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export VLLM_ASCEND_ENABLE_MLAPO=1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
         --port 8077 \
@@ -290,6 +297,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
         --port 8077 \
@@ -348,6 +356,7 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
     export VLLM_ASCEND_ENABLE_MLAPO=1
     export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
         --host 0.0.0.0 \
         --port 8077 \

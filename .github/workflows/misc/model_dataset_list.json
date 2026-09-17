@@ -303,7 +303,8 @@
             "Eco-Tech/Kimi-K2.6-w4a8",
             "z-lab/Qwen3.6-35B-A3B-DFlash",
             "Ex0bit/Qwen3.6-27B-PRISM-EAGLE3",
-            "zai-org/GLM-Image"
+            "zai-org/GLM-Image",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a3": [
             "AI-ModelScope/AI21-Jamba-1.5-Mini",
@@ -361,6 +362,7 @@
             "IQuestLab/IQuest-Coder-V1-40B-Instruct",
             "Inferact/MiniMax-M3-EAGLE3",
             "Kwai-Keye/Keye-VL-8B-Preview",
+            "leslie1776/Qwen3.5-9B-Eagle3-ShareGPTocal-di",
             "LLM-Research/Llama-3.2-11B-Vision",
             "LLM-Research/Llama-3.2-1B-Instruct",
             "LLM-Research/Meta-Llama-3-8B-Instruct",
@@ -575,7 +577,8 @@
             "z-lab/Qwen3-8B-DFlash-b16",
             "zai-org/GLM-4.1V-9B-Thinking",
             "zai-org/GLM-Image",
-            "Eco-Tech/GLM-5.2-w8a8c8"
+            "Eco-Tech/GLM-5.2-w8a8c8",
+            "Eco-Tech/GLM-5.3-w8a8c8"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

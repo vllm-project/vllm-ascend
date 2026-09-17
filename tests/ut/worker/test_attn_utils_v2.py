@@ -888,6 +888,8 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
 
 class _PrefillStateBuilder:
+    consumes_pcp_context = False
+
     def __init__(self):
         self.extra_kwargs = None
 
@@ -903,10 +905,13 @@ class _CaptureStateBuilder(_PrefillStateBuilder):
         return common_attn_metadata.is_prefilling
 
 
+@pytest.mark.parametrize("cache_only_backend", [False, True])
 @pytest.mark.parametrize("for_cudagraph_capture", [False, True])
-def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture):
-    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", _PrefillStateBuilder)
+def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture, cache_only_backend):
+    sfa_builder_cls = type("UnrelatedSFABuilder", (), {}) if cache_only_backend else _PrefillStateBuilder
+    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", sfa_builder_cls)
     builder = _CaptureStateBuilder() if for_cudagraph_capture else _PrefillStateBuilder()
+    builder.consumes_pcp_context = cache_only_backend
     attn_group = SimpleNamespace(
         layer_names=["layer.0"],
         get_metadata_builder=lambda _: builder,

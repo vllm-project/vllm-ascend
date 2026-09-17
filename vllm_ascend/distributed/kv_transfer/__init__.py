@@ -117,9 +117,9 @@ def register_connector():
         )
 
     KVConnectorFactory.register_connector(
-        "RecomputeCPUOffloadConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
-        "RecomputeCPUOffloadConnectorV1",
+        "PreemptOffloadConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.preempt_offload_connector",
+        "PreemptOffloadConnectorV1",
     )
 
     KVConnectorFactory.register_connector(

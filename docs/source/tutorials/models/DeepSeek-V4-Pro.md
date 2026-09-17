@@ -21,11 +21,16 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): download the production weight from [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8). This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+|  Weight Version             | Hardware Requirements                                               | Download Links |
+|-----------------------------|---------------------------------------------------------------------|----------------|
+| `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
+| `DeepSeek-V4-Pro-0813-w4a8` |                                                                     | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
 
-- `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)
+`DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -167,9 +172,10 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_RPC_TIMEOUT=1800000
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 10010 \
+      --port 8000 \
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
@@ -241,10 +247,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export ASCEND_CONNECT_TIMEOUT=10000
     export ASCEND_TRANSFER_TIMEOUT=10000
     export VLLM_RPC_TIMEOUT=1800000
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 10010 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip  \
       --data-parallel-size 4 \
@@ -312,10 +319,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
@@ -369,10 +377,11 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
@@ -439,7 +448,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 2 \
@@ -501,7 +510,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
 
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
       --host 0.0.0.0 \
-      --port 8900 \
+      --port 8000 \
       --headless \
       --data-parallel-address $node0_ip \
       --data-parallel-rpc-port 13399 \
@@ -564,7 +573,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](..
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8900/v1/chat/completions \
+curl http://<node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "dsv4",
@@ -739,6 +748,7 @@ Before you start, please:
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
         --host 0.0.0.0 \
         --port $2 \
@@ -808,7 +818,8 @@ Before you start, please:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_BUFFSIZE=1024
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
         --host 0.0.0.0 \
         --port $2 \
@@ -907,7 +918,8 @@ Before you start, please:
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -970,7 +982,8 @@ Before you start, please:
     export HCCL_BUFFSIZE=1800
     export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Pro-0813-w4a8 \
         --host 0.0.0.0 \
         --port $2 \
@@ -1178,7 +1191,8 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -1253,7 +1267,8 @@ Before you start, please:
         sysctl kernel.sched_migration_cost_ns=50000
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -1409,7 +1424,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1423,11 +1438,11 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

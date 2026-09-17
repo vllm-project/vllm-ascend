@@ -264,6 +264,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -271,6 +277,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -1014,16 +1028,18 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
+    if isinstance(tensor, torch.Tensor):
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(tensors: Any) -> Any:
+def weak_ref_tensors(
+    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
-    Recursively replace tensors with weak references while preserving containers
-    and non-tensor values.
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -1035,14 +1051,14 @@ def weak_ref_tensors(tensors: Any) -> Any:
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensors(tensor) for tensor in tensors]
+        return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
-    if isinstance(tensors, dict):
-        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    # For IntermediateTensors used in pipeline parallelism
     if isinstance(tensors, IntermediateTensors):
-        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
-    return tensors
+        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
+        return ret
+    raise ValueError("Invalid type for tensors")
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1428,6 +1444,15 @@ def enable_dsa_cp() -> bool:
     return get_ascend_config().enable_dsa_cp
 
 
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
+
+
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
     """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
@@ -1707,11 +1732,3 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
-
-
-def use_updatable_graph(
-    attn_backend,
-) -> bool:
-    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
-
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

@@ -29,6 +29,7 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
     return runner
@@ -527,7 +528,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config):
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
