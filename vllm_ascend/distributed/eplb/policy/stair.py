@@ -301,62 +301,63 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
 
 
-def _minimum_source_cost(
-    demands: list[tuple[int, int]],
-    owners: dict[int, tuple[int, ...]],
-    capacity: dict[tuple[int, int], int],
-    node_by_rank: tuple[int, ...],
-) -> int | None:
-    """Solve the directed pair-capacity matching problem."""
-    if not demands:
-        return 0
-    pairs = sorted({(src, dst) for dst, expert in demands for src in owners[expert] if capacity[(src, dst)]})
-    pair_nodes = {pair: len(demands) + index + 1 for index, pair in enumerate(pairs)}
-    sink = len(demands) + len(pairs) + 1
-    graph: list[list[list[int]]] = [[] for _ in range(sink + 1)]
+    @staticmethod
+    def _minimum_source_cost(
+        demands: list[tuple[int, int]],
+        owners: dict[int, tuple[int, ...]],
+        capacity: dict[tuple[int, int], int],
+        node_by_rank: tuple[int, ...],
+    ) -> int | None:
+        """Solve the directed pair-capacity matching problem."""
+        if not demands:
+            return 0
+        pairs = sorted({(src, dst) for dst, expert in demands for src in owners[expert] if capacity[(src, dst)]})
+        pair_nodes = {pair: len(demands) + index + 1 for index, pair in enumerate(pairs)}
+        sink = len(demands) + len(pairs) + 1
+        graph: list[list[list[int]]] = [[] for _ in range(sink + 1)]
 
-    def add_edge(start: int, end: int, cap: int, cost: int) -> None:
-        graph[start].append([end, len(graph[end]), cap, cost])
-        graph[end].append([start, len(graph[start]) - 1, 0, -cost])
+        def add_edge(start: int, end: int, cap: int, cost: int) -> None:
+            graph[start].append([end, len(graph[end]), cap, cost])
+            graph[end].append([start, len(graph[start]) - 1, 0, -cost])
 
-    scale = len(demands) + 1
-    for index, (dst, expert) in enumerate(demands, 1):
-        add_edge(0, index, 1, 0)
-        for src in owners[expert]:
-            if (src, dst) in pair_nodes:
-                cost = 1 if node_by_rank[src] == node_by_rank[dst] else scale
-                add_edge(index, pair_nodes[(src, dst)], 1, cost)
-    for pair, node in pair_nodes.items():
-        add_edge(node, sink, capacity[pair], 0)
+        scale = len(demands) + 1
+        for index, (dst, expert) in enumerate(demands, 1):
+            add_edge(0, index, 1, 0)
+            for src in owners[expert]:
+                if (src, dst) in pair_nodes:
+                    cost = 1 if node_by_rank[src] == node_by_rank[dst] else scale
+                    add_edge(index, pair_nodes[(src, dst)], 1, cost)
+        for pair, node in pair_nodes.items():
+            add_edge(node, sink, capacity[pair], 0)
 
-    total = 0
-    for _ in demands:
-        distance = [10**18] * len(graph)
-        parent: list[tuple[int, int] | None] = [None] * len(graph)
-        distance[0] = 0
-        queue, queued = deque([0]), {0}
-        while queue:
-            node = queue.popleft()
-            queued.discard(node)
-            for edge_index, edge in enumerate(graph[node]):
-                target, _, cap, cost = edge
-                if cap and distance[node] + cost < distance[target]:
-                    distance[target] = distance[node] + cost
-                    parent[target] = (node, edge_index)
-                    if target not in queued:
-                        queue.append(target)
-                        queued.add(target)
-        if parent[sink] is None:
-            return None
-        total += distance[sink]
-        node = sink
-        while node:
-            previous, edge_index = parent[node]  # type: ignore[misc]
-            edge = graph[previous][edge_index]
-            edge[2] -= 1
-            graph[node][edge[1]][2] += 1
-            node = previous
-    return total
+        total = 0
+        for _ in demands:
+            distance = [10**18] * len(graph)
+            parent: list[tuple[int, int] | None] = [None] * len(graph)
+            distance[0] = 0
+            queue, queued = deque([0]), {0}
+            while queue:
+                node = queue.popleft()
+                queued.discard(node)
+                for edge_index, edge in enumerate(graph[node]):
+                    target, _, cap, cost = edge
+                    if cap and distance[node] + cost < distance[target]:
+                        distance[target] = distance[node] + cost
+                        parent[target] = (node, edge_index)
+                        if target not in queued:
+                            queue.append(target)
+                            queued.add(target)
+            if parent[sink] is None:
+                return None
+            total += distance[sink]
+            node = sink
+            while node:
+                previous, edge_index = parent[node]  # type: ignore[misc]
+                edge = graph[previous][edge_index]
+                edge[2] -= 1
+                graph[node][edge[1]][2] += 1
+                node = previous
+        return total
 
 
 def assign_sources(
@@ -377,7 +378,7 @@ def assign_sources(
     owners = {expert: tuple(rank for rank, _ in values) for expert, values in locations.items()}
     slots = {(expert, rank): slot for expert, values in locations.items() for rank, slot in values}
     capacity = {(src, dst): pair_cap for src in range(old.shape[0]) for dst in range(old.shape[0]) if src != dst}
-    target = _minimum_source_cost(demands, owners, capacity, node_by_rank)
+    target = StairEplbPolicy._minimum_source_cost(demands, owners, capacity, node_by_rank)
     if target is None:
         return None
 
@@ -390,7 +391,7 @@ def assign_sources(
                 continue
             cost = 1 if node_by_rank[src] == node_by_rank[dst] else len(demands) + 1
             capacity[pair] -= 1
-            future = _minimum_source_cost(demands[index + 1 :], owners, capacity, node_by_rank)
+            future = StairEplbPolicy._minimum_source_cost(demands[index + 1 :], owners, capacity, node_by_rank)
             if future is not None and cost + future == target:
                 assignment[demand] = (src, slots[(expert, src)])
                 target -= cost
