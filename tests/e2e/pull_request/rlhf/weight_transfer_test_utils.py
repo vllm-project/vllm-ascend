@@ -5,11 +5,11 @@
 
 import hashlib
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import regex as re
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
