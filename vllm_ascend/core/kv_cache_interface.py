@@ -175,19 +175,23 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
 
 
 def should_use_sfa_kv_parent_layout(kv_transfer_config: object | None) -> bool:
-    """Decide whether unquantized SFA main KV uses the token-concat parent layout.
+    """Decide whether the configured KV transfer route can serve the
+    token-concatenated parent layout for unquantized SFA main KV.
 
-    Local inference with no KV transfer uses this layout. With transfer
-    configured, only the native route-A connector is adapted; unadapted
-    connectors (including MultiConnector and external implementations
-    reusing the native name) keep the established separate contiguous layout.
-    This is a storage-layout policy, not a statement about operator compatibility.
+    This answers only the transport-policy half of the decision; callers
+    combine it with the remaining gate conditions (A5 device, spec, backend)
+    before enabling the parent layout.
+
+    The parent layout changes where KV bytes sit in memory, so a transfer
+    route must understand it to address pages correctly. Today exactly one
+    configuration qualifies: local inference with no KV transfer configured
+    (``kv_transfer_config is None``). Any configured connector keeps the
+    legacy separate NoPE/RoPE buffers -- including the native
+    ``SfaRemoteD2HConnector``, whose parent-page wire protocol is being
+    developed on a separate branch and has not been exercised on device.
+    When that work lands and is validated, relax this to admit it.
     """
-    if kv_transfer_config is None:
-        return True
-    return getattr(kv_transfer_config, "kv_connector", None) == "SfaRemoteD2HConnector" and getattr(
-        kv_transfer_config, "kv_connector_module_path", None
-    ) in (None, "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector")
+    return kv_transfer_config is None
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -588,12 +588,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     patch("vllm_ascend.worker.model_runner_v1.get_kv_cache_tensor_layers", return_value=names),
                 ):
                     raw = runner._allocate_kv_cache_tensors(config)
-                    if connector != "MultiConnector":
+                    if connector is None:
                         self.assertIsInstance(raw[names[0]], torch.Tensor)
                         self.assertEqual(raw[names[0]].numel(), 3 * spec.page_size_bytes)
                         self.assertEqual(raw[names[0]] is raw[names[1]], legacy)
                     caches = runner._reshape_kv_cache_tensors(config, raw)
-                if connector == "MultiConnector":
+                if connector is not None:
                     self.assertTrue(all(t.is_contiguous() for n in names for t in caches[n]))
                     with self.assertRaises(ValueError):
                         get_sfa_kv_parent(*caches[names[0]])
