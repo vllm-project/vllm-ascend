@@ -5,9 +5,16 @@ inputs:
   cache-dir:
     required: true
     description: Directory exported as VLLM_ASCEND_BUILD_CACHE_DIR.
-  compatibility-id:
+  architecture:
     required: true
-    description: Coarse environment identity used only to rank persistent snapshots.
+    description: Build architecture, normalized by this action (for example X64 or ARM64).
+  soc-version:
+    required: true
+    description: Target SOC or device family, normalized by this action.
+  toolchain-image:
+    required: false
+    default: ''
+    description: Compiler image fallback when the action runs outside the CANN container.
   source-root:
     required: false
     default: '.'
@@ -35,7 +42,9 @@ runs:
       shell: bash
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
-        COMPATIBILITY_ID: ${{ inputs.compatibility-id }}
+        CACHE_ARCHITECTURE: ${{ inputs.architecture }}
+        CACHE_SOC_VERSION: ${{ inputs.soc-version }}
+        CACHE_TOOLCHAIN_IMAGE: ${{ inputs.toolchain-image }}
         SOURCE_ROOT: ${{ inputs.source-root }}
         CALLER_CSRC_HASH: ${{ inputs.csrc-hash }}
       run: |
@@ -82,7 +91,79 @@ runs:
           fi
         fi
 
-        compat_digest="$(printf '%s' "$COMPATIBILITY_ID" | sha256sum | awk '{print $1}')"
+        compat_digest="$(python3 - \
+          "$CACHE_ARCHITECTURE" \
+          "$CACHE_SOC_VERSION" \
+          "$CACHE_TOOLCHAIN_IMAGE" <<'PYCODE'
+        import hashlib
+        import json
+        import sys
+        from pathlib import Path
+
+        architecture_aliases = {
+            "x64": "x64",
+            "x86_64": "x64",
+            "amd64": "x64",
+            "arm64": "arm64",
+            "aarch64": "arm64",
+        }
+        soc_aliases = {
+            "a2": "ascend910b1",
+            "910b": "ascend910b1",
+            "ascend910b1": "ascend910b1",
+            "a3": "ascend910_9391",
+            "ascend910_9391": "ascend910_9391",
+            "310p": "ascend310p1",
+            "ascend310p1": "ascend310p1",
+            "a5": "ascend950dt_9582",
+            "950": "ascend950dt_9582",
+            "ascend950dt_9582": "ascend950dt_9582",
+        }
+
+        architecture = architecture_aliases.get(sys.argv[1].strip().lower())
+        if architecture is None:
+            raise SystemExit(f"unsupported cache architecture: {sys.argv[1]!r}")
+
+        soc_input = sys.argv[2].strip().lower()
+        soc_version = soc_aliases.get(soc_input, soc_input)
+        toolchain_image = sys.argv[3].strip()
+        machine = {
+            "x64": "x86_64",
+            "arm64": "aarch64",
+        }[architecture]
+        metadata = Path(
+            f"/usr/local/Ascend/ascend-toolkit/latest/{machine}-linux/"
+            "ascend_toolkit_install.info"
+        )
+        if metadata.is_file():
+            toolchain = {
+                "kind": "cann-metadata",
+                "sha256": hashlib.sha256(metadata.read_bytes()).hexdigest(),
+            }
+        elif toolchain_image:
+            toolchain = {
+                "kind": "container-image",
+                "value": toolchain_image,
+            }
+        else:
+            raise SystemExit(
+                "CANN metadata is unavailable; toolchain-image fallback is required"
+            )
+        if not soc_version:
+            raise SystemExit("SOC version must be non-empty")
+
+        descriptor = json.dumps(
+            {
+                "architecture": architecture,
+                "soc_version": soc_version,
+                "toolchain": toolchain,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        print(hashlib.sha256(descriptor.encode("utf-8")).hexdigest())
+        PYCODE
+        )"
         compat_prefix="vllm-ascend-inc-v1-schema${schema}-${compat_digest}-"
         same_csrc_prefix="${compat_prefix}${csrc_hash}-"
         primary_key="${same_csrc_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)-$$-${RANDOM}"
@@ -113,3 +194,34 @@ runs:
         restore-keys: |
           ${{ steps.key.outputs.same_csrc_prefix }}
           ${{ steps.key.outputs.compat_prefix }}
+
+    - name: Record restored L1 entries
+      if: steps.key.outputs.supported == 'true'
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: |
+        set -euo pipefail
+        baseline="${RUNNER_TEMP}/csrc-l1-${GITHUB_JOB}-baseline.json"
+        python3 - "$CACHE_DIR" "$baseline" <<'PYCODE'
+        import hashlib
+        import json
+        import sys
+        from pathlib import Path
+
+        cache_root = Path(sys.argv[1])
+        records = []
+        if cache_root.is_dir():
+            for manifest in sorted(cache_root.rglob("manifest.json")):
+                records.append(
+                    [
+                        manifest.relative_to(cache_root).as_posix(),
+                        hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    ]
+                )
+        Path(sys.argv[2]).write_text(
+            json.dumps(records, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        PYCODE
+        echo "VLLM_ASCEND_BUILD_CACHE_BASELINE=$baseline" >> "$GITHUB_ENV"

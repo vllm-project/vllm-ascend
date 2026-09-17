@@ -79,9 +79,6 @@ env:
   # L1: persistent fine-grained build cache. L0 remains the exact final-artifact
   # cache consumed by test jobs.
   INCREMENTAL_BUILD_CACHE_DIR: /tmp/vllm-ascend-incremental-build-cache
-  INCREMENTAL_BUILD_CACHE_NAMESPACE: vllm-ascend-inc
-  INCREMENTAL_BUILD_CACHE_TRANSPORT_EPOCH: v1
-
   RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
   RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
   RUNS_ON_S3_FORCE_PATH_STYLE: "false"
@@ -189,83 +186,21 @@ jobs:
           yum install -y python3-pip net-tools jemalloc numactl patch clang
           pip install uv
 
-      - name: Build incremental cache key
-        id: incremental-cache-key
-        if: fromJSON(inputs.target).incremental_cache == true
-        env:
-          CSRC_HASH: ${{ inputs.csrc_hash }}
-          TARGET_ID: ${{ fromJSON(inputs.target).id }}
-          IMAGE_TAG: ${{ fromJSON(inputs.target).image_tag }}
-          TARGET_SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
-        run: |
-          set -euo pipefail
-
-          engine_schema="$(python3 - <<'PYCODE'
-          import ast
-          from pathlib import Path
-
-          tree = ast.parse(
-              Path("csrc/scripts/build_cache.py").read_text(encoding="utf-8")
-          )
-          for node in tree.body:
-              if isinstance(node, ast.Assign):
-                  for target in node.targets:
-                      if (
-                          isinstance(target, ast.Name)
-                          and target.id == "SCHEMA_VERSION"
-                      ):
-                          print(ast.literal_eval(node.value))
-                          raise SystemExit(0)
-
-          raise SystemExit("SCHEMA_VERSION not found")
-          PYCODE
-          )"
-
-          compat_prefix="${INCREMENTAL_BUILD_CACHE_NAMESPACE}-${INCREMENTAL_BUILD_CACHE_TRANSPORT_EPOCH}-schema${engine_schema}-${TARGET_ID}-${IMAGE_TAG}-${TARGET_SOC_VERSION}-"
-          same_csrc_prefix="${compat_prefix}${CSRC_HASH}-"
-          primary_key="${same_csrc_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          {
-            echo "engine_schema=${engine_schema}"
-            echo "compat_prefix=${compat_prefix}"
-            echo "same_csrc_prefix=${same_csrc_prefix}"
-            echo "primary_key=${primary_key}"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "================ L1 CACHE KEY ================"
-          echo "target=${TARGET_ID}"
-          echo "engine_schema=${engine_schema}"
-          echo "primary_key=${primary_key}"
-          echo "restore priority:"
-          echo "  1. ${same_csrc_prefix}*"
-          echo "  2. ${compat_prefix}*"
-          echo "=============================================="
-
-      - name: Prepare incremental build cache destination
-        if: fromJSON(inputs.target).incremental_cache == true
-        run: |
-          set -euo pipefail
-          rm -rf "$INCREMENTAL_BUILD_CACHE_DIR"
-          mkdir -p "$INCREMENTAL_BUILD_CACHE_DIR"
-
       - name: Restore incremental build cache
         id: incremental-cache-restore
         if: fromJSON(inputs.target).incremental_cache == true
-        continue-on-error: true
-        uses: runs-on/cache/restore@v5
+        uses: ./.github/actions/csrc-l1-restore
         with:
-          path: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
-          key: ${{ steps.incremental-cache-key.outputs.primary_key }}
-          restore-keys: |
-            ${{ steps.incremental-cache-key.outputs.same_csrc_prefix }}
-            ${{ steps.incremental-cache-key.outputs.compat_prefix }}
+          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          architecture: ${{ fromJSON(inputs.target).cache_arch }}
+          soc-version: ${{ fromJSON(inputs.target).soc_version }}
+          csrc-hash: ${{ inputs.csrc_hash }}
 
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
           VLLM_ASCEND_BUILD_CACHE_DIR: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
-          VLLM_ASCEND_BUILD_CACHE_EVENT_LOG: ${{ runner.temp }}/incremental-build-cache.events.jsonl
         run: |
           mkdir -p "$VLLM_ASCEND_BUILD_CACHE_DIR"
           rm -f "$VLLM_ASCEND_BUILD_CACHE_EVENT_LOG"
@@ -298,7 +233,7 @@ jobs:
         if: always() && fromJSON(inputs.target).incremental_cache == true
         continue-on-error: true
         env:
-          EVENT_LOG: ${{ runner.temp }}/incremental-build-cache.events.jsonl
+          EVENT_LOG: ${{ env.VLLM_ASCEND_BUILD_CACHE_EVENT_LOG }}
           RESTORE_HIT: ${{ steps.incremental-cache-restore.outputs.cache-hit }}
           RESTORE_MATCHED_KEY: ${{ steps.incremental-cache-restore.outputs.cache-matched-key }}
         run: |
@@ -377,14 +312,13 @@ jobs:
             env.OBS_CACHE_WRITE_ACCESS_KEY_ID != '' &&
             env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY != ''
           }}
-        continue-on-error: true
-        uses: runs-on/cache/save@v5
+        uses: ./.github/actions/csrc-l1-save
         env:
           AWS_ACCESS_KEY_ID: ${{ env.OBS_CACHE_WRITE_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ env.OBS_CACHE_WRITE_SECRET_ACCESS_KEY }}
         with:
-          path: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
-          key: ${{ steps.incremental-cache-key.outputs.primary_key }}
+          cache-dir: ${{ env.INCREMENTAL_BUILD_CACHE_DIR }}
+          primary-key: ${{ steps.incremental-cache-restore.outputs.primary-key }}
 
       - name: Save csrc cache
         if: >-

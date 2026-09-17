@@ -493,7 +493,8 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          compatibility-id: main2main-a3-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ runner.arch }}
+          architecture: ${{ runner.arch }}
+          soc-version: a3
           source-root: .
       - name: Install vllm-project/vllm-ascend
         working-directory: ${{ github.workspace }}

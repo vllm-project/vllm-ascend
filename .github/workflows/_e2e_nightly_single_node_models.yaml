@@ -26,6 +26,9 @@ on:
       image:
         required: true
         type: string
+      soc_version:
+        required: true
+        type: string
       model_list:
         required: true
         type: string
@@ -142,7 +145,8 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          compatibility-id: source-models-${{ inputs.runner }}-${{ inputs.image }}-${{ runner.arch }}
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
           source-root: ./temp-vllm-ascend
       - name: Move vllm-ascend code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}

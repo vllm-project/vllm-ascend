@@ -143,6 +143,24 @@ independent of the persistence backend.
 An OBS restore or save failure is a performance degradation. The normal source
 build remains authoritative, and a verified final L0 artifact remains usable.
 
+The restore action is the single owner of the persistent snapshot key. Its
+coarse compatibility descriptor contains only the normalized build
+architecture, target SOC, and installed CANN metadata fingerprint; it never
+contains a workflow role. When the action runs outside the compiler container,
+as in wheel builds, the exact build image is used as the explicit toolchain
+fallback. Producer and consumer jobs using the same compiler environment can
+therefore discover the same snapshot namespace even when one uses a derived CI
+image. The engine schema and csrc source hash rank compatible snapshots within
+that namespace, while each inner action still validates its complete semantic
+identity before a hit.
+
+After restore, the action records the path and content hash of every entry
+manifest in the snapshot. A trusted save publishes only when that manifest set
+changes during the build. Diagnostic index updates from an all-hit build do not
+republish an otherwise unchanged snapshot. Comparing entry manifests also
+works across Docker builds, where compiler telemetry is produced inside the
+image but the updated L1 directory is exported back to the host.
+
 ## Cache identity model
 
 An action's final key is the canonical hash of three independent identities:

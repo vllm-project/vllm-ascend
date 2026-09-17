@@ -216,7 +216,8 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
-          compatibility-id: source-${{ inputs.soc_version }}-${{ inputs.image }}-${{ runner.arch }}
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
           source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}

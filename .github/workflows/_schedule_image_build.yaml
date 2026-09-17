@@ -371,7 +371,8 @@ jobs:
       uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
       with:
         cache-dir: ${{ github.workspace }}/build_cache
-        compatibility-id: image-${{ inputs.soc }}-${{ inputs.cann_image_version }}-${{ inputs.base_os }}-${{ matrix.runner_info.tag }}
+        architecture: ${{ matrix.runner_info.tag }}
+        soc-version: ${{ inputs.soc }}
         source-root: .
     - name: Build and push
       uses: docker/build-push-action@v7

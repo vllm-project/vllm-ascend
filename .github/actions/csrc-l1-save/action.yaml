@@ -16,15 +16,44 @@ runs:
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}
         PRIMARY_KEY: ${{ inputs.primary-key }}
+        BASELINE: ${{ env.VLLM_ASCEND_BUILD_CACHE_BASELINE }}
       run: |
         set -euo pipefail
+
+        updated="$(python3 - "$CACHE_DIR" "$BASELINE" <<'PYCODE'
+        import hashlib
+        import json
+        import sys
+        from pathlib import Path
+
+        cache_root = Path(sys.argv[1])
+        baseline_path = Path(sys.argv[2]) if sys.argv[2] else None
+        baseline = None
+        if baseline_path and baseline_path.is_file():
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+
+        current = []
+        if cache_root.is_dir():
+            for manifest in sorted(cache_root.rglob("manifest.json")):
+                current.append(
+                    [
+                        manifest.relative_to(cache_root).as_posix(),
+                        hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    ]
+                )
+        print("true" if baseline is not None and current != baseline else "false")
+        PYCODE
+        )"
+
         if [ -n "$PRIMARY_KEY" ] \
           && [ -d "$CACHE_DIR" ] \
-          && find "$CACHE_DIR" -mindepth 1 -print -quit | grep -q .; then
+          && find "$CACHE_DIR" -mindepth 1 -print -quit | grep -q . \
+          && [ "$updated" = "true" ]; then
           echo "present=true" >> "$GITHUB_OUTPUT"
           du -sh "$CACHE_DIR" || true
         else
           echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::L1 entry manifests are unchanged; shared cache save is skipped."
         fi
 
     - name: Save L1 snapshot

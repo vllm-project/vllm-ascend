@@ -141,7 +141,9 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ github.workspace }}/build_cache
-          compatibility-id: wheel-${{ github.job }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: a2
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-910b-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
         run: |
@@ -281,7 +283,9 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ github.workspace }}/build_cache
-          compatibility-id: wheel-${{ github.job }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: a3
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-a3-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
         run: |
@@ -415,7 +419,9 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ github.workspace }}/build_cache
-          compatibility-id: wheel-${{ github.job }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: 310p
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-310p-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
         run: |
@@ -549,7 +555,9 @@ jobs:
         uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ github.workspace }}/build_cache
-          compatibility-id: wheel-${{ github.job }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: a5
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-950-manylinux_2_34-py${{ matrix.python-version }}
           source-root: .
       - name: Build wheel
         run: |
