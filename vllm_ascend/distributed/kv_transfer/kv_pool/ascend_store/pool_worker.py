@@ -39,6 +39,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
+    LayerwiseSessionTracker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
@@ -93,9 +96,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid im
     layerwise_fence_drains_recv,
     layerwise_send_fence_backlog,
     prepare_group_sessions,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
-    MooncakeSessionTracker,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -420,7 +420,7 @@ class KVPoolWorker:
         self._put_started_keys_lock = threading.Lock()
         self._load_session_lock = threading.Lock()
         self._layer_load_aborted = threading.Event()
-        self._mooncake_session_tracker = MooncakeSessionTracker()
+        self._layerwise_session_tracker = LayerwiseSessionTracker()
         self._current_mooncake_request_ids: set[str] = set()
         self._current_mooncake_last_chunk_req_ids: set[str] = set()
 
@@ -660,7 +660,7 @@ class KVPoolWorker:
                     group_builders=self._build_group_layer_builders(),
                     put_started_keys=self._put_started_keys,
                     put_started_keys_lock=self._put_started_keys_lock,
-                    session_tracker=self._mooncake_session_tracker if self.backend_name == "mooncake" else None,
+                    session_tracker=self._layerwise_session_tracker if self.backend_name == "mooncake" else None,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -1986,15 +1986,15 @@ class KVPoolWorker:
 
     def _release_mooncake_requests_for_retry(self, req_ids: set[str]) -> None:
         with self._load_session_lock:
-            self._end_mooncake_load_keys(self._mooncake_session_tracker.release_for_retry(req_ids))
+            self._end_mooncake_load_keys(self._layerwise_session_tracker.release_for_retry(req_ids))
 
     def _release_mooncake_requests_terminal(self, req_ids: set[str]) -> None:
         with self._load_session_lock:
-            self._end_mooncake_load_keys(self._mooncake_session_tracker.release_terminal(req_ids))
+            self._end_mooncake_load_keys(self._layerwise_session_tracker.release_terminal(req_ids))
 
     def _release_failed_mooncake_get_attempts(self, request_ids_by_key: dict[str, set[str]]) -> None:
         with self._load_session_lock:
-            keys = self._mooncake_session_tracker.release_failed_get_attempts(request_ids_by_key)
+            keys = self._layerwise_session_tracker.release_failed_get_attempts(request_ids_by_key)
             self._end_mooncake_load_keys(keys)
 
     def _finish_current_mooncake_load_sessions(self) -> None:
@@ -2075,7 +2075,7 @@ class KVPoolWorker:
                 request.save_last_block_key = None
             else:
                 request.save_block_keys[slot] = None
-        self._mooncake_session_tracker.register_put_keys(
+        self._layerwise_session_tracker.register_put_keys(
             request.req_id,
             ((key, block_index) for key, _, block_index in key_slots if key in started),
         )
@@ -2121,7 +2121,7 @@ class KVPoolWorker:
                     )
                 )
 
-        load_entries = self._mooncake_session_tracker.prepare_load_entries(request.req_id, current_entries)
+        load_entries = self._layerwise_session_tracker.prepare_load_entries(request.req_id, current_entries)
         valid_entries = [
             (key, block_index) for key, block_index in load_entries if 0 <= block_index < len(request.block_ids)
         ]
@@ -2157,7 +2157,7 @@ class KVPoolWorker:
 
         results_by_key = dict(zip(keys, results, strict=True))
         for key, result in results_by_key.items():
-            self._mooncake_session_tracker.record_get_result(key, request_ids_by_key[key], succeeded=result == 0)
+            self._layerwise_session_tracker.record_get_result(key, request_ids_by_key[key], succeeded=result == 0)
         request_load_keys: dict[int, list[str]] = {}
         request_seen_keys: dict[int, set[str]] = {}
         requests_by_id: dict[int, ReqMeta] = {}

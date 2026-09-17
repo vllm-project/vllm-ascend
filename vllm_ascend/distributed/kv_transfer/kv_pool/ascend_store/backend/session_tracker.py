@@ -21,8 +21,8 @@ import threading
 from collections.abc import Iterable, Mapping
 
 
-class MooncakeSessionTracker:
-    """Track Mooncake sessions that may span multiple chunked-prefill steps."""
+class LayerwiseSessionTracker:
+    """Track backend sessions that may span chunked-prefill steps."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()

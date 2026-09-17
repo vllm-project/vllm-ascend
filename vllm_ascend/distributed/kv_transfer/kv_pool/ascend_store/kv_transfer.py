@@ -21,6 +21,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
+    LayerwiseSessionTracker,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -36,9 +39,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 # isort: on
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
-    MooncakeSessionTracker,
-)
 
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
@@ -381,7 +381,7 @@ class LayerBatchBuilder:
         task: LayerTransferTask,
         is_save: bool,
     ) -> SharedBlockData:
-        """Build block-key rows shared by all Mooncake layer ranges."""
+        """Build block-key rows shared by all backend layer ranges."""
         block_ids: list[int] = []
         block_keys: list[str] = []
         req_ids: list[str] = []
@@ -689,10 +689,10 @@ class KVTransferThread(threading.Thread):
         max_transfer_blocks: int,
         max_transfer_bytes: int,
     ) -> list[tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]]:
-        """Split Mooncake range calls by key count and per-segment byte size."""
+        """Split backend range calls by key count and per-segment byte size."""
         row_count = len(keys)
         if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == row_count):
-            raise ValueError("Mooncake range metadata must contain one buffer/size/offset row per key")
+            raise ValueError("Layerwise range metadata must contain one buffer/size/offset row per key")
 
         # Default configuration (both limits unset) means one batch holding every
         # key and no per-segment splitting, so every row passes through as-is
@@ -703,7 +703,7 @@ class KVTransferThread(threading.Thread):
         if max_transfer_blocks <= 0 and max_transfer_bytes <= 0:
             for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
                 if not (len(buffers) == len(sizes) == len(offsets)):
-                    raise ValueError("Mooncake range rows must align buffers, sizes, and offsets")
+                    raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
                 if sizes and min(sizes) >= 0 and 0 not in sizes:
                     continue
                 break
@@ -715,13 +715,13 @@ class KVTransferThread(threading.Thread):
         normalized_offsets: list[list[int]] = []
         for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
             if not (len(buffers) == len(sizes) == len(offsets)):
-                raise ValueError("Mooncake range rows must align buffers, sizes, and offsets")
+                raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
             split_buffers: list[int] = []
             split_sizes: list[int] = []
             split_offsets: list[int] = []
             for buffer, size, offset in zip(buffers, sizes, offsets, strict=True):
                 if size < 0:
-                    raise ValueError(f"Mooncake range size must be non-negative, got {size}")
+                    raise ValueError(f"Layerwise range size must be non-negative, got {size}")
                 if size == 0:
                     continue
                 packet_size = max_transfer_bytes if max_transfer_bytes > 0 else size
@@ -1588,7 +1588,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         group_builders: list[LayerBatchBuilder] | None = None,
         put_started_keys: set[str] | None = None,
         put_started_keys_lock: threading.Lock | None = None,
-        session_tracker: MooncakeSessionTracker | None = None,
+        session_tracker: LayerwiseSessionTracker | None = None,
     ):
         super().__init__(
             m_store,
@@ -1650,9 +1650,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         try:
             results = require_aligned_batch_results("batch_revoke", keys, self.m_store.batch_revoke(keys))
             if any(result != 0 for result in results):
-                logger.error("Mooncake layerwise revoke failed keys=%s results=%s", keys, results)
+                logger.error("Layerwise backend revoke failed keys=%s results=%s", keys, results)
         except Exception as exc:
-            logger.error("Mooncake layerwise revoke raised keys=%s error=%s", keys, exc)
+            logger.error("Layerwise backend revoke raised keys=%s error=%s", keys, exc)
         finally:
             self._remove_started_keys(keys)
             if self._session_tracker is not None:
@@ -1721,11 +1721,11 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             for task in transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:
-                    raise RuntimeError("Mooncake range save requires shared block metadata")
+                    raise RuntimeError("Layerwise range save requires shared block metadata")
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
                 req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
                 if not isinstance(req_meta, LayerRangeReqMeta):
-                    raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
+                    raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
                 self._active_put_keys = self._group_put_keys.get(task.group_id)
                 try:
@@ -2000,11 +2000,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             for task in data.transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:
-                    raise RuntimeError("Mooncake range load requires shared block metadata")
+                    raise RuntimeError("Layerwise range load requires shared block metadata")
                 builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
                 req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
                 if not isinstance(req_meta, LayerRangeReqMeta):
-                    raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
+                    raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
                 req_meta.layer_id = layer_id
                 self._active_load_indices = self._group_load_indices.get(task.group_id)
                 self._handle_range_request(req_meta, shared)

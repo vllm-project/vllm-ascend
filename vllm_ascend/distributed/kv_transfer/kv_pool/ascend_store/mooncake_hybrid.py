@@ -134,7 +134,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
     """
     result = {group: [] for group in range(worker.num_kv_cache_groups)}
     get_slots = []
-    tracker = worker._mooncake_session_tracker
+    tracker = worker._layerwise_session_tracker
     worker._current_mooncake_request_ids = {request.req_id for request in requests}
     worker._current_mooncake_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
     for request in requests:

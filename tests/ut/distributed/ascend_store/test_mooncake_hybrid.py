@@ -25,10 +25,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     attention_transfer_window,
     reset_attention_compute_start_gate,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
+    LayerwiseSessionTracker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread, _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid import hybrid_block_key, hybrid_layout_id
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import MooncakeSessionTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 
 
@@ -227,7 +229,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         self.assertFalse(store.open_reads)
 
     def test_tracker_keeps_equal_block_indices_in_different_groups(self):
-        tracker = MooncakeSessionTracker()
+        tracker = LayerwiseSessionTracker()
         tracker.register_put_keys("request", [("swa", 0)], group_id=0)
         tracker.register_put_keys("request", [("compressed", 0)], group_id=1)
         tracker.commit_put_keys(["swa", "compressed"])
