@@ -108,6 +108,8 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.speculative_config = None
         runner.use_compress = True
         runner._has_gdn = False
+        # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
@@ -141,6 +143,34 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
+
+
+class TestMmEncoderOnlyDummyRunEarlyExit(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True))
+        )
+        return runner
+
+    def test_dummy_run_returns_empty_tensors_without_forward(self):
+        runner = self._build_runner()
+        runner._model_forward = MagicMock()
+
+        result = runner._dummy_run(4)
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].numel(), 0)
+        self.assertEqual(result[1].numel(), 0)
+        runner._model_forward.assert_not_called()
+
+    def test_dummy_sampler_run_returns_empty_tensor(self):
+        runner = self._build_runner()
+
+        result = runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+        self.assertEqual(result.numel(), 0)
 
 
 class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
@@ -211,7 +241,9 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.uses_xdrope_dim = 0
         runner.positions = torch.zeros(4, dtype=torch.int64)
         runner.drafter = None
-        runner.vllm_config = MagicMock()
+        # _dummy_run reads multimodal_config for the mm_encoder_only
+        # early-exit; keep it real so the forward path is not skipped.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
         runner.model = MagicMock()
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False

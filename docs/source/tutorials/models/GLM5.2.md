@@ -450,6 +450,7 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -477,7 +478,7 @@ Before you start, please
             --max-num-seqs 64 \
             --quantization ascend \
             --gpu-memory-utilization 0.85 \
-            --api-server-count 1 \
+            --api-server-count 16 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -511,6 +512,7 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -563,7 +565,7 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         # d0: api server on this node; d1: --headless
-        server_role_args="--api-server-count 1"
+        server_role_args="--api-server-count 16"
 
         export HCCL_BUFFSIZE=256
         export HCCL_IF_IP=$local_ip
@@ -571,6 +573,7 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -629,6 +632,7 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
@@ -729,6 +733,11 @@ python load_balance_proxy_server_example.py \
 Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
+
+**API server and tokenizer configurations:**
+
+- `VLLM_USE_FASTOKENS=1`: Enables the `fastokens` backend for Hugging Face fast tokenizers to accelerate input tokenization and output detokenization. The `fastokens` package must be installed.
+- `--api-server-count 16`: Starts 16 API server processes for each API-facing `vllm serve` instance to improve frontend concurrency. It is configured on prefill node 0 (p0) and decode node 0 (d0); prefill node 1 (p1) and decode node 1 (d1) remain headless.
 
 **PP2 prefill node-specific configurations (p0/p1):**
 
