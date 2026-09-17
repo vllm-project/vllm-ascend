@@ -25,12 +25,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     attention_transfer_window,
     reset_attention_compute_start_gate,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
+    hybrid_block_key,
+    hybrid_layout_id,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVTransferThread, _LayerRevokeTask
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendConnectorMetadata, LoadSpec, ReqMeta
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid import hybrid_block_key, hybrid_layout_id
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 
 
@@ -287,8 +291,9 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(KVPoolScheduler)
-        scheduler.mooncake_hybrid = True
-        scheduler.mooncake_hybrid_layout = "layout"
+        scheduler.block_key_hybrid = True
+        scheduler.block_key_hybrid_layout = "layout"
+        scheduler.layerwise_protocol = mooncake_layerwise
         scheduler.model_name = "model"
         scheduler.tp_size = 2
         scheduler.put_step = 1
@@ -475,7 +480,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         ):
             importer.import_module.return_value = MagicMock()
             scheduler = KVPoolScheduler(config, kv_cache_config=group_config, use_layerwise=True)
-            self.assertTrue(scheduler.mooncake_hybrid)
+            self.assertTrue(scheduler.block_key_hybrid)
             request = SimpleNamespace(request_id="r", block_hashes=[bytes([i]) * 32 for i in range(4)])
             for tail_blocks, expected in (({1, 3}, 64), ({1}, 32), (set(), 0)):
 

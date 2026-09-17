@@ -16,59 +16,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
-def make_layerwise_block_key(
-    model_name: str,
-    block_hash_or_tail: str,
-    head_or_tp_rank: int,
-) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
-    return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
-
-
-def is_block_key_layerwise(use_layerwise: bool, backend_name: str) -> bool:
-    """Whether to use Mooncake's block-key range-session protocol.
-
-    Memcache also stores one object per block, but its layerwise path is
-    selected through the backend protocol registry and uses GVA allocation.
-    Keeping this flag Mooncake-specific prevents the two data planes from
-    being mixed after the generic layerwise refactor.
-    """
-    return use_layerwise and backend_name.lower() == "mooncake"
-
-
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
-
-
-def validate_mooncake_layerwise_topology(
-    parallel_config: Any,
-    backend_name: str,
-    use_layerwise: bool,
-) -> None:
-    """Reject coordinates omitted from the current Mooncake block key."""
-    if not use_layerwise or backend_name.lower() != "mooncake":
-        return
-
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    topology_dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
-        (
-            "prefill_context_parallel_size",
-            parallel_size("prefill_context_parallel_size"),
-        ),
-        (
-            "decode_context_parallel_size",
-            parallel_size("decode_context_parallel_size"),
-        ),
-    )
-    unsupported = [f"{name}={size}" for name, size in topology_dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
-        )
 
 
 @dataclass(frozen=True)
@@ -1272,7 +1221,7 @@ class LayerTransferTask:
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
-    # Mooncake uses one remote object per block/rank with per-layer ranges.
+    # Block-key backends use one remote object per block/rank with per-layer ranges.
     use_key_major_ranges: bool = False
     # Group-local completion differs from the physical model layer boundary.
     final_group_layer: bool = False

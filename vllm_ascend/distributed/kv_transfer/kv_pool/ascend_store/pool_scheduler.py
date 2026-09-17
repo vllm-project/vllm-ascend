@@ -24,7 +24,10 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    get_layerwise_data_plane,
     get_layerwise_protocol,
+    validate_layerwise_runtime,
+    validate_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -49,16 +52,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
-    is_block_key_layerwise,
-    make_layerwise_block_key,
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
-    validate_mooncake_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_hybrid import hybrid_block_key, hybrid_layout_id
 
 
 class KVPoolScheduler:
@@ -71,6 +70,14 @@ class KVPoolScheduler:
         self.vllm_config = vllm_config
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        backend_name = str(extra_config.get("backend", "mooncake"))
+        self.backend_name = backend_name.lower()
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
+        self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
+        validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
         hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
         hf_config = getattr(vllm_config.model_config, "hf_config", hf_text_config)
         self.hf_config = hf_text_config or hf_config
@@ -79,11 +86,7 @@ class KVPoolScheduler:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
-            is_block_key_layerwise(
-                use_layerwise, vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
-            )
-            and kv_cache_groups is not None
-            and len(kv_cache_groups) > 1
+            self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
         self.kv_cache_group_ids = (
             list(range(len(kv_cache_config.kv_cache_groups)))
@@ -172,31 +175,21 @@ class KVPoolScheduler:
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
-        backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
-        self.backend_name = backend_name.lower()
-        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
-        validate_mooncake_layerwise_topology(
-            vllm_config.parallel_config,
-            self.backend_name,
-            self.use_layerwise,
-        )
-        self.mooncake_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.mooncake_hybrid_layout = (
-            hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
-            if self.mooncake_hybrid
+        self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
+        self.block_key_hybrid_layout = (
+            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
+            if self.block_key_hybrid
             else ""
         )
-        if self.mooncake_hybrid and self.mamba_group_ids:
-            raise ValueError("Mooncake hybrid layerwise does not yet support recurrent Mamba state")
-        if self.backend_name == "mooncake" and self.use_layerwise and self.tp_mismatch:
-            raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
+        validate_layerwise_runtime(
+            self.layerwise_protocol,
+            use_hybrid=self.block_key_hybrid,
+            has_recurrent_state=bool(self.mamba_group_ids),
+            tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
+        )
         self.layerwise_max_transfer_blocks = int(
             vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
         )
-        # Resolve the backend's layerwise protocol (if any) once through the
-        # registry; generic code never imports the protocol module by name.
-        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
-        self.use_layerwise_transfer = self.use_layerwise and self.layerwise_protocol is not None
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -371,11 +364,11 @@ class KVPoolScheduler:
         protocol helper enumerates all stages and head/TP ranks.
         """
         head_or_tp_ranks = self.tp_size // self.put_step
-        if self.mooncake_hybrid:
+        if self.block_key_hybrid:
             return [
-                hybrid_block_key(
+                self.layerwise_protocol.hybrid_block_key(
                     self.model_name,
-                    self.mooncake_hybrid_layout,
+                    self.block_key_hybrid_layout,
                     group_id,
                     self.kv_cache_group_families[group_id],
                     self.grouped_block_size[group_id],
@@ -435,14 +428,14 @@ class KVPoolScheduler:
             all_keys = [key for block_keys in keys_by_block for key in block_keys]
             if not all_keys:
                 return []
-            if self.mooncake_hybrid:
+            if self.block_key_hybrid:
                 states = []
                 batch_size = self.layerwise_max_transfer_blocks * (self.tp_size // self.put_step) or len(all_keys)
                 for start in range(0, len(all_keys), batch_size):
                     batch = all_keys[start : start + batch_size]
                     codes = self.store_scheduler.batch_is_exist(batch)
                     if len(codes) != len(batch) or any(type(code) is not int or code not in (0, 1) for code in codes):
-                        raise RuntimeError("Mooncake hybrid exists returned invalid results")
+                        raise RuntimeError("Block-key layerwise exists returned invalid results")
                     states.extend(codes)
                 hits = []
                 offset = 0
@@ -543,7 +536,7 @@ class KVPoolScheduler:
         )
         return hit_tokens
 
-    def _get_mooncake_layerwise_hit_tokens(
+    def _lookup_block_key_contiguous(
         self,
         request: "Request",
         token_len: int,
@@ -561,11 +554,7 @@ class KVPoolScheduler:
         head_or_tp_ranks = self.tp_size // self.put_step
         keys_by_block = [
             [
-                make_layerwise_block_key(
-                    self.model_name,
-                    block_hash_to_str(block_hash),
-                    head_or_tp_rank,
-                )
+                self.layerwise_protocol.make_block_key(self.model_name, block_hash_to_str(block_hash), head_or_tp_rank)
                 for head_or_tp_rank in range(head_or_tp_ranks)
             ]
             for block_hash in block_hashes
@@ -600,7 +589,7 @@ class KVPoolScheduler:
                 break
             num_hit_blocks += 1
         logger.info(
-            "Mooncake layerwise hit check request=%s hit_blocks=%d/%d",
+            "Block-key layerwise hit check request=%s hit_blocks=%d/%d",
             request.request_id,
             num_hit_blocks,
             len(keys_by_block),
@@ -613,11 +602,9 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
-        if self.backend_name == "mooncake":
-            if self.mooncake_hybrid:
-                return self._lookup_layerwise_with_coordinator(request, token_len)
-            return self._get_mooncake_layerwise_hit_tokens(request, token_len, num_computed_tokens)
-        raise RuntimeError(f"Unsupported block-key layerwise backend: {self.backend_name}")
+        if self.block_key_hybrid:
+            return self._lookup_layerwise_with_coordinator(request, token_len)
+        return self._lookup_block_key_contiguous(request, token_len, num_computed_tokens)
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity

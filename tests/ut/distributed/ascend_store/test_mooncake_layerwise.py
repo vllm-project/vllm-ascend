@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
     LayerwiseSessionTracker,
 )
@@ -175,6 +176,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.model_name = "model"
         worker.head_or_tp_rank = 0
         worker.backend_name = "mooncake"
+        worker.layerwise_protocol = mooncake_layerwise
         worker.use_block_key_layerwise = True
         worker.layerwise_offload = False
         worker.independent_layers = []
@@ -202,7 +204,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 16, can_load=True),
         )
 
-        worker._prepare_mooncake_put_session(request)
+        worker._prepare_layerwise_put_session(request)
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
@@ -217,7 +219,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 63, can_load=True, kvpool_store_skip_tokens=64),
         )
 
-        slots = worker._prepare_mooncake_get_session(request)
+        slots = worker._prepare_layerwise_get_session(request)
 
         self.assertEqual(len(slots), 4)
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
@@ -239,7 +241,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             is_last_chunk=False,
         )
 
-        slots = worker._prepare_mooncake_get_session(request)
+        slots = worker._prepare_layerwise_get_session(request)
         worker.layer_load_tasks = [[]]
         worker._process_load_for_layer_batch([request], 0)
 
@@ -259,7 +261,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 32, can_load=True),
         )
 
-        slots = worker._prepare_mooncake_get_session(request)
+        slots = worker._prepare_layerwise_get_session(request)
 
         self.assertEqual(
             request.load_block_keys,

@@ -70,7 +70,7 @@ class ExternalCachedBlockPool:
 class AscendStoreCoordinator:
     """Hybrid cache-hit/mask coordinator for AscendStore external KV Pool.
 
-    This mirrors vLLM MooncakeStoreCoordinator but uses AscendStore's external
+    This mirrors vLLM's external KV coordinator but uses AscendStore's external
     key granularity. Compressed specs already expose raw-token block sizes,
     while transfer addresses remain in cache-domain blocks.
     """

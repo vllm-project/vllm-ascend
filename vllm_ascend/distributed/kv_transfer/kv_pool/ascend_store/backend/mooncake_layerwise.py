@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -22,6 +22,58 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+
+LAYERWISE_DATA_PLANE = "block_key"
+
+
+def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
+    """Block-key transfer does not opt into GVA-backed physical reuse."""
+    del extra_config
+    return None
+
+
+def make_block_key(model_name: str, block_hash_or_tail: str, head_or_tp_rank: int) -> str:
+    """Build the canonical one-object-per-block-and-saving-rank key."""
+    return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
+
+
+def make_hit_check_keys(
+    model_name: str,
+    group_id: int,
+    block_hash_hex: str,
+    num_ranks: int,
+    num_groups: int,
+    pp_size: int = 1,
+) -> list[str]:
+    del group_id, num_groups, pp_size
+    return [make_block_key(model_name, block_hash_hex, rank) for rank in range(num_ranks)]
+
+
+def validate_topology(parallel_config: Any) -> None:
+    """Reject parallel coordinates omitted from Mooncake's block key."""
+
+    def parallel_size(name: str) -> int:
+        value = getattr(parallel_config, name, 1)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+    dimensions = (
+        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
+        ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
+        ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
+    )
+    unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
+    if unsupported:
+        raise ValueError(
+            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
+        )
+
+
+def validate_runtime(*, use_hybrid: bool, has_recurrent_state: bool, tp_mismatch: bool) -> None:
+    if use_hybrid and has_recurrent_state:
+        raise ValueError("Mooncake hybrid layerwise does not yet support recurrent Mamba state")
+    if tp_mismatch:
+        raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
 
 
 def group_block_size_signature(group) -> tuple[int, ...]:
@@ -69,7 +121,7 @@ def hybrid_block_key(
     return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@family:{family}@block:{block_size}@{block_hash}@{head}"
 
 
-def layerwise_fence_drains_recv() -> bool:
+def fence_drains_recv() -> bool:
     """Whether the attention-window fence also quiesces the LOAD queue.
 
     Off by default: the load queue carries the prefetch that layerwise exists
@@ -81,7 +133,7 @@ def layerwise_fence_drains_recv() -> bool:
     return bool(envs.VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV)
 
 
-def layerwise_send_fence_backlog() -> int:
+def send_fence_backlog() -> int:
     """How many queued layer saves may stay outstanding at an attention boundary.
 
     The attention-window fence used to drain the SAVE queue to zero after every
@@ -121,7 +173,7 @@ def prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dic
         with worker._put_started_keys_lock:
             keys = list(worker._put_started_keys - previously_started)
         worker._queue_layerwise_revoke_keys(keys)
-        worker._finish_current_mooncake_load_sessions()
+        worker._finish_current_layerwise_load_sessions()
         raise
 
 
@@ -135,8 +187,8 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
     result = {group: [] for group in range(worker.num_kv_cache_groups)}
     get_slots = []
     tracker = worker._layerwise_session_tracker
-    worker._current_mooncake_request_ids = {request.req_id for request in requests}
-    worker._current_mooncake_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
+    worker._current_layerwise_request_ids = {request.req_id for request in requests}
+    worker._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
     for request in requests:
         cached_tokens = request.save_start_token
         if request.load_spec is not None and request.load_spec.can_load:
@@ -162,7 +214,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             def key(index, group=group, block_size=block_size, hashes=hashes):
                 return hybrid_block_key(
                     worker.model_name,
-                    worker.mooncake_hybrid_layout,
+                    worker.block_key_hybrid_layout,
                     group,
                     worker.kv_cache_group_families[group],
                     block_size,
@@ -232,7 +284,7 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                 new = missing
             if new:
                 try:
-                    codes = worker._start_mooncake_put_keys(new, sum(worker.group_block_len[group]))
+                    codes = worker._start_layerwise_put_keys(new, sum(worker.group_block_len[group]))
                 except Exception:
                     worker._queue_layerwise_revoke_keys(new)
                     raise
@@ -262,5 +314,5 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             tracker.register_put_keys(
                 request.req_id, ((name, index) for name, index in key_indices if name in started), group_id=group
             )
-    worker._open_mooncake_get_sessions(get_slots)
+    worker._open_layerwise_get_sessions(get_slots)
     return result
