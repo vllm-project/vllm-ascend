@@ -431,37 +431,38 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return new, source_rank, source_slot
 
 
-def _post_insert_risk(
-    experts: set[int],
-    candidate: int,
-    mean: np.ndarray,
-    moments: np.ndarray,
-    replicas: np.ndarray,
-    z_score: float,
-) -> float:
-    selected = sorted((*experts, candidate))
-    counts = replicas[selected].astype(np.float64)
-    rank_mean = float(np.sum(mean[selected] / counts, dtype=np.float64))
-    if moments.ndim == 1:
-        variance = float(np.sum(moments[selected] / counts**2, dtype=np.float64))
-    else:
-        variance = float(np.sum(moments[np.ix_(selected, selected)] / np.outer(counts, counts), dtype=np.float64))
-    result = rank_mean + z_score * np.sqrt(max(variance, 0.0))
-    if not np.isfinite(result):
-        raise ValueError("STAIR rank risk must be finite")
-    return result
+    @staticmethod
+    def _post_insert_risk(
+        experts: set[int],
+        candidate: int,
+        mean: np.ndarray,
+        moments: np.ndarray,
+        replicas: np.ndarray,
+        z_score: float,
+    ) -> float:
+        selected = sorted((*experts, candidate))
+        counts = replicas[selected].astype(np.float64)
+        rank_mean = float(np.sum(mean[selected] / counts, dtype=np.float64))
+        if moments.ndim == 1:
+            variance = float(np.sum(moments[selected] / counts**2, dtype=np.float64))
+        else:
+            variance = float(np.sum(moments[np.ix_(selected, selected)] / np.outer(counts, counts), dtype=np.float64))
+        result = rank_mean + z_score * np.sqrt(max(variance, 0.0))
+        if not np.isfinite(result):
+            raise ValueError("STAIR rank risk must be finite")
+        return result
 
-
-def _ordered_copies(mean: np.ndarray, moments: np.ndarray, replicas: np.ndarray, z_score: float) -> list[int]:
-    diagonal = np.diag(moments) if moments.ndim == 2 else moments
-    risk = mean + z_score * np.sqrt(np.maximum(diagonal, 0.0))
-    copies = [
-        (float(risk[expert] / replicas[expert]), expert, ordinal)
-        for expert in range(len(mean))
-        for ordinal in range(replicas[expert])
-    ]
-    copies.sort(key=lambda item: (-item[0], item[1], item[2]))
-    return [expert for _, expert, _ in copies]
+    @staticmethod
+    def _ordered_copies(mean: np.ndarray, moments: np.ndarray, replicas: np.ndarray, z_score: float) -> list[int]:
+        diagonal = np.diag(moments) if moments.ndim == 2 else moments
+        risk = mean + z_score * np.sqrt(np.maximum(diagonal, 0.0))
+        copies = [
+            (float(risk[expert] / replicas[expert]), expert, ordinal)
+            for expert in range(len(mean))
+            for ordinal in range(replicas[expert])
+        ]
+        copies.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return [expert for _, expert, _ in copies]
 
 
 def unconstrained_lpt(
@@ -477,7 +478,7 @@ def unconstrained_lpt(
         raise ValueError("STAIR physical slots must divide evenly across ranks")
     slots_per_rank = total_slots // num_ranks
     ranks: list[set[int]] = [set() for _ in range(num_ranks)]
-    for expert in _ordered_copies(mean, moments, replicas, z_score):
+    for expert in StairEplbPolicy._ordered_copies(mean, moments, replicas, z_score):
         candidates = [
             rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
         ]
@@ -485,7 +486,10 @@ def unconstrained_lpt(
             raise ValueError("STAIR replica vector has no duplicate-free placement")
         rank = min(
             candidates,
-            key=lambda item: (_post_insert_risk(ranks[item], expert, mean, moments, replicas, z_score), item),
+            key=lambda item: (
+                StairEplbPolicy._post_insert_risk(ranks[item], expert, mean, moments, replicas, z_score),
+                item,
+            ),
         )
         ranks[rank].add(expert)
     return np.asarray([sorted(row) for row in ranks], dtype=np.int64)
@@ -507,7 +511,7 @@ def constrained_lpt(
     if int(np.sum(replicas)) != old.size or len(node_by_rank) != old.shape[0]:
         raise ValueError("STAIR replica, placement, and topology sizes disagree")
     ranks: list[set[int]] = [set() for _ in range(old.shape[0])]
-    copies = _ordered_copies(mean, moments, replicas, z_score)
+    copies = StairEplbPolicy._ordered_copies(mean, moments, replicas, z_score)
     backtracks = 0
 
     def search(index: int) -> dict[tuple[int, int], tuple[int, int]] | None:
@@ -519,7 +523,10 @@ def constrained_lpt(
             rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
         ]
         candidates.sort(
-            key=lambda rank: (_post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score), rank)
+            key=lambda rank: (
+                StairEplbPolicy._post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score),
+                rank,
+            )
         )
         for rank in candidates:
             ranks[rank].add(expert)
