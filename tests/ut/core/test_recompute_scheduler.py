@@ -1,268 +1,242 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
-from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-import torch
-from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.kv_cache_utils import (
-    get_group_id,
-    get_request_block_hasher,
-    init_none_hash,
-)
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.engine import EngineCoreOutput, FinishReason
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-)
-from vllm.v1.request import Request, RequestStatus
+import pytest
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.request import RequestStatus
 
+from tests.ut.core.test_dyntra_lb_scheduler import make_dyntra_test_config
+from vllm_ascend.core.dyntra_lb_scheduler import DyntraLBPolicyMixin
 from vllm_ascend.core.recompute_scheduler import (
+    AsyncDyntraLBRecomputeScheduler,
+    AsyncRecomputeScheduler,
+    DyntraLBRecomputeScheduler,
     RecomputeReqInfo,
     RecomputeScheduler,
+    RecomputeSchedulerConfig,
 )
 
 
-def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
-    return {"tokens_per_state": ratio}
-
-
-def test_add_request_does_not_inject_placeholder_spec_tokens():
+def _make_preempt_scheduler(*, connector=None):
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    scheduler.requests = {}
-    scheduler.log_stats = False
-    scheduler.connector = None
-    # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
-    scheduler.spec_decode_metrics_level = "none"
+    scheduler.connector = connector
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.kv_cache_manager.get_block_ids.return_value = ([3, 4],)
+    scheduler._recomputed_reqs = []
+    return scheduler
 
-    enqueued_requests = []
 
-    def enqueue_waiting_request(self, request):
-        enqueued_requests.append(request)
+def test_recompute_scheduler_keeps_local_schedule_for_ascend_spec_padding():
+    assert RecomputeScheduler.schedule is not Scheduler.schedule
+    assert RecomputeScheduler.update_from_output is not Scheduler.update_from_output
 
-    scheduler._enqueue_waiting_request = MethodType(enqueue_waiting_request, scheduler)
 
-    request = Request(
-        request_id="pd-consumer-first-step",
-        prompt_token_ids=[1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=8),
-        pooling_params=None,
+def test_recompute_scheduler_config_picks_sync_and_async_class():
+    vllm_config = make_dyntra_test_config()
+
+    vllm_config.scheduler_config.async_scheduling = False
+    sync_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+    assert sync_config.scheduler_cls == ("vllm_ascend.core.recompute_scheduler.RecomputeScheduler")
+
+    vllm_config.scheduler_config.async_scheduling = True
+    async_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
+    assert async_config.scheduler_cls == ("vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler")
+
+
+def test_preempt_offloads_before_upstream_releases_blocks():
+    connector = MagicMock()
+    connector.update_state_before_preempt.return_value = True
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=17,
     )
 
-    scheduler.add_request(request)
-
-    assert enqueued_requests == [request]
-    assert scheduler.requests[request.request_id] is request
-    assert request.spec_token_ids == []
-    assert request.num_tokens_with_spec == request.num_tokens
-
-
-def test_recompute_notification_precedes_regular_output():
-    scheduler_output = SimpleNamespace(
-        recomputed_reqs=[
-            RecomputeReqInfo(
-                request_id="recomputed-request",
-                output_token_ids=[],
-                client_index=0,
-            )
-        ]
-    )
-    outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-
-    RecomputeScheduler._add_recomputed_outputs(scheduler_output, outputs)
-    outputs[0].append(
-        EngineCoreOutput(
-            request_id="regular-request",
-            new_token_ids=[1],
+    def assert_offload_completed_before_release(*args, **kwargs):
+        connector.update_state_before_preempt.assert_called_once_with(
+            request,
+            ([3, 4],),
+            17,
         )
+
+    with patch.object(
+        Scheduler,
+        "_preempt_request",
+        side_effect=assert_offload_completed_before_release,
+    ) as upstream_preempt:
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+            drop_stale_output=True,
+        )
+
+    assert locally_preempted
+    scheduler.kv_cache_manager.get_block_ids.assert_called_once_with("req-1")
+    upstream_preempt.assert_called_once_with(
+        request,
+        1.5,
+        drop_stale_output=True,
     )
 
-    output = outputs[0][0]
-    assert output.request_id == "recomputed-request"
-    assert output.finish_reason == FinishReason.STOP
-    assert output.stop_reason == "recomputed"
-    assert outputs[0][1].request_id == "regular-request"
+
+@pytest.mark.parametrize("connector", [None, MagicMock(spec=[])])
+def test_preempt_without_offload_hook_sends_request_back_to_p(connector):
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=2,
+        num_computed_tokens=17,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch.object(Scheduler, "_preempt_request") as upstream_preempt,
+        patch("vllm_ascend.core.recompute_scheduler.logger.warning") as warning,
+    ):
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+        )
+
+    assert not locally_preempted
+    scheduler.kv_cache_manager.get_block_ids.assert_not_called()
+    warning.assert_called_once()
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once_with(
+        "req-1",
+        RequestStatus.FINISHED_ABORTED,
+    )
+    assert scheduler._recomputed_reqs == [RecomputeReqInfo("req-1", 2)]
 
 
-def test_finish_recomputed_request_uses_normal_abort_cleanup():
+def test_preempt_offload_failure_sends_request_back_to_p():
+    connector = MagicMock()
+    connector.update_state_before_preempt.return_value = False
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=17,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch.object(Scheduler, "_preempt_request") as upstream_preempt,
+        patch("vllm_ascend.core.recompute_scheduler.logger.warning") as warning,
+    ):
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+        )
+
+    assert not locally_preempted
+    warning.assert_called_once()
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once()
+
+
+def test_reset_preemption_skips_offload():
+    connector = MagicMock()
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(request_id="req-1", num_computed_tokens=17)
+
+    with patch.object(Scheduler, "_preempt_request") as upstream_preempt:
+        scheduler._preempt_request(request, 1.5, drop_stale_output=True)
+
+    connector.update_state_before_preempt.assert_not_called()
+    scheduler.kv_cache_manager.get_block_ids.assert_not_called()
+    upstream_preempt.assert_called_once_with(
+        request,
+        1.5,
+        drop_stale_output=True,
+    )
+
+
+def test_preempt_without_computed_kv_still_uses_recompute_fallback():
+    connector = MagicMock()
+    connector.update_state_before_preempt.return_value = False
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=0,
+    )
+
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with patch.object(Scheduler, "_preempt_request") as upstream_preempt:
+        locally_preempted = scheduler._preempt_or_recompute(
+            request,
+            1.5,
+        )
+
+    assert not locally_preempted
+    connector.update_state_before_preempt.assert_called_once_with(
+        request,
+        ([3, 4],),
+        0,
+    )
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once()
+
+
+def test_preempt_offload_exception_uses_recompute_fallback():
+    connector = MagicMock()
+    connector.update_state_before_preempt.side_effect = RuntimeError("offload failed")
+    scheduler = _make_preempt_scheduler(connector=connector)
+    request = SimpleNamespace(
+        request_id="req-1",
+        client_index=0,
+        num_computed_tokens=17,
+    )
+    scheduler.finish_requests = MagicMock(return_value=[request])
+
+    with (
+        patch.object(Scheduler, "_preempt_request") as upstream_preempt,
+        patch("vllm_ascend.core.recompute_scheduler.logger.warning") as warning,
+    ):
+        locally_preempted = scheduler._preempt_or_recompute(request, 1.5)
+
+    assert not locally_preempted
+    warning.assert_called_once()
+    upstream_preempt.assert_not_called()
+    scheduler.finish_requests.assert_called_once()
+
+
+def test_recomputed_output_precedes_regular_output():
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    request = Request(
-        request_id="fallback-recomputed-request",
-        prompt_token_ids=[1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=8),
-        pooling_params=None,
+    scheduler_output = SimpleNamespace(recomputed_reqs=[RecomputeReqInfo("recomputed-request", 0)])
+    regular_output = EngineCoreOutput(
+        request_id="regular-request",
+        new_token_ids=[1],
     )
-    request.status = RequestStatus.RUNNING
+    upstream_outputs = {0: EngineCoreOutputs(outputs=[regular_output])}
 
-    # The fallback victim has already been popped from the running queue.
-    scheduler.requests = {request.request_id: request}
-    scheduler.running = []
-    scheduler.waiting = MagicMock()
-    scheduler.skipped_waiting = MagicMock()
-    scheduler._inflight_prefills = {request}
-    scheduler._connector_finished = MagicMock(return_value=(False, None))
-    scheduler.encoder_cache_manager = MagicMock()
-    scheduler.ec_connector = None
-    scheduler.finished_req_ids = set()
-    scheduler.finished_req_ids_dict = None
-    scheduler._free_request_blocks = MagicMock()
-
-    recomputed_reqs: list[RecomputeReqInfo] = []
-    scheduler._finish_recomputed_request(request, recomputed_reqs)
-
-    assert request.status == RequestStatus.FINISHED_ABORTED
-    assert request not in scheduler._inflight_prefills
-    assert request.request_id not in scheduler.requests
-    assert request.request_id in scheduler.finished_req_ids
-    scheduler._connector_finished.assert_called_once_with(request)
-    scheduler.encoder_cache_manager.free.assert_called_once_with(request)
-    scheduler._free_request_blocks.assert_called_once_with(request)
-    assert recomputed_reqs == [
-        RecomputeReqInfo(
-            request_id=request.request_id,
-            output_token_ids=request.output_token_ids,
-            client_index=request.client_index,
+    with patch.object(
+        Scheduler,
+        "update_from_output",
+        return_value=upstream_outputs,
+    ):
+        outputs = scheduler.update_from_output(
+            scheduler_output,
+            MagicMock(),
         )
+
+    assert [output.request_id for output in outputs[0].outputs] == [
+        "recomputed-request",
+        "regular-request",
     ]
+    assert outputs[0].outputs[0].stop_reason == "recomputed"
 
 
-def test_truncate_computed_blocks_supports_legacy_short_mamba_group():
-    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    mamba_block = MagicMock()
-    attention_blocks = [MagicMock(), MagicMock()]
-    blocks = SimpleNamespace(blocks=([mamba_block], attention_blocks))
-    kv_cache_manager = SimpleNamespace(
-        truncate_computed_blocks=MagicMock(),
-        coordinator=SimpleNamespace(
-            single_type_managers=[
-                SimpleNamespace(block_size=4),
-                SimpleNamespace(block_size=4),
-            ]
-        ),
-        kv_cache_config=SimpleNamespace(
-            kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=MagicMock(spec=MambaSpec)),
-                SimpleNamespace(kv_cache_spec=MagicMock()),
-            ]
-        ),
-        create_kv_cache_blocks=MagicMock(side_effect=lambda value: value),
-    )
-    scheduler.kv_cache_manager = kv_cache_manager
-
-    truncated = scheduler._truncate_computed_blocks_for_connector(blocks, 8)
-
-    assert truncated == ([mamba_block], attention_blocks)
-    kv_cache_manager.truncate_computed_blocks.assert_not_called()
-
-
-def test_dsv4_decode_node_observes_real_dense_local_cache_hit():
-    register_all_kvcache_specs(MagicMock())
-    init_none_hash(sha256)
-    hash_block_size = 4
-    kv_cache_config = KVCacheConfig(
-        num_blocks=800,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["dense_mla"],
-                MLAAttentionSpec(
-                    block_size=256,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.uint8,
-                    **_ratio_kwargs(4),
-                    model_version="deepseek_v4",
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["swa_tail"],
-                SlidingWindowMLASpec(
-                    block_size=64,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.uint8,
-                    sliding_window=128,
-                    model_version="deepseek_v4",
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["c4_state"],
-                SlidingWindowMLASpec(
-                    block_size=4,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.uint8,
-                    sliding_window=8,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["c128_state"],
-                SlidingWindowMLASpec(
-                    block_size=8,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.uint8,
-                    sliding_window=128,
-                ),
-            ),
-        ],
-    )
-    manager = KVCacheManager(
-        kv_cache_config,
-        max_model_len=8192,
-        scheduler_block_size=256,
-        hash_block_size=hash_block_size,
-        enable_caching=True,
-    )
-    block_hasher = get_request_block_hasher(hash_block_size, sha256)
-
-    def make_request(request_id: str, num_tokens: int) -> Request:
-        return Request(
-            request_id=request_id,
-            prompt_token_ids=[0] * num_tokens,
-            sampling_params=SamplingParams(max_tokens=1),
-            pooling_params=None,
-            block_hasher=block_hasher,
-        )
-
-    fill = make_request("fill", 1024)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
-    assert num_computed == 0
-    assert (
-        manager.allocate_slots(
-            fill,
-            fill.num_tokens,
-            num_new_computed_tokens=0,
-            new_computed_blocks=computed_blocks,
-        )
-        is not None
-    )
-    manager.free(fill)
-
-    non_dense_block_ids = {
-        block.block_id
-        for block in manager.block_pool.blocks
-        if block.block_hash is not None and get_group_id(block.block_hash) in {1, 2, 3}
-    }
-    assert non_dense_block_ids
-    manager.evict_blocks(non_dense_block_ids)
-
-    replay = make_request("replay", 1280)
-    replay.kv_transfer_params = {"do_remote_prefill": True}
-    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
-    scheduler.kv_cache_manager = manager
-
-    _, num_local, shared_prefix_boundary, hit_diverged = scheduler._get_computed_blocks_for_connector(replay)
-
-    assert num_local == 1024
-    assert shared_prefix_boundary == 0
-    assert hit_diverged
+def test_recompute_scheduler_variants_keep_offload_preemption():
+    assert issubclass(AsyncRecomputeScheduler, RecomputeScheduler)
+    assert issubclass(DyntraLBRecomputeScheduler, RecomputeScheduler)
+    assert issubclass(DyntraLBRecomputeScheduler, DyntraLBPolicyMixin)
+    assert issubclass(AsyncDyntraLBRecomputeScheduler, AsyncRecomputeScheduler)
+    assert issubclass(AsyncDyntraLBRecomputeScheduler, DyntraLBPolicyMixin)

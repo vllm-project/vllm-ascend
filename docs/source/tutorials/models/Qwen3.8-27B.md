@@ -22,16 +22,16 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 The following model weights are available:
 
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
-- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
-- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
-- `Qwen3.8-27B-w8a8-310p` (Quantized version): requires 1 Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p)
+|  Weight Version                              | Hardware Requirements | Download Links |
+|----------------------------------------------|-----------------------|----------------|
+| `Qwen3.8-27B` (BF16 version)                 | 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node <br>or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
+| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
+| `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
+| `Qwen3.8-27B-w8a8-310p` (Quantized version)  | 1 Atlas 300I DUO  | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -226,6 +226,7 @@ Before starting the service:
     # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -276,6 +277,7 @@ Before starting the service:
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
     export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
 
     vllm serve $MODEL_PATH \
@@ -329,6 +331,7 @@ Before starting the service:
     # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+    # Ensure the model path matches the directory recorded during download
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -379,7 +382,8 @@ Before starting the service:
         export VLLM_USE_MODELSCOPE=True
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+        # Ensure the model path matches the directory recorded during download
+        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-310p
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
@@ -473,7 +477,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 Here is an accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -487,11 +491,11 @@ Here is an accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -46,6 +46,7 @@ from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    vllm_version_is,
 )
 
 
@@ -153,13 +154,14 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
 
-        self.context_proj = ReplicatedLinear(
+        self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
             self.config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "context_proj"),
+            gather_output=True,
         )
         self.context_norm = RMSNorm(
             self.config.hidden_size,
@@ -287,9 +289,15 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         quantization-aware per-layer projections, so use vLLM's public loader
         interface without creating that extra packed parameter.
         """
-        # Current vLLM drops the training-only and shared checkpoint
-        # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
-        loader = AutoWeightsLoader(self)
+        if vllm_version_is("0.28.0"):
+            loader = AutoWeightsLoader(
+                self,
+                skip_substrs=list(self.checkpoint_skip_substrs),
+            )
+        else:
+            # Current vLLM drops the training-only and shared checkpoint
+            # weights in hf_to_vllm_mapper instead of AutoWeightsLoader.
+            loader = AutoWeightsLoader(self)
         rotation_weight = None
         if self.rotation_path is not None:
             rotation_weight = get_rotation_matrix(self.rotation_path)

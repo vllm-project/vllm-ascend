@@ -3,21 +3,26 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
+    unwrap_mamba_kv_cache_groups,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -35,6 +40,8 @@ def _make_kv_cache_tensor(
     offset: int = 0,
 ) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(
         size=size,
         layers=layer_names,
@@ -83,6 +90,56 @@ def _group(spec: MambaSpec):
     )
 
 
+def test_unwrap_uniform_mamba_groups_for_upstream_model_state():
+    spec = _mamba_spec()
+    layer_specs = {"mamba.0": spec, "mamba.1": spec}
+    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+    assert wrapped is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=list(layer_specs),
+                kv_cache_spec=wrapped,
+            )
+        ],
+    )
+
+    normalized = unwrap_mamba_kv_cache_groups(config)
+
+    assert normalized is not config
+    assert normalized.kv_cache_groups[0].kv_cache_spec == spec
+    assert config.kv_cache_groups[0].kv_cache_spec is wrapped
+
+
+def test_unwrap_preserves_distinct_mamba_layouts():
+    specs = {
+        "mamba.0": _mamba_spec(),
+        "mamba.1": MambaSpec(
+            block_size=16,
+            shapes=((3, 2), (1, 4)),
+            dtypes=(torch.float16, torch.float32),
+        ),
+    }
+    wrapped = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert wrapped is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=list(specs),
+                kv_cache_spec=wrapped,
+            )
+        ],
+    )
+
+    normalized = unwrap_mamba_kv_cache_groups(config)
+
+    assert normalized.kv_cache_groups[0].kv_cache_spec is wrapped
+
+
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
@@ -118,6 +175,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert query_start_loc_values == [
         "self.input_buffers.query_start_loc",
         "query_start_loc[:num_reqs_padded + 1]",
+        "self.input_buffers.query_start_loc",
     ]
     assert ast.unparse(assignments["seq_lens"]) == "self.input_buffers.seq_lens[:num_reqs_padded]"
 
@@ -132,9 +190,52 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert padded_count.id == "num_reqs_padded"
 
 
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_metadata):
+    expected_metadata = {"gdn": object()}
+    mock_build_attn_metadata.return_value = expected_metadata
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=3),
+        num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
+        max_model_len=1024,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=8,
+        num_tokens_after_padding=16,
+        is_prefilling_np=np.array([False, False]),
+        idx_mapping=torch.tensor([0, 1]),
+        num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        num_scheduled_tokens=np.array([4, 4], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 4, 8, 12, 16], dtype=np.int32),
+        seq_lens=None,
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.ones(4, dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    metadata = AscendMambaHybridModelState.prepare_attn(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+    )
+
+    assert metadata is expected_metadata
+    model_metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [3, 3, 3, 3]
+    assert model_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
+
+
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
     spec = _mamba_spec()
@@ -174,7 +275,7 @@ def test_mamba_cache_reshape_returns_contiguous_state_tensors(_mock_config):
 
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     attention_spec = FullAttentionSpec(
@@ -194,22 +295,28 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert attention_spec.page_size_bytes == 20
     assert mamba_spec.page_size_bytes == 20
 
-    kv_cache_tensors = [
-        _make_kv_cache_tensor(
-            80,
-            ["full_attn", "mtp_attn"],
-            20,
-            layer_stride=40,
-        ),
-        # Every descriptor aliases the same backing. The Mamba group starts
-        # at byte zero and overlays the first attention-layer region.
-        _make_kv_cache_tensor(
-            80,
-            ["linear_attn"],
-            20,
-            layer_stride=40,
-        ),
-    ]
+    if vllm_version_is("0.28.0"):
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
+            _make_kv_cache_tensor(40, ["mtp_attn"], 20),
+        ]
+    else:
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(
+                80,
+                ["full_attn", "mtp_attn"],
+                20,
+                layer_stride=40,
+            ),
+            # Every descriptor aliases the same backing. The Mamba group starts
+            # at byte zero and overlays the first attention-layer region.
+            _make_kv_cache_tensor(
+                80,
+                ["linear_attn"],
+                20,
+                layer_stride=40,
+            ),
+        ]
 
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
@@ -236,11 +343,14 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     mtp_attn_raw = raw_caches["mtp_attn"]
     assert isinstance(full_attn_raw, torch.Tensor)
     assert isinstance(mtp_attn_raw, torch.Tensor)
-    assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
-    backing_ptr = raw_cache.untyped_storage().data_ptr()
-    assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
-    assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
-    assert mtp_attn_raw.data_ptr() - backing_ptr == 40
+    if vllm_version_is("0.28.0"):
+        assert full_attn_raw is raw_cache
+    else:
+        assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
+        backing_ptr = raw_cache.untyped_storage().data_ptr()
+        assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.data_ptr() - backing_ptr == 40
 
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
@@ -281,8 +391,9 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
-    assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
-    assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
+    if not vllm_version_is("0.28.0"):
+        assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
+        assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
 
 
 @patch(
@@ -291,7 +402,7 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
 )
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
-    return_value=SimpleNamespace(kv_transfer_config=None),
+    return_value=SimpleNamespace(kv_transfer_config=None, additional_config={}),
 )
 def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     _mock_config,
@@ -404,7 +515,10 @@ def test_mamba_spec_follows_aligned_attention_spec(
     assert specs["full_attn"].page_size_bytes == 20
     # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
     # page_size_padded carries the padded/block-stride-indexed page there.
-    assert specs["full_attn"].page_size_padded == 20
+    if vllm_version_is("0.28.0"):
+        assert specs["full_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["full_attn"].page_size_padded == 20
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
@@ -455,11 +569,15 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
 
     assert {spec.page_size_bytes for spec in specs.values()} == {80}
     # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main.
-    # The marker is gone, so the assertions verify the observable alignment
-    # effect instead: the under-sized spec is padded to the common page, and
-    # the already-aligned spec reports the common page size.
-    assert specs["small_attn"].page_size_padded == 80
-    assert specs["large_attn"].page_size_bytes == 80
+    # The marker is gone, so the main-lane assertions verify the observable
+    # alignment effect instead: the under-sized spec is padded to the common
+    # page, and the already-aligned spec reports the common page size.
+    if vllm_version_is("0.28.0"):
+        assert specs["small_attn"].indexes_kv_by_block_stride is True
+        assert specs["large_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["small_attn"].page_size_padded == 80
+        assert specs["large_attn"].page_size_bytes == 80
     assert specs["linear_attn"].page_size_padded == 80
 
 
@@ -485,3 +603,27 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+def test_init_model_state_uses_override_then_default():
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+    custom_cls = MagicMock()
+    model = MagicMock()
+    model.get_model_state_cls.return_value = custom_cls
+
+    assert init_asecnd_model_state(vllm_config, model, encoder_cache, device) is custom_cls.return_value
+
+    with (
+        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=False),
+        patch("vllm_ascend.worker.v2.model_states.default.AscendModelState") as default_cls,
+    ):
+        state = init_asecnd_model_state(
+            vllm_config,
+            MagicMock(spec=["forward"]),
+            encoder_cache,
+            device,
+        )
+    assert state is default_cls.return_value

@@ -3,12 +3,13 @@ import torch_npu
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import is_vl_model
@@ -24,8 +25,21 @@ def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
     except (AssertionError, AttributeError):
         return None
 
-    if local_sizes is None or len(local_sizes) != ep_group.world_size:
+    if local_sizes is None:
         return None
+    if len(local_sizes) != ep_group.world_size:
+        pcp_size = get_pcp_group().world_size
+        dp_size = get_dp_group().world_size
+        if len(local_sizes) * pcp_size != ep_group.world_size or len(local_sizes) % dp_size:
+            return None
+        sp_size = len(local_sizes) // dp_size
+        # Upstream describes DP x SP; EP ranks are ordered DP x PCP x TP.
+        local_sizes = [
+            size
+            for dp_rank in range(dp_size)
+            for _ in range(pcp_size)
+            for size in local_sizes[dp_rank * sp_size : (dp_rank + 1) * sp_size]
+        ]
     return [int(size) for size in local_sizes]
 
 
@@ -41,15 +55,15 @@ def _pad_to_ep_local_size(x: torch.Tensor, max_local_size: int) -> torch.Tensor:
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
-    """仅用于 EP 通信场景：EP all_gather + 按 DP token 分布 unpad。"""
+    """EP communication only: EP all_gather followed by unpad according to the DP token distribution."""
     forward_context = get_forward_context()
     dp_metadata = forward_context.dp_metadata
     ep_group = get_ep_group()
     local_sizes = _get_ep_local_sizes(dp_metadata, ep_group)
     if local_sizes is not None:
         max_local_size = max(local_sizes)
-        # all_gather 要求各 rank 输入等长：先 pad 到 max_local_size，
-        # gather 后再按各 rank 真实的 local_sizes 截回。
+        # all_gather requires equal-length inputs on every rank: pad to
+        # max_local_size first, then trim back to each rank's real local size.
         x = _pad_to_ep_local_size(x, max_local_size)
     # need to unpad from ep size
     x = ep_group.all_gather(x, 0)
@@ -73,7 +87,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
 
 
 def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
-    """仅用于 EP 通信场景：按 DP token 分布 pad 后做 EP reduce_scatter。"""
+    """EP communication only: pad according to the DP token distribution, then EP reduce_scatter."""
     forward_context = get_forward_context()
 
     if _EXTRA_CTX.is_draft_model and is_vl_model():
@@ -108,6 +122,37 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
         offset += num_tokens_dp
 
     return ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+
+
+def _routed_output_is_reduced(layer_name: str) -> bool:
+    runner = get_forward_context().no_compile_layers[layer_name]
+    is_sequence_parallel = runner.moe_config.is_sequence_parallel
+    comm = _EXTRA_CTX.moe_comm_type
+    return comm in {
+        MoECommType.MC2,
+        MoECommType.ALLTOALL,
+        MoECommType.FUSED_MC2,
+    } or (comm == MoECommType.ALLGATHER and is_sequence_parallel)
+
+
+def _maybe_all_reduce_tensor_model_parallel_impl(
+    states: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """Reduce routed/final output only if dispatch has not already reduced it."""
+    if _routed_output_is_reduced(layer_name):
+        return states
+    return tensor_model_parallel_all_reduce(states)
+
+
+def _maybe_all_reduce_shared_expert_impl(
+    shared_output: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """Reduce shared TP output separately when routed output is already reduced."""
+    if _routed_output_is_reduced(layer_name):
+        return tensor_model_parallel_all_reduce(shared_output)
+    return shared_output
 
 
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor) -> torch.Tensor:
@@ -190,6 +235,22 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=_maybe_pad_and_reduce_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="maybe_all_reduce_tensor_model_parallel",
+    op_func=_maybe_all_reduce_tensor_model_parallel_impl,
+    fake_impl=lambda states, layer_name: states,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="maybe_all_reduce_shared_expert",
+    op_func=_maybe_all_reduce_shared_expert_impl,
+    fake_impl=lambda shared_output, layer_name: shared_output,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

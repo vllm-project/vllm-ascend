@@ -322,6 +322,31 @@ The following code configures vLLM Ascend to use speculative decoding where prop
       --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "enforce_eager": true}'
     ```
 
+### Adaptive verification
+
+Adaptive verification lets DSpark choose how many draft tokens to verify for
+each request at every decode step. Requests with higher confidence can keep a
+longer draft, while low-confidence drafts are shortened to avoid unnecessary
+target-model computation. It is disabled by default and requires a DSpark
+model with a confidence head.
+
+Enable it in `speculative_config`:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{
+    "method": "dspark",
+    "model": "deepseek-ai/dspark_qwen3_8b_block7",
+    "num_speculative_tokens": 7,
+    "enable_adaptive_verification": true
+  }'
+```
+
+Adaptive verification takes effect only with model runner V2.
+
+For more details, see the
+[vLLM community documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/adaptive_verification/).
+
 ## Draft KV Sliding Window {: #draft-kv-sliding-window }
 
 Draft models are often trained on short contexts (e.g. 4-8k tokens). When the
@@ -438,10 +463,25 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 ## Extracting Hidden States
 
-The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models.
+The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models. The dumps are then used to train EAGLE/EAGLE-3 drafts.
 
 > [!NOTE]
 > This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+
+Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+> [!NOTE]
+> Model Runner V2 support reuses upstream vLLM's `ExtractHiddenStatesSpeculator`
+> ([PR #49811](https://github.com/vllm-project/vllm/pull/49811)). Ascend only
+> adds `init_speculator` dispatch and NPU KV allocate/reshape for
+> `HiddenStateCacheSpec`. After
+> [vLLM #51718](https://github.com/vllm-project/vllm/pull/51718) (0828 pin),
+> hidden-state layers keep private `[B, H, N, C]` buffers so they cannot overlay
+> the standardized hybrid Attention/Mamba backing.
 
 - Offline inference
 

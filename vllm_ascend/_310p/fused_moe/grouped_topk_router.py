@@ -41,7 +41,7 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
                 input_ids=input_ids,
             )
 
-        # vLLM main recomputes router_logits as fp32 in _forward_impl,
+        # vLLM recomputes router_logits as fp32 in _forward_impl,
         # but the resulting tensor may be in FRACTAL_NZ format on 310P.
         # npu_moe_gating_top_k_softmax only supports DT_FLOAT16 + ND,
         # so cast the router_logits accordingly.

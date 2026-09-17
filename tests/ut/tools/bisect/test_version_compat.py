@@ -154,7 +154,10 @@ def test_adapter_sets_empty_target_device_for_editable_vllm_install(
     )
     adapter = VersionAdapter(BisectOptions(repo_dir=tmp_path, vllm_dir=vllm_dir))
 
-    adapter.ensure_targets({"vllm": "v0.25.1"}, ("vllm",))
+    # _switch_vllm sets os.environ["VLLM_VERSION"] as a side effect. Isolate it
+    # so later cpu-ut cases keep resolving against the installed vllm version.
+    with mock.patch.dict(os.environ, {}):
+        adapter.ensure_targets({"vllm": "v0.25.1"}, ("vllm",))
 
     command, env = runs[0]
     assert command[:4] == ["pip", "install", "-e", str(vllm_dir)]

@@ -1,0 +1,500 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Cache metadata and execution backends for the GLM-Next pooled indexer."""
+
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.forward_context import get_forward_context
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    get_kv_cache_compression_ratio,
+    get_storage_block_size,
+)
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
+from vllm_ascend.models.glm5next.kv_cache import (
+    format_indexer_kpool_slot_mapping,
+)
+
+GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
+
+
+@dataclass
+class AscendIndexerKPoolMetadata:
+    """Metadata for compressed indexer cache writes and top-k reads."""
+
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    seq_lens: torch.Tensor
+    seq_lens_cpu: torch.Tensor | None
+    positions: torch.Tensor
+    block_size: int
+    compress_ratio: int
+    cache_role: str = "indexer"
+    cum_query_lens: torch.Tensor | None = None
+    raw_seq_lens: torch.Tensor | None = None
+    num_actual_tokens: int = 0
+
+
+class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
+    """Build pool-level addressing for the compressed indexer cache."""
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec,
+    ) -> AttentionCGSupport:
+        # This cache-only builder still participates in graph capability
+        # reduction. Its decode metadata uses persistent buffers refreshed in
+        # place, so it must not disable the main model's uniform decode graph.
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    def __init__(
+        self,
+        kv_cache_spec: MLAAttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        if not isinstance(kv_cache_spec, MLAAttentionSpec):
+            raise TypeError(
+                f"Ascend Indexer KPool backend requires MLAAttentionSpec, got {type(kv_cache_spec).__name__}."
+            )
+        compress_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
+        if compress_ratio <= 1:
+            raise ValueError(f"Ascend Indexer KPool cache requires compress_ratio > 1, got {compress_ratio}.")
+        if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
+            raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.logical_block_size = kv_cache_spec.block_size
+        self.storage_block_size = get_storage_block_size(kv_cache_spec)
+        if self.storage_block_size <= 0:
+            raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
+        self.compress_ratio = compress_ratio
+        if self.logical_block_size % GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE:
+            raise ValueError(
+                "GLM-Next logical block size must be divisible by the SFA "
+                f"kernel block size: logical={self.logical_block_size}, "
+                f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
+            )
+        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        scheduler_config = vllm_config.scheduler_config
+        # ACLGraph replay keeps the addresses captured on the first run. The
+        # derived compressed metadata therefore needs persistent storage that
+        # is refreshed in place on every builder invocation.
+        self._slot_mapping_buffer = torch.empty(
+            scheduler_config.max_num_batched_tokens,
+            dtype=torch.int64,
+            device=device,
+        )
+        self._seq_lens_buffer = torch.empty(
+            scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._cum_query_lens_buffer = torch.empty(
+            scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._raw_seq_lens_buffer = torch.empty(
+            scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
+        max_logical_blocks = cdiv(
+            vllm_config.model_config.max_model_len,
+            self.logical_block_size,
+        )
+        self._block_table_buffer = torch.empty(
+            scheduler_config.max_num_seqs,
+            max_logical_blocks,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendIndexerKPoolMetadata:
+        del common_prefix_len, fast_build, kwargs
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        positions = common_attn_metadata.positions[:num_input_tokens].long()
+        slot_mapping = self._slot_mapping_buffer[:num_input_tokens]
+        slot_mapping.copy_(
+            format_indexer_kpool_slot_mapping(
+                common_attn_metadata.slot_mapping[:num_input_tokens],
+                positions,
+                self.logical_block_size,
+                self.compress_ratio,
+            )
+        )
+        seq_lens = self._seq_lens_buffer[:num_reqs]
+        torch.div(
+            common_attn_metadata.seq_lens[:num_reqs],
+            self.compress_ratio,
+            rounding_mode="floor",
+            out=seq_lens,
+        )
+        cum_query_lens = self._cum_query_lens_buffer[:num_reqs]
+        cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
+        raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
+        raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
+        if common_attn_metadata._seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        elif common_attn_metadata.seq_lens_cpu is not None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        else:
+            seq_lens_cpu = None
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
+        expanded_block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        split = self.kernel_blocks_per_logical_block
+        if expanded_block_table.shape[1] % split:
+            raise ValueError(
+                "GLM-Next indexer received a partially expanded SFA block "
+                f"table: width={expanded_block_table.shape[1]}, split={split}."
+            )
+        logical_width = expanded_block_table.shape[1] // split
+        if logical_width > self._block_table_buffer.shape[1]:
+            raise ValueError(
+                "GLM-Next indexer block table exceeds its persistent buffer: "
+                f"required={logical_width}, capacity="
+                f"{self._block_table_buffer.shape[1]}."
+            )
+        block_table = self._block_table_buffer[:num_reqs, :logical_width]
+        # The common full-group table is expanded for the C128 SFA kernel:
+        # scheduler block N becomes [split*N, ..., split*N+split-1]. The
+        # compressed indexer owns one physical page per scheduler block, so it
+        # must recover N rather than treating the SFA sub-blocks as pages.
+        torch.div(
+            expanded_block_table[:, ::split],
+            split,
+            rounding_mode="floor",
+            out=block_table,
+        )
+        return AscendIndexerKPoolMetadata(
+            block_table=block_table,
+            slot_mapping=slot_mapping,
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            positions=positions,
+            block_size=self.storage_block_size,
+            compress_ratio=self.compress_ratio,
+            cum_query_lens=cum_query_lens,
+            raw_seq_lens=raw_seq_lens,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+        )
+
+
+class AscendIndexerKPoolBackend(AttentionBackend):
+    """Cache-only backend for the compressed indexer keys."""
+
+    @staticmethod
+    def get_impl_cls():
+        return None
+
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_INDEXER_KPOOL"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # The scheduler manages logical token blocks. Triton consumes complete
+        # compressed storage pages with their actual size and strides.
+        return [MultipleOf(1)]
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendIndexerKPoolMetadataBuilder]:
+        return AscendIndexerKPoolMetadataBuilder
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
+        del cache_type
+        if num_kv_heads != 1:
+            raise ValueError(f"Indexer KPool cache requires one KV head, got {num_kv_heads}.")
+        return (num_blocks, block_size, num_kv_heads, head_size)
+
+
+@dataclass
+class AscendIndexerKPoolTailMetadata:
+    """Addressing required to update the compressor tail cache."""
+
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    block_size: int
+
+
+class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
+    """Build independent metadata for the GLM-Next compressor tail."""
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec,
+    ) -> AttentionCGSupport:
+        # Full-graph tail writes use the fixed-shape sentinel path. Do not let
+        # the base class default NEVER downgrade FULL_DECODE_ONLY for the main
+        # model merely because this cache-only builder is in the cache group.
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    def __init__(
+        self,
+        kv_cache_spec: AscendIndexerKPoolTailSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        if not isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+            raise TypeError(
+                "Ascend Indexer KPool tail backend requires "
+                f"AscendIndexerKPoolTailSpec, got {type(kv_cache_spec).__name__}."
+            )
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.block_size = kv_cache_spec.block_size
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendIndexerKPoolTailMetadata:
+        del common_prefix_len, fast_build, kwargs
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        return AscendIndexerKPoolTailMetadata(
+            block_table=common_attn_metadata.block_table_tensor[:num_reqs],
+            slot_mapping=common_attn_metadata.slot_mapping[:num_input_tokens],
+            block_size=self.block_size,
+        )
+
+
+class AscendIndexerKPoolTailBackend(AttentionBackend):
+    """Cache-only backend for the GLM-Next compressor tail."""
+
+    @staticmethod
+    def get_impl_cls():
+        return None
+
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_INDEXER_KPOOL_TAIL"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Ring capacity is independent of the pool size and SFA C128.
+        return [MultipleOf(1)]
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendIndexerKPoolTailMetadataBuilder]:
+        return AscendIndexerKPoolTailMetadataBuilder
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
+        del cache_type
+        if num_kv_heads != 1:
+            raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
+        return (num_blocks, 2, block_size, head_size)
+
+
+class Glm5NextKPoolIndexerBackend(nn.Module):
+    """Model-side implementation of the unified seven-argument indexer API.
+
+    The cache-only backends above own the engine-facing attention contracts.
+    Keep execution independent of the standard SFA indexer and its operators.
+    """
+
+    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
+        super().__init__()
+        if qk_rope_head_dim != 0:
+            raise ValueError(
+                f"GLM-Next KPool indexing supports NoPE queries only, got qk_rope_head_dim={qk_rope_head_dim}."
+            )
+        parallel_config = vllm_indexer.vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError("GLM-Next KPool indexing does not support PCP or DCP.")
+
+        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+            raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
+
+        self.n_head: int = vllm_indexer.n_head
+        self.head_dim: int = vllm_indexer.head_dim
+        self.topk_tokens: int = vllm_indexer.topk_tokens
+        self.q_lora_rank: int = vllm_indexer.q_lora_rank
+        self.index_kpool: int = vllm_indexer.index_kpool
+        self.wq_b = vllm_indexer.wq_b
+        self.wk_weights_proj = vllm_indexer.wk_weights_proj
+        self.k_norm = vllm_indexer.k_norm
+        self.softmax_scale = vllm_indexer.softmax_scale
+        self.index_kpool_compress_ape = vllm_indexer.index_kpool_compress_ape
+        self.index_kpool_compress_gate = vllm_indexer.index_kpool_compress_gate
+        self.k_cache: Any = vllm_indexer.k_cache
+        self.tail_cache: Any = vllm_indexer.tail_cache
+        self.topk_indices_buffer: torch.Tensor | None = vllm_indexer.topk_indices_buffer
+        # Load KPool operators only when constructing the model-side backend;
+        # cache metadata is also imported during engine initialization.
+        from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
+
+        self.indexer_op = SparseAttnIndexerKpool(self.topk_tokens, self.head_dim)
+        self.enable_sparse_li_c8 = False
+        for name in ("_wk_weight_f32", "_gate_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
+            self.register_buffer(name, None, persistent=False)
+
+    @property
+    def topk_output_width(self) -> int:
+        return self.topk_tokens + self.index_kpool - 1
+
+    def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
+        visible = (positions + 1).clamp_min(0)
+        history = (visible // self.index_kpool * self.index_kpool).clamp(max=self.topk_tokens)
+        return history + visible % self.index_kpool
+
+    @property
+    def num_cache_tensors(self) -> int:
+        return 1
+
+    def process_weights_after_loading(self) -> None:
+        self._wk_weight_f32 = self.wk_weights_proj.weight.detach().float()
+        self._gate_weight_f32 = self.index_kpool_compress_gate.detach().float()
+        self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
+        self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
+
+    @staticmethod
+    def _bound_cache(layer: Any) -> torch.Tensor:
+        context = get_forward_context()
+        cache = layer.kv_cache
+        if isinstance(cache, (list, tuple)):
+            virtual_engine = getattr(context, "virtual_engine", 0) or 0
+            if virtual_engine >= len(cache):
+                raise IndexError(f"Cache virtual engine {virtual_engine} is out of range.")
+            cache = cache[virtual_engine]
+        if isinstance(cache, (list, tuple)):
+            if len(cache) != 1:
+                raise TypeError("GLM KPool cache must contain one tensor.")
+            cache = cache[0]
+        if not isinstance(cache, torch.Tensor):
+            raise TypeError(f"GLM KPool cache {layer.prefix!r} is not bound to a tensor.")
+        return cache
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        k_hidden_states: torch.Tensor,
+        indexer_metadata: Any,
+        compute_topk: bool = True,
+    ) -> torch.Tensor | None:
+        if not isinstance(indexer_metadata, AscendIndexerKPoolMetadata):
+            raise TypeError("GLM KPool backend requires AscendIndexerKPoolMetadata.")
+        context = get_forward_context()
+        if not isinstance(context.attn_metadata, dict):
+            raise TypeError("GLM KPool backend requires per-layer metadata.")
+        tail_metadata = context.attn_metadata[self.tail_cache.prefix]
+        if not isinstance(tail_metadata, AscendIndexerKPoolTailMetadata):
+            raise TypeError("GLM KPool backend requires tail-cache metadata.")
+
+        num_tokens = hidden_states.shape[0]
+        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
+        hidden = hidden_states[:num_tokens]
+        k_hidden = k_hidden_states[:num_tokens]
+        if self._wk_weight_f32 is None:
+            self.process_weights_after_loading()
+        assert self._wk_weight_f32 is not None
+        hidden_f32 = hidden.float()
+        k_hidden_f32 = hidden_f32 if k_hidden_states is hidden_states else k_hidden.float()
+        projected = F.linear(k_hidden_f32, self._wk_weight_f32)
+        k = F.layer_norm(
+            projected[:, : self.head_dim],
+            (self.head_dim,),
+            self._norm_weight_f32,
+            self._norm_bias_f32,
+            getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6)),
+        )
+        gate_score = F.linear(k_hidden_f32, self._gate_weight_f32)
+        q_values = None
+        weights = None
+        if compute_topk:
+            if isinstance(q_c, tuple):
+                raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
+            q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
+            weights = (
+                projected[:, self.head_dim :]
+                if k_hidden_states is hidden_states
+                else F.linear(hidden_f32, self._wk_weight_f32[self.head_dim :])
+            ).to(q_values.dtype)
+            weights = weights * (self.softmax_scale * self.n_head**-0.5)
+
+        indexer_cache = self._bound_cache(self.k_cache)
+        tail_cache = self._bound_cache(self.tail_cache)
+        positions = indexer_metadata.positions[:num_tokens]
+        result = self.indexer_op(
+            k,
+            q_values,
+            weights,
+            positions,
+            indexer_cache,
+            tail_cache,
+            indexer_metadata,
+            tail_metadata,
+            gate_score=gate_score,
+            compress_ape=self.index_kpool_compress_ape,
+            index_kpool=self.index_kpool,
+            max_pool_seq_len=(
+                indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
+                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
+                else int(indexer_metadata.seq_lens_cpu.max())
+                if indexer_metadata.seq_lens_cpu.numel()
+                else 0
+            ),
+            compute_topk=compute_topk,
+        )
+        if result is None or self.topk_indices_buffer is None:
+            return result
+
+        if num_tokens > self.topk_indices_buffer.shape[0]:
+            raise RuntimeError(
+                f"GLM KPool output exceeds the top-k buffer rows: {num_tokens} > {self.topk_indices_buffer.shape[0]}."
+            )
+        output = self.topk_indices_buffer[:num_tokens]
+        output.fill_(-1)
+        if result.shape[-1] > output.shape[-1]:
+            raise RuntimeError(
+                f"GLM KPool output exceeds the top-k buffer width: {result.shape[-1]} > {output.shape[-1]}."
+            )
+        output[:, : result.shape[-1]].copy_(result[:, 0])
+        return result

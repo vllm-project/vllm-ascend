@@ -55,12 +55,14 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
             self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
             self.weight_scale = torch.nn.Parameter(torch.randn(2, 3), requires_grad=False)
             self.quant_method = linear_method
+            self.reduce_results = True
 
     def setUp(self):
         AscendSFADSACPImpl.o_proj_full_pools.clear()
 
     def _make_impl(self, linear_method=None):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.layerwise_kv_cache_hook = None
         impl.tp_size = 2
         impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
         impl._o_proj_weight_switch_enabled = False
@@ -109,7 +111,10 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.enable_dsa_cp_full_o_proj = True
         gathered_output = torch.cat((torch.ones(2, 3), torch.full((2, 3), 2.0)))
         tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
-        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+        with patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
+            return_value=tp_group,
+        ):
             output = impl._finalize_o_proj(
                 attn_output=torch.randn(2, 8),
                 output=torch.empty(3, 3),
@@ -120,6 +125,28 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         self.assertEqual(impl.o_proj.weight_scale.data_ptr(), original_scale_ptr)
         tp_group.all_gather.assert_called_once()
         self.assertTrue(torch.equal(output, gathered_output[:3]))
+
+    def test_o_proj_full_weight_stages_local_result_for_upstream_sp(self):
+        impl = self._make_impl()
+        impl._enable_o_proj_full_weight_switch()
+        impl.enable_dsa_cp_full_o_proj = True
+        impl.o_proj.reduce_results = False
+        local_output = torch.tensor([[3.0, 4.0, 5.0], [6.0, 7.0, 8.0]])
+        impl._apply_o_proj_full_weight = MagicMock(return_value=local_output)
+        tp_group = SimpleNamespace(rank_in_group=1, all_gather=MagicMock())
+
+        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+            output = impl._finalize_o_proj(
+                attn_output=torch.randn(2, 8),
+                output=torch.full((3, 3), -1.0),
+                gather_full_o_proj=True,
+            )
+
+        tp_group.all_gather.assert_not_called()
+        torch.testing.assert_close(
+            output,
+            torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [3.0, 4.0, 5.0]]),
+        )
 
     def test_prepare_native_hidden_states_slices_replicated_token_state(self):
         impl = self._make_impl()
@@ -160,6 +187,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+        impl.layerwise_kv_cache_hook = None
         impl.enable_dsa_cp_full_o_proj = True
         impl.enable_sp = False
         impl.has_indexer = False
@@ -171,6 +199,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
+        impl.g_proj = None
         impl.layer_name = "layers.0.attn"
 
         q_c = MagicMock()
@@ -182,8 +211,8 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl._q_proj_and_k_up_proj = MagicMock(return_value=(MagicMock(), MagicMock()))
         impl.rope_single = MagicMock(return_value=MagicMock())
         impl._record_query_gather_context = MagicMock()
-        impl._prepare_kv_for_parallel = MagicMock(return_value=(None, None, None, []))
-        impl._store_parallel_kv = MagicMock(return_value=(None, None, None))
+        impl._prepare_kv_for_parallel = MagicMock(return_value=(None, []))
+        impl._store_parallel_kv = MagicMock(return_value=(None, None))
         impl._get_indexcache_topk_indices = MagicMock(return_value=MagicMock())
         impl._execute_sparse_flash_attention_process = MagicMock(return_value=MagicMock())
         attn_output = MagicMock()

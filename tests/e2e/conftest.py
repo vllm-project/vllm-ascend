@@ -67,7 +67,7 @@ from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
-from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch, vllm_version_is  # noqa E402
 
 adapt_patch(True)
 adapt_patch(False)
@@ -510,7 +510,9 @@ def _get_pd_server_required_devices(vllm_serve_args: list[str]) -> int:
         "--data-parallel-size-local" if "--data-parallel-size-local" in vllm_serve_args else "--data-parallel-size"
     )
     data_parallel_size = get_size(data_parallel_arg)
-    return tensor_parallel_size * data_parallel_size
+    pipeline_parallel_size = get_size("--pipeline-parallel-size")
+    prefill_context_parallel_size = get_size("--prefill-context-parallel-size")
+    return tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size * data_parallel_size
 
 
 class RemotePDServer(RemoteOpenAIServer):
@@ -547,6 +549,11 @@ class RemotePDServer(RemoteOpenAIServer):
             raise RuntimeError("vllm_serves_args must be a list")
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
+        visible_devices = self.env_dict.get(
+            "ASCEND_RT_VISIBLE_DEVICES",
+            os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
+        )
+        available_device_ids = visible_devices.split(",") if visible_devices else None
 
         for i, vllm_serve_arg in enumerate(self.vllm_serve_args_list):
             if "--port" not in vllm_serve_arg:
@@ -556,9 +563,17 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
-            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-                str(device_id) for device_id in range(start_device_id, start_device_id + required_devices)
-            )
+            end_device_id = start_device_id + required_devices
+            if available_device_ids is None:
+                assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]
+            else:
+                assigned_device_ids = available_device_ids[start_device_id:end_device_id]
+                if len(assigned_device_ids) != required_devices:
+                    raise ValueError(
+                        f"PD servers require at least {end_device_id} visible devices, "
+                        f"but ASCEND_RT_VISIBLE_DEVICES={visible_devices!r}."
+                    )
+            server_env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(assigned_device_ids)
             start_device_id += required_devices
 
             vllm_serve_arg = [*serve_arg_cmd, *vllm_serve_arg]
@@ -1992,8 +2007,14 @@ PROMPT_CONFIGS = {
         "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
-        "skip": "HunyuanVL is not supported on vLLM main "
-        "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL).",
+        **(
+            {
+                "skip": "HunyuanVL is not supported on vLLM main branch "
+                "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL)."
+            }
+            if not vllm_version_is("0.28.0")
+            else {}
+        ),
     },
 }
 
