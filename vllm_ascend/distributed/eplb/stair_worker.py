@@ -13,7 +13,7 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy, validate_plan
+from vllm_ascend.distributed.eplb.policy import StairEplbPolicy
 
 
 def run_stair_planner(
@@ -50,7 +50,7 @@ def run_stair_planner(
                 state._stair_config,
                 sample_weights=model_state._stair_sample_weights,
             )
-            validate_plan(
+            StairEplbPolicy.validate_plan(
                 old,
                 plan,
                 logical_load.shape[2],

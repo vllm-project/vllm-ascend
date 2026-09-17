@@ -17,7 +17,6 @@ from vllm_ascend.distributed.eplb.policy.stair import (
     passes_hysteresis,
     placement_score,
     replica_candidates,
-    validate_plan,
     weighted_moments,
 )
 
@@ -131,7 +130,7 @@ def test_plan_validation_rejects_false_source_ownership():
     )
 
     with np.testing.assert_raises_regex(ValueError, "does not own"):
-        validate_plan(old, plan, num_experts=2, pair_cap=1)
+        StairEplbPolicy.validate_plan(old, plan, num_experts=2, pair_cap=1)
 
 
 def test_constrained_lpt_obeys_placement_and_pair_invariants():
@@ -210,7 +209,7 @@ def test_plan_rebalance_swaps_experts_without_redundancy():
     assert not np.array_equal(plan.placement, old)
     np.testing.assert_array_equal(np.bincount(plan.placement.ravel()), np.ones(4, dtype=int))
     assert plan.accepted_scores[0] < placement_score(load[:, 0], np.ones(1), old[0]).mean
-    validate_plan(old, plan, num_experts=4, pair_cap=1)
+    StairEplbPolicy.validate_plan(old, plan, num_experts=4, pair_cap=1)
 
 
 def test_stair_policy_implements_upstream_contract(monkeypatch):

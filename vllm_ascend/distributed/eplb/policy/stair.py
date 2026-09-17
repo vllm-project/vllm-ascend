@@ -106,37 +106,51 @@ class StairEplbPolicy(AbstractEplbPolicy):
             sample_weights=sample_weights,
         )
 
+    @classmethod
+    def validate_plan(cls, old_placement: np.ndarray, plan: StairPlan, num_experts: int, pair_cap: int) -> None:
+        """Validate placement, explicit sources, and directed pair capacity."""
+        old = np.asarray(old_placement, dtype=np.int64)
+        if (
+            old.shape != plan.placement.shape
+            or old.shape != plan.source_rank.shape
+            or old.shape != plan.source_slot.shape
+        ):
+            raise ValueError("STAIR plan tensors must have identical shapes")
+        if plan.accepted_scores.shape != (old.shape[0],):
+            raise ValueError("STAIR plan scores must match the layer count")
+        if np.any(~np.isnan(plan.accepted_scores) & ~np.isfinite(plan.accepted_scores)):
+            raise ValueError("STAIR plan contains a non-finite score")
 
-def validate_plan(old_placement: np.ndarray, plan: StairPlan, num_experts: int, pair_cap: int) -> None:
-    """Validate placement, explicit sources, and directed pair capacity."""
-    old = np.asarray(old_placement, dtype=np.int64)
-    if old.shape != plan.placement.shape or old.shape != plan.source_rank.shape or old.shape != plan.source_slot.shape:
-        raise ValueError("STAIR plan tensors must have identical shapes")
-    if plan.accepted_scores.shape != (old.shape[0],):
-        raise ValueError("STAIR plan scores must match the layer count")
-    if np.any(~np.isnan(plan.accepted_scores) & ~np.isfinite(plan.accepted_scores)):
-        raise ValueError("STAIR plan contains a non-finite score")
+        for layer, new in enumerate(plan.placement):
+            cls.replica_counts(new, num_experts)
+            pair_usage: dict[tuple[int, int], int] = {}
+            for dst, row in enumerate(new):
+                old_slots = {int(expert): slot for slot, expert in enumerate(old[layer, dst])}
+                for dst_slot, expert in enumerate(row):
+                    src = int(plan.source_rank[layer, dst, dst_slot])
+                    src_slot = int(plan.source_slot[layer, dst, dst_slot])
+                    if not 0 <= src < old.shape[1] or not 0 <= src_slot < old.shape[2]:
+                        raise ValueError("STAIR plan contains an invalid source")
+                    if old[layer, src, src_slot] != expert:
+                        raise ValueError("STAIR source does not own the requested expert")
+                    if int(expert) in old_slots:
+                        if (src, src_slot, dst_slot) != (dst, old_slots[int(expert)], old_slots[int(expert)]):
+                            raise ValueError("STAIR retained experts must keep their original slot")
+                    elif src != dst:
+                        pair = (src, dst)
+                        pair_usage[pair] = pair_usage.get(pair, 0) + 1
+                        if pair_usage[pair] > pair_cap:
+                            raise ValueError("STAIR plan exceeds a directed rank-pair limit")
 
-    for layer, new in enumerate(plan.placement):
-        replica_counts(new, num_experts)
-        pair_usage: dict[tuple[int, int], int] = {}
-        for dst, row in enumerate(new):
-            old_slots = {int(expert): slot for slot, expert in enumerate(old[layer, dst])}
-            for dst_slot, expert in enumerate(row):
-                src = int(plan.source_rank[layer, dst, dst_slot])
-                src_slot = int(plan.source_slot[layer, dst, dst_slot])
-                if not 0 <= src < old.shape[1] or not 0 <= src_slot < old.shape[2]:
-                    raise ValueError("STAIR plan contains an invalid source")
-                if old[layer, src, src_slot] != expert:
-                    raise ValueError("STAIR source does not own the requested expert")
-                if int(expert) in old_slots:
-                    if (src, src_slot, dst_slot) != (dst, old_slots[int(expert)], old_slots[int(expert)]):
-                        raise ValueError("STAIR retained experts must keep their original slot")
-                elif src != dst:
-                    pair = (src, dst)
-                    pair_usage[pair] = pair_usage.get(pair, 0) + 1
-                    if pair_usage[pair] > pair_cap:
-                        raise ValueError("STAIR plan exceeds a directed rank-pair limit")
+    @staticmethod
+    def replica_counts(placement: np.ndarray, num_experts: int) -> np.ndarray:
+        layout = np.asarray(placement, dtype=np.int64)
+        if layout.ndim != 2 or np.any(layout < 0) or np.any(layout >= num_experts):
+            raise ValueError("STAIR placement contains an invalid expert")
+        counts = np.bincount(layout.ravel(), minlength=num_experts)
+        if np.any(counts == 0) or any(len(set(row)) != len(row) for row in layout.tolist()):
+            raise ValueError("STAIR placement must cover every expert without rank-local duplicates")
+        return counts
 
 
 def compress_samples(samples: np.ndarray, sample_size: int) -> tuple[np.ndarray, np.ndarray]:
@@ -176,20 +190,10 @@ def weighted_moments(
     return mean, np.sum(centered**2 * counts[:, None], axis=0, dtype=np.float64) / (total - 1)
 
 
-def replica_counts(placement: np.ndarray, num_experts: int) -> np.ndarray:
-    layout = np.asarray(placement, dtype=np.int64)
-    if layout.ndim != 2 or np.any(layout < 0) or np.any(layout >= num_experts):
-        raise ValueError("STAIR placement contains an invalid expert")
-    counts = np.bincount(layout.ravel(), minlength=num_experts)
-    if np.any(counts == 0) or any(len(set(row)) != len(row) for row in layout.tolist()):
-        raise ValueError("STAIR placement must cover every expert without rank-local duplicates")
-    return counts
-
-
 def placement_score(samples: np.ndarray, weights: np.ndarray, placement: np.ndarray) -> BalanceScore:
     values = np.asarray(samples, dtype=np.float64)
     layout = np.asarray(placement, dtype=np.int64)
-    counts = replica_counts(layout, values.shape[1])
+    counts = StairEplbPolicy.replica_counts(layout, values.shape[1])
     loads = np.stack([np.sum(values[:, row] / counts[row], axis=1) for row in layout], axis=1)
     totals = loads.sum(axis=1)
     imbalance = np.ones(values.shape[0], dtype=np.float64)
@@ -628,7 +632,7 @@ def _plan_rebalance(
     new_scores = np.full(old.shape[0], np.nan, dtype=np.float64)
     eligible = []
     for layer in range(old.shape[0]):
-        replica_counts(old[layer], samples.shape[2])
+        StairEplbPolicy.replica_counts(old[layer], samples.shape[2])
         if np.sum(samples[:, layer], dtype=np.float64) == 0:
             continue
         current = placement_score(samples[:, layer], weights, old[layer])

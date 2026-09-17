@@ -17,7 +17,7 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
-from .policy.stair import replica_counts
+from .policy import StairEplbPolicy
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 
@@ -127,7 +127,7 @@ class AscendEplbState(_eplb_state.EplbState):
         if mapping.ndim != 2 or mapping.shape[1] % num_ranks:
             raise ValueError("STAIR physical experts must divide evenly across EP ranks")
         for layer in mapping:
-            replica_counts(
+            StairEplbPolicy.replica_counts(
                 layer.reshape(num_ranks, -1).cpu().numpy(),
                 model.num_logical_experts,
             )
