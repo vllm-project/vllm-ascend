@@ -27,7 +27,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -54,6 +54,9 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: remove this import with dflash_cache.py.
+from vllm_ascend.core.dflash_cache import DFlashKVCacheSpecs, uses_mixed_dflash_cache
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -90,6 +93,15 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        specs = super().get_kv_cache_spec()
+        if uses_mixed_dflash_cache(self.vllm_config):
+            draft_names = getattr(self.speculator, "draft_attn_layer_names", None)
+            if not draft_names:
+                raise ValueError("Mixed DFlash cache planning requires loaded draft attention layer names.")
+            return DFlashKVCacheSpecs(specs, set(draft_names))
+        return specs
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations

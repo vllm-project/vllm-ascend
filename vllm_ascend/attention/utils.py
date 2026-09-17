@@ -277,6 +277,28 @@ class AscendDCPMetadata:
 
 
 @dataclass
+class ExactSeqLensListCache:
+    """Share one exact host conversion within a single metadata build only.
+
+    The caller owns this short-lived cache and keeps the source tensor
+    unchanged until all groups have been built. Tensor identity, rather than
+    its data pointer, prevents reuse for a different slice or layout. Never
+    retain this cache on a builder or use the host upper bound as its source.
+    """
+
+    _source: torch.Tensor | None = None
+    _values: list[int] | None = None
+
+    def get_list(self, seq_lens: torch.Tensor) -> list[int]:
+        if self._source is not seq_lens:
+            self._values = seq_lens.tolist()
+            self._source = seq_lens
+        assert self._values is not None
+        # A group's FIA padding must not modify another group's lengths.
+        return self._values.copy()
+
+
+@dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -288,6 +310,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
+
+    # V2-only, ephemeral sharing across groups in one build_attn_metadata call.
+    # Do not propagate through unpadded() or retain on returned layer metadata.
+    exact_seq_lens_list_cache: ExactSeqLensListCache | None = None
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.

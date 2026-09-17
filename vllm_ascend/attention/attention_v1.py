@@ -37,6 +37,10 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: PAD_SLOT_ID is only used by
+# _mask_dflash_cache_slots; remove this import with dflash_cache.py.
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -44,6 +48,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    ExactSeqLensListCache,
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_dcp,
@@ -305,6 +310,27 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         """
         return {}
 
+    def _get_seq_lens_list(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        seq_lens: torch.Tensor,
+    ) -> list[int]:
+        seq_lens_list_cache = common_attn_metadata.exact_seq_lens_list_cache
+        if (
+            isinstance(seq_lens_list_cache, ExactSeqLensListCache)
+            and type(self) is AscendAttentionMetadataBuilder
+            and self.vllm_config.use_v2_model_runner
+            and self.speculative_config is not None
+            and self.speculative_config.parallel_drafting
+            and not self.pcp_enabled
+            and not isinstance(self.kv_cache_spec, CrossAttentionSpec)
+        ):
+            # Parallel drafting requires exact device lengths after rejection.
+            # V2 groups in this build share the same immutable source tensor;
+            # convert it once instead of synchronizing once for every group.
+            return seq_lens_list_cache.get_list(seq_lens)
+        return seq_lens.tolist()
+
     def build(
         self,
         common_prefix_len: int,
@@ -348,7 +374,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
-        seq_lens_list = seq_lens.tolist()
+        seq_lens_list = self._get_seq_lens_list(common_attn_metadata, seq_lens)
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
@@ -1632,9 +1658,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value=value,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
-            slot_mapping=slot_mapping,
+            # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: no-op unless the mixed
+            # Full/SWA DFlash null block was reserved; see dflash_cache.py.
+            slot_mapping=self._mask_dflash_cache_slots(slot_mapping),
             use_bnsd=self.use_bnsd_kv_cache,
         )
+
+    # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: remove with dflash_cache.py.
+    def _mask_dflash_cache_slots(self, slots: torch.Tensor) -> torch.Tensor:
+        null_block_size = getattr(self, "_dflash_null_block_size", 0)
+        if not null_block_size:
+            return slots
+        valid = (slots >= null_block_size) & (slots < self._dflash_cache_slot_limit)
+        return torch.where(valid, slots, PAD_SLOT_ID)
 
     def reshape_and_cache(
         self,
@@ -1654,7 +1690,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.is_kv_producer:
                     attn_metadata.reshape_cache_event.record()
                 return query, key, value, output
-            slots = attn_metadata.slot_mapping
+            # DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: no-op unless the mixed
+            # Full/SWA DFlash null block was reserved; see dflash_cache.py.
+            slots = self._mask_dflash_cache_slots(attn_metadata.slot_mapping)
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
             key_to_cache = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
             value_to_cache = value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value
