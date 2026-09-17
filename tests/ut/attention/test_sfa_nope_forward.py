@@ -31,8 +31,8 @@ class _RecordingIndexer:
         self.call: tuple | None = None
         self.k_cache = SimpleNamespace(prefix="model.layers.0.self_attn.indexer.k_cache")
 
-    def __call__(self, hidden, q_c, cos, sin, k_hidden, metadata, compute_topk):
-        self.call = (hidden.clone(), q_c.clone(), cos, sin, k_hidden.clone(), metadata, compute_topk)
+    def __call__(self, hidden, q_c, k_hidden, metadata, compute_topk):
+        self.call = (hidden.clone(), q_c.clone(), k_hidden.clone(), metadata, compute_topk)
         return self.indices
 
 
@@ -255,10 +255,9 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     assert indexer.call is not None
     torch.testing.assert_close(indexer.call[0][:num_tokens], real_hidden)
     torch.testing.assert_close(indexer.call[1][:num_tokens], expected_q_c)
-    assert indexer.call[2:4] == (None, None)
-    torch.testing.assert_close(indexer.call[4][:num_tokens], real_hidden)
-    assert indexer.call[5] is indexer_metadata
-    assert indexer.call[6] is True
+    torch.testing.assert_close(indexer.call[2][:num_tokens], real_hidden)
+    assert indexer.call[3] is indexer_metadata
+    assert indexer.call[4] is True
     assert output_proj.calls[0][1] == {}
 
     kwargs = sparse_attention.call_args.kwargs
