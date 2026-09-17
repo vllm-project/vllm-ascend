@@ -21,7 +21,7 @@ def identity_module(monkeypatch):
     _stub(
         monkeypatch,
         "vllm_ascend.device.hardware_profile",
-        get_current_hardware_profile=lambda: SimpleNamespace(weight_layout_policy=None),
+        get_current_hardware_profile=lambda: SimpleNamespace(weight_layout_policy=None, _device_type="A2"),
     )
     return _load_module(monkeypatch, "rfork_test_identity", "identity.py")
 
@@ -67,6 +67,16 @@ def planner_module(monkeypatch):
         RETRYABLE = auto()
         REJECTED = auto()
 
+    class SeedReportStatus(Enum):
+        ACCEPTED = auto()
+        RETRYABLE = auto()
+        REJECTED = auto()
+
+    @dataclass(frozen=True)
+    class SeedReportResult:
+        status: SeedReportStatus
+        reason: str = ""
+
     @dataclass(frozen=True)
     class SeedLease:
         seed_ip: str
@@ -83,15 +93,38 @@ def planner_module(monkeypatch):
         SeedLease=SeedLease,
         RForkIdentity=object,
         SeedAdvertisement=object,
+        SeedReportResult=SeedReportResult,
+        SeedReportStatus=SeedReportStatus,
     )
     return _load_module(monkeypatch, "rfork_test_planner_client", "planner_client.py")
 
 
-def _model_config(*, dtype=torch.float32, quantization=None, revision="rev-a"):
+def _model_config(
+    *,
+    dtype=torch.float32,
+    quantization=None,
+    revision="rev-a",
+    max_model_len=8192,
+    max_seq_len_to_capture=8192,
+    runner_type="generate",
+    task="generate",
+    convert="auto",
+    use_mla=False,
+    enforce_eager=False,
+    multimodal_config=None,
+):
     return SimpleNamespace(
         dtype=dtype,
         quantization=quantization,
         revision=revision,
+        max_model_len=max_model_len,
+        max_seq_len_to_capture=max_seq_len_to_capture,
+        runner_type=runner_type,
+        task=task,
+        convert=convert,
+        use_mla=use_mla,
+        enforce_eager=enforce_eager,
+        multimodal_config=multimodal_config,
         hf_config=SimpleNamespace(
             model_type="test-model",
             architectures=["TestModel"],
@@ -100,8 +133,59 @@ def _model_config(*, dtype=torch.float32, quantization=None, revision="rev-a"):
     )
 
 
-def _vllm_config(tp_size=1):
+def _vllm_config(
+    tp_size=1,
+    *,
+    kv_role=None,
+    max_num_batched_tokens=4096,
+    max_num_seqs=8,
+    cache_block_size=128,
+    cache_dtype="auto",
+    mamba_cache_dtype="auto",
+    speculative_config=None,
+    quant_config=None,
+    compilation_config=None,
+    lora_config=None,
+    prompt_adapter_config=None,
+    pooler_config=None,
+    use_v2_model_runner=False,
+    prefill_context_parallel_size=1,
+    decode_context_parallel_size=1,
+    use_sequence_parallel_moe=False,
+    cp_kv_cache_interleave_size=1,
+    data_parallel_rank=0,
+):
+    kv_transfer_config = None
+    if kv_role is not None:
+        kv_transfer_config = SimpleNamespace(
+            kv_role=kv_role,
+            is_kv_producer=kv_role in ("kv_producer", "kv_both"),
+            is_kv_consumer=kv_role in ("kv_consumer", "kv_both"),
+        )
+    if compilation_config is None:
+        compilation_config = SimpleNamespace(
+            cudagraph_mode="NONE",
+            cudagraph_capture_sizes=[],
+            max_cudagraph_capture_size=0,
+        )
     return SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+        ),
+        cache_config=SimpleNamespace(
+            block_size=cache_block_size,
+            cache_dtype=cache_dtype,
+            mamba_cache_dtype=mamba_cache_dtype,
+        ),
+        speculative_config=speculative_config,
+        quant_config=quant_config,
+        compilation_config=compilation_config,
+        lora_config=lora_config,
+        prompt_adapter_config=prompt_adapter_config,
+        pooler_config=pooler_config,
+        use_v2_model_runner=use_v2_model_runner,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp_size,
             pipeline_parallel_size=1,
@@ -109,13 +193,31 @@ def _vllm_config(tp_size=1):
             data_parallel_size=None,
             enable_expert_parallel=False,
             is_moe_model=False,
-        )
+            prefill_context_parallel_size=prefill_context_parallel_size,
+            decode_context_parallel_size=decode_context_parallel_size,
+            use_sequence_parallel_moe=use_sequence_parallel_moe,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            data_parallel_rank=data_parallel_rank,
+        ),
     )
 
 
-def _build_fingerprint(identity_module, model_config, *, tp_size=1):
+def _build_fingerprint(
+    identity_module,
+    model_config,
+    *,
+    tp_size=1,
+    kv_role=None,
+    max_num_batched_tokens=4096,
+    **vllm_config_kwargs,
+):
     return identity_module.build_compatibility_fingerprint(
-        _vllm_config(tp_size),
+        _vllm_config(
+            tp_size,
+            kv_role=kv_role,
+            max_num_batched_tokens=max_num_batched_tokens,
+            **vllm_config_kwargs,
+        ),
         model_config,
         model_url="model",
         model_deploy_strategy_name="strategy",
@@ -128,6 +230,38 @@ def _fingerprint(identity_module, *, dtype=torch.float32, quantization=None, rev
         _model_config(dtype=dtype, quantization=quantization, revision=revision),
         tp_size=tp_size,
     )
+
+
+def _ascend_config(**overrides):
+    values = {
+        "weight_nz_mode": 1,
+        "enable_kv_nz": False,
+        "enable_transpose_kv_cache_by_block": True,
+        "enable_fused_mc2": 0,
+        "enable_mlapo": True,
+        "mlapo_keep_prefill_weights": False,
+        "enable_sparse_sfa_c8": False,
+        "enable_sparse_li_c8": False,
+        "c8_reshape_optim_enabled": False,
+        "enable_dsa_cp": False,
+        "mix_placement": False,
+        "enable_shared_expert_dp": False,
+        "enable_sp_by_pass": False,
+        "pd_tp_ratio": 1,
+        "pd_head_ratio": 1,
+        "num_head_replica": 1,
+        "draft_window_size": None,
+        "finegrained_tp_config": SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+            olora_tensor_parallel_size=0,
+        ),
+        "dynamic_spec_config": SimpleNamespace(method=None, method_params={}),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def test_canonicalization_is_deterministic_for_dicts_sets_and_dtype(identity_module):
@@ -172,6 +306,21 @@ def test_fingerprint_quantization_config_changes(identity_module):
     changed_config.hf_config.quantization_config = {"bits": 4, "group_size": 128}
 
     assert _build_fingerprint(identity_module, base_config) != _build_fingerprint(identity_module, changed_config)
+
+
+def test_effective_quantization_description_isolates_weight_scheme(identity_module):
+    base_model = _model_config(quantization="ascend")
+    producer = SimpleNamespace(
+        get_name=lambda: "ascend",
+        quant_description={"group_size": 32, "model.layers.0.self_attn.q_proj.weight": "W4A8"},
+    )
+    consumer = SimpleNamespace(
+        get_name=lambda: "ascend",
+        quant_description={"group_size": 128, "model.layers.0.self_attn.q_proj.weight": "W4A8"},
+    )
+    assert _build_fingerprint(identity_module, base_model, quant_config=producer) != _build_fingerprint(
+        identity_module, base_model, quant_config=consumer
+    )
 
 
 def test_fingerprint_changes_for_other_hf_behavior_fields(identity_module):
@@ -280,6 +429,407 @@ def test_unresolved_revision_keeps_explicit_version_fallback(identity_module):
     assert identity_module._get_model_revision(config) == "config-version"
     config.hf_config.revision = None
     assert identity_module._get_model_revision(config) is None
+
+
+@pytest.mark.parametrize("quantization", [None, "ascend"])
+def test_fingerprint_changes_when_kv_role_changes(identity_module, quantization):
+    # Role isolation is unconditional, including checkpoint-layout transfer.
+    model_config = _model_config(quantization=quantization)
+    producer = _build_fingerprint(identity_module, model_config, kv_role="kv_producer")
+    consumer = _build_fingerprint(identity_module, model_config, kv_role="kv_consumer")
+    assert producer != consumer
+
+
+def test_effective_kv_role_supports_legacy_boolean_flags(identity_module):
+    producer_config = _vllm_config()
+    producer_config.kv_transfer_config = SimpleNamespace(is_kv_producer=True, is_kv_consumer=False)
+    consumer_config = _vllm_config()
+    consumer_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False, is_kv_consumer=True)
+
+    assert identity_module._get_effective_kv_role(producer_config) == "kv_producer"
+    assert identity_module._get_effective_kv_role(consumer_config) == "kv_consumer"
+
+
+@pytest.mark.parametrize(
+    ("field", "base_value", "changed_value"),
+    [
+        ("enable_mlapo", False, True),
+        ("mlapo_keep_prefill_weights", False, True),
+        ("enable_sparse_sfa_c8", False, True),
+        ("enable_sparse_li_c8", False, True),
+        ("c8_reshape_optim_enabled", False, True),
+        ("enable_dsa_cp", False, True),
+        ("mix_placement", False, True),
+        ("enable_shared_expert_dp", False, True),
+        ("enable_sp_by_pass", False, True),
+        ("pd_tp_ratio", 1, 2),
+        ("pd_head_ratio", 1, 2),
+        ("num_head_replica", 1, 2),
+        ("draft_window_size", None, 8),
+    ],
+)
+def test_fingerprint_changes_when_ascend_layout_config_changes(
+    identity_module, monkeypatch, field, base_value, changed_value
+):
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: base_value}))
+    base = _fingerprint(identity_module)
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: changed_value}))
+    assert _fingerprint(identity_module) != base
+
+
+def test_fingerprint_changes_when_max_num_batched_tokens_changes(identity_module):
+    model_config = _model_config(quantization="ascend")
+    small_batch = _build_fingerprint(identity_module, model_config, max_num_batched_tokens=1024)
+    large_batch = _build_fingerprint(identity_module, model_config, max_num_batched_tokens=4096)
+    assert small_batch != large_batch
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "model_kwargs"),
+    [
+        ({"cache_block_size": 64}, {}),
+        ({"cache_dtype": "int8"}, {}),
+        ({"mamba_cache_dtype": "float32"}, {}),
+        ({"use_v2_model_runner": True}, {}),
+        ({"prefill_context_parallel_size": 2}, {}),
+        ({"decode_context_parallel_size": 2}, {}),
+        ({"use_sequence_parallel_moe": True}, {}),
+        ({}, {"max_model_len": 16384}),
+        ({}, {"runner_type": "draft"}),
+        ({}, {"task": "embed"}),
+        ({}, {"convert": "embed"}),
+        ({}, {"use_mla": True}),
+        ({}, {"enforce_eager": True}),
+    ],
+)
+def test_fingerprint_changes_when_runtime_tensor_layout_changes(identity_module, config_kwargs, model_kwargs):
+    base = _build_fingerprint(identity_module, _model_config())
+    changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
+    assert changed != base
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "model_kwargs"),
+    [
+        ({"max_num_seqs": 16}, {}),
+        ({"cp_kv_cache_interleave_size": 2}, {}),
+        ({}, {"max_seq_len_to_capture": 16384}),
+    ],
+)
+def test_runtime_sizing_does_not_partition_weight_seeds(identity_module, config_kwargs, model_kwargs):
+    base = _build_fingerprint(identity_module, _model_config())
+    changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
+    assert changed == base
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("enable_kv_nz", True),
+        ("enable_transpose_kv_cache_by_block", False),
+    ],
+)
+def test_kv_cache_layout_does_not_partition_weight_seeds(identity_module, monkeypatch, field, changed_value):
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+    base = _fingerprint(identity_module)
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: changed_value}))
+    assert _fingerprint(identity_module) == base
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "oproj_tensor_parallel_size",
+        "lmhead_tensor_parallel_size",
+        "embedding_tensor_parallel_size",
+        "mlp_tensor_parallel_size",
+        "olora_tensor_parallel_size",
+    ],
+)
+def test_fingerprint_changes_for_every_finegrained_tp_size(identity_module, monkeypatch, field_name):
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+    base = _fingerprint(identity_module)
+
+    finegrained_values = {
+        name: (2 if name == field_name else 0) for name in identity_module._FINEGRAINED_TP_LAYOUT_FIELDS
+    }
+    monkeypatch.setattr(
+        identity_module,
+        "get_ascend_config",
+        lambda: _ascend_config(finegrained_tp_config=SimpleNamespace(**finegrained_values)),
+    )
+    assert _fingerprint(identity_module) != base
+
+
+def test_finegrained_tp_isolates_data_parallel_layout_rank(identity_module, monkeypatch):
+    finegrained = SimpleNamespace(
+        oproj_tensor_parallel_size=2,
+        lmhead_tensor_parallel_size=0,
+        embedding_tensor_parallel_size=0,
+        mlp_tensor_parallel_size=0,
+        olora_tensor_parallel_size=0,
+    )
+    monkeypatch.setattr(
+        identity_module,
+        "get_ascend_config",
+        lambda: _ascend_config(finegrained_tp_config=finegrained),
+    )
+    model_config = _model_config()
+    first_rank = _build_fingerprint(identity_module, model_config, data_parallel_rank=0)
+    second_rank = _build_fingerprint(identity_module, model_config, data_parallel_rank=1)
+    assert first_rank != second_rank
+
+
+def test_replicated_data_parallel_ranks_keep_sharing_fingerprint(identity_module, monkeypatch):
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+    model_config = _model_config()
+    first_rank = _build_fingerprint(identity_module, model_config, data_parallel_rank=0)
+    second_rank = _build_fingerprint(identity_module, model_config, data_parallel_rank=1)
+    assert first_rank == second_rank
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("method", "eagle3"),
+        ("num_speculative_tokens", 3),
+        ("num_speculative_tokens_per_batch_size", {1: 3, 8: 1}),
+        ("draft_tensor_parallel_size", 2),
+        ("parallel_drafting", True),
+        ("disable_padded_drafter_batch", True),
+        ("enforce_eager", True),
+        ("draft_sample_method", "probabilistic"),
+        ("speculative_token_tree", "[(0,), (0, 0)]"),
+        ("quantization", "ascend"),
+        ("use_local_argmax_reduction", True),
+    ],
+)
+def test_fingerprint_changes_when_speculative_layout_changes(identity_module, field, changed_value):
+    base = _build_fingerprint(identity_module, _model_config())
+    speculative_config = SimpleNamespace(**{field: changed_value})
+    changed = _build_fingerprint(identity_module, _model_config(), speculative_config=speculative_config)
+    assert changed != base
+
+
+def test_fingerprint_changes_when_draft_model_or_parallel_layout_changes(identity_module):
+    base_draft = _model_config()
+    base_draft.hf_config.hidden_size = 1024
+    changed_draft = _model_config()
+    changed_draft.hf_config.hidden_size = 2048
+    base_spec = SimpleNamespace(
+        method="eagle3",
+        draft_model_config=base_draft,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    changed_model_spec = SimpleNamespace(
+        method="eagle3",
+        draft_model_config=changed_draft,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    changed_parallel_spec = SimpleNamespace(
+        method="eagle3",
+        draft_model_config=base_draft,
+        draft_parallel_config=SimpleNamespace(tensor_parallel_size=2),
+    )
+
+    base = _build_fingerprint(identity_module, _model_config(), speculative_config=base_spec)
+    model_changed = _build_fingerprint(identity_module, _model_config(), speculative_config=changed_model_spec)
+    parallel_changed = _build_fingerprint(identity_module, _model_config(), speculative_config=changed_parallel_spec)
+    assert model_changed != base
+    assert parallel_changed != base
+
+
+def test_fingerprint_changes_when_dynamic_spec_layout_changes(identity_module, monkeypatch):
+    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+    base = _fingerprint(identity_module)
+    monkeypatch.setattr(
+        identity_module,
+        "get_ascend_config",
+        lambda: _ascend_config(dynamic_spec_config=SimpleNamespace(method="mtp", method_params={"window": 4})),
+    )
+    assert _fingerprint(identity_module) != base
+
+
+def test_fingerprint_changes_when_hardware_device_type_changes(identity_module, monkeypatch):
+    monkeypatch.setattr(
+        identity_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A2"),
+    )
+    a2_fingerprint = _fingerprint(identity_module)
+    monkeypatch.setattr(
+        identity_module,
+        "get_current_hardware_profile",
+        lambda: SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A5"),
+    )
+    assert _fingerprint(identity_module) != a2_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("cudagraph_mode", "FULL"),
+        ("cudagraph_capture_sizes", [1, 2, 16]),
+        ("max_cudagraph_capture_size", 16),
+    ],
+)
+def test_compilation_capture_sizes_do_not_partition_weight_seeds(identity_module, field, changed_value):
+    base = _build_fingerprint(identity_module, _model_config())
+    values = {
+        "cudagraph_mode": "NONE",
+        "cudagraph_capture_sizes": [],
+        "max_cudagraph_capture_size": 0,
+    }
+    values[field] = changed_value
+    changed = _build_fingerprint(
+        identity_module,
+        _model_config(),
+        compilation_config=SimpleNamespace(**values),
+    )
+    assert changed == base
+
+
+def test_compilation_runtime_registry_is_not_part_of_fingerprint(identity_module):
+    base = _build_fingerprint(identity_module, _model_config())
+    compilation_config = SimpleNamespace(
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        max_cudagraph_capture_size=0,
+        static_forward_context={"current": object()},
+    )
+    assert _build_fingerprint(identity_module, _model_config(), compilation_config=compilation_config) == base
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("limit_per_prompt", {"image": 0}),
+        ("mm_encoder_tp_mode", "data"),
+        ("enable_multimodal_pruning", True),
+    ],
+)
+def test_multimodal_layout_isolates_tower_and_shard_choices(identity_module, field, changed_value):
+    base = _build_fingerprint(identity_module, _model_config())
+    multimodal_config = SimpleNamespace(**{field: changed_value})
+    changed = _build_fingerprint(identity_module, _model_config(multimodal_config=multimodal_config))
+    assert changed != base
+
+
+def test_multimodal_processor_kwargs_do_not_partition_weight_seeds(identity_module):
+    base_multimodal = SimpleNamespace(limit_per_prompt={"image": 1}, mm_encoder_tp_mode="tensor")
+    runtime_multimodal = SimpleNamespace(
+        limit_per_prompt={"image": 1},
+        mm_encoder_tp_mode="tensor",
+        mm_processor_kwargs={"resize": 1024},
+    )
+    base = _build_fingerprint(identity_module, _model_config(multimodal_config=base_multimodal))
+    changed = _build_fingerprint(identity_module, _model_config(multimodal_config=runtime_multimodal))
+    assert changed == base
+
+
+def test_effective_multimodal_limit_and_pruning_isolate_model_layout(identity_module):
+    class MultimodalConfig:
+        limit_per_prompt = {"image": 1}
+        mm_encoder_tp_mode = "tensor"
+
+        def __init__(self, image_limit, pruning):
+            self.image_limit = image_limit
+            self.pruning = pruning
+
+        def get_limit_per_prompt(self, modality):
+            return self.image_limit if modality == "image" else 0
+
+        def is_multimodal_pruning_enabled(self):
+            return self.pruning
+
+    base = _build_fingerprint(identity_module, _model_config(multimodal_config=MultimodalConfig(1, False)))
+    limit_changed = _build_fingerprint(identity_module, _model_config(multimodal_config=MultimodalConfig(0, False)))
+    pruning_changed = _build_fingerprint(identity_module, _model_config(multimodal_config=MultimodalConfig(1, True)))
+    assert limit_changed != base
+    assert pruning_changed != base
+
+
+@pytest.mark.parametrize(
+    ("feature", "field", "value"),
+    [
+        ("lora_config", "max_lora_rank", 128),
+        ("prompt_adapter_config", "max_prompt_adapter_token", 16),
+        ("pooler_config", "pooling_type", "LAST"),
+    ],
+)
+def test_optional_model_features_isolate_tensor_layout(identity_module, feature, field, value):
+    base = _build_fingerprint(identity_module, _model_config())
+    changed = _build_fingerprint(
+        identity_module,
+        _model_config(),
+        **{feature: SimpleNamespace(**{field: value})},
+    )
+    assert changed != base
+
+
+@pytest.mark.parametrize(
+    ("feature", "layout_field", "runtime_field", "runtime_value"),
+    [
+        ("lora_config", "max_lora_rank", "max_cpu_loras", 8),
+        ("prompt_adapter_config", "max_prompt_adapter_token", "max_prompt_adapters", 8),
+        ("pooler_config", "pooling_type", "normalize", True),
+    ],
+)
+def test_optional_runtime_fields_do_not_partition_weight_seeds(
+    identity_module, feature, layout_field, runtime_field, runtime_value
+):
+    base_feature = SimpleNamespace(**{layout_field: 16})
+    changed_feature = SimpleNamespace(**{layout_field: 16, runtime_field: runtime_value})
+    base = _build_fingerprint(identity_module, _model_config(), **{feature: base_feature})
+    changed = _build_fingerprint(identity_module, _model_config(), **{feature: changed_feature})
+    assert changed == base
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "attention_backend_family",
+        "device_adaptor_family",
+        "moe_comm_policy",
+        "quantization_backend_family",
+        "capabilities",
+    ],
+)
+def test_derived_hardware_capabilities_do_not_partition_weight_seeds(identity_module, monkeypatch, field):
+    base_profile = SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A2")
+    monkeypatch.setattr(identity_module, "get_current_hardware_profile", lambda: base_profile)
+    base = _fingerprint(identity_module)
+    setattr(base_profile, field, {"MLAPO_NATIVE_WEIGHTS"} if field == "capabilities" else "COMPATIBILITY")
+    assert _fingerprint(identity_module) == base
+
+
+def test_hardware_weight_policy_still_isolates_layout(identity_module, monkeypatch):
+    profile = SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A2")
+    monkeypatch.setattr(identity_module, "get_current_hardware_profile", lambda: profile)
+    base = _fingerprint(identity_module)
+    profile.weight_layout_policy = "FORCE_NZ"
+    assert _fingerprint(identity_module) != base
+
+
+def test_multimodal_layout_descriptor_reads_dataclass_fields(identity_module):
+    @dataclass(slots=True)
+    class MultimodalConfig:
+        limit_per_prompt: dict[str, int]
+        mm_encoder_tp_mode: str
+
+    producer = _model_config(multimodal_config=MultimodalConfig({"image": 0}, "data"))
+    consumer = _model_config(multimodal_config=MultimodalConfig({"image": 1}, "data"))
+    assert _build_fingerprint(identity_module, producer) != _build_fingerprint(identity_module, consumer)
+
+
+def test_compatibility_fingerprint_length_remains_fixed(identity_module):
+    base = _build_fingerprint(identity_module, _model_config())
+    expanded = _build_fingerprint(
+        identity_module,
+        _model_config(multimodal_config=SimpleNamespace(limit_per_prompt={"image": 1})),
+        lora_config=SimpleNamespace(max_lora_rank=128),
+    )
+    assert len(base) == len(expanded) == 64
 
 
 def test_recursive_fingerprint_values_fail_with_actionable_error(identity_module):

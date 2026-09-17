@@ -14,7 +14,14 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.model_loader.rfork.config import RForkConfig
 from vllm_ascend.model_loader.rfork.identity import build_seed_key
-from vllm_ascend.model_loader.rfork.types import LeaseReleaseResult, RForkIdentity, SeedAdvertisement, SeedLease
+from vllm_ascend.model_loader.rfork.types import (
+    LeaseReleaseResult,
+    RForkIdentity,
+    SeedAdvertisement,
+    SeedLease,
+    SeedReportResult,
+    SeedReportStatus,
+)
 
 HEARTBEAT_LOG_EVERY_N = 4
 SEED_REMOVAL_MAX_ATTEMPTS = 3
@@ -115,7 +122,7 @@ class RForkPlannerClient:
                 seed_key=self.seed_key,
                 lease_ttl_sec=parsed_lease_ttl_sec,
             )
-        except Exception as exc:
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
             logger.warning("RFork planner seed acquisition failed: %s", exc)
             return None
 
@@ -151,17 +158,19 @@ class RForkPlannerClient:
                 return LeaseReleaseResult.RELEASED
             body = response.text.replace(lease.user_id, "<lease-id>") if lease.user_id else response.text
             body = "".join(char if char.isprintable() else " " for char in body[:RESPONSE_LOG_MAX_CHARS])
-            logger.warning(
+            retryable = response.status_code in (408, 429) or 500 <= response.status_code < 600
+            log_failure = logger.debug if retryable else logger.warning
+            log_failure(
                 "RFork planner lease release rejected: lease=%s status=%s response=%r",
                 lease_log_id(lease),
                 response.status_code,
                 body,
             )
-            if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+            if retryable:
                 return LeaseReleaseResult.RETRYABLE
             return LeaseReleaseResult.REJECTED
         except requests.RequestException as exc:
-            logger.warning(
+            logger.debug(
                 "RFork lease release request failed: lease=%s error=%s", lease_log_id(lease), type(exc).__name__
             )
             return LeaseReleaseResult.RETRYABLE
@@ -187,7 +196,7 @@ class RForkPlannerClient:
                 lease_log_id(lease),
                 response.status_code,
             )
-        except Exception as exc:
+        except (requests.RequestException, RuntimeError) as exc:
             logger.warning(
                 "RFork planner lease renewal failed: lease=%s error=%s",
                 lease_log_id(lease),
@@ -198,7 +207,7 @@ class RForkPlannerClient:
     def remove_seed(self, advertisement: SeedAdvertisement | None = None) -> bool:
         try:
             self._require_planner()
-        except Exception as exc:
+        except RuntimeError as exc:
             logger.warning("RFork planner seed removal setup failed: %s", exc)
             return False
 
@@ -231,7 +240,7 @@ class RForkPlannerClient:
                     SEED_REMOVAL_MAX_ATTEMPTS,
                     response.status_code,
                 )
-            except Exception as exc:
+            except requests.RequestException as exc:
                 logger.warning(
                     "RFork planner seed removal attempt %d/%d failed: %s",
                     attempt + 1,
@@ -242,7 +251,7 @@ class RForkPlannerClient:
                 time.sleep(SEED_REMOVAL_RETRY_BACKOFF_SEC * (attempt + 1))
         return False
 
-    def report_seed_once(self, port: int, seed_ip: str | None = None) -> bool:
+    def report_seed_once(self, port: int, seed_ip: str | None = None) -> SeedReportResult:
         try:
             self._require_planner()
             advertisement = SeedAdvertisement(seed_ip or get_ip(), port, self.tp_rank)
@@ -259,14 +268,17 @@ class RForkPlannerClient:
                     "SEED_REFCNT": "0",
                 },
                 timeout=self.request_timeout_sec,
+                allow_redirects=False,
             )
-            if response.status_code != 200:
-                logger.warning("RFork planner seed report returned status=%s", response.status_code)
-                return False
-            return True
-        except Exception as exc:
-            logger.warning("RFork planner seed report failed: %s", exc)
-            return False
+            if response.status_code == 200:
+                return SeedReportResult(SeedReportStatus.ACCEPTED)
+            if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+                return SeedReportResult(SeedReportStatus.RETRYABLE, f"status={response.status_code}")
+            return SeedReportResult(SeedReportStatus.REJECTED, f"status={response.status_code}")
+        except requests.RequestException as exc:
+            return SeedReportResult(SeedReportStatus.RETRYABLE, type(exc).__name__)
+        except (RuntimeError, ValueError, OSError) as exc:
+            return SeedReportResult(SeedReportStatus.REJECTED, type(exc).__name__)
 
     def run_seed_heartbeat(
         self,

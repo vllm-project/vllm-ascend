@@ -57,6 +57,7 @@ class _RForkSeedUnavailable(RuntimeError):
 
 FALLBACK_CLEANUP_MAX_ATTEMPTS = 2
 FALLBACK_MEMORY_RECLAIM_PASSES = 4
+RFORK_FALLBACK_EXCEPTIONS = (ImportError, OSError, RuntimeError, ValueError)
 
 
 @dataclass
@@ -591,6 +592,8 @@ class RForkModelLoader(BaseModelLoader):
                     with _rfork_skip_unquantized_moe_post_load_processing(model):
                         process_weights_after_loading(model, model_config, target_device)
 
+                session.log_transferred_model_layout(model, processed_layout_transfer)
+
                 # Advertise only after post-load and eval; the session owns failure cleanup.
                 model = model.eval()
                 _start_rfork_seed_service(
@@ -611,7 +614,7 @@ class RForkModelLoader(BaseModelLoader):
                     "RFork %s seed acquisition was unsuccessful; loading locally.",
                     _rfork_model_kind(session),
                 )
-            except Exception as e:
+            except RFORK_FALLBACK_EXCEPTIONS as e:
                 fallback_source = "fallback"
                 logger.warning("RFork transfer failed: %s, clean up and fall back to default loader", e)
 

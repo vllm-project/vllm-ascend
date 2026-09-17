@@ -28,6 +28,21 @@ class LeaseReleaseResult(Enum):
     REJECTED = auto()
 
 
+class SeedReportStatus(Enum):
+    ACCEPTED = auto()
+    RETRYABLE = auto()
+    REJECTED = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class SeedReportResult:
+    status: SeedReportStatus
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.status is SeedReportStatus.ACCEPTED
+
+
 class RForkSeedServiceStartResult(Enum):
     STARTED = auto()
     DEFERRED = auto()

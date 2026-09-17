@@ -26,6 +26,7 @@ from vllm_ascend.model_loader.rfork.tensor_layout import (
     collect_transferable_tensors,
     find_non_npu_state_tensors,
     is_transferable_tensor,
+    log_tensor_layout_summary,
     reshape_tensor_to_seed_shape,
     validate_transferable_tensor_layout,
 )
@@ -36,6 +37,7 @@ MAX_TRANSFER_CHUNK_SEGMENTS = 512
 MAX_MEMORY_REGISTRATION_BATCH_ITEMS = 4096
 MAX_TRANSFER_ENGINE_FINALIZE_ATTEMPTS = 10
 TRANSFER_ENGINE_FINALIZE_RETRY_INTERVAL_SEC = 1.0
+TENSOR_LAYOUT_ERROR_EXCERPT_CHARS = 256
 
 
 def _select_weight_blocks(
@@ -191,7 +193,8 @@ def _validate_transferable_tensor_layouts(transferable_tensors: list[tuple[str, 
 class RForkTransferBackend:
     """Own one YuanRong TransferEngine and its registered model memory."""
 
-    def __init__(self) -> None:
+    def __init__(self, tp_rank: int | None = None) -> None:
+        self.tp_rank = tp_rank
         self.transfer_engine: Any | None = None
         self.transfer_session_id: str | None = None
         self.weight_manifest: dict[str, Any] | None = None
@@ -254,6 +257,39 @@ class RForkTransferBackend:
         """Return a consistent copy for draft exclusion; this does not pin its lifetime."""
         with self._lifecycle_lock:
             return list(self.registered_weight_blocks)
+
+    def log_model_layout_summary(
+        self,
+        model,
+        processed_layout: bool,
+        *,
+        stage: str,
+        peer_session_id: str | None = None,
+    ) -> None:
+        """Observe a live model layout without changing transfer acceptance."""
+        try:
+            with self._lifecycle_lock:
+                tensors = list(collect_transferable_tensors(model, processed_layout))
+                tensors, _ = _split_tensors_by_excluded_blocks(tensors, self.excluded_weight_blocks)
+                log_tensor_layout_summary(
+                    tensors,
+                    stage=stage,
+                    session_id=self.transfer_session_id,
+                    peer_session_id=peer_session_id,
+                    processed_layout=processed_layout,
+                )
+        except Exception as exc:
+            # Diagnostics must not turn an otherwise usable transferred model into a fallback.
+            error_excerpt = " ".join(str(exc).split())[:TENSOR_LAYOUT_ERROR_EXCERPT_CHARS]
+            logger.info(
+                "RFork tensor layout summary: stage=%s session=%s peer_session=%s layout=%s unavailable=%s:%s",
+                stage,
+                self.transfer_session_id,
+                peer_session_id,
+                "processed" if processed_layout else "checkpoint",
+                type(exc).__name__,
+                error_excerpt,
+            )
 
     def register_memory_region(
         self,
@@ -457,6 +493,13 @@ class RForkTransferBackend:
             time.perf_counter() - start_reg_mr_time,
             len(weight_mr_dict),
         )
+        log_tensor_layout_summary(
+            transferable_tensors,
+            stage="registration",
+            session_id=self.transfer_session_id,
+            processed_layout=processed_layout,
+            known_formats=weight_format_dict,
+        )
         return True
 
     def _unregister_weight_blocks(self, transfer_engine: Any) -> bool:
@@ -627,7 +670,8 @@ class RForkTransferBackend:
 
         transferable_tensors = self._registered_transferable_tensors
         if transferable_tensors is None:
-            transferable_tensors = list(collect_transferable_tensors(model, processed_layout))
+            logger.error("RFork cannot read seed weights without a successful destination registration.")
+            return False
         _validate_transferable_tensor_layouts(transferable_tensors)
         if not transferable_tensors:
             if self._all_transferable_tensors_excluded and self.weight_manifest == {} and not seed_info.weights:
@@ -661,20 +705,12 @@ class RForkTransferBackend:
         remote_only = remote_name_set - local_name_set
         skipped_shared_names: set[str] = set()
         if local_only:
-            for name, tensor in transferable_tensors:
-                if name in local_only and _is_tensor_in_blocks(tensor, excluded_blocks):
-                    logger.debug(
-                        "Skip RFork weight %s shared with the target model: not present in the seed manifest.",
-                        name,
-                    )
-                    skipped_shared_names.add(name)
-            if local_only - skipped_shared_names:
-                logger.error(
-                    "RFork manifest names differ: local_only=%s, remote_only=%s",
-                    sorted(local_only - skipped_shared_names, key=str),
-                    sorted(remote_only, key=str),
-                )
-                return False
+            logger.error(
+                "RFork manifest names differ: local_only=%s, remote_only=%s",
+                sorted(local_only, key=str),
+                sorted(remote_only, key=str),
+            )
+            return False
         if remote_only:
             full_model_transferable_tensors = list(collect_transferable_tensors(model, processed_layout))
             _validate_transferable_tensor_layouts(full_model_transferable_tensors)
@@ -723,6 +759,15 @@ class RForkTransferBackend:
             client_ptr_list.append(tensor.data_ptr())
             client_len_list.append(tensor.numel() * tensor.element_size())
 
+        log_tensor_layout_summary(
+            [(name, tensor) for name, tensor in transferable_tensors if name not in skipped_shared_names],
+            stage="receiver_before_read",
+            session_id=self.transfer_session_id,
+            peer_session_id=seed_info.session_id,
+            processed_layout=processed_layout,
+            known_formats=self.weight_formats,
+        )
+
         chunks = list(iter_transfer_chunks(weight_names, seed_ptr_list, client_ptr_list, client_len_list))
         total_bytes = sum(client_len_list)
         total_gib = total_bytes / (1024**3)
@@ -759,9 +804,11 @@ class RForkTransferBackend:
             )
         transfer_elapsed = time.perf_counter() - transfer_start
         throughput_gib_s = total_gib / transfer_elapsed if transfer_elapsed > 0 else 0.0
-        logger.debug(
-            "RFork weight transfer completed: weights=%d, chunks=%d, bytes=%.2f GiB, "
+        log_transfer = logger.info if self.tp_rank == 0 else logger.debug
+        log_transfer(
+            "RFork weight transfer completed: tp_rank=%s, weights=%d, chunks=%d, bytes=%.2f GiB, "
             "elapsed=%.4fs, throughput=%.2f GiB/s",
+            self.tp_rank,
             len(client_len_list),
             len(chunks),
             total_gib,

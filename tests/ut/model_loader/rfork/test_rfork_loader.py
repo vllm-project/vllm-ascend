@@ -327,6 +327,9 @@ def test_rfork_draft_load_passes_target_registered_blocks_to_session(monkeypatch
             events.append("transfer")
             return True
 
+        def log_transferred_model_layout(self, model, processed_layout):
+            events.append("layout_summary")
+
         def start_seed_service(self, model, processed_layout, exclude_blocks=None):
             events.append("start_seed_service")
             captured_blocks.append(list(exclude_blocks or []))
@@ -401,6 +404,9 @@ def test_rfork_acquires_seed_after_model_preparation(monkeypatch, processed_layo
             events.append("transfer")
             return True
 
+        def log_transferred_model_layout(self, model, processed_layout):
+            events.append("layout_summary")
+
         def start_seed_service(self, model, processed_layout, exclude_blocks=None):
             events.append("start_seed_service")
             return True
@@ -434,9 +440,9 @@ def test_rfork_acquires_seed_after_model_preparation(monkeypatch, processed_layo
     assert loader.load_model(vllm_config=vllm_config, model_config=model_config) is model
 
     if processed_layout:
-        assert events[:5] == ["initialize", "layout", "synchronize", "acquire", "transfer"]
+        assert events[:6] == ["initialize", "layout", "synchronize", "acquire", "transfer", "layout_summary"]
     else:
-        assert events[:4] == ["initialize", "acquire", "transfer", "post_load"]
+        assert events[:5] == ["initialize", "acquire", "transfer", "post_load", "layout_summary"]
 
 
 @pytest.mark.parametrize("failure_stage", ["initialize", "layout"])
@@ -737,6 +743,9 @@ def test_rfork_seed_start_failure_returns_valid_model_without_disk_reload(monkey
         def transfer_from_seed(self, model, processed_layout):
             events.append("transfer")
             return True
+
+        def log_transferred_model_layout(self, model, processed_layout):
+            events.append("layout_summary")
 
         def start_seed_service(self, model, processed_layout, exclude_blocks=None):
             events.append("start_seed_service")

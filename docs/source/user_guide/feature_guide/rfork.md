@@ -47,6 +47,12 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
 | **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall back to the default. |
 | **rfork_seed_key_separator** | String | Separator used when building the RFork seed key string. | Optional. Default: `$`. Keep the same value across compatible instances. |
+| **rfork_request_timeout_sec** | Number | HTTP connect/read timeout for planner and seed requests. | Optional. Default: `10.0`. Must be greater than `0`. |
+| **rfork_heartbeat_interval_sec** | Number | Interval between planner heartbeat reports. | Optional. Default: `30.0`. JSON configuration only. |
+| **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. Permanent planner rejection still stops retries. |
+| **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. |
+| **rfork_seed_bind_host** | String | Local address used by the seed HTTP service. | Optional. Default: `0.0.0.0`. |
+| **rfork_seed_advertise_host** | String | Seed address advertised to the planner. | Optional. Automatically detected when unset. |
 
 ### How RFork Matches Seeds
 
@@ -64,6 +70,12 @@ RFork does not match instances by `model_url` alone. The local seed key is compo
 This means two instances must agree on both model identity and deployment topology before the planner will treat them as interchangeable seeds.
 For deployments without pipeline or expert parallelism, the existing seed-key format is unchanged.
 
+The compatibility fingerprint also includes the normalized model configuration, model revision, parallel topology,
+device type, effective P/D role, quantization, speculative decoding, model-runner generation, and Ascend weight-layout
+settings that can change transferable tensor names, shapes, dtypes, formats, or derived contents. Runtime-only settings
+such as planner addresses, request scheduling policy, logging paths, and ACLGraph capture sizes are excluded. The final
+manifest is still validated before transfer, and RFork falls back rather than copying incompatible tensors.
+
 ### Quantized Models
 
 For quantized models, RFork transfers tensors after Ascend weight post-processing instead of raw checkpoint parameters. The receiver first builds the same post-load tensor layout as the seed, then RFork copies the live NPU tensors used by inference.
@@ -75,7 +87,32 @@ When validating RFork for a quantized model:
 - Apply the same vLLM Ascend code to both the seed instance and the receiver instance.
 - Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.
 - Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.
-- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`.
+- A successful TP0 RFork transfer logs elapsed time, bytes, chunks, and throughput at INFO. Other TP ranks and
+  per-chunk details remain at DEBUG. The fallback path logs `RFork transfer failed`.
+
+### Intentional transfer contracts
+
+The following behaviors are deliberate RFork protocol choices, not missing
+manifest checks:
+
+- **Dense transpose and reshape:** RFork transfers the one continuous byte range
+  covered by a non-overlapping dense tensor. Before the native read, the receiver
+  may replace its tensor metadata with a storage-preserving view of the seed
+  shape. RFork therefore does not require a separate seed/receiver stride-equality
+  check. Compatible instances are expected to construct the same dense byte
+  order through the fingerprinted configuration and the same post-load path;
+  semantic and physical layout digests are diagnostic evidence for that contract.
+  Gapped or overlapping layouts are still rejected. A new layout implementation
+  that changes byte order must update the compatibility descriptor or extend the
+  transfer protocol instead of relying on the existing dense-view contract.
+- **Processed NZ payload length:** RFork intentionally reads exactly
+  `numel * element_size` bytes for each named tensor, including processed NZ,
+  packed-weight, and derived-scale tensors. Allocation capacity, descriptor-only
+  padding outside the tensor's dense logical range, and adjacent or shared storage
+  are not part of that tensor's payload and are not copied implicitly. A future
+  NPU format that requires bytes outside this range needs explicit manifest and
+  transfer-protocol support; the diagnostic physical-size fields do not silently
+  widen a read.
 
 ## Tested Models
 
@@ -145,6 +182,26 @@ vllm serve <model_path> \
 - `<deploy_strategy>`: Stable deployment-strategy name used to build the RFork seed key.
 - `<port>`: Serving port of the vLLM instance being started.
 
+Successful loads log `source=transfer`, `local`, `fallback`, or `shared_target`.
+Successful TP0 weight reads also log transfer elapsed time, bytes, chunks, and
+throughput at INFO; other TP ranks and per-chunk timings remain at DEBUG.
+Every successful registration, receiver-before-read, and final receiver stage
+emits one bounded `RFork tensor layout summary` at INFO per rank. The summary hashes all tensor
+names, shapes, strides, dtypes, NPU formats, logical byte counts, storage byte
+capacities, storage offsets, and NPU descriptor element counts into fixed-size
+semantic and physical digests. It also reports aggregate counts and at most
+three representative tensors, preferring storage views or tensors whose NPU
+descriptor size differs from logical `numel`. Match a receiver's `peer_session`
+to the seed's `session`. Digest differences are diagnostic and do not by
+themselves reject a transfer. On checkpoint-layout transfers, compare
+`receiver_before_read` with `receiver_after_post_load` to determine whether the
+post-load hook rebuilt the layout. Processed-layout transfers instead emit
+`receiver_after_transfer_finalize`, because their layout processing happened
+before the read. The summary does not copy tensor data or prove value equality;
+validate output accuracy separately on NPU hardware.
+Set `VLLM_LOGGING_LEVEL=DEBUG` for per-rank registration, metadata, transfer,
+lease-release, and publication timing.
+
 ---
 
 ## Note & Caveats
@@ -153,3 +210,11 @@ vllm serve <model_path> \
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
 - RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
+- Each heartbeat verifies that the seed HTTP service remains alive. If the service exits, RFork stops heartbeats and
+  attempts to withdraw the advertisement while leaving the loaded model available for inference.
+- Temporary planner outages do not stop inference. Retryable initial advertisements and lease releases continue in the
+  background, while permanent planner rejections prevent seed promotion. Outage logs are limited to the first failure,
+  periodic summaries, and recovery events.
+- Validate transfer accuracy and the logical-payload contract for newly supported NPU formats on the intended NPU and
+  model combination; CPU tests cannot establish NPU storage correctness. This qualification is required when adding a
+  format, but it is not a runtime requirement to copy allocator or descriptor padding outside a tensor's declared payload.

@@ -82,7 +82,9 @@ def test_session_serves_real_metadata_and_closes_listener(live_session):
 
 def test_rejected_advertisement_cleans_real_server_before_unregister(live_session):
     r = live_session
-    r.session.planner.report_seed_once.return_value = False
+    r.session.planner.report_seed_once.return_value = r.runtime.types.SeedReportResult(
+        r.runtime.types.SeedReportStatus.REJECTED, "status=400"
+    )
 
     def unregister():
         assert r.handles and not r.handles[0].is_alive
@@ -93,6 +95,29 @@ def test_rejected_advertisement_cleans_real_server_before_unregister(live_sessio
     assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.FAILED
     assert r.session.seed_server is None
     r.session.transfer_backend.unregister_memory_region.assert_called_once()
+
+
+def test_transient_initial_advertisement_recovers_without_restarting_instance(live_session):
+    r = live_session
+    r.session.config = replace(r.session.config, heartbeat_interval_sec=0.02)
+    recovered = threading.Event()
+    retryable = r.runtime.types.SeedReportResult(r.runtime.types.SeedReportStatus.RETRYABLE, "ConnectTimeout")
+    accepted = r.runtime.types.SeedReportResult(r.runtime.types.SeedReportStatus.ACCEPTED)
+
+    def report(*_args, **_kwargs):
+        if r.session.planner.report_seed_once.call_count == 1:
+            return retryable
+        recovered.set()
+        return accepted
+
+    r.session.planner.report_seed_once.side_effect = report
+    assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+    handle = r.session.seed_server
+    assert handle.is_alive
+    assert recovered.wait(2)
+    assert r.session.state is r.runtime.types.RForkLifecycleState.SERVING
+    assert r.session.shutdown()
+    assert not handle.is_alive
 
 
 def test_failed_removal_keeps_live_seed_until_retry(live_session):
@@ -134,14 +159,16 @@ def test_lost_publish_response_cleans_or_retains_live_resources(live_session, mo
         return SimpleNamespace(status_code=200)
 
     monkeypatch.setattr(requests, "post", post)
-    assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.FAILED
+    assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+    assert planner.last_advertisement is not None
+    assert remote_seeds and r.session.seed_server.is_alive
+    r.session.transfer_backend.unregister_memory_region.assert_not_called()
     if removal_fails:
-        assert planner.last_advertisement is not None
-        assert remote_seeds and r.session.seed_server.is_alive
-        r.session.transfer_backend.unregister_memory_region.assert_not_called()
+        assert not r.session.prepare_for_fallback().can_schedule_seed
+        assert r.session.seed_server.is_alive
         # A later acknowledged removal releases the resources in order.
         removal_fails = False
-        assert r.session.prepare_for_fallback().can_schedule_seed
+    assert r.session.prepare_for_fallback().can_schedule_seed
     assert not remote_seeds
     assert planner.last_advertisement is None
     assert r.session.seed_server is None
