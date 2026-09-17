@@ -335,8 +335,7 @@ class BigTensorLoader(BigTensorDefaultLoader):
             self._write_snapshot_async(blob_parts, manifest)
         except Exception:
             logger.exception(
-                "snapshot background save FAILED; "
-                "no snapshot written, next startup falls back to fresh load+process"
+                "snapshot background save FAILED; no snapshot written, next startup falls back to fresh load+process"
             )
 
     @staticmethod
@@ -394,16 +393,17 @@ class BigTensorLoader(BigTensorDefaultLoader):
                 )
         else:
             free_b, _ = torch.npu.mem_get_info()
+            # free_b already excludes model params (allocated by
+            # initialize_model before restore); only keep a safety margin.
             margin = max(4 * 1024**3, free_b // 10) + nz_bytes // 4
-            budget = free_b - dev_bytes - margin
+            budget = free_b - margin
             if budget < 1024**3:
                 logger.warning(
                     "snapshot bulk: dynamic chunk budget %.2fGB "
-                    "(free %.2fGB - weights %.2fGB - margin %.2fGB) "
+                    "(free %.2fGB - margin %.2fGB) "
                     "< 1GB, falling back to per-tensor restore",
                     budget / 1024**3,
                     free_b / 1024**3,
-                    dev_bytes / 1024**3,
                     margin / 1024**3,
                 )
                 return False, 0, dev_bytes, nz_bytes
