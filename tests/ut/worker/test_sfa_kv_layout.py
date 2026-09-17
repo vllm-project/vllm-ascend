@@ -6,7 +6,6 @@ import torch
 
 from vllm_ascend.core.kv_cache_interface import (
     get_sfa_kv_parent,
-    should_use_sfa_kv_parent_layout,
     split_sfa_kv_parent,
 )
 
@@ -112,8 +111,13 @@ def test_reconstruction_rejects_non_parent_views(kind):
         ("MemcacheConnector", None, False),
     ],
 )
-def test_parent_layout_keeps_unadapted_connectors_on_legacy_layout(connector, module, expected):
+def test_parent_layout_transport_gate(connector, module, expected, monkeypatch):
     from types import SimpleNamespace
 
-    config = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=module)
-    assert should_use_sfa_kv_parent_layout(config) is expected
+    from vllm_ascend.core import kv_cache_interface
+    from vllm_ascend.utils import AscendDeviceType
+
+    transfer = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=module)
+    monkeypatch.setattr(kv_cache_interface, "get_ascend_device_type", lambda: AscendDeviceType.A5)
+    vllm_config = SimpleNamespace(kv_transfer_config=transfer)
+    assert kv_cache_interface.should_use_sfa_kv_parent_layout(vllm_config) is expected
