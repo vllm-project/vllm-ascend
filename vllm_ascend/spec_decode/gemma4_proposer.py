@@ -26,6 +26,7 @@ metadata, and FIA speculative-decoding attention state.
 import copy
 
 from vllm.config import get_layers_from_vllm_config
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 
@@ -128,6 +129,7 @@ class AscendGemma4Proposer(Gemma4Proposer, AscendSpecDecodeBaseProposer):
         common_attn_metadata,
         num_input_tokens,
         num_actual_tokens,
+        batch_descriptor: BatchDescriptor | None = None,
     ):
         per_layer_attn_metadata = {}
         for attn_group in self.draft_attn_groups:

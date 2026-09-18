@@ -46,10 +46,30 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
-    ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
+    (
+        "expected_acceptance_length",
+        "num_speculative_tokens",
+        "additional_config",
+        "draft_enforce_eager",
+        "cudagraph_capture_sizes",
+    ),
     [
-        pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
-        pytest.param(3.45, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
+        pytest.param(
+            3.33,
+            5,
+            {"enable_dsa_cp": False},
+            False,
+            [6, 8, 16, 18],
+            id="dspark-aclgraph",
+        ),
+        pytest.param(
+            3.45,
+            7,
+            {"enable_dsa_cp": True},
+            False,
+            [8, 16, 24, 32],
+            id="dsa-cp-dspark-aclgraph",
+        ),
         pytest.param(
             3.35,
             5,
@@ -58,6 +78,8 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
                 "enable_dsa_cp": False,
                 "dynamic_spec_config": DSPARK_DYNAMIC_SPEC_CONFIG,
             },
+            True,
+            [6, 8, 16, 18],
             id="dspark-dynamic",
         ),
     ],
@@ -77,19 +99,24 @@ def test_deepseek_v4_dspark_acceptance_tp4(
     expected_acceptance_length,
     num_speculative_tokens,
     additional_config,
+    draft_enforce_eager,
+    cudagraph_capture_sizes,
 ):
     _run_speculative_decoding(
         model_name=model_name,
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
-            "enforce_eager": True,
+            "enforce_eager": draft_enforce_eager,
         },
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
             "tensor_parallel_size": 4,
             "max_model_len": 4096,
-            "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
+            "compilation_config": CompilationConfig(
+                cudagraph_mode="FULL_DECODE_ONLY",
+                cudagraph_capture_sizes=cudagraph_capture_sizes,
+            ),
             "additional_config": additional_config,
         },
     )
