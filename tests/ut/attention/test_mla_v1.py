@@ -133,7 +133,12 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
 @pytest.mark.parametrize(
     "quant_method,device_type,expected_type",
     [
-        (UnquantizedLinearMethod(), AscendDeviceType.A5, PreprocessType.PROLOG_V3),
+        (
+            SimpleNamespace(quant_method=MagicMock(spec=AscendW8A8MXFP8DynamicLinearMethod)),
+            AscendDeviceType.A5,
+            PreprocessType.PROLOG_V3,
+        ),
+        (UnquantizedLinearMethod(), AscendDeviceType.A5, None),
         (UnquantizedLinearMethod(), AscendDeviceType.A2, None),
         (SimpleNamespace(quant_method=object()), AscendDeviceType.A5, None),
         (None, AscendDeviceType.A5, None),
@@ -156,22 +161,25 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 @pytest.mark.parametrize("enable_mlapo,fa_quant_layer", [(True, False), (False, True), (False, False)])
-def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer):
+@pytest.mark.parametrize("scheme_type", [AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod])
+def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer, scheme_type):
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     profile = get_hardware_profile(device_type)
     impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
     impl.enable_mlapo = enable_mlapo
     impl.fa_quant_layer = fa_quant_layer
-    impl.fused_qkv_a_proj = SimpleNamespace(
-        quant_method=SimpleNamespace(quant_method=MagicMock(spec=AscendW8A8LinearMethod))
-    )
+    impl.fused_qkv_a_proj = SimpleNamespace(quant_method=SimpleNamespace(quant_method=MagicMock(spec=scheme_type)))
     impl.q_proj = SimpleNamespace()
     mark_fused_preprocess_weights(impl)
-    expected_managed = device_type == AscendDeviceType.A5 and (enable_mlapo or fa_quant_layer)
+    expected_managed = (
+        device_type == AscendDeviceType.A5
+        and scheme_type is AscendW8A8MXFP8DynamicLinearMethod
+        and (enable_mlapo or fa_quant_layer)
+    )
     assert impl.fused_qkv_a_proj._fused_preprocess_managed == expected_managed
     assert impl.q_proj._fused_preprocess_managed == expected_managed
 
-    if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+    if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3) or scheme_type is not AscendW8A8LinearMethod:
         return
     # Isolating the NZ marker must not disable the existing W8A8/FA prolog.
     impl.kv_lora_rank = 4

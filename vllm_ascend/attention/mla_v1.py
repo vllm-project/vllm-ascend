@@ -1015,30 +1015,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
-    def _supports_mlapo_weights(self) -> bool:
-        if self.fused_qkv_a_proj is None:
-            return False
-        layer_quant_method = self.fused_qkv_a_proj.quant_method
-        if isinstance(layer_quant_method, UnquantizedLinearMethod):
-            return get_current_hardware_profile().supports(HardwareCapability.MLAPO_NATIVE_WEIGHTS)
-        if layer_quant_method is None:
-            return False
-        # Quantized Ascend linears expose their concrete scheme through the
-        # wrapper. Unsupported wrappers should fail instead of disabling MLAPO.
-        return isinstance(
-            layer_quant_method.quant_method,
-            (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
-        )
-
     def _fused_preprocess_type(self) -> PreprocessType | None:
-        """Return the FP8 prolog that owns projection NZ conversion, if enabled."""
-        # Defer FP8 projection NZ conversion only on profiles using prolog v3.
-        # Other profiles retain their existing MLAPO weight-loading path.
-        if not self.support_fp8_attention:
+        """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
+        if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
             return None
         if self.fused_qkv_a_proj is None or self.q_proj is None:
             return None
-        if self.fa_quant_layer or (self.enable_mlapo and self._supports_mlapo_weights()):
+        quant_method = getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None)
+        if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
             return PreprocessType.PROLOG_V3
         return None
 
@@ -1083,13 +1067,22 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
-            quant_method = (
-                None
-                if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod)
-                else layer_quant_method.quant_method
-            )
+            if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
+                quant_method = None
+            else:
+                # Quantized Ascend linears always expose their concrete scheme
+                # through AscendLinearMethod.quant_method. Let an unsupported
+                # wrapper fail here instead of silently disabling MLAPO.
+                quant_method = layer_quant_method.quant_method
             self._mlapo_uses_native_weights = quant_method is None
-            if not self._supports_mlapo_weights():
+            supports_quantized_weights = isinstance(
+                quant_method,
+                (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            )
+            supports_native_weights = get_current_hardware_profile().supports(
+                HardwareCapability.MLAPO_NATIVE_WEIGHTS
+            ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
+            if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
                     "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native "
