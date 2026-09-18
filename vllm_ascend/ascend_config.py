@@ -190,9 +190,6 @@ class EplbConfig:
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
-    # Native EPLB (V2, or global Policy4 on V1): restrict which batch phase
-    # contributes to the load window. Any prefill request marks the batch
-    # as prefill.
     load_collection_phase: str = "all"
 
     @model_validator(mode="after")

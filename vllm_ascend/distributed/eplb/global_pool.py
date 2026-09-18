@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Global shared-slot planning for the periodic mainline replica router."""
 
 from __future__ import annotations
 
@@ -10,9 +9,6 @@ from typing import Any
 import numpy as np
 
 _SLOT_GAIN_EPSILON = 1e-12
-# Policy 4 owns its stability and migration thresholds. Keeping these values
-# internal avoids a second set of user-facing tuning knobs and, importantly,
-# prevents low-signal decode windows from forcing repeated weight migration.
 _MIN_EFFECTIVE_GAIN = 0.01
 _REQUIRED_STABLE_WINDOWS = 2
 _POST_APPLY_COOLDOWN_WINDOWS = 1
@@ -39,12 +35,6 @@ def _logical_heat(table: np.ndarray, workload: np.ndarray, num_experts: int) -> 
 
 
 def _routing_shares(holders: np.ndarray, routing_table_rows: int, logical_ids: Any = None) -> np.ndarray:
-    """Estimate shares under uniform source ranks and routing-table rows.
-
-    Mainline selects (row + source_rank + logical_id) % copies. Aggregate
-    heat does not describe expert occurrences by row or source, so this is
-    an explicit uniform-position model, not an exact replay of real traffic.
-    """
     num_ranks = holders.shape[-1]
     copies = holders.sum(axis=-1, keepdims=True)
     if np.any(copies == 0):
@@ -56,8 +46,6 @@ def _routing_shares(holders: np.ndarray, routing_table_rows: int, logical_ids: A
     row_tail = routing_table_rows % copies
     rank_tail = num_ranks % copies
     offset = (ordinal - logical_ids) % copies
-    # Full periods contribute equally. Intersect the two remaining cyclic
-    # intervals instead of enumerating every source rank for every candidate.
     tail = np.maximum(0, np.minimum(rank_tail, offset + 1) - np.maximum(0, offset - row_tail + 1))
     tail += np.maximum(0, np.minimum(rank_tail, offset + copies + 1) - np.maximum(0, offset + copies - row_tail + 1))
     counts = num_ranks * (routing_table_rows // copies) + (num_ranks // copies) * row_tail + tail
@@ -71,11 +59,6 @@ def _allocate_critical_path_replicas(
     num_ranks: int,
     routing_table_rows: int,
 ) -> list[list[tuple[int, int]]]:
-    """Greedily minimize the summed per-layer critical path under routing.
-
-    Evaluate one destination rank at a time to avoid materializing a
-    [layers, experts, destination ranks, holder ranks] tensor.
-    """
     num_layers, _, _ = base.shape
     num_experts = heat.shape[1]
     holders = np.zeros((num_layers, num_experts, num_ranks), dtype=bool)
@@ -92,8 +75,6 @@ def _allocate_critical_path_replicas(
     dirty_layers = slice(None)
 
     for _ in range(slots_per_rank * num_ranks):
-        # Adding a replica changes only its layer's loads and contributions.
-        # Keep other layers' exact scores, invalidating exhausted ranks below.
         layer_holders = holders[dirty_layers]
         layer_heat = heat[dirty_layers]
         layer_load = rank_load[dirty_layers]
@@ -121,7 +102,6 @@ def _allocate_critical_path_replicas(
         if best_primary > _SLOT_GAIN_EPSILON:
             eligible = critical_gain >= best_primary - _SLOT_GAIN_EPSILON
         else:
-            # A second-moment improvement must not increase the critical path.
             eligible = critical_gain >= -_SLOT_GAIN_EPSILON
         score = np.where(eligible, second_moment_gain, -np.inf)
         if best_primary <= _SLOT_GAIN_EPSILON and float(np.max(score)) <= _SLOT_GAIN_EPSILON:
@@ -208,7 +188,6 @@ def _migration_penalty(changed_slots: int, capacity: int) -> float:
 
 
 class GlobalExpertPoolPlanner:
-    """Plan shared slots with conservative, implementation-owned gating."""
 
     def __init__(self, num_redundant_experts: int, *, routing_table_rows: int) -> None:
         if isinstance(num_redundant_experts, bool) or not isinstance(num_redundant_experts, int):
@@ -276,8 +255,6 @@ class GlobalExpertPoolPlanner:
 
         candidate = _align_shared_slots(table, base_slots, targets_by_rank)
         current_rank_loads = _rank_loads_by_layer(table, heat, num_ranks, self.routing_table_rows)
-        # Stability tracks sustained benefit, not identical greedy tie breaks.
-        # Revalidate the pending placement against fresh heat and the same base.
         if (
             self._last_candidate is not None
             and self._pending_base is not None

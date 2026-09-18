@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Experimental mainline runtime for the global shared expert pool."""
 
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,12 +23,6 @@ _SLOTS_PER_TRANSFER_STEP = 4
 
 
 class GlobalPoolState(AscendEplbState):
-    """Reuse native load windows and routing, not per-layer weight commits.
-
-    Planning runs on a CPU thread. Each transfer step uses inactive shared
-    slots while the following forward runs against immutable base copies.
-    The initial integration deliberately excludes draft models and graphs.
-    """
 
     def __init__(self, parallel_config, device, slots_per_rank):
         super().__init__(parallel_config, device)
@@ -63,8 +56,6 @@ class GlobalPoolState(AscendEplbState):
         if base_slots * group.world_size != model.num_logical_experts:
             raise ValueError("The logical expert count must divide the EP size exactly")
         super().add_model(model, model_config)
-        # The stock asynchronous worker assumes independent layer storage.
-        # This state instead owns asynchronous planning and shared-slot P2P.
         self.is_async = False
         self.storage = SharedExpertWeights(layers, self.slots_per_rank)
         self._model_state = next(iter(self.model_states.values()))
@@ -104,7 +95,6 @@ class GlobalPoolState(AscendEplbState):
         model.set_eplb_state(state.expert_load_pass_buffer, state.logical_to_physical_map, state.logical_replica_count)
         self._propagate_shared_tensors(model, state.num_unpadded_tokens_tensors)
         refresh_model_routing_tables(state)
-        # Initialize the transfer group's collective contract on every rank.
         dist.all_reduce(torch.zeros(1, device=self.device), group=group.device_group)
 
     def _publish_layer(self, layer):
@@ -223,7 +213,6 @@ class GlobalPoolState(AscendEplbState):
             return
         for request in self._requests:
             request.wait()
-        # A rank with no receives must not route to a peer still receiving.
         dist.barrier(group=get_ep_group().cpu_group)
         changed_layers = set()
         for item in self._pending:

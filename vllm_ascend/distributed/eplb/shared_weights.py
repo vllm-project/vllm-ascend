@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Storage and transfer descriptions for cross-layer shared expert slots."""
 
 from dataclasses import dataclass
 
@@ -10,11 +9,6 @@ import torch
 
 
 class SharedExpertWeights:
-    """Extend kernel-owned expert lists with the same buffers for every layer.
-
-    Call before graph capture. Routing must leave new slots inactive until
-    transfers finish. The caller owns metadata updates and stream ordering.
-    """
 
     def __init__(self, layers, slots_per_rank: int):
         if isinstance(slots_per_rank, bool) or not isinstance(slots_per_rank, int) or slots_per_rank <= 0:
@@ -25,8 +19,6 @@ class SharedExpertWeights:
         self.base_slots = layers[0].local_num_experts
         if self.base_slots <= 0:
             raise ValueError("each rank must have at least one immutable base expert")
-        # Use the quantization method contract, including fused scales. Do not
-        # duplicate format-specific tensor-name lists from legacy EPLB.
         views = [list(layer.quant_method.get_eplb_weight_views(layer)) for layer in layers]
         signatures = None
         list_ids = set()
@@ -51,8 +43,6 @@ class SharedExpertWeights:
                 raise ValueError("all shared-pool layers must use identical expert tensor formats")
             signatures = current
 
-        # Allocate everything before extending any model-owned list. Base
-        # weights and their addresses remain unchanged.
         self.pool = [[torch.empty_like(experts[0]) for _ in range(slots_per_rank)] for experts in views[0]]
         self.views = views
         for tensors in views:
@@ -81,12 +71,6 @@ class SharedSlotTransfer:
 
 
 def plan_shared_slot_transfers(current: np.ndarray, candidate: np.ndarray, shared_slots: int):
-    """Describe pool ownership changes without modifying weights or routing.
-
-    Deactivate old owners before receiving and publish new owners only after
-    all tensor transfers finish. Sources are always immutable base experts,
-    so reusing a shared slot cannot overwrite another transfer's source.
-    """
     if isinstance(shared_slots, bool) or not isinstance(shared_slots, int) or shared_slots <= 0:
         raise ValueError("shared_slots must be a positive integer")
     current = np.asarray(current)

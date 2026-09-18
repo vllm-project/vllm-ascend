@@ -3973,8 +3973,6 @@ class NPUModelRunner(GPUModelRunner):
             self.kvpp.prepare_forward(False)
 
             if self.global_eplb is not None:
-                # Idle DP ranks join the same migration collectives, but dummy
-                # and profiling tokens must never enter the load window.
                 self.global_eplb.state.prepare_forward(self.model_config, 0)
                 self.global_eplb.state.should_record_tensor.fill_(False)
 
