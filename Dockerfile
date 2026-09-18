@@ -166,9 +166,7 @@ RUN cd /vllm-workspace/vllm && \
     export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}" && \
     export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}" && \
     python3 -m pip install setuptools-rust && \
-    ./build_rust.sh && \
-    rm -f /root/.cargo/config.toml && \
-    if [ -n "$GIT_PROXY" ]; then git config --global --unset-all url."${GIT_PROXY}https://github.com/".insteadOf; fi
+    ./build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
@@ -186,7 +184,7 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
 
 # Restore public package sources so externally-published images can install
 # packages; the internal mirrors are only needed during the build.
-RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple && \
-    pip config unset global.trusted-host 2>/dev/null || true
+COPY .github/workflows/scripts/restore_public_sources.sh /tmp/
+RUN bash /tmp/restore_public_sources.sh && rm -f /tmp/restore_public_sources.sh
 
 CMD ["/bin/bash"]
