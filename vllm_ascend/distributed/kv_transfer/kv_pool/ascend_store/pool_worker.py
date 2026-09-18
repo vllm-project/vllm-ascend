@@ -194,6 +194,11 @@ class KVPoolWorker:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
         self._invalid_block_ids: set[int] = set()
+        # Scheduler error reporting and save fencing have different
+        # lifetimes. The scheduler may consume _invalid_block_ids before a
+        # deferred save, while the fence must survive for the entire step.
+        self._load_failed_block_ids: set[int] = set()
+        self._load_failed_req_ids: set[str] = set()
         self._invalid_block_ids_lock = threading.Lock()
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
@@ -411,6 +416,66 @@ class KVPoolWorker:
         self._mooncake_session_tracker = MooncakeSessionTracker()
         self._current_mooncake_request_ids: set[str] = set()
         self._current_mooncake_last_chunk_req_ids: set[str] = set()
+        self._handled_load_failed_req_ids: set[str] = set()
+
+    def _reset_load_failure_fence(self) -> None:
+        with self._invalid_block_ids_lock:
+            self._load_failed_block_ids.clear()
+            self._load_failed_req_ids.clear()
+        self._handled_load_failed_req_ids.clear()
+
+    def _record_load_failure(
+        self,
+        request_ids: set[str],
+        block_ids: set[int] | list[int],
+        report_to_scheduler: bool = True,
+    ) -> None:
+        failed_blocks = set(block_ids)
+        with self._invalid_block_ids_lock:
+            self._load_failed_req_ids.update(request_ids)
+            self._load_failed_block_ids.update(failed_blocks)
+            if report_to_scheduler:
+                self._invalid_block_ids.update(failed_blocks)
+
+    @staticmethod
+    def _request_save_keys(request: ReqMeta) -> set[str]:
+        keys = set(request.save_keys or [])
+        keys.update(key for key in request.save_block_keys if key is not None)
+        if request.save_last_block_key is not None:
+            keys.add(request.save_last_block_key)
+        return keys
+
+    def _get_save_fenced_request_ids(self, requests: Sequence[ReqMeta]) -> set[str]:
+        with self._invalid_block_ids_lock:
+            failed_request_ids = self._load_failed_req_ids.copy()
+            failed_block_ids = self._load_failed_block_ids.copy()
+
+        fenced_request_ids = failed_request_ids.copy()
+        if failed_block_ids:
+            for request in requests:
+                if len(request.block_ids_by_group) == 1 and any(
+                    block_id in failed_block_ids
+                    for group_block_ids in request.block_ids_by_group
+                    for block_id in group_block_ids
+                ):
+                    fenced_request_ids.add(request.req_id)
+
+        # A remote key may be shared by multiple requests. Fence every owner
+        # so canceling a failed request cannot race another owner committing
+        # the same object.
+        while True:
+            failed_save_keys = {
+                key
+                for request in requests
+                if request.req_id in fenced_request_ids
+                for key in self._request_save_keys(request)
+            }
+            expanded = fenced_request_ids | {
+                request.req_id for request in requests if self._request_save_keys(request) & failed_save_keys
+            }
+            if expanded == fenced_request_ids:
+                return fenced_request_ids
+            fenced_request_ids = expanded
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -697,6 +762,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    load_failure_recorder=self._record_load_failure,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -712,6 +778,7 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.num_layers,
                     layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
+                    load_failure_recorder=self._record_load_failure,
                 )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -750,6 +817,7 @@ class KVPoolWorker:
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     worker=self if self.tp_mismatch else None,
                     record_operation=self._record_kv_connector_operation,
+                    load_failure_recorder=self._record_load_failure,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -1030,6 +1098,7 @@ class KVPoolWorker:
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
+        self._reset_load_failure_fence()
         if self.use_layerwise:
             self.next_layer_to_submit = 0
             # Transfer threads receive these lists by reference. Give every
@@ -1160,9 +1229,12 @@ class KVPoolWorker:
                     block_id_list_c,
                     ret,
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                self._record_load_failure(
+                    {request.req_id},
+                    missing_block_ids,
+                    report_to_scheduler=len(request.block_ids_by_group) == 1,
+                )
+                if len(request.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -1175,9 +1247,12 @@ class KVPoolWorker:
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                self._record_load_failure(
+                    {request.req_id},
+                    missing_block_ids,
+                    report_to_scheduler=len(request.block_ids_by_group) == 1,
+                )
+                if len(request.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -1804,10 +1879,12 @@ class KVPoolWorker:
                 # failures, as the scheduler cannot handle inconsistent KV
                 # cache state across groups (see PR #9701 for rationale).
                 if invalid_block_ids:
-                    if self.num_kv_cache_groups == 1:
-                        with self._invalid_block_ids_lock:
-                            self._invalid_block_ids.update(invalid_block_ids)
-                    else:
+                    self._record_load_failure(
+                        {request.req_id},
+                        invalid_block_ids,
+                        report_to_scheduler=self.num_kv_cache_groups == 1,
+                    )
+                    if self.num_kv_cache_groups > 1:
                         leased_keys_to_release = list(
                             dict.fromkeys(
                                 [
@@ -1857,11 +1934,9 @@ class KVPoolWorker:
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.load_gva_block_offset = 0
 
-    def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
-        if not block_ids:
-            return
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+    def _record_layerwise_invalid_blocks(self, block_ids: list[int], request_ids: set[str]) -> None:
+        if block_ids:
+            self._record_load_failure(request_ids, block_ids)
 
     def _is_layerwise_save_owner(self) -> bool:
         return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
@@ -2084,7 +2159,10 @@ class KVPoolWorker:
         except Exception as exc:
             logger.error("Mooncake batch_get_start failed keys=%s error=%s", keys, exc)
             self._release_failed_mooncake_get_attempts(request_ids_by_key)
-            self._record_layerwise_invalid_blocks([block_id for _, _, block_id, _ in request_key_slots])
+            self._record_layerwise_invalid_blocks(
+                [block_id for _, _, block_id, _ in request_key_slots],
+                {request.req_id for request, _, _, _ in request_key_slots},
+            )
             for request, _, _, slot in request_key_slots:
                 if slot is None:
                     request.load_last_block_key = None
@@ -2108,7 +2186,7 @@ class KVPoolWorker:
                     request_load_keys[request_identity].append(key)
                     request_seen_keys[request_identity].add(key)
                 continue
-            self._record_layerwise_invalid_blocks([block_id])
+            self._record_layerwise_invalid_blocks([block_id], {request.req_id})
             if slot is None:
                 request.load_last_block_key = None
             else:
@@ -2126,8 +2204,10 @@ class KVPoolWorker:
                 (request, key, block_id, slot) for key, block_id, slot in self._prepare_mooncake_get_session(request)
             )
         self._open_mooncake_get_sessions(get_key_slots)
+        fenced_request_ids = self._get_save_fenced_request_ids(requests)
         for request in requests:
-            self._prepare_mooncake_put_session(request)
+            if request.req_id not in fenced_request_ids:
+                self._prepare_mooncake_put_session(request)
 
     def _build_shared_save_data(self) -> None:
         """Build shared block data once and attach to all layer save tasks.
@@ -2182,6 +2262,21 @@ class KVPoolWorker:
                 for layer_id in range(self.num_layers):
                     for task in self.layer_save_tasks[layer_id]:
                         task.cached_process_tokens = cached
+
+    def _prune_fenced_layer_save_tasks(self, fenced_request_ids: set[str]) -> None:
+        if not fenced_request_ids:
+            return
+        for layer_id, tasks in enumerate(self.layer_save_tasks):
+            kept_tasks: list[LayerTransferTask] = []
+            for task in tasks:
+                task.block_ranges = [
+                    block_range
+                    for block_range in task.block_ranges
+                    if block_range.request.req_id not in fenced_request_ids
+                ]
+                if task.block_ranges:
+                    kept_tasks.append(task)
+            self.layer_save_tasks[layer_id] = kept_tasks
 
     def _build_shared_load_data(self) -> None:
         """Build shared block data once and attach to all layer load tasks.
@@ -2284,7 +2379,9 @@ class KVPoolWorker:
                 self._process_save_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         # Protect the previous partial before allocating the next snapshot.
         self._prepare_load_gvas(requests)
-        self._alloc_gvas_for_save(requests)
+        fenced_request_ids = self._get_save_fenced_request_ids(requests)
+        self._prune_fenced_layer_save_tasks(fenced_request_ids)
+        self._alloc_gvas_for_save([request for request in requests if request.req_id not in fenced_request_ids])
         self._build_shared_save_data()
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
@@ -2363,6 +2460,61 @@ class KVPoolWorker:
             self._invalid_block_ids.clear()
         return invalid_blocks
 
+    def _cancel_fenced_mooncake_saves(
+        self,
+        requests: Sequence[ReqMeta],
+        fenced_request_ids: set[str],
+    ) -> None:
+        if self.backend_name != "mooncake" or not self.use_block_key_layerwise:
+            return
+        newly_fenced = fenced_request_ids - self._handled_load_failed_req_ids
+        if not newly_fenced:
+            return
+        keys = [
+            key for request in requests if request.req_id in newly_fenced for key in self._request_save_keys(request)
+        ]
+        self._queue_layerwise_revoke_keys(keys)
+        self._handled_load_failed_req_ids.update(newly_fenced)
+
+    def _filter_fenced_layer_save_tasks(
+        self,
+        tasks: list[LayerTransferTask],
+        fenced_request_ids: set[str],
+    ) -> list[LayerTransferTask]:
+        if not fenced_request_ids:
+            return tasks
+        assert self.kv_send_thread is not None
+        finish_writes = any(task.write_finish_keys for task in tasks)
+        filtered_tasks: list[LayerTransferTask] = []
+        for task in tasks:
+            block_ranges = [
+                block_range for block_range in task.block_ranges if block_range.request.req_id not in fenced_request_ids
+            ]
+            if not block_ranges:
+                continue
+            filtered_task = LayerTransferTask(
+                layer_id=task.layer_id,
+                block_ranges=block_ranges,
+                group_id=task.group_id,
+                layer_idx_in_group=task.layer_idx_in_group,
+                use_key_major_ranges=task.use_key_major_ranges,
+            )
+            if isinstance(self.kv_send_thread, KVCacheStoreLayerSendingThread):
+                filtered_task.shared_block_data = self.kv_send_thread.build_shared_data(filtered_task)
+            elif isinstance(self.kv_send_thread, KVCacheStoreKeyLayerSendingThread):
+                filtered_task.cached_process_tokens = self.kv_send_thread.build_cached_process_tokens(filtered_task)
+            filtered_tasks.append(filtered_task)
+
+        if finish_writes and filtered_tasks:
+            active_save_keys = [
+                key
+                for task in filtered_tasks
+                if task.shared_block_data is not None
+                for key in task.shared_block_data.save_keys
+            ]
+            filtered_tasks[-1].write_finish_keys.extend(dict.fromkeys(active_save_keys))
+        return filtered_tasks
+
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # PP fix: num_layers may be widened to the GLOBAL layer count by the
         # cache-group layout update, but only the per-stage LOCAL layers are
@@ -2378,12 +2530,18 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
+        fenced_request_ids = self._get_save_fenced_request_ids(connector_metadata.requests)
+        self._cancel_fenced_mooncake_saves(connector_metadata.requests, fenced_request_ids)
+        save_tasks = self._filter_fenced_layer_save_tasks(
+            self.layer_save_tasks[self.current_layer],
+            fenced_request_ids,
+        )
         self.sync_save_events[self.current_layer].record()
-        if self.layer_save_tasks[self.current_layer]:
-            for task in self.layer_save_tasks[self.current_layer]:
+        if save_tasks:
+            for task in save_tasks:
                 for block_range in task.block_ranges:
                     send_thread.add_stored_request(block_range.request.req_id)
-            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
+            send_thread.add_request(save_tasks)  # type: ignore[arg-type]
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == num_local - 1:
@@ -2399,15 +2557,25 @@ class KVPoolWorker:
                     self.layer_save_finished_events[layer_id].clear()
 
         self.current_layer = self.current_layer + 1
+        if self.current_layer == num_local:
+            self._reset_load_failure_fence()
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
 
+        fenced_request_ids = self._get_save_fenced_request_ids(connector_metadata.requests)
+
         for request in connector_metadata.requests:
             can_save = request.can_save
             if can_save is None or not can_save:
+                continue
+            if request.req_id in fenced_request_ids:
+                logger.warning(
+                    "Skip KV save for request %s because its step contains a failed load",
+                    request.req_id,
+                )
                 continue
             if current_event is None:
                 current_event = torch.npu.Event()
@@ -2419,6 +2587,7 @@ class KVPoolWorker:
 
         if current_event is not None:
             send_thread.request_queue.join()
+        self._reset_load_failure_fence()
 
     def retrieve_layer(
         self,
@@ -2666,12 +2835,10 @@ class KVPoolWorker:
         )
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            self._record_load_failure(set(), missing_block_ids)
         elif ret is None:
             missing_block_ids = record_failed_blocks(block_ids_c, [1] * len(block_ids_c))
-            with self._invalid_block_ids_lock:
-                self._invalid_block_ids.update(missing_block_ids)
+            self._record_load_failure(set(), missing_block_ids)
         logger.debug(
             "KV pool worker tp_mismatch get returned keys=%d",
             len(keys_c),

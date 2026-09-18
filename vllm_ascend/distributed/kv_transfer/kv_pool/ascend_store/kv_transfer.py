@@ -1152,6 +1152,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        load_failure_recorder: Callable[[set[str], set[int], bool], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1167,6 +1168,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
         self._record_operation_cb = record_operation
+        self._load_failure_recorder = load_failure_recorder
+
+    def _record_failed_load(self, req_meta: ReqMeta, missing_block_ids: set[int]) -> None:
+        report_to_scheduler = len(req_meta.block_ids_by_group) == 1
+        if self._load_failure_recorder is not None:
+            self._load_failure_recorder(
+                {req_meta.req_id},
+                missing_block_ids,
+                report_to_scheduler,
+            )
+        elif report_to_scheduler:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(missing_block_ids)
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -1255,10 +1269,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_list_c,
                     ret,
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                self._record_failed_load(req_meta, missing_block_ids)
+                if len(req_meta.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -1271,10 +1283,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if len(req_meta.block_ids_by_group) == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
-                elif missing_block_ids:
+                self._record_failed_load(req_meta, missing_block_ids)
+                if len(req_meta.block_ids_by_group) > 1 and missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
                         "Skip invalid-block fallback to avoid scheduler crash. "
@@ -1464,6 +1474,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         layer_save_finished_events: list[threading.Event],
         num_layers: int,
         layer_offset: int = 0,
+        load_failure_recorder: Callable[[set[str], set[int], bool], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1480,6 +1491,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
         self.layer_offset = layer_offset
+        self._load_failure_recorder = load_failure_recorder
 
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
@@ -1502,6 +1514,9 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         key_list = []
         addr_list = []
         size_list = []
+        block_id_list: list[int] = []
+        req_id_list: list[str] = []
+        request_group_counts: dict[str, int] = {}
         req_ids = []
         is_last_chunks = []
         if len(data.transfer_tasks) > 1:
@@ -1511,6 +1526,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
             for block_range in transfer_task.block_ranges:
                 request = block_range.request
                 req_ids.append(request.req_id)
+                request_group_counts[request.req_id] = len(request.block_ids_by_group)
                 is_last_chunks.append(request.is_last_chunk)
                 for block_index in range(block_range.start_block, block_range.end_block):
                     if block_index >= len(request.block_hashes):
@@ -1532,13 +1548,28 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     key_list.append(key.to_string())
                     addr_list.append(addr)
                     size_list.append(size)
+                    block_id_list.append(request.block_ids[block_index])
+                    req_id_list.append(request.req_id)
 
         if key_list:
             shift = (self.tp_rank * len(key_list)) // self.tp_size
             key_list_c = _circular_shift(key_list, shift)
             addr_list_c = _circular_shift(addr_list, shift)
             size_list_c = _circular_shift(size_list, shift)
-            self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            block_id_list_c = _circular_shift(block_id_list, shift)
+            req_id_list_c = _circular_shift(req_id_list, shift)
+            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if ret is None:
+                failed_results = [1] * len(block_id_list_c)
+            else:
+                failed_results = ret
+            missing_block_ids = record_failed_blocks(block_id_list_c, failed_results)
+            if missing_block_ids and self._load_failure_recorder is not None:
+                failed_req_ids = {
+                    req_id for req_id, result in zip(req_id_list_c, failed_results, strict=True) if result != 0
+                }
+                report_to_scheduler = all(request_group_counts[req_id] == 1 for req_id in failed_req_ids)
+                self._load_failure_recorder(failed_req_ids, missing_block_ids, report_to_scheduler)
 
         if layer_id == self.final_layer_id:
             for req_id, is_last_chunk in zip(req_ids, is_last_chunks):
@@ -1639,6 +1670,8 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             logger.error("Mooncake layerwise revoke raised keys=%s error=%s", keys, exc)
         finally:
             self._remove_started_keys(keys)
+            if self._active_put_keys is not None:
+                self._active_put_keys.difference_update(keys)
             if self._session_tracker is not None:
                 self._session_tracker.revoke_put_keys(keys)
 
@@ -1848,6 +1881,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        load_failure_recorder: Callable[[set[str], set[int], bool], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1872,6 +1906,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
+        self._load_failure_recorder = load_failure_recorder
         self._active_load_indices: set[int] | None = None
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
@@ -1894,8 +1929,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
     def _mark_invalid_transfer_task_blocks(self, transfer_tasks: list[LayerTransferTask]) -> None:
         block_ids: set[int] = set()
+        request_ids: set[str] = set()
+        report_to_scheduler = True
         for task in transfer_tasks:
             for block_range in task.block_ranges:
+                request_ids.add(block_range.request.req_id)
+                report_to_scheduler = report_to_scheduler and len(block_range.request.block_ids_by_group) == 1
                 request_block_ids = (
                     block_range.request.block_ids_by_group[task.group_id]
                     if task.group_id < len(block_range.request.block_ids_by_group)
@@ -1907,12 +1946,19 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 partial_index = block_range.partial_block_index
                 if partial_index is not None and 0 <= partial_index < len(request_block_ids):
                     block_ids.add(request_block_ids[partial_index])
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+        if self._load_failure_recorder is not None:
+            self._load_failure_recorder(request_ids, block_ids, report_to_scheduler)
+        elif report_to_scheduler:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(block_ids)
 
     def _mark_invalid_range_indices(self, req_meta: LayerRangeReqMeta, indices: list[int]) -> None:
-        with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(req_meta.block_ids[index] for index in indices)
+        block_ids = {req_meta.block_ids[index] for index in indices}
+        if self._load_failure_recorder is not None:
+            self._load_failure_recorder(set(), block_ids, True)
+        else:
+            with self._invalid_block_ids_lock:
+                self._invalid_block_ids.update(block_ids)
 
     def _handle_range_request(self, req_meta: LayerRangeReqMeta, shared: SharedBlockData) -> None:
         layer_id = req_meta.layer_id
@@ -2122,6 +2168,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 res,
             )
         if res != 0:
+            self._mark_invalid_transfer_task_blocks(transfer_tasks)
+            self._load_abort_event.set()
             raise RuntimeError(f"Layerwise {layer_id} load batch_copy failed with return code {res}")
 
         if layer_id == self.final_layer_id and all_load_keys:

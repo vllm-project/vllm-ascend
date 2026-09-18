@@ -1094,6 +1094,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        suppress_save_on_load: bool = True,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1143,11 +1144,11 @@ class ReqMeta:
         skip_save = skip_save or (
             num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
         )
-        # A ReqMeta must never carry both a save AND a load.
-        # The save would also be wasted work — the bytes are being looked up
-        # in the store right now. Later cached_reqs steps save new tokens
-        # normally.
-        if load_spec is not None and load_spec.can_load and not save_partial_block:
+        # Async loads outlive model execution and must not share the request's
+        # delayed-free lifecycle with a save. Synchronous loads finish before
+        # execution and may save newly computed suffix tokens in the same
+        # step; their failure safety is enforced by the worker-side save fence.
+        if load_spec is not None and load_spec.can_load and suppress_save_on_load:
             skip_save = True
         if skip_save and load_spec is None:
             return None

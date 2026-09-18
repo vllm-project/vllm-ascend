@@ -587,6 +587,27 @@ class TestReqMeta(unittest.TestCase):
         self.assertIsNotNone(meta.load_spec)
         self.assertFalse(meta.can_save)
 
+    def test_from_request_tracker_sync_load_keeps_save(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True)
+
+        meta = ReqMeta.from_request_tracker(
+            tracker,
+            cache_transfer_granularity=16,
+            load_spec=load_spec,
+            block_hashes=[b"h1", b"h2"],
+            suppress_save_on_load=False,
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertIsNotNone(meta.load_spec)
+        self.assertTrue(meta.can_save)
+
     def test_from_request_tracker_partial_tokens_discarded(self):
         tracker = RequestTracker(
             req_id="r1",

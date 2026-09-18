@@ -25,6 +25,7 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
+    LayerBlockRange,
     LayerTransferTask,
     LoadSpec,
     ReqMeta,
@@ -815,6 +816,136 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+
+    def test_failed_sync_load_fences_save_after_error_is_reported(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.kv_send_thread = MagicMock()
+        worker.m_store.get.return_value = [-1]
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            can_save=True,
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+        worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_not_called()
+        worker.kv_send_thread.add_request.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+
+    def test_successful_sync_load_can_save_in_same_step(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.kv_send_thread = MagicMock()
+        worker.m_store.get.return_value = [0]
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            can_save=True,
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(req)
+
+        worker.start_load_kv(meta)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_called_once_with("r1")
+        worker.kv_send_thread.add_request.assert_called_once_with(req)
+        worker.kv_send_thread.request_queue.join.assert_called_once()
+
+    def test_hybrid_load_failure_fences_request_without_scheduler_fallback(self):
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.kv_send_thread = MagicMock()
+        failed = ReqMeta(
+            req_id="failed",
+            token_len_chunk=16,
+            block_ids_by_group=[[7], [3]],
+            block_hashes=["h0"],
+            can_save=True,
+        )
+        healthy = ReqMeta(
+            req_id="healthy",
+            token_len_chunk=16,
+            block_ids_by_group=[[8], [4]],
+            block_hashes=["h1"],
+            can_save=True,
+        )
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(failed)
+        meta.add_request(healthy)
+
+        worker._record_load_failure({"failed"}, {7}, report_to_scheduler=False)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_called_once_with("healthy")
+        worker.kv_send_thread.add_request.assert_called_once_with(healthy)
+
+    def test_layerwise_save_filters_failed_request(self):
+        worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
+        worker.kv_send_thread = MagicMock()
+        worker.current_layer = 0
+        worker.num_layers = 2
+        worker.sync_save_events = [MagicMock(), MagicMock()]
+        worker.layer_save_finished_events = [threading.Event(), threading.Event()]
+        failed = ReqMeta(
+            req_id="failed",
+            token_len_chunk=16,
+            block_ids_by_group=[[7], [3]],
+            block_hashes=["h0"],
+            can_save=True,
+        )
+        healthy = ReqMeta(
+            req_id="healthy",
+            token_len_chunk=16,
+            block_ids_by_group=[[8], [4]],
+            block_hashes=["h1"],
+            can_save=True,
+        )
+        worker.layer_save_tasks = [
+            [
+                LayerTransferTask(
+                    layer_id=0,
+                    block_ranges=[
+                        LayerBlockRange(failed, 0, 1),
+                        LayerBlockRange(healthy, 0, 1),
+                    ],
+                )
+            ],
+            [],
+        ]
+        meta = AscendConnectorMetadata(set(), set())
+        meta.add_request(failed)
+        meta.add_request(healthy)
+        worker._record_load_failure({"failed"}, {7}, report_to_scheduler=False)
+
+        worker.save_kv_layer(meta)
+
+        worker.kv_send_thread.add_stored_request.assert_called_once_with("healthy")
+        queued_tasks = worker.kv_send_thread.add_request.call_args.args[0]
+        self.assertEqual(
+            [block_range.request.req_id for block_range in queued_tasks[0].block_ranges],
+            ["healthy"],
+        )
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
