@@ -1058,3 +1058,33 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     assert manager._global_batch is saved_batch
     assert manager._hidden_restore_idx is saved_indices
     manager._block_tables.gather_block_tables.assert_not_called()
+
+
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_pcp_slot_buffers_match_block_tables(slot_dtype):
+    def init_buffers(manager, **kwargs):
+        manager._global_batch_slot_mappings = torch.empty((1, 4), dtype=torch.int64)
+        manager._gathered_kv_slot_mappings = torch.empty((1, 8), dtype=torch.int64)
+        manager._pad_slot_id = torch.tensor(-1, dtype=torch.int64)
+        manager.pcp_world_size = 2
+
+    block_tables = SimpleNamespace(slot_mappings=torch.empty((1, 4), dtype=slot_dtype))
+    with patch.object(PCPManager, "__init__", init_buffers):
+        manager = AscendPCPManager(2, 0, torch.device("cpu"), block_tables=block_tables)
+
+    assert manager._global_batch_slot_mappings.dtype == slot_dtype
+    assert manager._gathered_kv_slot_mappings.dtype == slot_dtype
+    manager._global_batch_slot_mappings.copy_(torch.tensor([[3200, 3201, -1, 3203]]))
+    manager._padded_gather_idx = torch.tensor([3, 0, 1, 2])
+    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True])
+    buffer_ptr = manager._gathered_kv_slot_mappings.data_ptr()
+
+    gathered = manager._convert_to_gathered_slot_mappings(manager._global_batch_slot_mappings)
+    assert gathered.tolist() == [[3203, 3200, -1, -1]]
+    assert gathered.dtype == slot_dtype
+    assert gathered.data_ptr() == buffer_ptr
+
+    dummy = manager.get_dummy_slot_mappings(2)
+    assert dummy.tolist() == [[-1, -1, -1, -1]]
+    assert dummy.dtype == slot_dtype
+    assert dummy.data_ptr() == buffer_ptr
