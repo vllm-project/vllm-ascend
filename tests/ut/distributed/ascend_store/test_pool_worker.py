@@ -201,6 +201,27 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
 
         return KVPoolWorker
 
+    def test_group_tp_size_uses_shared_lookup_rules(self):
+        worker = self._make_worker_class().__new__(self._make_worker_class())
+        worker.tp_size = 8
+        worker.num_kv_head = 4
+        worker.use_mla = False
+        worker.use_sparse = False
+        worker.use_kvpp = False
+        worker.group_uses_align_state = [False]
+        worker.tp_mismatch = False
+        worker.effective_tp_size = 8
+        self.assertEqual(worker.get_group_tp_size(0), 4)
+
+        worker.use_sparse = True
+        self.assertEqual(worker.get_group_tp_size(0), 1)
+
+        worker.group_uses_align_state = [True]
+        self.assertEqual(worker.get_group_tp_size(0), 8)
+
+        worker.use_kvpp = True
+        self.assertEqual(worker.get_group_tp_size(0), 8)
+
     def test_check_all_layers_exists(self):
         cls = self._make_worker_class()
         cases = [

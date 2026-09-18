@@ -36,6 +36,7 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    SCHEDULER_LOOKUP_BACKENDS,
     AscendStoreKVConnectorWorkerMetadata,
     is_block_key_layerwise,
     is_kv_save_role,
@@ -107,6 +108,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
+        self.use_scheduler_client_for_lookup = not self.use_layerwise and self.backend_name in SCHEDULER_LOOKUP_BACKENDS
         validate_mooncake_layerwise_topology(
             vllm_config.parallel_config,
             self.backend_name,
@@ -139,7 +141,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
             )
             assert self.connector_worker is not None
-            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
+            if (
+                not self.use_layerwise
+                and not self.use_scheduler_client_for_lookup
+                and vllm_config.parallel_config.rank == 0
+            ):
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     ############################################################

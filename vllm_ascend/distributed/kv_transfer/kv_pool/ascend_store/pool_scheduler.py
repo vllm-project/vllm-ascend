@@ -24,6 +24,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_protocol,
@@ -36,6 +37,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    SCHEDULER_LOOKUP_BACKENDS,
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
@@ -47,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_kv_pool_lookup_tp_size,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -78,6 +81,9 @@ class KVPoolScheduler:
         self.compress_ratios = getattr(hf_text_config, "compress_ratios", None)
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
+        self.use_compress = self.compress_ratios is not None
+        self.use_sparse = hasattr(hf_text_config, "index_topk")
+        self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         self.kv_cache_group_ids = (
@@ -85,7 +91,12 @@ class KVPoolScheduler:
             if kv_cache_config is not None and self.use_hybrid
             else [0]
         )
-        self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        self.kv_cache_group_families = infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
+        )
         self.num_swa_blocks = self._infer_swa_blocks()
         if kv_cache_config is not None:
             for kv_cache_group in kv_cache_config.kv_cache_groups:
@@ -117,6 +128,7 @@ class KVPoolScheduler:
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
         self.mamba_group_ids = self._infer_mamba_groups()
+        self.group_uses_align_state = self._infer_group_uses_align_state()
         self.num_speculative_blocks = (
             vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
         )
@@ -171,9 +183,11 @@ class KVPoolScheduler:
             use_hybrid=self.use_hybrid,
         )
         self.tp_mismatch = tp_mismatch_info.enabled
+        self.effective_tp_size = tp_mismatch_info.effective_tp_size
 
         backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
+        self.use_scheduler_client_for_lookup = not self.use_layerwise and self.backend_name in SCHEDULER_LOOKUP_BACKENDS
         self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
         validate_mooncake_layerwise_topology(
             vllm_config.parallel_config,
@@ -268,7 +282,7 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
+        head_or_tp_ranks = self.get_group_tp_size(kv_cache_group_id)
         cache_family = get_group_cache_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
@@ -299,6 +313,35 @@ class KVPoolScheduler:
             keys_by_block.append(block_keys)
         return keys_by_block
 
+    def get_group_tp_size(self, group_id: int) -> int:
+        use_align_state = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+        return get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            use_align_state,
+            self.effective_tp_size if self.tp_mismatch else None,
+            self.use_kvpp,
+        )
+
+    def _get_lookup_key_prefixes(self, group_id: int) -> list[str]:
+        cache_family = get_group_cache_family(self.kv_cache_group_families, group_id)
+        return [
+            (
+                f"{self.model_name}"
+                f"@dcp:{dcp_rank}"
+                f"@head_or_tp_rank:{head_or_tp_rank}"
+                f"@pp_rank:{pp_rank}"
+                f"@group:{group_id}"
+                f"@cache_role:kv"
+                f"@cache_family:{cache_family}@"
+            )
+            for dcp_rank in range(self.dcp_size)
+            for head_or_tp_rank in range(self.get_group_tp_size(group_id))
+            for pp_rank in range(self.pp_size)
+        ]
+
     def _get_store_lookup_hit_tokens(
         self,
         request: "Request",
@@ -327,20 +370,109 @@ class KVPoolScheduler:
                 f"expected={len(query_keys)}, actual={len(exists_states)}"
             )
 
-        num_queried_hit_blocks = 0
+        block_hits: list[bool] = []
         offset = 0
         for block_keys in query_keys_by_block:
             block_states = exists_states[offset : offset + len(block_keys)]
             offset += len(block_keys)
             if all(exists == 1 for exists in block_states):
-                num_queried_hit_blocks += 1
+                block_hits.append(True)
                 continue
             if any(exists == 0 for exists in block_states):
-                break
+                block_hits.append(False)
+                continue
             raise RuntimeError(f"KV pool exists check failed for request {request.request_id}: states={exists_states}")
+
+        if self.group_uses_align_state[0]:
+            for index in range(len(block_hits) - 1, -1, -1):
+                hit_end = (query_start_block + index + 1) * self._block_size
+                if block_hits[index] and hit_end % self.cache_transfer_granularity == 0:
+                    return hit_end
+            return 0
+
+        num_queried_hit_blocks = 0
+        for is_hit in block_hits:
+            if not is_hit:
+                break
+            num_queried_hit_blocks += 1
 
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
+
+    def _get_coordinated_lookup_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        hbm_hit_tokens: int,
+    ) -> int:
+        coordinator = self.cache_coordinator
+        assert coordinator is not None
+
+        def query_group_hits(
+            group_id: int,
+            group_block_hashes: Sequence[BlockHash | str],
+            lookup_mask: Sequence[bool] | None,
+        ) -> list[BlockHash | str]:
+            group_block_size = coordinator.group_effective_block_sizes[group_id]
+            hbm_hit_blocks = min(hbm_hit_tokens // group_block_size, len(group_block_hashes))
+            hits: list[BlockHash | str] = list(group_block_hashes[:hbm_hit_blocks])
+            key_prefixes = self._get_lookup_key_prefixes(group_id)
+            hashes_to_query: list[BlockHash | str] = []
+            keys_by_block: list[list[str]] = []
+            for block_index, block_hash in enumerate(group_block_hashes[hbm_hit_blocks:], hbm_hit_blocks):
+                if lookup_mask is not None and (block_index >= len(lookup_mask) or not lookup_mask[block_index]):
+                    continue
+                hashes_to_query.append(block_hash)
+                hash_string = block_hash_to_str(block_hash)
+                keys_by_block.append([prefix + hash_string for prefix in key_prefixes])
+
+            query_keys = [key for block_keys in keys_by_block for key in block_keys]
+            if not query_keys:
+                return hits
+            exists_states = self.store_scheduler.batch_is_exist(query_keys)
+            if len(exists_states) != len(query_keys):
+                raise RuntimeError(
+                    "KV pool exists check returned unexpected number of states "
+                    f"for request {request.request_id}: expected={len(query_keys)}, actual={len(exists_states)}"
+                )
+
+            offset = 0
+            for block_hash, block_keys in zip(hashes_to_query, keys_by_block, strict=True):
+                block_states = exists_states[offset : offset + len(block_keys)]
+                offset += len(block_keys)
+                if all(exists == 1 for exists in block_states):
+                    hits.append(block_hash)
+                elif any(exists not in (0, 1) for exists in block_states):
+                    raise RuntimeError(
+                        f"KV pool exists check failed for request {request.request_id}: states={block_states}"
+                    )
+            return hits
+
+        return coordinator.find_reachable_hit_tokens(
+            request.block_hashes,
+            token_len,
+            query_group_hits,
+            log_context=f"hit_check: req={request.request_id}",
+        )
+
+    def _get_scheduler_lookup_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        hbm_hit_tokens: int,
+    ) -> int:
+        try:
+            if self.cache_coordinator is not None:
+                return self._get_coordinated_lookup_hit_tokens(request, token_len, hbm_hit_tokens)
+            return self._get_store_lookup_hit_tokens(request, token_len, hbm_hit_tokens)
+        except Exception as e:
+            logger.error(
+                "Remote connection failed in scheduler KV pool lookup. "
+                "type=%s, error=%s. Check network and remote store.",
+                type(e).__name__,
+                e,
+            )
+            return 0
 
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
@@ -597,6 +729,23 @@ class KVPoolScheduler:
                 mamba_group_ids.append(group_id)
         return mamba_group_ids
 
+    def _infer_group_uses_align_state(self) -> list[bool]:
+        if self.kv_cache_config is None:
+            return [False]
+        group_uses_align_state = []
+        for group in self.kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                specs = [kv_cache_spec.kv_cache_specs[layer_name] for layer_name in group.layer_names]
+            else:
+                specs = [kv_cache_spec]
+            group_uses_align_state.append(
+                any(
+                    isinstance(spec, MambaSpec) and getattr(spec, "mamba_cache_mode", None) == "align" for spec in specs
+                )
+            )
+        return group_uses_align_state
+
     def _infer_swa_blocks(self) -> list[int]:
         if self.kv_cache_config is None:
             return []
@@ -671,13 +820,20 @@ class KVPoolScheduler:
             if token_len < self.cache_transfer_granularity:
                 return 0, False
 
+            if not self.use_layerwise and num_computed_tokens >= token_len:
+                return 0, False
+
             if self.use_layerwise:
                 num_external_hit_tokens = self._get_store_lookup_hit_tokens(
                     request, token_len, num_computed_tokens, include_layers=True
                 )
+            elif self.use_scheduler_client_for_lookup:
+                num_external_hit_tokens = self._get_scheduler_lookup_hit_tokens(
+                    request,
+                    token_len,
+                    num_computed_tokens,
+                )
             else:
-                if num_computed_tokens >= token_len:
-                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(

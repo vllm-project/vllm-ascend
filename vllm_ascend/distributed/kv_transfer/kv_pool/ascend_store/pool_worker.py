@@ -72,6 +72,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_kv_pool_lookup_tp_size,
     get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
@@ -229,7 +230,12 @@ class KVPoolWorker:
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.num_kv_cache_groups = len(self.grouped_block_size)
-        self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        self.kv_cache_group_families = infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
+        )
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, range(self.num_kv_cache_groups)
@@ -2884,21 +2890,16 @@ class KVPoolWorker:
             return 0
         return min(hits) if hits else 0
 
-    def _get_group_num_kv_heads(self, group_id: int) -> int:
-        if self.use_mla or self.use_sparse:
-            return 1
-        if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-            return 1
-        return self.num_kv_head
-
     def get_group_tp_size(self, kv_cache_group_id: int):
-        if self.use_kvpp:
-            return self.tp_size
-        if self.tp_mismatch:
-            return self.effective_tp_size
-        if self.group_uses_align_state[kv_cache_group_id]:
-            return self.tp_size
-        return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
+        return get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            self.group_uses_align_state[kv_cache_group_id],
+            self.effective_tp_size if self.tp_mismatch else None,
+            self.use_kvpp,
+        )
 
     @staticmethod
     def _replace_key_field(key: str, field: str, value: int) -> str:

@@ -22,7 +22,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     parse_qos_from_extra_config,
     require_aligned_batch_results,
-    set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -187,14 +186,16 @@ class MooncakeBackend(Backend):
         lazy_init: bool = False,
         contribute_memory: bool = True,
         extra_config: dict[str, Any] | None = None,
+        lookup_only: bool = False,
     ):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
-        if self.config.protocol != "ascend":
+        if not lookup_only and self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _inject_store_qos(extra_config)
         _validate_store_qos()
-        self.device_id = torch.npu.current_device()
+        self._lookup_only = lookup_only
+        self.device_id = None if lookup_only else torch.npu.current_device()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
@@ -203,7 +204,7 @@ class MooncakeBackend(Backend):
         # operates independently of the global transfer engine; setup goes through store
         # and buffers are registered via store.register_buffer() instead of global_te.
         self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
-        self._lazy_init = lazy_init and self._use_fabric_mem
+        self._lazy_init = lazy_init and self._use_fabric_mem and not lookup_only
         self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
@@ -237,6 +238,20 @@ class MooncakeBackend(Backend):
         self.set_device()
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
+        if self._lookup_only:
+            ret = store.setup(
+                local_hostname=local_hostname,
+                metadata_server=self.config.metadata_server,
+                global_segment_size=0,
+                local_buffer_size=0,
+                protocol="rpc_only",
+                rdma_devices="",
+                master_server_addr=self.config.master_server_address,
+            )
+            if ret != 0:
+                raise RuntimeError(f"Initialize Mooncake lookup client failed with return code {ret}.")
+            return store
+
         ssd_kwargs = _ssd_setup_kwargs(self.config)
         # Each rank that contributes memory to the pool uses its own SSD
         # directory to avoid bucket file collisions. Key by the globally unique
@@ -302,13 +317,17 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        set_scheduler_device(parallel_config)
-        return cls(parallel_config, contribute_memory=False)
+        return cls(parallel_config, contribute_memory=False, lookup_only=True)
 
     def set_device(self):
+        if self._lookup_only:
+            return
+        assert self.device_id is not None
         torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
+        if self._lookup_only:
+            return
         if self._use_store_independent_te:
             assert self.store is not None
             for ptr, length in zip(ptrs, lengths):
