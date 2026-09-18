@@ -27,7 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -52,13 +52,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
-        post_process = getattr(model, "post_process", None)
-        if post_process is not None:
+        if hasattr(model, "post_process"):
             with set_current_vllm_config(self.vllm_config):
-                post_process(self.vllm_config)
-        configure_capture = getattr(model, "configure_target_aux_hidden_capture", None)
-        if configure_capture is not None:
-            configure_capture(target_model)
+                model.post_process(self.vllm_config)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
 
         return model
 
@@ -108,7 +106,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
             self.attn_backends = attn_backends
             backend = _get_graph_update_backend(self.attn_groups)
-            self.attn_architecture = "MLA" if issubclass(backend, AscendMLABackend) else None
+            if issubclass(backend, AscendMLABackend):
+                self.attn_architecture = "MLA"
+            elif issubclass(backend, AscendAttentionBackend):
+                self.attn_architecture = "GQA"
+            else:
+                self.attn_architecture = None
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
@@ -152,9 +155,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         return metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Extend query boundaries through padded requests.
+        """Rebuild ``actual_seq_lengths_q`` from the padded request count,
+        mirroring Eagle's ``_update_decode_attn_metadata``.
 
-        FIA requires the last boundary to equal the query token count in TND layout.
+        DSpark inherits DFlash's full-graph path, and upstream
+        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
+        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
+        when a batch is padded to a capture size (``num_reqs_padded >
+        num_reqs``) the cumulative query lengths stop at
+        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
+        Ascend FIA operator requires, in TND layout, that the last element of
+        ``actual_seq_lengths_q`` equals the query token count of the graph
+        being replayed; otherwise tiling fails with
+        ``queryT != last element of actualSequenceLengthQ``.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
