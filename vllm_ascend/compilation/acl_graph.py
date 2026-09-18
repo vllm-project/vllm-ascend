@@ -4,7 +4,7 @@
 import dataclasses
 import weakref
 from collections.abc import Callable
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import weak_ref_tensors
+from ..utils import super_kernel_scope, weak_ref_tensors
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -32,19 +32,6 @@ _STREAM_RESOURCE_ERROR_MARKERS = (
     "stream resources are insufficient",
 )
 _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
-
-
-@contextmanager
-def _super_kernel_scope(scope: str, enabled: bool):
-    if not enabled:
-        yield
-        return
-
-    torch.npu.super_kernel_scope_begin(scope)
-    try:
-        yield
-    finally:
-        torch.npu.super_kernel_scope_end(scope)
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -203,7 +190,7 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        with _super_kernel_scope("full_model", self.enable_super_kernel):
+                        with super_kernel_scope("full_model", self.enable_super_kernel):
                             output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
@@ -243,6 +230,7 @@ class ACLGraphWrapper:
                         "dcci_after_kernel_end": [".*"],
                     },
                 )
+                logger.info_once("Super kernel optimization is enabled for ACL graph capture.")
 
             # here we always use weak ref for the workspaces
             # to save memory
