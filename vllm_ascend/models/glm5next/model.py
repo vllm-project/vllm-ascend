@@ -552,7 +552,6 @@ class Glm5NextModel(nn.Module):
 
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
