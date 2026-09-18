@@ -30,6 +30,8 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 
+| KVPP | 🔵 Experimental | Non-hybrid MLA/SFA models in eager mode; see [KVPP][kvpp] for supported combinations. |
+
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
 - 🚧 WIP: Under active development, will be supported soon.
@@ -48,3 +50,5 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
 [eplb]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/expert_parallelism_load_balancer.html
 [pipeline_parallel]: ../feature_guide/pipeline_parallel.md
+
+[kvpp]: ../feature_guide/kvpp.md
