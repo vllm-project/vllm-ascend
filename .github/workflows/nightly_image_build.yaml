@@ -67,7 +67,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a2
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '910b'
@@ -83,7 +83,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a3
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: 'a3'
@@ -99,7 +99,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: 310p
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '310p'
@@ -114,7 +114,7 @@ jobs:
     uses: ./.github/workflows/_nightly_image_build.yaml
     with:
       target: a5
-      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
+      vllm_ascend_branch: ${{ github.event.pull_request.head.sha || inputs.vllm_ascend_branch || 'main' }}
       build_type: ${{ inputs.build_type || 'release' }}
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       soc: '950'
