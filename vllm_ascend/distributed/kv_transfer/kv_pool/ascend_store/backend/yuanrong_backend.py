@@ -53,13 +53,7 @@ class YuanrongBackend(Backend):
     # MSetD2H filters existing keys and applies NX on publish, so no connector-side existence check needed.
     requires_exists_before_put = False
 
-    def __init__(
-        self,
-        parallel_config: ParallelConfig,
-        lazy_init: bool = False,
-        enable_data_plane: bool = True,
-        extra_config: dict | None = None,
-    ):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, enable_data_plane: bool = True):
         if lazy_init:
             logger.warning("YuanrongBackend does not support lazy initialization; initializing eagerly.")
         try:
