@@ -909,3 +909,76 @@ class StairEplbPolicy(AbstractEplbPolicy):
             source_slot_ids=source_slot_ids,
             predicted_mean_ratios=predicted_mean_ratios,
         )
+
+    @classmethod
+    def validate_plan(
+        cls,
+        current_rank_expert_ids: np.ndarray,
+        plan: StairPlan,
+        num_experts: int,
+        rank_pair_migration_limit: int,
+    ) -> None:
+        """Validate a fixed-shape plan against its current placement.
+
+        Current and planned arrays are ``[layers, ranks, slots]``. Every source
+        coordinate must own its target expert in the current placement;
+        retained experts must keep their rank and slot. Directed rank-pair
+        migration usage is counted independently for each layer. Predicted mean
+        ratios are ``[layers]``: changed layers require a finite value and
+        unchanged layers require NaN.
+        """
+        current = np.asarray(current_rank_expert_ids)
+        target = np.asarray(plan.rank_expert_ids)
+        source_ranks = np.asarray(plan.source_rank_ids)
+        source_slots = np.asarray(plan.source_slot_ids)
+        if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
+            raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
+        if target.shape != current.shape or source_ranks.shape != current.shape or source_slots.shape != current.shape:
+            raise ValueError("STAIR plan placement and source arrays must match the current placement shape")
+        if not all(np.issubdtype(values.dtype, np.integer) for values in (target, source_ranks, source_slots)):
+            raise ValueError("STAIR plan placement and source arrays must contain integers")
+        controls = num_experts, rank_pair_migration_limit
+        invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
+        if invalid_type or num_experts < 1 or rank_pair_migration_limit < 1:
+            raise ValueError("num_experts and rank_pair_migration_limit must be positive integers")
+
+        ratios = np.asarray(plan.predicted_mean_ratios)
+        if ratios.shape != (current.shape[0],) or not np.issubdtype(ratios.dtype, np.floating):
+            raise ValueError("predicted_mean_ratios must be a floating-point value per layer")
+        ratios = ratios.astype(np.float64, copy=False)
+        if np.any(~np.isnan(ratios) & (~np.isfinite(ratios) | (ratios < 1))):
+            raise ValueError("predicted mean ratios must be NaN or finite values no smaller than one")
+        if (
+            np.any(source_ranks < 0)
+            or np.any(source_ranks >= current.shape[1])
+            or np.any(source_slots < 0)
+            or np.any(source_slots >= current.shape[2])
+        ):
+            raise ValueError("STAIR plan contains an out-of-range source coordinate")
+
+        for layer_id, target_layer in enumerate(target):
+            current_layer = current[layer_id]
+            cls.placement_replica_counts(current_layer, num_experts)
+            cls.placement_replica_counts(target_layer, num_experts)
+            changed = not np.array_equal(target_layer, current_layer)
+            has_candidate = not np.isnan(ratios[layer_id])
+            if changed != has_candidate:
+                raise ValueError("predicted_mean_ratios must be finite for changed layers and NaN for unchanged layers")
+
+            pair_usage: dict[tuple[int, int], int] = {}
+            for dst_rank, target_experts in enumerate(target_layer):
+                current_slots = {int(expert): slot for slot, expert in enumerate(current_layer[dst_rank])}
+                for dst_slot, expert in enumerate(target_experts):
+                    src_rank = int(source_ranks[layer_id, dst_rank, dst_slot])
+                    src_slot = int(source_slots[layer_id, dst_rank, dst_slot])
+                    if current_layer[src_rank, src_slot] != expert:
+                        raise ValueError("STAIR source does not own the target expert")
+                    retained_slot = current_slots.get(int(expert))
+                    if retained_slot is not None:
+                        if (src_rank, src_slot, dst_slot) != (dst_rank, retained_slot, retained_slot):
+                            raise ValueError("retained experts must keep their current rank and slot")
+                        continue
+                    pair = (src_rank, dst_rank)
+                    pair_usage[pair] = pair_usage.get(pair, 0) + 1
+                    if pair_usage[pair] > rank_pair_migration_limit:
+                        raise ValueError("STAIR plan exceeds the directed rank-pair migration limit")
