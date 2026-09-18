@@ -33,7 +33,13 @@ def test_sparse_models_select_shared_sfa(monkeypatch, kpool, fp8_device):
         ),
     )
     monkeypatch.setattr(platform, "_validate_fa3_backend", lambda *args: False)
-    selector = SimpleNamespace(use_mla=True, use_sparse=True, use_pcp=False)
+    monkeypatch.setattr(
+        platform,
+        "get_ascend_config",
+        lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False)),
+    )
+    monkeypatch.setattr("vllm_ascend.utils.enable_dsa_cp", lambda: False)
+    selector = SimpleNamespace(use_mla=True, use_sparse=True, use_pcp=False, use_dcp=False)
     assert platform.NPUPlatform.get_attn_backend_cls(None, selector) == "vllm_ascend.attention.sfa_v1.AscendSFABackend"
 
 

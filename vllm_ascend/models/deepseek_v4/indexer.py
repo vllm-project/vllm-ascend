@@ -107,6 +107,19 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     ):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
+        from vllm.config import get_current_vllm_config
+
+        from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend, AscendDSAC128Backend, select_dsa_backend
+        from vllm_ascend.utils import enable_dsa_cp
+
+        if compress_ratio not in (4, 128):
+            raise ValueError(f"Unsupported DeepSeek V4 indexer compression ratio: {compress_ratio}")
+        self._attn_backend = select_dsa_backend(
+            AscendDSAC4Backend if compress_ratio == 4 else AscendDSAC128Backend,
+            use_pcp=get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1,
+            use_dsa_cp=enable_dsa_cp(),
+        )
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             self.dtype = torch.float8_e4m3fn
@@ -141,16 +154,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        # Keep these imports lazy to avoid a model-inspection circular import.
-        if self.compress_ratio == 4:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
-
-            return AscendDSAC4Backend
-        if self.compress_ratio == 128:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
-
-            return AscendDSAC128Backend
-        raise ValueError(f"Unsupported DeepSeek V4 indexer compression ratio: {self.compress_ratio}")
+        return self._attn_backend
 
 
 @dataclass(frozen=True)
