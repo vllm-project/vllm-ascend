@@ -62,10 +62,9 @@ def test_sp_ep_reduce_scatter_pads_local_chunks(monkeypatch):
     assert result.shape == (3, 4)
 
 
-def test_sp_ep_reduce_scatter_draft_vl_keeps_ep_layout(monkeypatch):
+def test_sp_ep_reduce_scatter_draft_model_keeps_ep_layout(monkeypatch):
     _patch_sp_ep_context(monkeypatch)
     custom_ops._EXTRA_CTX.is_draft_model = True
-    monkeypatch.setattr(custom_ops, "is_vl_model", lambda: True, raising=False)
 
     def unexpected_tp_all_reduce(_x):
         raise AssertionError("EP/SP finalize must not use TP AllReduce")
