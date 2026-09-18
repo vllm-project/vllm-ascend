@@ -20,6 +20,7 @@ class PlacementImbalance:
 
 _ReplicaSearchState = tuple[np.ndarray, int]
 # (replica counts, unallocated extra slots)
+_VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 
 
 class StairEplbPolicy(AbstractEplbPolicy):
@@ -284,3 +285,136 @@ class StairEplbPolicy(AbstractEplbPolicy):
             final_candidates_by_counts.values(),
             key=lambda candidate: (candidate_score(candidate), tuple(candidate)),
         )[:beam_size]
+
+    @staticmethod
+    def _updated_rank_variance(
+        expert: int,
+        rank_experts: np.ndarray,
+        current_variance: float,
+        current_scale: float,
+        expert_variances: np.ndarray,
+        expert_covariance: np.ndarray,
+        replica_counts: np.ndarray,
+    ) -> tuple[float, float]:
+        """Add one replica's scaled variance and covariance to a rank.
+
+        ``rank_experts`` contains expert IDs already placed on that rank. The
+        result uses total replica counts for load splitting and clips only
+        floating-point roundoff below zero.
+        """
+        expert_replica_count = replica_counts[expert]
+        variance_increment = expert_variances[expert] / expert_replica_count**2
+        updated_scale = current_scale + abs(variance_increment)
+        for existing_expert in rank_experts:
+            covariance_increment = (
+                2
+                * expert_covariance[expert, existing_expert]
+                / (expert_replica_count * replica_counts[existing_expert])
+            )
+            variance_increment += covariance_increment
+            updated_scale += abs(covariance_increment)
+        updated_variance = current_variance + variance_increment
+        num_experts = len(rank_experts) + 1
+        num_terms = num_experts * (num_experts + 1) // 2
+        scale = max(updated_scale, np.finfo(np.float64).tiny)
+        roundoff_tolerance = _VARIANCE_ROUNDOFF_SAFETY_FACTOR * num_terms * np.finfo(np.float64).eps * scale
+        if updated_variance < -roundoff_tolerance:
+            raise ValueError("expert covariance produces a negative rank variance")
+        return max(float(updated_variance), 0.0), updated_scale
+
+    @classmethod
+    def lpt_placement(
+        cls,
+        expert_means: np.ndarray,
+        expert_variances: np.ndarray,
+        expert_covariance: np.ndarray,
+        replica_counts: np.ndarray,
+        num_ranks: int,
+        z_score: float,
+    ) -> np.ndarray | None:
+        """Place replicas with deterministic covariance-aware greedy LPT.
+
+        Mean, variance, and replica counts are ``[experts]``; covariance is
+        ``[experts, experts]``. Experts are processed by descending per-replica
+        risk. Each replica chooses the legal rank with the lowest updated risk,
+        breaking ties by rank ID. The result is ``[ranks, slots]``; ``None``
+        means greedy choices left no legal rank for a later replica.
+        """
+        means = np.asarray(expert_means, dtype=np.float64)
+        variances = np.asarray(expert_variances, dtype=np.float64)
+        covariance = np.asarray(expert_covariance, dtype=np.float64)
+        replicas = np.asarray(replica_counts)
+        num_experts = means.size
+        if means.ndim != 1 or num_experts == 0:
+            raise ValueError("expert_means must be a non-empty vector")
+        if (
+            variances.shape != means.shape
+            or covariance.shape != (num_experts, num_experts)
+            or replicas.shape != means.shape
+        ):
+            raise ValueError("STAIR LPT variance, covariance, and replica-count shapes must match expert_means")
+        if not np.issubdtype(replicas.dtype, np.integer):
+            raise ValueError("replica_counts must contain integers")
+        if (
+            not np.all(np.isfinite(means))
+            or not np.all(np.isfinite(variances))
+            or not np.all(np.isfinite(covariance))
+            or not np.isfinite(z_score)
+        ):
+            raise ValueError("STAIR LPT moments and z_score must be finite")
+        if np.any(means < 0) or np.any(variances < 0) or z_score < 0:
+            raise ValueError("expert means, variances, and z_score must be non-negative")
+        if not np.allclose(covariance, covariance.T):
+            raise ValueError("expert_covariance must be symmetric")
+        if not np.allclose(np.diag(covariance), variances):
+            raise ValueError("expert_covariance diagonal must match expert_variances")
+        covariance = (covariance + covariance.T) * 0.5
+        if not isinstance(num_ranks, int) or isinstance(num_ranks, bool) or num_ranks < 1:
+            raise ValueError("num_ranks must be a positive integer")
+        replicas = replicas.astype(np.int64, copy=False)
+        total_slots = int(replicas.sum())
+        if np.any(replicas < 1) or np.any(replicas > num_ranks) or total_slots % num_ranks != 0:
+            raise ValueError("replica_counts must fit an equal-capacity rank placement")
+
+        slots_per_rank = total_slots // num_ranks
+        placement = np.full((num_ranks, slots_per_rank), -1, dtype=np.int64)
+        rank_sizes = np.zeros(num_ranks, dtype=np.int64)
+        rank_means = np.zeros(num_ranks, dtype=np.float64)
+        rank_variances = np.zeros(num_ranks, dtype=np.float64)
+        rank_variance_scales = np.zeros(num_ranks, dtype=np.float64)
+        per_replica_risks = cls.expert_risk(means, variances, z_score) / replicas
+        experts_by_descending_replica_risk = sorted(
+            range(num_experts), key=lambda expert: (-per_replica_risks[expert], expert)
+        )
+
+        for expert in experts_by_descending_replica_risk:
+            for _ in range(replicas[expert]):
+                rank_choices = []
+                for rank_id in range(num_ranks):
+                    size = rank_sizes[rank_id]
+                    rank_experts = placement[rank_id, :size]
+                    if size == slots_per_rank or expert in rank_experts:
+                        continue
+                    updated_mean = rank_means[rank_id] + means[expert] / replicas[expert]
+                    updated_variance, updated_scale = cls._updated_rank_variance(
+                        expert,
+                        rank_experts,
+                        rank_variances[rank_id],
+                        rank_variance_scales[rank_id],
+                        variances,
+                        covariance,
+                        replicas,
+                    )
+                    updated_risk = updated_mean + z_score * np.sqrt(updated_variance)
+                    rank_choices.append((float(updated_risk), rank_id, updated_mean, updated_variance, updated_scale))
+                if not rank_choices:
+                    return None
+                _, selected_rank, selected_mean, selected_variance, selected_scale = min(
+                    rank_choices, key=lambda choice: (choice[0], choice[1])
+                )
+                rank_means[selected_rank] = selected_mean
+                rank_variances[selected_rank] = selected_variance
+                rank_variance_scales[selected_rank] = selected_scale
+                placement[selected_rank, rank_sizes[selected_rank]] = expert
+                rank_sizes[selected_rank] += 1
+        return placement
