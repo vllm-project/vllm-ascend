@@ -364,12 +364,12 @@ class NPUModelRunner(GPUModelRunner):
         synchronous (``_publish_task`` runs them inline), so only the RoPE
         cache initialization is needed here. ``build`` raises without it.
         """
-        from vllm_ascend.attention.dsa_v41 import DeepseekV41MetadataBuilder
+        from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 
         for groups in self.attn_groups:
             for attn_group in groups:
                 for builder in attn_group.metadata_builders:
-                    if isinstance(builder, DeepseekV41MetadataBuilder):
+                    if isinstance(builder, AscendDSAV41MetadataBuilder):
                         builder.prepare_source_rope()
 
     @torch.inference_mode()
