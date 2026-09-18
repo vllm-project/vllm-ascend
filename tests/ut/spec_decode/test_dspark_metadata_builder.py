@@ -66,7 +66,7 @@ def test_direct_non_dense_mla_builder_preserves_upstream_metadata(monkeypatch, m
 @pytest.mark.parametrize("architecture", [None, "MLA"])
 def test_direct_builder_preserves_empty_metadata(monkeypatch, architecture):
     spec = make_speculator(architecture)
-    metadata = {}
+    metadata: dict[str, SimpleNamespace] = {}
     monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", MagicMock(return_value=metadata))
     assert spec._build_draft_attn_metadata(num_reqs=0, num_reqs_padded=1, num_tokens_padded=5) is metadata
 
