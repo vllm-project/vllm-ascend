@@ -54,7 +54,7 @@ def triton_q_rms(
     # Adaptive calculate the block size
     resv_buffer = 6144 # reserve buffer 6KB to prevent UB overflow
     available_ub_size = get_ub_size_bytes() - resv_buffer
-    element_size = torch.empty(1, dtype=q.dtype).element_size() * 8
+    element_size = torch.empty(1, dtype=q.dtype).element_size()
     if element_size == 4:
         data_multiplier = 5  # input(4bytes) + offset(4bytes) + mid_out(4bytes) + output(4bytes) + others(4bytes) = 5x
     elif element_size == 2:
