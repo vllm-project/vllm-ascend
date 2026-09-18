@@ -6,6 +6,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
+
+from vllm_ascend.ops.dummy_quant_matmul import install_dummy_quant_matmul_shim
+
+install_dummy_quant_matmul_shim()
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
@@ -24,12 +28,23 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
+from vllm_ascend.ops.fxrt_side_effects import (
+    fxrt_dsa_indexer_scatter_if_nonempty,
+    fxrt_dsa_scatter_if_nonempty,
+    fxrt_notify_kv_cache_written,
+    fxrt_record_attention_compute_start,
+    fxrt_save_kv_layer,
+    fxrt_wait_for_kv_layer,
+    get_attention_event_index,
+)
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.ops.rms_quant_meta import register_rms_quant_meta
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
+    fxrt_prefill_decompose_enabled,
     get_ascend_device_type,
     olora_tp_enable,
 )
@@ -993,6 +1008,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.attn_sink = kwargs["attn_sink"]
 
         self.vllm_config = get_current_vllm_config()
+        self._fxrt_prefill_decompose = fxrt_prefill_decompose_enabled()
+        # The extension can already be loaded by the device allocator without
+        # enable_custom_op(). Install its corrected Meta before Dynamo traces
+        # the exposed attention; eager execution uses the same fused kernel.
+        register_rms_quant_meta()
+        self._fxrt_attention_event_index = (
+            get_attention_event_index() if self._fxrt_prefill_decompose else -1
+        )
 
         # indexer param
         if self.indexer is not None:
@@ -1197,6 +1220,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
+        num_actual_tokens: int | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -1204,16 +1228,22 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return output.fill_(0)
         if not isinstance(attn_metadata, list):
             attn_metadata = [attn_metadata]
-        wait_for_kv_layer_from_connector(layer_name)
-        full_gather_wo_a_enabled = (
-            self.tp_size > 1
-            and self.enable_dsa_cp_with_o_proj_tp
-            and attn_metadata[0].attn_state
-            not in {
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding,
-            }
-        )
+        if self._fxrt_prefill_decompose:
+            fxrt_wait_for_kv_layer(layer_name)
+        else:
+            wait_for_kv_layer_from_connector(layer_name)
+        if self._fxrt_prefill_decompose:
+            full_gather_wo_a_enabled = self.tp_size > 1 and self.enable_dsa_cp_with_o_proj_tp
+        else:
+            full_gather_wo_a_enabled = (
+                self.tp_size > 1
+                and self.enable_dsa_cp_with_o_proj_tp
+                and attn_metadata[0].attn_state
+                not in {
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding,
+                }
+            )
         local_attn_output, o_proj_full_handles = self._forward(
             layer_name,
             hidden_states,
@@ -1221,6 +1251,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             attn_metadata,
             need_gather_q_kv,
             full_gather_wo_a_enabled,
+            num_actual_tokens,
         )
         o_proj_input = self._restore_tp_head_layout(
             local_attn_output,
@@ -1257,11 +1288,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
-                    # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
-                    # o = torch.einsum("tgd,grd->tgr", o, wo_a)
+                    wo_a_weight = self.wo_a.weight
+                    # The real weight loader already produces [groups, K, R].
+                    # Only raw 2D weights (e.g. dummy loading) need conversion.
+                    if wo_a_weight.ndim == 2:
+                        group_hidden_dim = o_proj_input.shape[-1]
+                        wo_a_weight = wo_a_weight.view(
+                            o_proj_groups, -1, group_hidden_dim
+                        ).transpose(1, 2)
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
-                        self.wo_a.weight,
+                        wo_a_weight,
                         bias=None,
                         scale=None,
                         perm_x1=(1, 0, 2),
@@ -1275,7 +1312,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
 
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        if self._fxrt_prefill_decompose:
+            fxrt_save_kv_layer(layer_name, list(kv_cache))
+        else:
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output
 
@@ -1287,6 +1327,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
         full_gather_wo_a_enabled: bool = False,
+        num_actual_tokens: int | None = None,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
         (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
@@ -1313,7 +1354,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         actual_seq_lengths_query = req_metadata.query_start_loc
         local_seq_lengths_query = cp_metadata.local_query_start_loc
         local_seq_lengths_key = cp_metadata.local_seq_lens
-        has_prefill = _has_prefill(common_attn_metadata.attn_state)
+        has_prefill = (
+            True
+            if self._fxrt_prefill_decompose
+            else _has_prefill(common_attn_metadata.attn_state)
+        )
         hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
@@ -1437,12 +1482,25 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cache_mode=1,
             )
 
-            if compressed_kv.numel() == 0:
-                compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            if self._fxrt_prefill_decompose:
+                fxrt_dsa_scatter_if_nonempty(
+                    compress_kv_cache, compressed_kv, compress_slot_mapping
+                )
+            else:
+                if compressed_kv.numel() == 0:
+                    compressed_kv = None
+                DeviceOperator.dsa_kv_compress_scatter(
+                    compress_kv_cache, compressed_kv, compress_slot_mapping
+                )
 
-        notify_kv_cache_written(layer_name)
-        record_attention_compute_start()
+        if self._fxrt_prefill_decompose:
+            fxrt_notify_kv_cache_written(layer_name)
+            fxrt_record_attention_compute_start(
+                self._fxrt_attention_event_index
+            )
+        else:
+            notify_kv_cache_written(layer_name)
+            record_attention_compute_start()
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
@@ -1577,6 +1635,20 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode=2,
             cache_mode=1,
         )
+
+        if self._fxrt_prefill_decompose:
+            if self.indexer.compressor.rotate:
+                kv = rotate_activation(
+                    kv, indexer_kv_scale_metadata.hadamard
+                )
+            fxrt_dsa_indexer_scatter_if_nonempty(
+                kv,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                indexer_slot_mapping,
+            )
+            return
 
         if kv.numel() == 0:
             return

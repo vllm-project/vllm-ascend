@@ -1145,11 +1145,15 @@ class DeepseekV4Model(nn.Module):
         forward_ctx = get_forward_context()
         if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
             h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
-            if pad_size > 0:
-                h_states_flat = h_states_flat[:-pad_size]
-            num_tokens = h_states_flat.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
+            # ``forward_ctx.pad_size`` is a request-dependent Python integer.
+            # Branching on it creates a Dynamo guard and recompiles when a new
+            # prompt has a different TP padding remainder.  Positions carries
+            # the same actual token count as a symbolic shape, so one dynamic
+            # slice handles both padded and unpadded requests.
+            num_tokens = positions.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(
+                h_states_flat[:num_tokens]
+            )
         else:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
