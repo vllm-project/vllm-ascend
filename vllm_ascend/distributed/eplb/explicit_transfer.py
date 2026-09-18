@@ -118,9 +118,7 @@ def stage_explicit_layer_transfer(
                 if ep_rank == src_rank:
                     communicator.add_send([weight[src_slot] for weight in expert_weights], dst_rank, expert)
                 if ep_rank == dst_rank:
-                    communicator.add_recv(
-                        [buffer[dst_slot] for buffer in expert_weight_buffers], src_rank, expert
-                    )
+                    communicator.add_recv([buffer[dst_slot] for buffer in expert_weight_buffers], src_rank, expert)
                     recv_primary_mask[dst_slot] = True
                     recv_expert_ids[recv_count] = expert
                     recv_dst_rows[recv_count] = dst_slot

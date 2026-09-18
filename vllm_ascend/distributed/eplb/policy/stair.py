@@ -12,6 +12,7 @@ from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
+from vllm_ascend.distributed.eplb.layer_sharding import all_gather_layer_shards, assigned_layer_ids
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
@@ -1028,6 +1029,82 @@ class StairEplbPolicy(AbstractEplbPolicy):
             source_slot_ids=source_slot_ids,
             predicted_mean_ratios=predicted_mean_ratios,
         )
+
+    @classmethod
+    def plan_sharded_rebalance(
+        cls,
+        logical_load_samples: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratios: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+        cpu_group: torch.distributed.ProcessGroup,
+    ) -> StairPlan:
+        """Plan round-robin layer shards and gather one stage-local plan.
+
+        Every rank in ``cpu_group`` must call this method with identical model
+        inputs and configuration. The group must contain only the current PP
+        stage's EPLB ranks. All ranks receive and validate the same complete
+        plan; no coordinator rank assembles the result. Input and result shapes
+        follow :meth:`plan_rebalance` and :class:`StairPlan`.
+        """
+        group_size = cpu_group.size()
+        local_error = None
+        local_plan_fields = None
+        current = None
+        try:
+            current = np.asarray(current_rank_expert_ids)
+            if current.ndim != 3:
+                raise ValueError("current_rank_expert_ids must be a [layers, ranks, slots] array")
+            num_layers = current.shape[0]
+            owned_layer_ids = assigned_layer_ids(num_layers, cpu_group.rank(), group_size)
+            local_plan = cls.plan_rebalance(
+                logical_load_samples,
+                current,
+                last_committed_mean_ratios,
+                rank_node_ids,
+                config,
+                layer_ids=owned_layer_ids,
+            )
+            owned_indices = np.fromiter(owned_layer_ids, dtype=np.int64, count=len(owned_layer_ids))
+            local_plan_fields = tuple(
+                torch.from_numpy(plan_field[owned_indices])
+                for plan_field in (
+                    local_plan.rank_expert_ids,
+                    local_plan.source_rank_ids,
+                    local_plan.source_slot_ids,
+                    local_plan.predicted_mean_ratios,
+                )
+            )
+            num_experts = np.asarray(logical_load_samples).shape[2]
+        except Exception as error:
+            local_error = error
+
+        planning_succeeded = torch.tensor(local_error is None, dtype=torch.int32)
+        if group_size > 1:
+            torch.distributed.all_reduce(
+                planning_succeeded,
+                op=torch.distributed.ReduceOp.MIN,
+                group=cpu_group,
+            )
+        if not planning_succeeded.item():
+            if local_error is not None:
+                raise local_error
+            raise RuntimeError("STAIR layer shard planning failed on another EPLB rank")
+        if current is None or local_plan_fields is None:
+            raise RuntimeError("STAIR layer shard planning produced no local plan")
+
+        def gather_owned_field(local_values: torch.Tensor) -> np.ndarray:
+            return all_gather_layer_shards(local_values, num_layers, cpu_group).numpy()
+
+        plan = StairPlan(
+            rank_expert_ids=gather_owned_field(local_plan_fields[0]),
+            source_rank_ids=gather_owned_field(local_plan_fields[1]),
+            source_slot_ids=gather_owned_field(local_plan_fields[2]),
+            predicted_mean_ratios=gather_owned_field(local_plan_fields[3]),
+        )
+        cls.validate_plan(current, plan, num_experts, config.rank_pair_migration_limit)
+        return plan
 
     @classmethod
     def validate_plan(
