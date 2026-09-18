@@ -86,7 +86,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         ),
         cache_config=target_cache_config,
     )
-    draft_model_config = SimpleNamespace(hf_overrides=None)
+    draft_model_config = object()
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -160,7 +160,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
-    assert draft_model_config.hf_overrides == {}
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
@@ -620,56 +619,3 @@ def test_propose_preserves_v028_dp_token_counts() -> None:
     ):
         speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
     assert parent.call_args.args[11] is token_counts
-
-
-def _fake_replace(config, **changes):
-    values = vars(config).copy()
-    values.update(changes)
-    return SimpleNamespace(**values)
-
-
-@pytest.mark.parametrize(
-    ("hf_overrides", "expected"),
-    [
-        (None, {}),
-        ({"architectures": ["DeepSeekV4MTPModel"]}, {"architectures": ["DeepSeekV4MTPModel"]}),
-    ],
-)
-def test_ensure_draft_hf_overrides(hf_overrides, expected) -> None:
-    draft_model_config = SimpleNamespace(hf_overrides=hf_overrides)
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == expected
-
-
-def test_ensure_draft_hf_overrides_missing_attr() -> None:
-    draft_model_config = SimpleNamespace()
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == {}
-
-
-def test_eagle_create_draft_vllm_config_fills_hf_overrides() -> None:
-    speculator = object.__new__(AscendEagleSpeculator)
-    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
-    speculator.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=8,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-    )
-
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator.replace",
-        side_effect=_fake_replace,
-    ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert speculator.draft_model_config.hf_overrides == {}
-    assert draft_config.model_config is speculator.draft_model_config
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert not draft_config.parallel_config.enable_expert_parallel
-    assert not draft_config.parallel_config.enable_eplb
