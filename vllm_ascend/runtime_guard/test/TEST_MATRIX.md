@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+
 """runtime_guard / runtime_config test matrix (adapted from skills/test, native dump_kv).
 
 Priorities: **P0** every PR / smoke; **P1** full suite; **P2** env-dependent.

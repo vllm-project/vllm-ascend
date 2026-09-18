@@ -45,7 +45,7 @@ Double-gated: injection is dead in shipped builds. Arm by flipping
 `_INJECT_MASTER_SWITCH = True` in `inject.py` (source edit, verification
 builds only), then set `RG_INJECT`. Either gate absent → 0 overhead in prod.
 
-```
+```bash
 RG_INJECT=scenario_name[:step_trigger][:param]
 ```
 
@@ -108,7 +108,7 @@ that step so post-sample scenarios do not require `logits_finite`):
 
 ## Implementation (as-built)
 
-```
+```text
 vllm_ascend/runtime_guard/
 └── inject.py                          # env parser + all 5 scenario hooks (no NPU deps)
 
@@ -128,6 +128,7 @@ vllm_ascend/runtime_guard/test/
 ## Live run procedure
 
 For each scenario #1-#5, #11-#12:
+
 1. Confirm guard server up on cards 6-7 (DeepSeek-V2-Lite, TP=2, port 8017)
 2. Reset runtime_config.json: `report.max_per_req=1`, all 4 shipped detectors `enabled=true`
    (`spec_acceptance`, `output_substring`, `token_repeat`, `logits_finite`)
