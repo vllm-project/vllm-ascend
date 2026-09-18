@@ -41,7 +41,6 @@ USE_MULTI_GROUPS_KV_CACHE = True
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
-@staticmethod
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     """Whether the EAGLE last-block drop must be suppressed on this process.
 
@@ -58,12 +57,9 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     band). Consumers and ``kv_both`` instances keep upstream behavior: they
     receive external loads whose verifier window the drop protects.
     """
-    return (
-        kv_transfer_config is None
-        or (
-            getattr(kv_transfer_config, "is_kv_producer", False)
-            and not getattr(kv_transfer_config, "is_kv_consumer", False)
-        )
+    return kv_transfer_config is None or (
+        getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
     )
 
 
@@ -414,9 +410,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     curr_hit_length = min(curr_hit_length, hit_length_by_group[first_group_id])
                     continue
 
-                drop_eagle_block = (
-                    use_eagle and idx not in eagle_verified and not self.skips_eagle_block_drop
-                )
+                drop_eagle_block = use_eagle and idx not in eagle_verified and not self.skips_eagle_block_drop
 
                 _max_length = curr_hit_length
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
