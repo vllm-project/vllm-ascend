@@ -60,16 +60,15 @@ class GuardTestBase(TestBase):
         _print_warning_once.cache_clear()
 
     @staticmethod
-    def _make_stubs(compile_backend: str = "inductor"):
-        compilation_config = CompilationConfig(backend="inductor")
+    def _make_stubs(track: bool = True):
+        compilation_config = CompilationConfig(backend="inductor") if track else CompilationConfig()
         # Mirror the post-early-hook state: _apply_inductor_track_defaults
         # already pinned the combo keys off before the late hook runs in the
         # real flow, so the normalizer stays silent on these stubs.
         compilation_config.inductor_compile_config["combo_kernels"] = False
         compilation_config.inductor_compile_config["benchmark_combo_kernel"] = False
         vllm_config = SimpleNamespace(compilation_config=compilation_config)
-        ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(compile_backend=compile_backend))
-        return vllm_config, ascend_config
+        return vllm_config
 
 
 class TestAotCompileGuard(GuardTestBase):
@@ -79,9 +78,9 @@ class TestAotCompileGuard(GuardTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_AOT_COMPILE"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertLogs("vllm", level=logging.WARNING) as logs:
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         joined = "\n".join(logs.output)
         self.assertIn("VLLM_USE_AOT_COMPILE=1", joined)
         self.assertIn("T0b-6", joined)
@@ -92,18 +91,18 @@ class TestAotCompileGuard(GuardTestBase):
     def test_unset_aot_pins_default_without_warning(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertNoLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["VLLM_USE_AOT_COMPILE"], "0")
 
     def test_explicit_aot_0_does_not_warn(self):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["VLLM_USE_AOT_COMPILE"] = "0"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertNoLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
 
 
 class TestTorchCompileDisableGuard(GuardTestBase):
@@ -113,9 +112,9 @@ class TestTorchCompileDisableGuard(GuardTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["TORCH_COMPILE_DISABLE"] = "1"
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertLogs("vllm", level=logging.WARNING) as logs:
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         joined = "\n".join(logs.output)
         self.assertIn("TORCH_COMPILE_DISABLE=1", joined)
         self.assertIn("no effect", joined)
@@ -125,9 +124,9 @@ class TestTorchCompileDisableGuard(GuardTestBase):
     def test_disable_unset_does_not_warn(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs()
+        vllm_config = self._make_stubs()
         with self.assertNoLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertNotIn("TORCH_COMPILE_DISABLE", os.environ)
 
 
@@ -139,9 +138,9 @@ class TestGuardsAreTrackScoped(GuardTestBase):
 
         os.environ["VLLM_USE_AOT_COMPILE"] = "1"
         os.environ["TORCH_COMPILE_DISABLE"] = "1"
-        vllm_config, ascend_config = self._make_stubs(compile_backend="auto")
+        vllm_config = self._make_stubs(track=False)
         with self.assertNoLogs("vllm", level=logging.WARNING):
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         for name in _GUARD_ENV_VARS:
             if name in ("VLLM_USE_AOT_COMPILE", "TORCH_COMPILE_DISABLE"):
                 continue  # the explicit user values stay untouched

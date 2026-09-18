@@ -58,20 +58,19 @@ class DumpTestBase(TestBase):
         super().tearDown()
 
     @staticmethod
-    def _make_stubs(compile_backend: str = "inductor", debug_dump_path=None):
-        compilation_config = CompilationConfig(backend="inductor", debug_dump_path=debug_dump_path)
+    def _make_stubs(track: bool = True, debug_dump_path=None):
+        compilation_config = CompilationConfig(backend="inductor", debug_dump_path=debug_dump_path) if track else CompilationConfig(debug_dump_path=debug_dump_path)
         vllm_config = SimpleNamespace(compilation_config=compilation_config)
-        ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(compile_backend=compile_backend))
-        return vllm_config, ascend_config
+        return vllm_config
 
 
 class TestDumpTrigger(DumpTestBase):
     def test_non_empty_dump_path_enables_torch_compile_debug(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
+        vllm_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
         with self.assertLogs("vllm", level=logging.INFO) as logs:
-            NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+            NPUPlatform._setup_inductor_track_envs(vllm_config)
         joined = "\n".join(logs.output)
         self.assertIn("debug_dump_path", joined)
         self.assertIn("inductor_cache/", joined)
@@ -82,26 +81,26 @@ class TestDumpTrigger(DumpTestBase):
         from vllm_ascend.platform import NPUPlatform
 
         os.environ["TORCH_COMPILE_DEBUG"] = "1"  # any pre-set value wins
-        vllm_config, ascend_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["TORCH_COMPILE_DEBUG"], "1")
         os.environ["TORCH_COMPILE_DEBUG"] = "0"  # even an explicit off wins
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertEqual(os.environ["TORCH_COMPILE_DEBUG"], "0")
 
     def test_empty_dump_path_sets_nothing(self):
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(debug_dump_path=None)
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs(debug_dump_path=None)
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertNotIn("TORCH_COMPILE_DEBUG", os.environ)
 
     def test_track_off_sets_nothing_even_with_dump_path(self):
         """Red line (总纲 §〇): track off = zero perturbation."""
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(compile_backend="auto", debug_dump_path=Path("/tmp/va_dump"))
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs(track=False, debug_dump_path=Path("/tmp/va_dump"))
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertNotIn("TORCH_COMPILE_DEBUG", os.environ)
 
     def test_depyf_and_cache_dirs_are_never_touched(self):
@@ -110,8 +109,8 @@ class TestDumpTrigger(DumpTestBase):
         initialize_cache — the hook must not write any of them."""
         from vllm_ascend.platform import NPUPlatform
 
-        vllm_config, ascend_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
-        NPUPlatform._setup_inductor_track_envs(vllm_config, ascend_config)
+        vllm_config = self._make_stubs(debug_dump_path=Path("/tmp/va_dump"))
+        NPUPlatform._setup_inductor_track_envs(vllm_config)
         self.assertNotIn("VLLM_DEBUG_DUMP_PATH", os.environ)
         self.assertNotIn("TORCHINDUCTOR_CACHE_DIR", os.environ)
         self.assertNotIn("TRITON_CACHE_DIR", os.environ)
