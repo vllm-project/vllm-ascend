@@ -1079,12 +1079,8 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     pooling_other = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="pooling"),
     )
-    encoder_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=encoder_spec)]
-    )
-    other_kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]
-    )
+    encoder_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=encoder_spec)])
+    other_kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())])
     mtp = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="generate"),
         speculative_config=SimpleNamespace(method="mtp"),
