@@ -8,7 +8,7 @@ import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy, StairPlan
 
 
 class TestStairLoadStatistics(unittest.TestCase):
@@ -615,6 +615,66 @@ class TestStairLoadStatistics(unittest.TestCase):
             )
 
         self.assertEqual(planned_load_totals, [4.0, 8.0])
+
+    def test_validate_plan_accepts_explicit_sources(self):
+        current = np.array([[[0, 1], [2, 3]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[0, 2], [1, 3]]]),
+            source_rank_ids=np.array([[[0, 1], [0, 1]]]),
+            source_slot_ids=np.array([[[0, 0], [1, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        StairEplbPolicy.validate_plan(current, plan, num_experts=4, rank_pair_migration_limit=1)
+
+    def test_validate_plan_rejects_false_source_ownership(self):
+        current = np.array([[[0, 1], [2, 3]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[0, 2], [1, 3]]]),
+            source_rank_ids=np.array([[[0, 1], [0, 1]]]),
+            source_slot_ids=np.array([[[0, 1], [1, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "does not own"):
+            StairEplbPolicy.validate_plan(current, plan, num_experts=4, rank_pair_migration_limit=1)
+
+    def test_validate_plan_rejects_invalid_controls_and_pair_limit(self):
+        current = np.array([[[0, 1], [2, 3], [4, 5]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[2, 3], [0, 1], [4, 5]]]),
+            source_rank_ids=np.array([[[1, 1], [0, 0], [2, 2]]]),
+            source_slot_ids=np.array([[[0, 1], [0, 1], [0, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        for num_experts, pair_limit in ((6, 1), (6, 1.5), (6, np.nan), (6, np.inf), (6, True), (6.0, 1)):
+            with self.subTest(num_experts=num_experts, pair_limit=pair_limit), self.assertRaises(ValueError):
+                StairEplbPolicy.validate_plan(current, plan, num_experts, pair_limit)
+
+    def test_validate_plan_rejects_prediction_for_unchanged_layer(self):
+        current = np.array([[[0], [1]]])
+        plan = StairPlan(
+            rank_expert_ids=current.copy(),
+            source_rank_ids=np.array([[[0], [1]]]),
+            source_slot_ids=np.zeros_like(current),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite for changed layers"):
+            StairEplbPolicy.validate_plan(current, plan, num_experts=2, rank_pair_migration_limit=1)
+
+    def test_validate_plan_rejects_non_float_predictions(self):
+        current = np.array([[[0], [1]]])
+        plan = StairPlan(
+            rank_expert_ids=current.copy(),
+            source_rank_ids=np.array([[[0], [1]]]),
+            source_slot_ids=np.zeros_like(current),
+            predicted_mean_ratios=np.array([True]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "floating-point"):
+            StairEplbPolicy.validate_plan(current, plan, num_experts=2, rank_pair_migration_limit=1)
 
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
