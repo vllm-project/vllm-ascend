@@ -10,6 +10,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -26,6 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
+    get_dspark_swa_index_width,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -303,6 +305,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
+            vllm_config
+        ):
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
+        else:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
         kv_plan = get_dsa_attn_kv_plan(vllm_config)
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.slot_mapping_shape = (
@@ -326,6 +335,29 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.spec_start_pos = [
                 torch.zeros(max_padded_reqs, dtype=torch.int32, device=self.device) for _ in range(spec_token_num)
             ]
+            self.spec_sas_metadata = [
+                torch.zeros(dsa_v1.DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
+            self.spec_start_pos = [
+                torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
+            if self.speculative_config.use_dspark():
+                index_width = get_dspark_swa_index_width(
+                    self.model_config.hf_config.sliding_window,
+                    spec_token_num,
+                )
+                max_dspark_rows = max(
+                    scheduler_config.max_num_batched_tokens,
+                    scheduler_config.max_num_seqs * (spec_token_num + 1),
+                )
+                self.dspark_swa_indices_buffer = torch.full(
+                    (max_dspark_rows, 1, index_width),
+                    -1,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -490,10 +522,19 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 treat_short_extends_as_decodes=False,
             )
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            tp_size = get_tp_group().world_size
+            rope_output_len = cdiv(num_input_tokens, tp_size) * tp_size
             # Use per-draft-index RoPE buffer so tensor addresses stay stable
             # across graph capture/replay; the per-step cache below then lets
             # sibling kv-cache groups reuse the same stable tensors.
-            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
+            cos, sin = get_cos_and_sin_dsa(
+                input_positions,
+                use_cache=True,
+                draft_index=draft_index,
+                cached_output_len=rope_output_len,
+            )
+            # Draft steps update positions independently. Reusing the global RoPE
+            # cache can let later draft steps overwrite step-0 metadata.
             if metadata_cache is not None:
                 metadata_cache.update(
                     num_decodes=num_decodes,
@@ -626,6 +667,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # freshly built values from the same (stable) buffer addresses.
             # Returning a fresh clone would leave the graph reading stale
             # capture-time metadata and cause illegal device memory accesses.
+            local_cos = cos[local_start:local_end_with_pad]
+            local_sin = sin[local_start:local_end_with_pad]
+            local_query_start_loc = local_query_start_loc.clone()
+            local_seq_lens = local_seq_lens.clone()
             local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
             local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
 
@@ -664,7 +709,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if is_noncausal:
             assert self.speculative_config is not None
-            # todo: If DSA CP is adapted to v2 DSpark graph mode, there may be issues.
+            if self.dspark_swa_indices_buffer is None:
+                raise RuntimeError("DSpark DSA-CP requires a persistent SWA-index buffer")
             global_dspark_indices, _ = build_dspark_swa_indices(
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
@@ -673,6 +719,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: num_reqs + 1],
                 self.seq_lens[:num_reqs],
                 self.num_actual_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
             pad_rows = num_tokens_pad - global_dspark_indices.shape[0]
             if pad_rows < 0:
@@ -681,8 +728,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     f"num_tokens_pad={num_tokens_pad}, actual={global_dspark_indices.shape[0]}"
                 )
             if pad_rows:
-                global_dspark_indices = F.pad(global_dspark_indices, (0, 0, 0, 0, 0, pad_rows), value=-1)
-            dspark_swa_indices = global_dspark_indices[local_start:local_end_with_pad].contiguous()
+                self.dspark_swa_indices_buffer[global_dspark_indices.shape[0] : num_tokens_pad].fill_(-1)
+            dspark_swa_indices = self.dspark_swa_indices_buffer[local_start:local_end_with_pad]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         assert self.spec_slot_mapping is not None
