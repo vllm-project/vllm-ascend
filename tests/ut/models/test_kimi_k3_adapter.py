@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from vllm_ascend.attention.utils import PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
@@ -16,6 +17,46 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
+    for fa_quant_layer in (False, True):
+        impl = SimpleNamespace(
+            enable_mlapo=True,
+            fa_quant_layer=fa_quant_layer,
+            fused_qkv_a_proj=SimpleNamespace(),
+            q_proj=SimpleNamespace(),
+        )
+        impl._fused_preprocess_type = lambda impl=impl: (
+            PreprocessType.PROLOG_V3 if impl.enable_mlapo or impl.fa_quant_layer else None
+        )
+        mark_fused_preprocess_weights(impl)
+        assert impl.fused_qkv_a_proj._fused_preprocess_managed
+        with (
+            patch.object(kimi_k3.UpstreamKimiMLAAttention, "__init__", lambda self, **kwargs: nn.Module.__init__(self)),
+            patch.object(
+                kimi_k3.AscendKimiMLAAttention,
+                "_attention_layer",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(impl=impl),
+            ),
+        ):
+            kimi_k3.AscendKimiMLAAttention(
+                config=SimpleNamespace(),
+                hidden_size=256,
+                num_heads=2,
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=32,
+                v_head_dim=128,
+                q_lora_rank=64,
+                kv_lora_rank=32,
+                use_output_gate=False,
+                use_rope=False,
+                disable_mlapo=True,
+            )
+        assert not impl.enable_mlapo
+        assert impl.fused_qkv_a_proj._fused_preprocess_managed == fa_quant_layer
+        assert impl.q_proj._fused_preprocess_managed == fa_quant_layer
 
 
 def test_kimi_moe_leaves_routed_input_transform_to_runner():

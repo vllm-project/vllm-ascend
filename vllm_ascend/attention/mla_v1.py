@@ -28,6 +28,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
     enabling_mlapo,
@@ -1014,6 +1015,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    def _supports_mlapo_weights(self) -> bool:
+        if self.fused_qkv_a_proj is None:
+            return False
+        layer_quant_method = self.fused_qkv_a_proj.quant_method
+        if isinstance(layer_quant_method, UnquantizedLinearMethod):
+            return get_current_hardware_profile().supports(HardwareCapability.MLAPO_NATIVE_WEIGHTS)
+        if layer_quant_method is None:
+            return False
+        # Quantized Ascend linears expose their concrete scheme through the
+        # wrapper. Unsupported wrappers should fail instead of disabling MLAPO.
+        return isinstance(
+            layer_quant_method.quant_method,
+            (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+        )
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        if self.fused_qkv_a_proj is None or self.q_proj is None:
+            return None
+        if self.fa_quant_layer or (self.enable_mlapo and self._supports_mlapo_weights()):
+            return PreprocessType.PROLOG_V3 if self.support_fp8_attention else PreprocessType.MLAPO
+        return None
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
         assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
@@ -1055,22 +1078,13 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
-            if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
-                quant_method = None
-            else:
-                # Quantized Ascend linears always expose their concrete scheme
-                # through AscendLinearMethod.quant_method. Let an unsupported
-                # wrapper fail here instead of silently disabling MLAPO.
-                quant_method = layer_quant_method.quant_method
-            self._mlapo_uses_native_weights = quant_method is None
-            supports_quantized_weights = isinstance(
-                quant_method,
-                (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
+            quant_method = (
+                None
+                if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod)
+                else layer_quant_method.quant_method
             )
-            supports_native_weights = get_current_hardware_profile().supports(
-                HardwareCapability.MLAPO_NATIVE_WEIGHTS
-            ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
-            if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
+            self._mlapo_uses_native_weights = quant_method is None
+            if not self._supports_mlapo_weights():
                 self.enable_mlapo = False
                 logger.warning_once(
                     "MLAPO supports W8A8/W8A8-MXFP8 weights, plus native "
@@ -1097,10 +1111,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
 
         is_native = self._mlapo_uses_native_weights
-        # Linear weight processing may already have converted these to NZ.
-        # Split, transpose and pad in ND before converting the prolog weights.
-        fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
-        weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        fused_weight = self.fused_qkv_a_proj.weight.data
+        weight_uq_qr = self.q_proj.weight.data
         if is_native:
             # Native Linear stores [out_features, in_features], while the
             # prolog consumes [in_features, out_features].

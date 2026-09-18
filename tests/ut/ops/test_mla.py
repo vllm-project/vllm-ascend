@@ -441,8 +441,8 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                         prefix=self.prefix,
                     )
 
-                self.assertEqual(hasattr(fused_qkv_a_proj, "_fused_preprocess_managed"), should_mark)
-                self.assertEqual(hasattr(q_proj, "_fused_preprocess_managed"), should_mark)
+                self.assertEqual(fused_qkv_a_proj._fused_preprocess_managed, should_mark)
+                self.assertEqual(q_proj._fused_preprocess_managed, should_mark)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")

@@ -1,4 +1,3 @@
-import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -28,6 +27,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
@@ -233,12 +233,6 @@ BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
-
-
-class PreprocessType(enum.Enum):
-    NATIVE = "native"
-    PROLOG_V3 = "prolog_v3"
-    MLAPO = "mlapo"
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
