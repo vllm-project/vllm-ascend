@@ -35,7 +35,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -108,6 +108,34 @@ def _dsv4_block_sizes():
     from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
     return DSV4_BLOCK_SIZES
+
+
+def _maybe_start_nz_warm_thread() -> None:
+    import os
+
+    if os.environ.get("MOTOR_COLDSTART_NZ_WARM", "off").strip().lower() != "thread":
+        return
+    try:
+        from vllm_ascend.quantization.methods.w8a8_dynamic import start_nz_warm_thread
+
+        start_nz_warm_thread("thread")
+    except Exception:
+        from vllm.logger import logger
+
+        logger.warning("NZ format-cast warmup thread skipped", exc_info=True)
+
+
+def _maybe_start_early_kernel_warmup() -> None:
+    try:
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            start_early_kernel_warmup,
+        )
+
+        start_early_kernel_warmup()
+    except Exception:
+        from vllm.logger import logger
+
+        logger.warning("Early kernel warmup skipped", exc_info=True)
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -300,9 +328,10 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Config, weight_name: str) -> int | None:
-    if weight_name.startswith("mtp."):
-        return 0
-    return None
+    if not weight_name.startswith("mtp."):
+        return None
+    token = weight_name.split(".", 2)[1]
+    return int(token) if token.isdigit() else 0
 
 
 class DeepseekV2MLP(nn.Module):
@@ -420,10 +449,17 @@ class DeepseekV4MoE(nn.Module):
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # Dummy load keeps zeros so garbage indices cannot fault. Real
+            # checkpoints overwrite this table; empty skips a vocab-sized
+            # zero-fill on every hash layer during construct.
+            load_format = getattr(
+                getattr(get_current_vllm_config(), "load_config", None),
+                "load_format",
+                "auto",
+            )
+            tid2eid_init = torch.zeros if str(load_format) == "dummy" else torch.empty
             self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
+                tid2eid_init(
                     config.vocab_size,
                     config.num_experts_per_tok,
                     dtype=torch.int32,
@@ -1081,6 +1117,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        _maybe_start_nz_warm_thread()
+        _maybe_start_early_kernel_warmup()
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

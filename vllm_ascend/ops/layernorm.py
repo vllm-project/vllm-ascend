@@ -24,6 +24,21 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.fused_norm_gate import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
 
+# Scanning quant_description is O(number of quantized tensors). The answer is
+# a property of the checkpoint, so cache it per quant_description object.
+_NORM_BIAS_IN_QUANT_DESCRIPTION: dict[int, bool] = {}
+
+
+def _quant_description_has_norm_bias(quant_description: dict) -> bool:
+    if not quant_description:
+        return False
+    cache_key = id(quant_description)
+    cached = _NORM_BIAS_IN_QUANT_DESCRIPTION.get(cache_key)
+    if cached is None:
+        cached = any("norm.bias" in name for name in quant_description)
+        _NORM_BIAS_IN_QUANT_DESCRIPTION[cache_key] = cached
+    return cached
+
 
 class AscendRMSNorm(RMSNorm):
     def __init__(
@@ -40,9 +55,8 @@ class AscendRMSNorm(RMSNorm):
         self.bias_loaded = False
 
         # quantization with anti_method m4 will generate none-zero norm bias
-        if vllm_config.quant_config is not None and any(
-            "norm.bias" in name for name in vllm_config.quant_config.quant_description
-        ):
+        quant_description = getattr(getattr(vllm_config, "quant_config", None), "quant_description", None) or {}
+        if _quant_description_has_norm_bias(quant_description):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
 

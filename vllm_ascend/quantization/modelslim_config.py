@@ -55,6 +55,20 @@ def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
     return isinstance(layer, (MoERunner, RoutedExperts))
 
 
+_FLOAT_WEIGHT_KEYS_CACHE: dict[int, tuple[str, ...]] = {}
+
+
+def _float_weight_keys(quant_description: Mapping[str, Any]) -> tuple[str, ...]:
+    cache_key = id(quant_description)
+    cached = _FLOAT_WEIGHT_KEYS_CACHE.get(cache_key)
+    if cached is None:
+        cached = tuple(
+            name for name, value in quant_description.items() if value == "FLOAT" and name.endswith(".weight")
+        )
+        _FLOAT_WEIGHT_KEYS_CACHE[cache_key] = cached
+    return cached
+
+
 # The config filename that ModelSlim generates after quantizing a model.
 MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
@@ -430,8 +444,10 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description[prefix + ".weight"]
-    return quant_type
+        # Missing key or FLOAT means unquantized. Do not invent a FLOAT
+        # scheme: create_scheme_for_layer has no FLOAT handler.
+        quant_type = quant_description.get(prefix + ".weight")
+    return None if quant_type == "FLOAT" else quant_type
 
 
 def get_quant_type_for_layer(
@@ -740,7 +756,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
+            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping) or not self._has_quant_weight(
+                prefix, self.packed_modules_mapping
+            ):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
@@ -775,10 +793,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = any(
-                key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
-                for key, value in self.quant_description.items()
-            )
+            is_skipped = any(key.startswith(prefix) for key in _float_weight_keys(self.quant_description))
 
         assert is_skipped is not None
         return is_skipped
