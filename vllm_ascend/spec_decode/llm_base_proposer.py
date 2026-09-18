@@ -80,6 +80,13 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
     DSparkDeepseekV4ForCausalLM,
 )
 
+if not vllm_version_is("0.29.0"):
+    # vLLM #56228 added the V4.1 dependencies after v0.29.0. Keep the
+    # common proposer importable on release for models that do not use V4.1.
+    from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
+
+    _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
+
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
