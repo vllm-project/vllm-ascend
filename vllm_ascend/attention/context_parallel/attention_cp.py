@@ -36,6 +36,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    enable_dcp,
     filter_chunked_req_indices,
     split_decodes_and_prefills,
 )
@@ -47,7 +48,11 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
+from vllm_ascend.utils import (
+    cp_chunkedprefill_comm_stream,
+    is_pd_decode_recompute_scheduler_enabled,
+    weak_ref_tensors,
+)
 
 
 @dataclass
@@ -94,6 +99,10 @@ class AscendAttentionDCPMetadataBuilder(
 
     metadata_cls = AscendAttentionDCPMetadata
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dcp_enabled = enable_dcp()
+
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -101,7 +110,9 @@ class AscendAttentionDCPMetadataBuilder(
         return split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
+            treat_short_extends_as_decodes=(
+                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+            ),
         )
 
     @staticmethod
