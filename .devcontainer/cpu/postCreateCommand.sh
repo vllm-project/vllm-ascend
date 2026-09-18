@@ -55,7 +55,10 @@ echo "[4/6] 从门禁 pin 提交重装 vllm (门禁: 'Install vllm-project/vllm 
 VLLM_PIN="$(tr -d '[:space:]' < "${PROJECT_DIR}/.github/vllm-main-verified.commit")"
 VLLM_SRC="/vllm-workspace/vllm"
 git config --global --add safe.directory "${VLLM_SRC}"
-git -C "${VLLM_SRC}" fetch --depth 1 origin "${VLLM_PIN}"
+# 镜像里 /vllm-workspace/vllm 的 remote origin 指向华为内网代理
+# (gh-proxy.test.osinfra.cn)，GitHub runner 直连不到。fetch 时显式用官方 URL，
+# 绕开 origin 配置；结果写入 FETCH_HEAD 供 checkout。
+git -C "${VLLM_SRC}" fetch --depth 1 https://github.com/vllm-project/vllm.git "${VLLM_PIN}"
 git -C "${VLLM_SRC}" checkout -f FETCH_HEAD
 ( cd "${VLLM_SRC}" && VLLM_TARGET_DEVICE=empty uv pip install . --force-reinstall --no-deps --no-build-isolation )
 pip uninstall -y triton
