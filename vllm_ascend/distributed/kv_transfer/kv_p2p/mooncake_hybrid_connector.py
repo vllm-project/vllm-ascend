@@ -113,35 +113,61 @@ def _reconstruct_shared_pages(
 ) -> list[_SharedPage]:
     """Rebuild shared physical pages from descriptors and runtime views.
 
-    A layer's descriptor placement is ``offset + index * layer_stride``.
-    Layers with the same placement, block stride, and runtime page base share
-    one physical page. Their runtime view addresses can still differ because a
-    layer may start at an inner-page offset.
+    ``layer_stride == 0`` retains the legacy ``shared_by`` contract: all
+    descriptor layers alias one standalone tensor. For nonzero layer strides,
+    a layer's physical start is ``base + offset + index * layer_stride`` and
+    layers resolving to the same start and block stride share one page. Runtime
+    view addresses can still differ because a layer may start at an inner-page
+    offset.
     """
-    placements_by_page: dict[tuple[int, int, int], list[tuple[str, int]]] = {}
-    for descriptor in kv_cache_config.kv_cache_tensors:
-        descriptor_placements: dict[int, list[tuple[str, tuple[torch.Tensor, ...]]]] = {}
+    pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
+    page_strides: dict[tuple[str, int, int], int] = {}
+    for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
+        descriptor_layers: list[tuple[str, int, tuple[torch.Tensor, ...]]] = []
         for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
             placement_start = descriptor.offset + layer_idx * descriptor.layer_stride
-            descriptor_placements.setdefault(placement_start, []).append(
-                (layer_name, as_kv_cache_tensors(kv_caches[layer_name]))
+            descriptor_layers.append(
+                (
+                    layer_name,
+                    placement_start,
+                    as_kv_cache_tensors(kv_caches[layer_name]),
+                )
             )
 
-        for placement_start, placement_layers in descriptor_placements.items():
-            page_base = min(tensor.data_ptr() for _, layer_tensors in placement_layers for tensor in layer_tensors)
-            page_key = (placement_start, descriptor.block_stride, page_base)
-            page_placements = placements_by_page.setdefault(page_key, [])
-            page_placements.extend(
+        if descriptor.layer_stride == 0:
+            page_base = min(tensor.data_ptr() for _, _, layer_tensors in descriptor_layers for tensor in layer_tensors)
+            page_key = ("shared_by", descriptor_idx, 0)
+            pages_by_key[page_key] = [
                 (
                     layer_name,
                     min(tensor.data_ptr() for tensor in layer_tensors) - page_base,
                 )
-                for layer_name, layer_tensors in placement_layers
+                for layer_name, _, layer_tensors in descriptor_layers
+            ]
+            page_strides[page_key] = descriptor.block_stride
+            continue
+
+        descriptor_base = min(
+            min(tensor.data_ptr() for tensor in layer_tensors) - placement_start
+            for _, placement_start, layer_tensors in descriptor_layers
+        )
+        for layer_name, placement_start, layer_tensors in descriptor_layers:
+            layer_start = descriptor_base + placement_start
+            page_key = ("strided", descriptor.block_stride, layer_start)
+            pages_by_key.setdefault(page_key, []).append(
+                (
+                    layer_name,
+                    min(tensor.data_ptr() for tensor in layer_tensors) - layer_start,
+                )
             )
+            page_strides[page_key] = descriptor.block_stride
 
     return [
-        _SharedPage(placements=tuple(placements), block_stride=block_stride)
-        for (_, block_stride, _), placements in placements_by_page.items()
+        _SharedPage(
+            placements=tuple(placements),
+            block_stride=page_strides[page_key],
+        )
+        for page_key, placements in pages_by_key.items()
     ]
 
 

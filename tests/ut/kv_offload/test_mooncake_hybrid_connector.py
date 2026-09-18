@@ -521,6 +521,51 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_zero_layer_stride_uses_descriptor_layers_as_shared_by(self):
+        num_blocks = 2
+        block_stride = 80
+        layer_names = [
+            "long_kv_cache",
+            "indexer.k_cache",
+            "state_cache",
+        ]
+        backing = torch.empty((num_blocks, block_stride), dtype=torch.uint8)
+        other_backing = torch.empty((num_blocks, block_stride), dtype=torch.uint8)
+        kv_caches = {
+            layer_names[0]: backing.as_strided((num_blocks, 64), (block_stride, 1)),
+            layer_names[1]: backing[:, 64:72],
+            layer_names[2]: backing,
+            "other_cache": other_backing,
+        }
+
+        pages = _reconstruct_shared_pages(
+            types.SimpleNamespace(
+                kv_cache_tensors=[
+                    types.SimpleNamespace(
+                        layers=layer_names,
+                        layer_stride=0,
+                        block_stride=block_stride,
+                        offset=0,
+                    ),
+                    types.SimpleNamespace(
+                        layers=["other_cache"],
+                        layer_stride=0,
+                        block_stride=block_stride,
+                        offset=0,
+                    ),
+                ]
+            ),
+            kv_caches,
+        )
+
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(
+            pages[0].placements,
+            ((layer_names[0], 0), (layer_names[1], 64), (layer_names[2], 0)),
+        )
+        self.assertEqual(pages[0].block_stride, block_stride)
+        self.assertEqual(pages[1].placements, (("other_cache", 0),))
+
     def test_reconstruct_shared_pages_uses_indexed_descriptor_placement(self):
         num_blocks = 2
         block_stride = 80
