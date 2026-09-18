@@ -63,9 +63,12 @@ def sync_due_bits(group: Any, due_locals: Sequence[bool]) -> list[bool]:
     if gate is None:
         return bits
 
+    # HCCL device_group only accepts NPU tensors; Gloo cpu_group accepts CPU.
+    device = "npu" if gate == getattr(group, "device_group", None) else "cpu"
     due_t = torch.tensor(
         [1.0 if b else 0.0 for b in bits],
         dtype=torch.float32,
+        device=device,
     )
     torch.distributed.all_reduce(
         due_t,
