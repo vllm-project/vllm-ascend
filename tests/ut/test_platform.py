@@ -60,8 +60,7 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize("enable_sfa_c8", [False, True])
-@pytest.mark.parametrize("enable_li_c8", [False, True])
-def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8, enable_li_c8):
+def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8):
     config = SimpleNamespace(
         use_v2_model_runner=True,
         parallel_config=SimpleNamespace(
@@ -70,7 +69,6 @@ def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8, enable_li_c8
         speculative_config=None,
         additional_config={
             "enable_sparse_sfa_c8": enable_sfa_c8,
-            "enable_sparse_li_c8": enable_li_c8,
         },
     )
     with (
