@@ -677,16 +677,19 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
-        # finegrained_tp requires recompute_scheduler
+        # MRV1 relies on the recompute scheduler to keep cross-DP token shapes
+        # uniform for embedding/o_proj TP. MRV2 aligns embedding/MLP TP batch
+        # descriptors in the runner and makes idle ranks join via dummy batches,
+        # so embedding TP no longer needs the MRV1 scheduler restriction there.
         if (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
-        ) and not self.scheduler_config.recompute_scheduler_enable:
+            self._finegrained_tp_requires_recompute_scheduler(vc)
+            and not self.scheduler_config.recompute_scheduler_enable
+        ):
             raise AssertionError(
                 "oproj_tensor_parallel_size / embedding_tensor_parallel_size "
-                "require recompute_scheduler_enable=true: their cross-DP HCCL "
-                "collectives need uniform num_tokens across DP ranks, which is "
-                "only guaranteed when the recompute scheduler is enabled."
+                "require recompute_scheduler_enable=true in ModelRunnerV1: "
+                "their cross-DP HCCL collectives need uniform num_tokens across "
+                "DP ranks. ModelRunnerV2 aligns embedding TP batches directly."
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
@@ -819,6 +822,11 @@ class AscendConfig:
         # sparse KV offload vs sparse SFA C8 main cache mutex
         self._validate_sparse_c8_kv_offload_compatibility()
         return self
+
+    def _finegrained_tp_requires_recompute_scheduler(self, vllm_config: VllmConfig) -> bool:
+        if self.finegrained_tp_config.oproj_tensor_parallel_size > 0:
+            return True
+        return self.finegrained_tp_config.embedding_tensor_parallel_size > 0 and not vllm_config.use_v2_model_runner
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
