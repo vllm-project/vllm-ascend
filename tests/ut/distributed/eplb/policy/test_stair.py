@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
@@ -560,6 +561,60 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertLess(plan.predicted_imbalance.mean_ratio, current_imbalance.mean_ratio)
         self.assertGreater(plan.predicted_imbalance.p95_ratio, current_imbalance.p95_ratio)
+
+    def test_plan_rebalance_preserves_filtered_layers(self):
+        samples = np.array(
+            [
+                [
+                    [0.0, 0.0, 0.0, 0.0],
+                    [1.0, 1.0, 1.0, 1.0],
+                    [8.0, 7.0, 6.0, 5.0],
+                ]
+            ]
+        )
+        current = np.array(
+            [
+                [[0, 1], [2, 3]],
+                [[0, 3], [2, 1]],
+                [[0, 1], [2, 3]],
+            ]
+        )
+
+        plan = StairEplbPolicy.plan_rebalance(
+            samples,
+            current,
+            np.array([np.nan, 1.0, np.nan]),
+            np.array([0, 1]),
+            StairConfig(),
+        )
+
+        np.testing.assert_array_equal(plan.rank_expert_ids[:2], current[:2])
+        np.testing.assert_array_equal(plan.source_rank_ids[:2], [[[0, 0], [1, 1]]] * 2)
+        np.testing.assert_array_equal(plan.source_slot_ids[:2], [[[0, 1], [0, 1]]] * 2)
+        np.testing.assert_array_equal(plan.rank_expert_ids[2], [[0, 3], [2, 1]])
+        np.testing.assert_array_equal(np.isnan(plan.predicted_mean_ratios), [True, True, False])
+        self.assertEqual(plan.predicted_mean_ratios[2], 1.0)
+
+    def test_plan_rebalance_orders_equal_mean_ratios_by_relative_deterioration(self):
+        samples = np.array([[[3.0, 1.0], [6.0, 2.0]]])
+        current = np.array([[[0], [1]], [[0], [1]]])
+        planned_load_totals = []
+
+        # Both layers have ratio 1.5; layer 0 deteriorated further from its anchor.
+        with patch.object(
+            StairEplbPolicy,
+            "plan_layer",
+            side_effect=lambda load, *_: planned_load_totals.append(float(load.sum())),
+        ):
+            StairEplbPolicy.plan_rebalance(
+                samples,
+                current,
+                np.array([1.1, 1.3]),
+                np.array([0, 1]),
+                StairConfig(),
+            )
+
+        self.assertEqual(planned_load_totals, [4.0, 8.0])
 
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
