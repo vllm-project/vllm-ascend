@@ -31,6 +31,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
@@ -70,6 +71,8 @@ _EXPECTED_CAPABILITIES = {
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.CANN_MEGAMOE,
+            HardwareCapability.CANN_MEGAMOE_MXFP,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

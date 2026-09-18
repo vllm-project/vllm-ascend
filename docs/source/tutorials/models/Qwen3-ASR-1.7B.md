@@ -18,9 +18,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU. Download the model weights from [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
+|  Weight Version    | Hardware Requirements                                            | Download Links |
+|--------------------|------------------------------------------------------------------|----------------|
+| BF16               | one Ascend Atlas 800I A2 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -83,7 +87,7 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 ### 4.2 Source Code Installation
 
-f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 !!! note
 
@@ -108,6 +112,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 === "Atlas A2 inference products"
 
     ```shell
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \
@@ -120,6 +125,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 === "Atlas 300I DUO"
 
     ```shell
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \

@@ -19,9 +19,11 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     MF_META,
+    MF_META_ACK,
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    SFAPD_PROTOCOL_VERSION,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -102,12 +104,10 @@ class MembPullReadThread(threading.Thread):
         self._p_layer_meta: dict[str, Any] = {}
         self._p_sessions: dict[bytes, str] = {}
         self._p_layer_metas: dict[bytes, dict[str, Any]] = {}
+        self._p_pp_topology: dict[bytes, tuple[int, int]] = {}
         self._done_requests: set[str] = set()
         self._failed_requests: set[str] = set()
-        # Request completion needs every contributor in the group (unequal P/D TP):
-        # track which group_member_idx values have reported done per request, and the
-        # group size to wait for. A request enters _done_requests only once all `ratio`
-        # distinct contributors arrived. ratio == 1 completes on the first arrival.
+        # Request completion needs every flattened PP/TP contributor.
         self._done_contributors: dict[str, set[int]] = {}
         self._expected_ratio: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -116,13 +116,16 @@ class MembPullReadThread(threading.Thread):
         self.startup_error: BaseException | None = None
 
     def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
-        """Accumulate a contributor's last-layer arrival; complete only when the whole group reported."""
+        """Accumulate a contributor's last-layer arrival."""
         with self._lock:
             for ext_id in done_ext_ids:
-                self._expected_ratio.setdefault(ext_id, ratio)
+                previous = self._expected_ratio.setdefault(ext_id, ratio)
+                if previous != ratio:
+                    self._failed_requests.add(ext_id)
+                    continue
                 contributors = self._done_contributors.setdefault(ext_id, set())
                 contributors.add(group_member_idx)
-                if len(contributors) >= self._expected_ratio[ext_id]:
+                if len(contributors) >= ratio:
                     self._done_requests.add(ext_id)
                     self._done_contributors.pop(ext_id, None)
                     self._expected_ratio.pop(ext_id, None)
@@ -187,13 +190,30 @@ class MembPullReadThread(threading.Thread):
                     msg_type = msg[0]
 
                     if msg_type == MF_META:
+                        if len(msg) not in (3, 6):
+                            raise ValueError(f"MF_META must contain 3 or 6 fields, got {len(msg)}")
                         p_session = msg[1]
                         if not isinstance(p_session, str):
                             raise ValueError("MF_META session must be a string")
+                        p_layer_meta = msgspec.msgpack.decode(msg[2])
+                        unknown_layers = set(p_layer_meta) - set(self._state.layer_metadata)
+                        if unknown_layers:
+                            raise ValueError(f"MF_META contains layers unknown to D: {sorted(unknown_layers)}")
+                        if len(msg) == 3:
+                            pp_rank, pp_size = 0, 1
+                        else:
+                            version, pp_rank, pp_size = map(int, msg[3:6])
+                            if version != SFAPD_PROTOCOL_VERSION:
+                                raise ValueError(
+                                    f"SFAPD protocol version mismatch: P={version}, D={SFAPD_PROTOCOL_VERSION}"
+                                )
+                            if pp_size < 1 or not 0 <= pp_rank < pp_size:
+                                raise ValueError(f"invalid producer PP topology: rank={pp_rank}, size={pp_size}")
                         self._p_session = p_session
-                        self._p_layer_meta = msgspec.msgpack.decode(msg[2])
+                        self._p_layer_meta = p_layer_meta
                         self._p_sessions[identity] = p_session
-                        self._p_layer_metas[identity] = self._p_layer_meta
+                        self._p_layer_metas[identity] = p_layer_meta
+                        self._p_pp_topology[identity] = (pp_rank, pp_size)
                         logger.info(
                             "Received MF_META: P session=%s, %d layers", self._p_session, len(self._p_layer_meta)
                         )
@@ -207,7 +227,10 @@ class MembPullReadThread(threading.Thread):
                                     layer_meta.get("block_len"),
                                     layer_meta.get("block_size_scale"),
                                 )
-                        sock.send_multipart((identity, b"", b"ACK"))
+                        if len(msg) == 3:
+                            sock.send_multipart((identity, b"", b"ACK"))
+                        else:
+                            sock.send_multipart((identity, b"", encoder.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))))
 
                     elif msg_type == READ_READY_BATCH:
                         layer_idx = msg[1]
@@ -284,7 +307,12 @@ class MembPullReadThread(threading.Thread):
                             with self._lock:
                                 self._failed_requests.update(failed_ids)
                         if succeeded and done_ext_ids:
-                            self._record_chunk_done(done_ext_ids, group_member_idx, ratio)
+                            pp_rank, pp_size = self._p_pp_topology[identity]
+                            self._record_chunk_done(
+                                done_ext_ids,
+                                pp_rank * ratio + group_member_idx,
+                                pp_size * ratio,
+                            )
 
                     else:
                         logger.error("MembPull got unexpected message %s", msg)

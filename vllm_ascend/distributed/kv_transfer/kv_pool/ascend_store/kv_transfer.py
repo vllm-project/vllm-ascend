@@ -113,10 +113,12 @@ class LayerBatchBuilder:
         page_size_bytes: int,
         num_layers: int,
         group_id: int = 0,
+        layer_byte_offset: int = 0,
     ) -> None:
         self.page_size_bytes = page_size_bytes
         self.num_layers = num_layers
         self.group_id = group_id
+        self.layer_byte_offset = layer_byte_offset
         self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
             token_database.group_kv_caches_base_addr[group_id],
@@ -178,7 +180,7 @@ class LayerBatchBuilder:
         layer_inner_offsets = np.concatenate(
             (np.zeros(1, dtype=np.int64), np.cumsum(layer_block_len[:-1], dtype=np.int64))
         )
-        rank_layer_offset = int(self._block_len_np[:base_offset].sum())
+        rank_layer_offset = self.layer_byte_offset + int(self._block_len_np[:base_offset].sum())
         if base_gvas_arr.size > 0 and np.any(base_gvas_arr <= 0):
             zero_count = int(np.sum(base_gvas_arr <= 0))
             logger.warning(
@@ -865,6 +867,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_size: int | list[int],
         tp_rank: int,
         tp_size: int = 1,
+        pcp_rank: int = 0,
+        pcp_size: int = 1,
         dcp_size: int = 1,
         put_step: int = 1,
         kv_role: str = "kv_producer",
@@ -876,6 +880,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
         )
+        self.pcp_rank = pcp_rank
+        self.pcp_size = pcp_size
         self.put_step = put_step
         self.kv_role = kv_role
         self.group_uses_align_state = group_uses_align_state or []
@@ -1020,7 +1026,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_start = block_idx * group_block_size
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
-            pre_shard = self.dcp_size <= 1 and not align_state_group
+            tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
+            # PCP=2, TP=4, KV heads=2, tp_replicas=2:
+            # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
+            #  0        0 / 2            0      0, 4, ...
+            #  0        1 / 3            1      1, 5, ...
+            #  1        0 / 2            2      2, 6, ...
+            #  1        1 / 3            3      3, 7, ...
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -1028,8 +1040,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.tp_rank % self.put_step if pre_shard else None,
-                shard_size=self.put_step if pre_shard else None,
+                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
+                shard_size=self.pcp_size * tp_replicas,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)
@@ -1296,6 +1308,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         num_layers: int,
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
+        layer_offset: int = 0,
     ):
         super().__init__(
             m_store,
@@ -1308,6 +1321,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             name="KVCacheStoreKeyLayerSendingThread",
         )
         self.final_layer_id = num_layers - 1
+        self.layer_offset = layer_offset
         self.put_step = put_step
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
@@ -1337,7 +1351,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                 block_index = start // group_block_size
                 if block_index < block_range.start_block or block_index >= block_range.end_block:
                     continue
-                key_all = key.split_layers(self.final_layer_id + 1)
+                key_all = key.split_layers(self.final_layer_id + 1, self.layer_offset)
                 entries.append((start, end, key_all))
             cache[br_idx] = entries
 
@@ -1393,7 +1407,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
                         continue
                     starts.append(start)
                     ends.append(end)
-                    keys.append(key.split_layers(self.final_layer_id + 1)[layer_id])
+                    keys.append(key.split_layers(self.final_layer_id + 1, self.layer_offset)[layer_id])
 
             if not self.dcp_size > 1:
                 starts = starts[self.tp_rank % self.put_step :: self.put_step]
@@ -1449,6 +1463,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
         num_layers: int,
+        layer_offset: int = 0,
     ):
         super().__init__(
             m_store,
@@ -1464,6 +1479,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
+        self.layer_offset = layer_offset
 
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
@@ -1503,7 +1519,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
                     chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
                     key = self.token_database._make_key_by_hash(
                         chunk_hash,
-                    ).split_layers(self.final_layer_id + 1)[layer_id]
+                    ).split_layers(self.final_layer_id + 1, self.layer_offset)[layer_id]
                     group_block_size = self._get_block_size(0)
                     start = block_index * group_block_size
                     end = start + group_block_size

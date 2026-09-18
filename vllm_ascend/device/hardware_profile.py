@@ -21,6 +21,7 @@ class HardwareCapability(Enum):
     ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
     CANN_MEGAMOE = auto()
+    CANN_MEGAMOE_MXFP = auto()
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
@@ -35,6 +36,7 @@ class HardwareCapability(Enum):
     GDN_COMPATIBILITY = auto()
     GRAPH_MULS_ADD_FUSION = auto()
     GRAPH_NORM_QUANT_FUSION = auto()
+    INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
     IRQ_CPU_RESERVATION = auto()
     LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
@@ -141,6 +143,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,
+        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
@@ -226,6 +229,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.CANN_MEGAMOE,
+                    HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,

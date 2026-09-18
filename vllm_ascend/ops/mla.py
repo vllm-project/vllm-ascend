@@ -100,13 +100,11 @@ class IndexerWrapper(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
+        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -217,6 +215,15 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
+
+        # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
+        # layers, so quant methods must skip their own NZ conversion.
+        # Mark before VLLM calls process_weights_after_loading on submodules.
+        impl = self.mla_attn.impl
+        if getattr(impl, "_fused_preprocess_type", None) and impl._fused_preprocess_type() is not None:
+            for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
+                if _layer is not None:
+                    _layer._fused_preprocess_managed = True
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 

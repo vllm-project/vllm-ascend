@@ -28,7 +28,8 @@ from vllm.config import CompilationConfig
 from vllm.tokenizers.registry import resolve_tokenizer_args
 from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -57,6 +58,13 @@ DFLASH2_MODELS = {
     "dflash2": {
         "main": "Qwen/Qwen3.8-27B",
         "spec": "z-lab/Qwen3.8-27B-DFlash2",
+    },
+}
+
+REDUCED_VOCAB_DSPARK_MODELS = {
+    "qwen36_35b_dspark": {
+        "main": "Qwen/Qwen3.6-35B-A3B",
+        "spec": "RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
     },
 }
 
@@ -187,11 +195,16 @@ def test_p_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
     draft_tensor_parallel_size: None | int,
+    monkeypatch,
 ):
     """
     Test acceptance rate for parallel drafting speculative decoding
     using a smaller draft model with parallel_drafting enabled.
     """
+    # MRv2 FULL decode ACL graph capture D2Hs seq_lens via .tolist() for
+    # parallel_drafting. Keep this acceptance case on V1 until that path is
+    # capture-safe.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 
@@ -359,7 +372,9 @@ def test_qwen3_vwn_eagle3_tp2():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_eagle3_sliding_window():
+def test_eagle3_sliding_window(monkeypatch):
+    # draft_window_size is MRV1-only; Qwen3 + eagle3 now defaults to MRv2.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -439,7 +454,7 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_hang():
+def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
     The server deadlocks when all of the following hold:
@@ -451,6 +466,9 @@ def test_hang():
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
+    # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
+    # defaults to MRv2; keep this regression on V1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -556,7 +574,12 @@ def test_hang():
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    monkeypatch,
 ):
+    # After #16726 reverted UpdatableGraph, MRv2 PIECEWISE dummy profile calls
+    # dflash2 candidate_selector without set_forward_context. Keep this
+    # acceptance case on V1; test_dflash2_v2_acceptance covers V2 eager.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -715,3 +738,62 @@ def test_dflash2_v2_acceptance(
 
     match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+
+
+@pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
+@pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
+@pytest.mark.parametrize("max_tokens", [1024])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            id="full_decode_only",
+        )
+    ],
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_qwen36_35b_dspark_spec_decoding(
+    model: str,
+    draft_model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+    compilation_config: dict,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    num_speculative_tokens = 7
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=4096,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "method": "dspark",
+            "model": draft_model,
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        compilation_config=compilation_config,
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.78, 0.61, 0.49, 0.39, 0.33, 0.29, 0.25]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"

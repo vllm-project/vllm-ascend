@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -21,6 +22,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
+    unwrap_mamba_kv_cache_groups,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -86,6 +88,56 @@ def _group(spec: MambaSpec):
         kv_cache_spec=spec,
         layer_names=["linear_attn"],
     )
+
+
+def test_unwrap_uniform_mamba_groups_for_upstream_model_state():
+    spec = _mamba_spec()
+    layer_specs = {"mamba.0": spec, "mamba.1": spec}
+    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+    assert wrapped is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=list(layer_specs),
+                kv_cache_spec=wrapped,
+            )
+        ],
+    )
+
+    normalized = unwrap_mamba_kv_cache_groups(config)
+
+    assert normalized is not config
+    assert normalized.kv_cache_groups[0].kv_cache_spec == spec
+    assert config.kv_cache_groups[0].kv_cache_spec is wrapped
+
+
+def test_unwrap_preserves_distinct_mamba_layouts():
+    specs = {
+        "mamba.0": _mamba_spec(),
+        "mamba.1": MambaSpec(
+            block_size=16,
+            shapes=((3, 2), (1, 4)),
+            dtypes=(torch.float16, torch.float32),
+        ),
+    }
+    wrapped = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert wrapped is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=list(specs),
+                kv_cache_spec=wrapped,
+            )
+        ],
+    )
+
+    normalized = unwrap_mamba_kv_cache_groups(config)
+
+    assert normalized.kv_cache_groups[0].kv_cache_spec is wrapped
 
 
 def test_mamba_model_state_inherits_upstream_state_management():
@@ -551,3 +603,27 @@ def test_hybrid_model_selects_mamba_model_state(mock_mamba_state):
         encoder_cache,
         device,
     )
+
+
+def test_init_model_state_uses_override_then_default():
+    vllm_config = MagicMock()
+    vllm_config.model_config.is_hybrid = False
+    encoder_cache = MagicMock()
+    device = torch.device("cpu")
+    custom_cls = MagicMock()
+    model = MagicMock()
+    model.get_model_state_cls.return_value = custom_cls
+
+    assert init_asecnd_model_state(vllm_config, model, encoder_cache, device) is custom_cls.return_value
+
+    with (
+        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=False),
+        patch("vllm_ascend.worker.v2.model_states.default.AscendModelState") as default_cls,
+    ):
+        state = init_asecnd_model_state(
+            vllm_config,
+            MagicMock(spec=["forward"]),
+            encoder_cache,
+            device,
+        )
+    assert state is default_cls.return_value

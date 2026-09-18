@@ -1,15 +1,68 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from itertools import product as iprod
 from typing import Any
 
+import numpy as np
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+def copy_kv_cache_blocks_inplace(
+    kv_caches: Iterable[torch.Tensor | Sequence[torch.Tensor | None] | None],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    """Copy logical cache blocks for Ascend's segmented cache layout.
+
+    Unlike the upstream block-major allocation, an Ascend cache allocation can
+    contain multiple block-indexed tensor segments. For example, Mamba stores
+    all convolution states before all SSM states in the same storage. Treating
+    that complete storage as ``[num_blocks, page_size]`` therefore copies the
+    wrong byte ranges. Copy every tensor segment as ``num_blocks`` complete
+    physical pages instead. A page may span multiple kernel-level cache blocks.
+    """
+    if not kv_cache_block_copies:
+        return
+
+    cache_tensors: list[torch.Tensor] = []
+    seen_tensors: set[int] = set()
+    for entry in kv_caches:
+        if entry is None:
+            continue
+        tensors = (entry,) if isinstance(entry, torch.Tensor) else entry
+        for tensor in tensors:
+            if tensor is None:
+                continue
+            data_ptr = tensor.data_ptr()
+            if data_ptr in seen_tensors:
+                continue
+            seen_tensors.add(data_ptr)
+            cache_tensors.append(tensor)
+
+    if not cache_tensors:
+        return
+
+    device = cache_tensors[0].device
+    indices_np = np.array(
+        [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
+        dtype=np.int64,
+    )
+    indices = async_tensor_h2d(indices_np, device=device)
+    src_indices, dst_indices = indices.unbind(dim=1)
+    for tensor in cache_tensors:
+        assert tensor.device == device
+        assert tensor.numel() % num_blocks == 0
+        blocks = tensor.view(num_blocks, -1)
+        source_blocks = torch.index_select(blocks, 0, src_indices)
+        blocks.index_copy_(0, dst_indices, source_blocks)
 
 
 @contextmanager

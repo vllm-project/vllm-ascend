@@ -124,14 +124,13 @@ class KVPoolScheduler:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        cp_scale = self.pcp_size * self.dcp_size
-        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
+        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
             requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
+        ) * self.dcp_size
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
@@ -206,6 +205,16 @@ class KVPoolScheduler:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        # Global layer offset for layerwise pool keys under PP (matches the
+        # pool worker's pp_layer_offset).
+        self.pp_layer_offset = 0
+        try:
+            start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
+            self.pp_layer_offset = start
+        except AttributeError:
+            self.pp_layer_offset = 0
+        except Exception:
+            self.pp_layer_offset = 0
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -266,28 +275,27 @@ class KVPoolScheduler:
             block_keys: list[str] = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
             pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
-            for pcp_rank in range(self.pcp_size):
-                for dcp_rank in range(self.dcp_size):
-                    for head_or_tp_rank in range(head_or_tp_ranks):
-                        for pp_rank in pp_ranks:
-                            pool_key = PoolKey(
-                                KeyMetadata(
-                                    self.model_name,
-                                    head_or_tp_rank,
-                                    pcp_rank,
-                                    dcp_rank,
-                                    pp_rank,
-                                    kv_cache_group_id=kv_cache_group_id,
-                                    cache_family=cache_family,
-                                ),
-                                chunk_hash,
+            for dcp_rank in range(self.dcp_size):
+                for head_or_tp_rank in range(head_or_tp_ranks):
+                    for pp_rank in pp_ranks:
+                        pool_key = PoolKey(
+                            KeyMetadata(
+                                self.model_name,
+                                head_or_tp_rank,
+                                dcp_rank,
+                                pp_rank,
+                                kv_cache_group_id=kv_cache_group_id,
+                                cache_family=cache_family,
+                            ),
+                            chunk_hash,
+                        )
+                        if include_layers:
+                            block_keys.extend(
+                                layer_key.to_string()
+                                for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
                             )
-                            if include_layers:
-                                block_keys.extend(
-                                    layer_key.to_string() for layer_key in pool_key.split_layers(self.num_layers)
-                                )
-                            else:
-                                block_keys.append(pool_key.to_string())
+                        else:
+                            block_keys.append(pool_key.to_string())
             keys_by_block.append(block_keys)
         return keys_by_block
 
@@ -353,8 +361,8 @@ class KVPoolScheduler:
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
+        A block is a hit only when every PP stage has saved it, so the
+        protocol helper enumerates all stages and head/TP ranks.
         """
         head_or_tp_ranks = self.tp_size // self.put_step
         return self.layerwise_protocol.make_hit_check_keys(
@@ -363,6 +371,7 @@ class KVPoolScheduler:
             block_hash_hex,
             head_or_tp_ranks,
             len(self.kv_cache_group_ids),
+            self.pp_size,
         )
 
     def _get_layerwise_hit_tokens(
