@@ -3,7 +3,7 @@
 ## 1. Environmental Dependencies
 
 * Software:
-  * CANN >= 8.5.0
+* * CANN >= 8.5.0
   * vLLM：main branch
   * vLLM-Ascend：main branch
   * mooncake：>= 0.3.11.post1
