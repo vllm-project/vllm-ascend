@@ -8,7 +8,13 @@ import numpy as np
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy.stair import PlacementImbalance, PlacementPlan, StairEplbPolicy, StairPlan
+from vllm_ascend.distributed.eplb.policy.stair import (
+    LayerPlan,
+    PlacementImbalance,
+    PlacementPlan,
+    StairEplbPolicy,
+    StairPlan,
+)
 
 
 class TestStairLoadStatistics(unittest.TestCase):
@@ -706,6 +712,51 @@ class TestStairLoadStatistics(unittest.TestCase):
             )
 
         self.assertEqual(planned_load_totals, [4.0, 8.0])
+
+    def test_plan_rebalance_limits_work_to_layer_shard(self):
+        samples = np.array([[[3.0, 1.0], [6.0, 2.0], [9.0, 3.0]]])
+        current = np.array([[[0], [1]]] * 3)
+        planned_load_totals = []
+
+        def plan_layer(load, *_):
+            planned_load_totals.append(float(load.sum()))
+            placement = PlacementPlan(
+                rank_expert_ids=np.array([[1], [0]]),
+                source_rank_ids=np.array([[1], [0]]),
+                source_slot_ids=np.zeros((2, 1), dtype=np.int64),
+            )
+            return LayerPlan(placement, PlacementImbalance(1.0, 1.0))
+
+        with patch.object(
+            StairEplbPolicy,
+            "plan_layer",
+            side_effect=plan_layer,
+        ):
+            plan = StairEplbPolicy.plan_rebalance(
+                samples,
+                current,
+                np.full(3, np.nan),
+                np.array([0, 1]),
+                StairConfig(),
+                layer_ids=(1,),
+            )
+
+        self.assertEqual(planned_load_totals, [8.0])
+        np.testing.assert_array_equal(plan.rank_expert_ids, [current[0], [[1], [0]], current[2]])
+        np.testing.assert_array_equal(plan.source_rank_ids, [[[0], [1]], [[1], [0]], [[0], [1]]])
+        np.testing.assert_array_equal(plan.source_slot_ids, np.zeros((3, 2, 1), dtype=np.int64))
+        np.testing.assert_array_equal(np.isnan(plan.predicted_mean_ratios), [True, False, True])
+
+    def test_plan_rebalance_rejects_invalid_layer_shard(self):
+        with self.assertRaisesRegex(ValueError, "stage-local"):
+            StairEplbPolicy.plan_rebalance(
+                np.ones((1, 1, 2)),
+                np.array([[[0], [1]]]),
+                np.array([np.nan]),
+                np.array([0, 1]),
+                StairConfig(),
+                layer_ids=(0, 0),
+            )
 
     def test_validate_plan_accepts_explicit_sources(self):
         current = np.array([[[0, 1], [2, 3]]])
