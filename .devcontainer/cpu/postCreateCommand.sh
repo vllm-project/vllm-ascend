@@ -55,9 +55,11 @@ echo "[4/6] 从门禁 pin 提交重装 vllm (门禁: 'Install vllm-project/vllm 
 VLLM_PIN="$(tr -d '[:space:]' < "${PROJECT_DIR}/.github/vllm-main-verified.commit")"
 VLLM_SRC="/vllm-workspace/vllm"
 git config --global --add safe.directory "${VLLM_SRC}"
-# 镜像里 /vllm-workspace/vllm 的 remote origin 指向华为内网代理
-# (gh-proxy.test.osinfra.cn)，GitHub runner 直连不到。fetch 时显式用官方 URL，
-# 绕开 origin 配置；结果写入 FETCH_HEAD 供 checkout。
+# amd64 镜像在构建时执行过 buildkite 脚本，往 /root/.gitconfig 写入了
+#   url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
+# 会把任何 github.com URL 重写成内网代理 gh-proxy.test.osinfra.cn（GitHub runner
+# 直连不到，报 418）。fetch 前先移除该 url section，aarch64 镜像无此配置时忽略。
+git config --global --remove-section 'url.https://gh-proxy.test.osinfra.cn/https://github.com/' 2>/dev/null || true
 git -C "${VLLM_SRC}" fetch --depth 1 https://github.com/vllm-project/vllm.git "${VLLM_PIN}"
 git -C "${VLLM_SRC}" checkout -f FETCH_HEAD
 ( cd "${VLLM_SRC}" && VLLM_TARGET_DEVICE=empty uv pip install . --force-reinstall --no-deps --no-build-isolation )
