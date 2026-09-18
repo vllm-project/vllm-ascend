@@ -38,7 +38,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -1102,7 +1102,13 @@ def get_potential_max_tokens() -> int:
     return _potential_max_tokens
 
 
-def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
+def should_skip_allreduce_across_dp_group(
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+    *,
+    model_instance: torch.nn.Module | None = None,
+    cann_mega_moe_supported: bool | None = None,
+) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
@@ -1139,13 +1145,22 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
         return False
 
     from vllm_ascend.ascend_forward_context import select_moe_comm_method, use_cann_megamoe
+    from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
-    if use_cann_megamoe(vllm_config):
-        return False
+    if ascend_config.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if cann_mega_moe_supported is None and model_instance is not None:
+            cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
+        if use_cann_megamoe(vllm_config) or cann_mega_moe_supported:
+            return False
 
     def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        return select_moe_comm_method(
+            n,
+            vllm_config,
+            model_instance=model_instance,
+            cann_mega_moe_supported=cann_mega_moe_supported,
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
