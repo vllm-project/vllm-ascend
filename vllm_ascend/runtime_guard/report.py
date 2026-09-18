@@ -252,14 +252,14 @@ def sanitize_report_detail(
     if not detail:
         return {}
     if save_sensitive_info:
-        out = truncate_token_id_fields(
+        enriched = truncate_token_id_fields(
             detail,
             max_prompt_token_ids=max_prompt_token_ids,
             max_output_token_ids=max_output_token_ids,
         )
         if decode_token_ids:
-            out = decode_token_id_texts(out, tokenizer)
-        return out
+            enriched = decode_token_id_texts(enriched, tokenizer)
+        return enriched
 
     out: dict[str, Any] = {}
     for key, value in detail.items():
@@ -515,7 +515,7 @@ class ReportWriter:
             # deferred (manual / next-flush); tools must pick wave_* with .pt.
             # ``dump_arm_wave`` remains the arm-time hint.
             dump_dirs = [str(dump_root / itype / rid) for rid in dump_req_ids]
-            record = {
+            record: dict[str, Any] = {
                 "ts": datetime.now().isoformat(timespec="milliseconds"),
                 "incident_type": incident_type,
                 "req_id": req_id,

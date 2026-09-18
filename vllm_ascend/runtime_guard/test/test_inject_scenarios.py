@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Synthetic UT for the RG_INJECT anomaly-injection hooks (no NPU).
 
 Drives ``vllm_ascend.runtime_guard.inject`` entry points directly with

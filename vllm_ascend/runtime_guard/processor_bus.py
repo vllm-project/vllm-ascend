@@ -32,6 +32,17 @@ logger = init_logger_ascend(__name__)
 class RuntimeGuardBusMixin:
     """Wave-head config sync + dump-job delivery (broadcast / file / TP)."""
 
+    # Attributes provided by RuntimeGuardProcessor (mixin composition).
+    runner: Any
+    runtime_config: Any
+    detectors: Any
+    report_writer: Any
+    action_executor: Any
+    _deferred_kv_dump_jobs: list[dict[str, Any]]
+
+    # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
+    _claim_dump_jobs_to_deferred_via_tp: Any
+
     def _refresh_config_body(
         self,
         *,

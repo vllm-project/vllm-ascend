@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Shared UT helpers for runtime_guard (avoid cross-importing test modules)."""
 
 from __future__ import annotations

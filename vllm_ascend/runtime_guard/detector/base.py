@@ -29,7 +29,11 @@ def detector_section_getter(section: Any) -> Callable[[str, Any], Any]:
     """``dict.get``-like accessor for a detector config section or object."""
     if isinstance(section, dict):
         return section.get
-    return lambda key, default=None: getattr(section, key, default)
+
+    def _getattr_get(key: str, default: Any = None) -> Any:
+        return getattr(section, key, default)
+
+    return _getattr_get
 
 
 def resolve_batch_req_ids(runner: Any, req_ids: list[str] | None) -> list[str]:

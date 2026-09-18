@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Regression UTs from the 2026-09-01 white-box review (task_spec/review_findings_20260901.md).
 
 IDs map to review findings:

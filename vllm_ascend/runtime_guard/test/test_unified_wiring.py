@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Unified v1/v2 pre-sample wrap + v2 output proxy + sample-phase wiring tests."""
 
 from types import SimpleNamespace

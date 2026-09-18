@@ -43,6 +43,17 @@ logger = init_logger_ascend(__name__)
 class RuntimeGuardReportMixin:
     """Incident report arming, manual trigger, finish print, tokenizer helpers."""
 
+    # Attributes provided by RuntimeGuardProcessor (mixin composition).
+    runner: Any
+    runtime_config: Any
+    wave_tracker: Any
+    action_executor: Any
+    _report_tokenizer: Any | None
+    _report_tokenizer_failed: bool
+
+    # Defined on RuntimeGuardDumpMixin / RuntimeGuardProcessor.
+    _run_kv_dumps: Any
+
     def _maybe_fire_manual_local(self, *, allow_arm: bool) -> None:
         """Fire ``manual_dump`` locally on each last-PP TP (no job bcast).
 
@@ -287,18 +298,18 @@ class RuntimeGuardReportMixin:
             detail = dict(base_detail)
             detail["num_requests"] = n_batch
             detail["requests"] = requests_detail
-            block_ids: list[int] = []
+            dump_block_ids: list[int] = []
             if requests_detail:
                 raw = requests_detail[0].get("block_ids")
                 if isinstance(raw, list):
-                    block_ids = [int(x) for x in raw]
+                    dump_block_ids = [int(x) for x in raw]
             self.action_executor.handle(
                 Incident(
                     incident_type=trigger.trigger_type,
                     req_id=MANUAL_TRIGGER_REQ_ID,
                     detail=detail,
                     consume_quota=False,
-                    block_ids=block_ids,
+                    block_ids=dump_block_ids,
                     wave=wave,
                 ),
                 detail=detail,

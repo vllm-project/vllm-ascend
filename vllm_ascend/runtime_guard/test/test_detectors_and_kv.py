@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """P0 UT: token_repeat pure logic + kv dump_kv empty-block safety."""
 
 from __future__ import annotations

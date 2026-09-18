@@ -225,6 +225,7 @@ class RequestIoSnapshotManager:
             return self._cache[cache_key]
 
         prompt_ids: list[int] | None = None
+        output_ids: list[int] | None = None
         store = RequestGuardStore.get()
         st_out = store.get_state(req_id)
         built_output = list(st_out.output_token_ids) if st_out is not None else []

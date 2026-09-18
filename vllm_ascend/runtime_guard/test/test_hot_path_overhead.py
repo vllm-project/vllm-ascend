@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Correctness UTs for hot-path gates / idle sync (no wall-clock bounds).
 
 Wall-clock microbenches live under ``vllm_ascend/runtime_guard/test/perf/`` (opt-in).

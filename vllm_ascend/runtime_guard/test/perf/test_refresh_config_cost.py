@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Opt-in wall-clock microbenches for runtime_guard hot path (not default UT).
 
 Run explicitly::

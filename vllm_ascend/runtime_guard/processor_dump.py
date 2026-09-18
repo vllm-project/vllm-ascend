@@ -41,6 +41,15 @@ logger = init_logger_ascend(__name__)
 class RuntimeGuardDumpMixin:
     """Mixin: queue / claim / run KV dump jobs (wave-deferred D2H)."""
 
+    # Attributes provided by RuntimeGuardProcessor (mixin composition).
+    runner: Any
+    runtime_config: Any
+    _deferred_kv_dump_jobs: list[dict[str, Any]]
+    _kv_dump_jobs: list[dict[str, Any]]
+
+    # Defined on RuntimeGuardReportMixin / RuntimeGuardProcessor.
+    _maybe_fire_manual_local: Any
+
     def queue_kv_dump(self, job: dict[str, Any]) -> bool:
         """TP0: record a dump job for last-PP all TP.
 
@@ -52,7 +61,7 @@ class RuntimeGuardDumpMixin:
             return False
         rid = str(job["req_id"])
         wave = job.get("wave")
-        pending = getattr(self, "_kv_dump_jobs", None)
+        pending: list[dict[str, Any]] | None = getattr(self, "_kv_dump_jobs", None)
         if pending is None:
             self._kv_dump_jobs = []
             pending = self._kv_dump_jobs

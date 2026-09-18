@@ -338,7 +338,7 @@ class KvCacheReader:
                         },
                     )
         if written:
-            req_id = snapshots[0].payload.get("req_id")
+            req_id = str(snapshots[0].payload.get("req_id") or "")
             logger.info(
                 "[runtime_guard dump_kv] wrote req_id=%s pt_files=%d dir=%s",
                 req_id,

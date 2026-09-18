@@ -154,8 +154,13 @@ class ActionExecutor:
                 ordered.append(name)
         if "report" in ordered and "dump_kv" in ordered:
             ordered = [n for n in ordered if n not in ("report", "dump_kv")]
-            head = [n for n in ordered if (get_action(n) and get_action(n).sync_only)]
-            tail = [n for n in ordered if not (get_action(n) and get_action(n).sync_only)]
+
+            def _is_sync_only(n: str) -> bool:
+                act = get_action(n)
+                return bool(act is not None and act.sync_only)
+
+            head = [n for n in ordered if _is_sync_only(n)]
+            tail = [n for n in ordered if not _is_sync_only(n)]
             ordered = head + ["report", "dump_kv"] + [n for n in tail if n not in head]
 
         for name in ordered:
@@ -171,13 +176,16 @@ class ActionExecutor:
                 if prepared is None:
                     continue
 
-                def _commit(action: Action = action, prepared: Any = prepared) -> None:
+                def _commit(
+                    act: Action = action,
+                    prep: Any = prepared,
+                ) -> None:
                     try:
-                        action.commit(prepared)
+                        act.commit(prep)
                     except Exception:
                         logger.exception(
                             "[runtime_guard action] %s commit failed incident=%s req_id=%s",
-                            action.name,
+                            act.name,
                             incident.incident_type,
                             incident.req_id,
                         )

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
 """Shipped-safety gate tests for the RG_INJECT double-gate.
 
 Injection requires BOTH the source-level ``_INJECT_MASTER_SWITCH`` (shipped
