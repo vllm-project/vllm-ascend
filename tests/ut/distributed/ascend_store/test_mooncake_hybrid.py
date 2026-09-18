@@ -274,7 +274,7 @@ class TestMooncakeHybrid(unittest.TestCase):
 
     def test_attention_window_drains_before_communication_and_on_exception(self):
         for fail in (False, True):
-            events = []
+            events: list[str] = []
             gate = reset_attention_compute_start_gate()
             gate.on_start = lambda events=events: events.append("put/get submit")
             gate.on_finish = lambda events=events: events.append("put/get complete")
