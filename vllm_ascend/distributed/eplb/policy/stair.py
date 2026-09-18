@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Pure NumPy building blocks for the STAIR EPLB policy."""
+"""CPU building blocks for the STAIR EPLB policy."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 
@@ -394,6 +395,91 @@ class StairEplbPolicy(AbstractEplbPolicy):
                         return None
         return source_rank_ids
 
+    @staticmethod
+    def _minimum_cost_migration_sources(
+        current_placement: np.ndarray,
+        target_placement: np.ndarray,
+        rank_pair_limit: int,
+        expert_sources: list[list[int]],
+        rank_node_ids: np.ndarray,
+    ) -> np.ndarray | None:
+        """Choose a source rank for each target slot.
+
+        The returned array is aligned with ``target_placement``; unplaced slots
+        remain ``-1`` and retained local experts use the destination rank. Local
+        experts do not consume directed rank-pair migration capacity. Among
+        valid assignments, minimize transfers between unequal node IDs, then
+        choose the lexicographically smallest source-rank vector in target-slot
+        order. Return ``None`` when no valid assignment exists.
+
+        The matching helper computes the globally minimal cost of the remaining
+        demands. The outer loop uses it as a tail oracle while fixing the
+        smallest source rank that can still achieve the global minimum.
+        """
+        source_rank_ids = np.full_like(target_placement, -1)
+
+        def minimum_cross_node_transfers(
+            remaining_demands: list[tuple[int, int]],
+            available_capacity_slots: list[tuple[int, int]],
+            dst_rank: int,
+        ) -> int | None:
+            if not remaining_demands:
+                return 0
+            if len(remaining_demands) > len(available_capacity_slots):
+                return None
+            infeasible_cost = len(remaining_demands) + 1
+            costs = np.full((len(remaining_demands), len(available_capacity_slots)), infeasible_cost, dtype=np.int64)
+            for demand_index, (_, expert) in enumerate(remaining_demands):
+                for capacity_index, (src_rank, _) in enumerate(available_capacity_slots):
+                    if src_rank in expert_sources[expert]:
+                        costs[demand_index, capacity_index] = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
+            demand_indices, capacity_indices = linear_sum_assignment(costs)
+            selected_costs = costs[demand_indices, capacity_indices]
+            if len(demand_indices) != len(remaining_demands) or np.any(selected_costs == infeasible_cost):
+                return None
+            return int(selected_costs.sum())
+
+        for dst_rank, target_experts in enumerate(target_placement):
+            demands = [
+                (slot, int(expert))
+                for slot, expert in enumerate(target_experts)
+                if expert >= 0 and expert not in current_placement[dst_rank]
+            ]
+            for slot, expert in enumerate(target_experts):
+                if expert >= 0 and expert in current_placement[dst_rank]:
+                    source_rank_ids[dst_rank, slot] = dst_rank
+            candidate_sources = sorted(
+                {src_rank for _, expert in demands for src_rank in expert_sources[expert] if src_rank != dst_rank}
+            )
+            capacity_slots = [
+                (src_rank, capacity_index)
+                for src_rank in candidate_sources
+                for capacity_index in range(rank_pair_limit)
+            ]
+
+            remaining_cost = minimum_cross_node_transfers(demands, capacity_slots, dst_rank)
+            if remaining_cost is None:
+                return None
+            # Fix the smallest source that preserves the global minimum tail cost.
+            while demands:
+                slot, expert = demands[0]
+                for capacity_slot in capacity_slots:
+                    src_rank, _ = capacity_slot
+                    if src_rank not in expert_sources[expert]:
+                        continue
+                    edge_cost = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
+                    remaining_capacity = [item for item in capacity_slots if item != capacity_slot]
+                    tail_cost = minimum_cross_node_transfers(demands[1:], remaining_capacity, dst_rank)
+                    if tail_cost is not None and edge_cost + tail_cost == remaining_cost:
+                        source_rank_ids[dst_rank, slot] = src_rank
+                        demands = demands[1:]
+                        capacity_slots = remaining_capacity
+                        remaining_cost = tail_cost
+                        break
+                else:
+                    return None
+        return source_rank_ids
+
     @classmethod
     def lpt_placement(
         cls,
@@ -405,6 +491,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         z_score: float,
         *,
         current_rank_expert_ids: np.ndarray,
+        rank_node_ids: np.ndarray,
         rank_pair_migration_limit: int,
         backtrack_limit: int,
     ) -> PlacementPlan | None:
@@ -417,6 +504,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
         assignment within the directed rank-pair limit. ``None`` means bounded
         backtracking found no legal placement. The first source-feasible choice
         is free; each accepted alternative choice consumes one backtrack.
+        ``rank_node_ids`` contains one non-negative node ID per rank; equal IDs
+        mean that two ranks share a node. Final source assignment first minimizes
+        cross-node transfers, then source rank IDs in target-slot order.
         """
         means = np.asarray(expert_means, dtype=np.float64)
         variances = np.asarray(expert_variances, dtype=np.float64)
@@ -462,6 +552,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("current_rank_expert_ids must match the target rank capacity")
         cls.placement_replica_counts(current_placement, num_experts)
         current_placement = current_placement.astype(np.int64, copy=False)
+        node_ids = np.asarray(rank_node_ids)
+        if node_ids.shape != (num_ranks,) or not np.issubdtype(node_ids.dtype, np.integer) or np.any(node_ids < 0):
+            raise ValueError("rank_node_ids must contain one non-negative integer per rank")
         expert_sources = [np.where(current_placement == expert)[0].tolist() for expert in range(num_experts)]
         migration_sources = cls._migration_sources
 
@@ -551,5 +644,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             rank_id, slot, previous_state = undo_state
             undo_placement(rank_id, slot, previous_state)
 
+        sources = cls._minimum_cost_migration_sources(
+            current_placement, placement, rank_pair_migration_limit, expert_sources, node_ids
+        )
         assert sources is not None
         return PlacementPlan(placement, sources)
