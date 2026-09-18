@@ -64,7 +64,7 @@ class DerivedMLABackend(AscendMLABackend):
     [
         (AscendMLABackend, "MLA"),
         (DerivedMLABackend, "MLA"),
-        (AscendAttentionBackend, None),
+        (AscendAttentionBackend, "GQA"),
         (AscendDSABackend, None),
         (AscendSFABackend, None),
     ],
@@ -187,7 +187,7 @@ def test_padded_mla_query_lengths_are_nested():
     assert not hasattr(metadata["draft.0"], "actual_seq_lengths_q")
 
 
-@pytest.mark.parametrize("architecture", [None, "MLA"])
+@pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 def test_empty_metadata_is_a_noop(architecture):
     spec = make_speculator()
     spec.attn_architecture = architecture
@@ -195,7 +195,7 @@ def test_empty_metadata_is_a_noop(architecture):
     assert spec._update_draft_attn_metadata(metadata, 1) is metadata
 
 
-@pytest.mark.parametrize("architecture", [None, "MLA"])
+@pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail):
     manager = graph.DFlashAclGraphManager.__new__(graph.DFlashAclGraphManager)
@@ -243,7 +243,7 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
     assert events == ["enter communicator", "enter model", "capture", "exit model", "exit communicator"]
 
 
-@pytest.mark.parametrize("architecture", [None, "MLA"])
+@pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architecture):
     spec = make_speculator()
     spec.attn_architecture = architecture

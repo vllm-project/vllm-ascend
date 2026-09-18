@@ -1242,8 +1242,15 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Forward draft positions and request flags to the metadata builder."""
-    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    """Wrap build_attn_metadata with Ascend draft-model context.
+
+    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
+    speculator path does not forward them. Attention state is left to the
+    caller/backend instead of forcing the legacy speculative state. Must run inside
+    ``build_attn_metadata_wrapper()``.
+    """
+    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
 
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
@@ -1254,4 +1261,4 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
         yield
     finally:
-        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore
