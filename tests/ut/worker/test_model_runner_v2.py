@@ -553,8 +553,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 
-@pytest.mark.parametrize("is_vllm_0_28_0", [True, False], ids=["v0.28.0", "newer"])
-def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm_0_28_0):
+def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
     runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -579,7 +578,6 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
         self.attn_groups = []
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_0_28_0),
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(
@@ -590,10 +588,7 @@ def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
     assert called is True
-    if is_vllm_0_28_0:
-        assert "kv_cache_allocation_context" not in captured_kwargs
-    else:
-        assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+    assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
@@ -695,7 +690,7 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_028=False):
+def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -722,7 +717,7 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
             SimpleNamespace(maybe_partition_pcp_batch=_partition),
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_028),
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
     ):
         return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
 
@@ -739,7 +734,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
     )
-    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_028=True)
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_029=True)
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
