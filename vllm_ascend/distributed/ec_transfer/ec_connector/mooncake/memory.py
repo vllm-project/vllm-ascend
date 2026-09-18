@@ -14,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
     ContiguousAllocator,
     ProducerMemoryPool,
+    StagedSources,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
@@ -101,17 +102,27 @@ class _BounceLeaseManager:
 class AscendContiguousAllocator(ContiguousAllocator):
     """Allocate a 2 MiB-aligned registered-memory slab on NPU."""
 
-    def _allocate_tensor(self, device: torch.device) -> torch.Tensor:
-        """Allocate a 2 MiB-aligned registered-memory tensor on NPU."""
-        raw_tensor = torch.empty(
-            self._capacity + ASCEND_DIRECT_MEMORY_ALIGNMENT - 1,
-            dtype=torch.uint8,
-            device=device,
-        )
-        offset = (-raw_tensor.data_ptr()) % ASCEND_DIRECT_MEMORY_ALIGNMENT
-        tensor = raw_tensor.narrow(0, offset, self._capacity)
-        assert tensor.data_ptr() % ASCEND_DIRECT_MEMORY_ALIGNMENT == 0
-        return tensor
+    def prepare(self, device: torch.device, transfer: MooncakeTransfer) -> None:
+        """Prepare an aligned NPU slab without relying on upstream hooks."""
+        if self.tensor is not None or self._disabled:
+            return
+        try:
+            raw_tensor = torch.empty(
+                self._capacity + ASCEND_DIRECT_MEMORY_ALIGNMENT - 1,
+                dtype=torch.uint8,
+                device=device,
+            )
+            offset = (-raw_tensor.data_ptr()) % ASCEND_DIRECT_MEMORY_ALIGNMENT
+            tensor = raw_tensor.narrow(0, offset, self._capacity)
+            assert tensor.data_ptr() % ASCEND_DIRECT_MEMORY_ALIGNMENT == 0
+            ret = transfer.register_memory(tensor)
+            if ret != 0:
+                raise RuntimeError(f"Mooncake returned {ret}")
+        except (RuntimeError, torch.OutOfMemoryError):
+            self._disabled = True
+            return
+        self.tensor = tensor
+        self._free = [(0, tensor.nbytes)]
 
 
 class AscendProducerAllocator(AscendContiguousAllocator):
@@ -180,6 +191,18 @@ class AscendProducerAllocator(AscendContiguousAllocator):
 class AscendConsumerMemoryPool(ConsumerMemoryPool):
     """Defer NPU buffer reuse until preceding stream work completes."""
 
+    def __init__(
+        self,
+        capacity: int,
+        transfer: MooncakeTransfer,
+        allocator: AscendContiguousAllocator,
+    ) -> None:
+        # The exact #56242 baseline does not accept an injected allocator.
+        # Replace the unprepared default allocator immediately after upstream
+        # initializes the pool's lifecycle bookkeeping.
+        super().__init__(capacity, transfer)
+        self._allocator = allocator
+
     def _record_release_event(self) -> torch.Event | None:
         pool = self.tensor
         if pool is None or pool.device.type != "npu":
@@ -198,7 +221,9 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
         transfer: MooncakeTransfer,
         allocator: AscendProducerAllocator,
     ) -> None:
-        super().__init__(capacity, transfer, allocator)
+        # The exact #56242 baseline does not accept an injected allocator.
+        super().__init__(capacity, transfer)
+        self._allocator = allocator
         self._producer_allocator = allocator
         self._bounce_lease_manager = _BounceLeaseManager(allocator.bounce_capacity)
 
@@ -212,15 +237,25 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
     def release_bounce(self, lease: _BounceLease | None) -> None:
         self._bounce_lease_manager.release(lease)
 
-    def _copy_to_staging(
-        self,
-        pool: torch.Tensor,
-        staged: list[torch.Tensor],
-        tensors: list[torch.Tensor],
-    ) -> None:
-        if pool.device.type != "npu":
-            return super()._copy_to_staging(pool, staged, tensors)
-
+    def stage(self, tensors: list[torch.Tensor]) -> StagedSources | None:
+        """Stage on an NPU stream without an upstream copy hook."""
+        if not tensors:
+            return StagedSources([], [])
+        allocator = self._allocator
+        staged: list[torch.Tensor] = []
+        regions: list[tuple[int, int]] = []
+        with self._lock:
+            allocator.prepare(tensors[0].device, self._transfer)
+            pool = allocator.tensor
+            if pool is None:
+                return None
+            for tensor in tensors:
+                region = allocator.allocate(tensor.nbytes)
+                if region is None:
+                    self._free_regions(regions)
+                    return None
+                regions.append(region)
+                staged.append(allocator.view(region[0], tensor.nbytes, tuple(tensor.shape), tensor.dtype))
         stream = getattr(self._local, "stream", None)
         if stream is None:
             stream = torch.npu.Stream(device=pool.device)
@@ -231,6 +266,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 destination.copy_(source, non_blocking=True)
 
         stream.synchronize()
+        return StagedSources(staged, regions)
 
     def copy_to_bounce(
         self,
@@ -257,9 +293,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
                 assert 0 < nbytes <= source.nbytes
                 assert bounce_offset + nbytes <= lease.nbytes
 
-                source_prefix = (
-                    source.view(torch.uint8).view(-1).narrow(0, 0, nbytes)
-                )
+                source_prefix = source.view(torch.uint8).view(-1).narrow(0, 0, nbytes)
                 destination = bounce.narrow(
                     0,
                     lease.offset + bounce_offset,

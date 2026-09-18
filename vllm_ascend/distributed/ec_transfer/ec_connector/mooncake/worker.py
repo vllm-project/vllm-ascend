@@ -5,33 +5,40 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
+    _RESERVATION_TTL_SECONDS,
     MooncakeECConfig,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
-    ConsumerMemoryPool,
-    ProducerMemoryPool,
+from vllm.distributed.ec_transfer.ec_connector.mooncake.control import (
+    ControlClient,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.producer import (
+    ProducerPushManager,
     ProducerPushRecord,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.reservation import (
+    ConsumerReservationManager,
+)
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
-    MooncakeTransfer,
+    ensure_mooncake_available,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
+    _MAX_CANCELLED_TRANSFER_IDS,
     _RESERVATION_REFRESH_SECONDS,
     ECMooncakeWorker,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
+from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ASCEND_DIRECT_MEMORY_ALIGNMENT,
@@ -53,6 +60,8 @@ if TYPE_CHECKING:
 
 _DEFAULT_BOUNCE_LIMIT = 128
 _BOUNCE_ARENA_CONFIG_KEY = "ascend_mooncake_bounce_arena_size"
+_TRANSFER_WORKERS = 4
+_CONTROL_WORKERS = 8
 logger = init_logger(__name__)
 
 
@@ -73,12 +82,36 @@ def _resolve_bounce_arena_size(vllm_config: VllmConfig) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{_BOUNCE_ARENA_CONFIG_KEY} must be an integer")
     if value < ASCEND_DIRECT_MEMORY_ALIGNMENT:
-        raise ValueError(
-            f"{_BOUNCE_ARENA_CONFIG_KEY} must be at least "
-            f"{ASCEND_DIRECT_MEMORY_ALIGNMENT} bytes"
-        )
+        raise ValueError(f"{_BOUNCE_ARENA_CONFIG_KEY} must be at least {ASCEND_DIRECT_MEMORY_ALIGNMENT} bytes")
 
     return round_up(value, ASCEND_DIRECT_MEMORY_ALIGNMENT)
+
+
+def _resolve_ascend_config(vllm_config: VllmConfig) -> MooncakeECConfig:
+    config = MooncakeECConfig.from_vllm_config(vllm_config)
+    ec_config = vllm_config.ec_transfer_config
+    assert ec_config is not None
+
+    protocol = config.protocol
+    if "mooncake_protocol" not in ec_config.ec_connector_extra_config:
+        protocol = "ascend"
+    elif protocol != "ascend":
+        raise ValueError("Ascend ECMooncakeConnector requires mooncake_protocol='ascend'")
+
+    buffer_device = config.buffer_device
+    if buffer_device == "cuda":
+        buffer_device = "npu"
+    device_type, separator, device_index = buffer_device.partition(":")
+    is_valid_npu_device = device_type == "npu" and (
+        not separator or (device_index.isascii() and device_index.isdigit())
+    )
+    if not is_valid_npu_device:
+        raise ValueError("Ascend ECMooncakeWorker requires ec_buffer_device='npu'")
+    return replace(
+        config,
+        protocol=protocol,
+        buffer_device=buffer_device,
+    )
 
 
 @dataclass(frozen=True)
@@ -142,64 +175,77 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         ec_config = vllm_config.ec_transfer_config
         assert ec_config is not None
 
+        config = _resolve_ascend_config(vllm_config)
         resolved_bounce_arena_size = _resolve_bounce_arena_size(vllm_config)
+        self._bounce_arena_size = resolved_bounce_arena_size if ec_config.is_ec_producer else 0
 
-        self._bounce_arena_size = (
-            resolved_bounce_arena_size if ec_config.is_ec_producer else 0
-        )
-
-        super().__init__(vllm_config)
-
-    def _make_config(self, vllm_config: VllmConfig) -> MooncakeECConfig:
-        config = super()._make_config(vllm_config)
-
-        ec_config = vllm_config.ec_transfer_config
-        assert ec_config is not None
-
-        protocol = config.protocol
-        if "mooncake_protocol" not in ec_config.ec_connector_extra_config:
-            protocol = "ascend"
-        elif protocol != "ascend":
-            raise ValueError("Ascend ECMooncakeConnector requires mooncake_protocol='ascend'")
-
-        buffer_device = config.buffer_device
-        if buffer_device == "cuda":
-            buffer_device = "npu"
-        device_type, separator, device_index = buffer_device.partition(":")
-        is_valid_npu_device = device_type == "npu" and (
-            not separator or (device_index.isascii() and device_index.isdigit())
-        )
-        if not is_valid_npu_device:
-            raise ValueError("Ascend ECMooncakeWorker requires ec_buffer_device='npu'")
-
-        return replace(
-            config,
-            protocol=protocol,
-            buffer_device=buffer_device,
-        )
-
-    def _make_transfer(self, hostname: str, protocol: str) -> AscendMooncakeTransfer:
-        if protocol != "ascend":
-            raise ValueError("Ascend ECMooncakeConnector requires mooncake_protocol='ascend'")
-        device_index = torch.npu.current_device()
-        return AscendMooncakeTransfer(hostname, device_index)
-
-    def _make_consumer_memory(self, capacity: int, transfer: MooncakeTransfer) -> ConsumerMemoryPool:
-        return AscendConsumerMemoryPool(
-            capacity,
+        ensure_mooncake_available()
+        self.is_producer = config.is_producer
+        self.is_consumer = config.is_consumer
+        self._buffer_device = config.buffer_device
+        self._control_host = config.control_host
+        self._control_port = config.control_port
+        transfer = AscendMooncakeTransfer(get_ip(), torch.npu.current_device())
+        consumer_memory = AscendConsumerMemoryPool(
+            config.pool_size,
             transfer,
-            allocator=AscendContiguousAllocator(capacity),
+            allocator=AscendContiguousAllocator(config.pool_size),
         )
-
-    def _make_producer_memory(self, capacity: int, transfer: MooncakeTransfer) -> ProducerMemoryPool:
-        return AscendProducerMemoryPool(
-            capacity,
+        self._transfer = transfer
+        self._consumer_memory = consumer_memory
+        self._reservations = ConsumerReservationManager(
+            consumer_memory,
+            _RESERVATION_TTL_SECONDS,
+            _MAX_CANCELLED_TRANSFER_IDS,
+        )
+        self._consumer_rank_resolved = False
+        self._is_receiving_rank = True
+        self._tp_rank = 0
+        self._tp_size = 1
+        self._control_server = None
+        self._producer_memory = AscendProducerMemoryPool(
+            config.pool_size,
             transfer,
             allocator=AscendProducerAllocator(
-                staging_capacity=capacity,
+                staging_capacity=config.pool_size,
                 bounce_capacity=self._bounce_arena_size,
             ),
         )
+        self._control_client = ControlClient(config.control_timeout_ms)
+        self._shutdown_drain_timeout_s = config.control_timeout_ms / 1000
+        self._io_executor = ThreadPoolExecutor(
+            max_workers=_TRANSFER_WORKERS,
+            thread_name_prefix="ec-mooncake-transfer",
+        )
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=_CONTROL_WORKERS,
+            thread_name_prefix="ec-mooncake-control",
+        )
+        self._shard_pool = None
+        self._shard_pool_lock = threading.Lock()
+        self._push_ready = threading.Event()
+        self._producer_pushes = ProducerPushManager(self._push_ready.set)
+        self._dispatch_stop = threading.Event()
+        self._dispatcher = None
+        self._failed_saves = set()
+        self._collecting_sources = False
+        self._completed_loads = set()
+        self._failed_loads = set()
+        self._shutdown = False
+        self._control_thread = threading.local()
+        if self.is_producer:
+            self._dispatcher = threading.Thread(
+                target=self._dispatch_pushes,
+                name="ec-mooncake-ready",
+                daemon=True,
+            )
+            self._dispatcher.start()
+
+    def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not getattr(self._control_thread, "device_set", False):
+            torch.npu.set_device(torch.device(self._buffer_device))
+            self._control_thread.device_set = True
+        return super()._reserve_push_destination(payload)
 
     def _acquire_transfer_wave(
         self,
@@ -230,9 +276,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                 bounce_address = producer_memory.copy_to_bounce(lease, copies)
 
             fragments = _flatten_transfer_wave(wave, bounce_address)
-            registration_addresses = transfer.acquire_registration_ranges(
-                wave.registration_ranges
-            )
+            registration_addresses = transfer.acquire_registration_ranges(wave.registration_ranges)
             return _AcquiredTransferWave(
                 fragments=fragments,
                 registration_addresses=registration_addresses,
@@ -249,9 +293,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         transfer = cast(AscendMooncakeTransfer, self._transfer)
 
         try:
-            transfer.release_registration_ranges(
-                acquired.registration_addresses
-            )
+            transfer.release_registration_ranges(acquired.registration_addresses)
         finally:
             producer_memory.release_bounce(acquired.bounce_lease)
 
@@ -261,13 +303,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]],
         acquired: _AcquiredTransferWave,
     ) -> None:
-        source_index = {
-            push.spec.transfer_id: index
-            for index, push in enumerate(pushes)
-        }
-        fragments_by_source: list[list[_TransferFragmentPlan]] = [
-            [] for _ in pushes
-        ]
+        source_index = {push.spec.transfer_id: index for index, push in enumerate(pushes)}
+        fragments_by_source: list[list[_TransferFragmentPlan]] = [[] for _ in pushes]
         for fragment in acquired.fragments:
             fragments_by_source[fragment.source_index].append(fragment)
 
@@ -284,12 +321,8 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             session = str(shard["dst_session"])
             destination = int(shard["dst_ptr"])
             for fragment in fragments_by_source[index]:
-                by_session.setdefault(session, []).append(
-                    (fragment, destination)
-                )
-            session_records.setdefault(session, {})[
-                push.spec.transfer_id
-            ] = push
+                by_session.setdefault(session, []).append((fragment, destination))
+            session_records.setdefault(session, {})[push.spec.transfer_id] = push
 
         def write(
             session: str,
@@ -298,10 +331,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             self._transfer.write(
                 session,
                 [fragment.source_address for fragment, _ in items],
-                [
-                    destination + fragment.destination_offset
-                    for fragment, destination in items
-                ],
+                [destination + fragment.destination_offset for fragment, destination in items],
                 [fragment.nbytes for fragment, _ in items],
             )
 
@@ -331,56 +361,38 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                     for index, shard in enumerate(reservations)
                     if not shard.get("ready", False)
                     and not shard.get("cancelled", False)
-                    and time.monotonic()
-                    - float(shard.get("_received_at", started_at))
-                    >= _RESERVATION_REFRESH_SECONDS
+                    and time.monotonic() - float(shard.get("_received_at", started_at)) >= _RESERVATION_REFRESH_SECONDS
                 ]
                 if stale:
-                    reservations = self._refresh_remote_reservations(
-                        push.spec, reservations, push
-                    )
-                    self._producer_pushes.replace_reservations(
-                        push, reservations
-                    )
+                    reservations = self._refresh_remote_reservations(push.spec, reservations, push)
+                    self._producer_pushes.replace_reservations(push, reservations)
                 self._producer_pushes.begin_writing(push)
                 writable = [
                     shard
                     for shard in reservations
-                    if not shard.get("cached", False)
-                    and not shard.get("cancelled", False)
-                    and shard.get("write", True)
+                    if not shard.get("cached", False) and not shard.get("cancelled", False) and shard.get("write", True)
                 ]
                 source = push.source_tensor
                 assert source is not None
                 for shard in writable:
                     if int(shard["nbytes"]) != source.nbytes:
-                        raise RuntimeError(
-                            "Reserved EC size does not match tensor for "
-                            f"mm_hash={push.spec.mm_hash}"
-                        )
+                        raise RuntimeError(f"Reserved EC size does not match tensor for mm_hash={push.spec.mm_hash}")
                     ready.append((push, shard))
                     written_pushes.setdefault(push.spec.transfer_id, push)
 
             if ready:
                 ordered_pushes = list(written_pushes.values())
                 tensors = [
-                    cast(torch.Tensor, push.source_tensor)
-                    for push in ordered_pushes
-                    if push.source_tensor is not None
+                    cast(torch.Tensor, push.source_tensor) for push in ordered_pushes if push.source_tensor is not None
                 ]
                 staged = self._producer_memory.stage(tensors)
                 if staged is not None:
                     lengths = [tensor.nbytes for tensor in tensors]
                     addresses = [tensor.data_ptr() for tensor in staged.tensors]
                     try:
-                        source_index = {
-                            push.spec.transfer_id: index
-                            for index, push in enumerate(ordered_pushes)
-                        }
+                        source_index = {push.spec.transfer_id: index for index, push in enumerate(ordered_pushes)}
                         by_session: dict[str, list[tuple[int, int]]] = {}
-                        session_records: dict[
-                            str, dict[str, ProducerPushRecord]
-                        ] = {}
+                        session_records: dict[str, dict[str, ProducerPushRecord]] = {}
                         for push, shard in ready:
                             session = str(shard["dst_session"])
                             by_session.setdefault(session, []).append(
@@ -389,9 +401,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                                     int(shard["dst_ptr"]),
                                 )
                             )
-                            session_records.setdefault(session, {})[
-                                push.spec.transfer_id
-                            ] = push
+                            session_records.setdefault(session, {})[push.spec.transfer_id] = push
 
                         def write(
                             session: str,
@@ -416,9 +426,7 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
                                 [future],
                             )
 
-                        writes: list[Callable[[], None]] = [
-                            partial(write, *session) for session in sessions
-                        ]
+                        writes: list[Callable[[], None]] = [partial(write, *session) for session in sessions]
                         self._run_fanout(writes, track_write)
                     finally:
                         self._producer_memory.release(staged)
@@ -458,9 +466,10 @@ class AscendECMooncakeWorker(ECMooncakeWorker):
             if failure is not None:
                 self._producer_pushes.fail(pushes, failure)
 
-    def _record_source_ready_event(self, tensor: torch.Tensor) -> torch.Event | None:
+    def _bind_push_source(self, tensor: torch.Tensor, mm_hash: str) -> None:
+        """Bind an NPU source using an NPU readiness event."""
         if tensor.device.type != "npu":
-            return super()._record_source_ready_event(tensor)
+            raise ValueError("Ascend ECMooncake source tensor must be on NPU")
         ready_event = torch.npu.Event()
         ready_event.record(torch.npu.current_stream(tensor.device))
-        return ready_event
+        self._producer_pushes.bind_source(mm_hash, tensor, ready_event)
