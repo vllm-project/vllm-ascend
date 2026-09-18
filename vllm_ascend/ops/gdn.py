@@ -24,6 +24,7 @@ from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -117,6 +118,10 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
 def _get_packed_conv_weights(layer: nn.Module) -> torch.Tensor:
     """Return the registered, kernel-layout convolution parameter."""
     return _get_base_conv1d(layer).get_parameter(_PACKED_CONV_WEIGHT_NAME)
+
+
+DMA_ALIGNMENT_ELEMENTS = 16
+_ORIGINAL_REARRANGE_MIXED_QKV = QwenGatedDeltaNetAttention.rearrange_mixed_qkv
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -260,6 +265,100 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
+
+    def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
+        if mixed_qkv is None or mixed_qkv.dtype not in (torch.bfloat16, torch.float16) or not mixed_qkv.is_contiguous():
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
+
+        q_dim = self.key_dim // self.tp_size
+        k_dim = q_dim
+        v_dim = self.value_dim // self.tp_size
+        if q_dim % DMA_ALIGNMENT_ELEMENTS != 0 or v_dim % DMA_ALIGNMENT_ELEMENTS != 0:
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
+
+        num_tokens = mixed_qkv.shape[0]
+        packed_qkv = DeviceOperator.rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)
+        if packed_qkv is None:
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
+        return self._view_packed_qkv(packed_qkv, num_tokens, q_dim, k_dim, v_dim)
+
+    def _view_packed_qkv(
+        self,
+        packed_qkv: torch.Tensor,
+        num_tokens: int,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ):
+        query, key, value = packed_qkv.split([num_tokens * q_dim, num_tokens * k_dim, num_tokens * v_dim])
+        return (
+            query.view(1, num_tokens, q_dim // self.head_k_dim, self.head_k_dim),
+            key.view(1, num_tokens, k_dim // self.head_k_dim, self.head_k_dim),
+            value.view(1, num_tokens, v_dim // self.head_v_dim, self.head_v_dim),
+        )
+
+    def rearrange_mixed_qkv_and_fused_gdn_gating(
+        self,
+        mixed_qkv: torch.Tensor | None,
+        A_log: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        dt_bias: torch.Tensor,
+    ):
+        if (
+            mixed_qkv is not None
+            and mixed_qkv.dtype == torch.bfloat16
+            and mixed_qkv.is_contiguous()
+            and a.dtype == torch.bfloat16
+            and b.dtype == torch.bfloat16
+        ):
+            q_dim = self.key_dim // self.tp_size
+            k_dim = q_dim
+            v_dim = self.value_dim // self.tp_size
+            supported = (
+                q_dim % DMA_ALIGNMENT_ELEMENTS == 0
+                and k_dim % DMA_ALIGNMENT_ELEMENTS == 0
+                and v_dim % DMA_ALIGNMENT_ELEMENTS == 0
+                and a.shape == b.shape
+                and a.ndim == 2
+                and a.shape[0] == mixed_qkv.shape[0]
+                and 0 < a.shape[1] <= 4096
+                and a.is_contiguous()
+                and b.is_contiguous()
+                and A_log.dtype == dt_bias.dtype
+                and A_log.dtype in (torch.float32, torch.bfloat16, torch.float16)
+                and A_log.ndim == 1
+                and dt_bias.ndim == 1
+                and A_log.numel() == a.shape[1]
+                and dt_bias.numel() == a.shape[1]
+                and A_log.is_contiguous()
+                and dt_bias.is_contiguous()
+            )
+            if supported:
+                outputs = DeviceOperator.rearrange_qkv_and_fused_gdn_gating(
+                    mixed_qkv,
+                    a,
+                    b,
+                    A_log,
+                    dt_bias,
+                    q_dim,
+                    k_dim,
+                    v_dim,
+                )
+                if outputs is not None:
+                    packed_qkv, g, beta = outputs
+                    query, key, value = self._view_packed_qkv(
+                        packed_qkv,
+                        mixed_qkv.shape[0],
+                        q_dim,
+                        k_dim,
+                        v_dim,
+                    )
+                    return query, key, value, g.unsqueeze(0), beta.unsqueeze(0)
+
+        query, key, value = self.rearrange_mixed_qkv(mixed_qkv)
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a, b, dt_bias)
+        return query, key, value, g, beta
 
     def forward(
         self,
@@ -509,11 +608,29 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-
-        # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        # A batch that mixes speculative and non-speculative tokens rearranges
+        # two indexed tensors, so neither input has the same rows as a/b.  Fuse
+        # only when exactly one rearrange input owns the complete token batch.
+        fuse_gating = (mixed_qkv_spec is None) != (mixed_qkv_non_spec is None)
+        if fuse_gating:
+            fused_input = mixed_qkv_non_spec if mixed_qkv_spec is None else mixed_qkv_spec
+            query, key, value, g, beta = self.rearrange_mixed_qkv_and_fused_gdn_gating(
+                fused_input,
+                self.A_log,
+                a,
+                b,
+                self.dt_bias,
+            )
+            if mixed_qkv_spec is None:
+                query_non_spec, key_non_spec, value_non_spec = query, key, value
+                query_spec = key_spec = value_spec = None
+            else:
+                query_spec, key_spec, value_spec = query, key, value
+                query_non_spec = key_non_spec = value_non_spec = None
+        else:
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
