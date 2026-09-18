@@ -195,6 +195,14 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
+        # Motor fork-group parent imported vLLM with devices hidden. Skip
+        # NPU-touching registration here; each child restores
+        # ASCEND_RT_VISIBLE_DEVICES and calls this method again without
+        # MOTOR_VLLM_FORK_PARENT.
+        if os.getenv("MOTOR_VLLM_FORK_PARENT", "").strip().lower() in {"1", "true", "yes"}:
+            config_deprecated_logging()
+            return
+
         if not is_310p():
             from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
         else:
